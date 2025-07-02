@@ -79,6 +79,10 @@ pub enum DatabaseError {
         #[source]
         source: sqlx::Error,
     },
+
+    #[error("DB Error: {0}")]
+    #[diagnostic()]
+    Other(sqlx::Error),
 }
 
 /// Agent-specific errors
@@ -141,6 +145,9 @@ pub enum AgentError {
         help("Letta IDs should be valid UUIDs")
     )]
     InvalidLettaId(String),
+    #[error("Letta Error: {0}")]
+    #[diagnostic()]
+    Other(#[from] letta::LettaError),
 }
 
 /// Discord-specific errors
@@ -185,6 +192,9 @@ pub enum DiscordError {
         #[source]
         source: serenity::Error,
     },
+    #[error("Discord error: {0}")]
+    #[diagnostic()]
+    Other(#[from] serenity::Error),
 }
 
 /// Configuration errors
@@ -260,29 +270,12 @@ impl From<sqlx::Error> for DatabaseError {
                     source: err,
                 }
             }
-            _ => DatabaseError::QueryFailed {
-                context: "Database operation failed".to_string(),
+            sqlx::Error::ColumnNotFound(ref s) => DatabaseError::QueryFailed {
+                context: format!("Column {s} not found"),
                 source: err,
             },
+            // Add some more specific options here potentially
+            _ => DatabaseError::Other(err),
         }
-    }
-}
-
-/// Convert Letta errors to our domain errors
-impl From<letta::LettaError> for AgentError {
-    fn from(err: letta::LettaError) -> Self {
-        // Extract context from letta error if possible
-        AgentError::MessageFailed {
-            agent: AgentId::new("unknown").unwrap(),
-            source: err,
-        }
-    }
-}
-
-/// Convert Serenity errors to our domain errors
-#[cfg(feature = "discord")]
-impl From<serenity::Error> for DiscordError {
-    fn from(err: serenity::Error) -> Self {
-        DiscordError::ConnectionFailed { source: err }
     }
 }

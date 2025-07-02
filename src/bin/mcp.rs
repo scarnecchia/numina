@@ -72,7 +72,13 @@ async fn main() -> Result<()> {
     info!("Multi-agent system initialized");
 
     // Create MCP server
-    let server = PatternMcpServer::new(letta_client, db, multi_agent_system);
+    let server = PatternMcpServer::new(
+        letta_client,
+        db,
+        multi_agent_system,
+        #[cfg(feature = "discord")]
+        None,
+    );
 
     // Run server
     info!("Starting Pattern MCP server...");

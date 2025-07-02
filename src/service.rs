@@ -15,6 +15,8 @@ pub struct PatternService {
     db: Arc<Database>,
     letta_client: Arc<letta::LettaClient>,
     multi_agent_system: Arc<MultiAgentSystem>,
+    #[cfg(feature = "discord")]
+    discord_client: Option<Arc<tokio::sync::RwLock<serenity::Client>>>,
 }
 
 impl PatternService {
@@ -48,6 +50,8 @@ impl PatternService {
             db,
             letta_client,
             multi_agent_system,
+            #[cfg(feature = "discord")]
+            discord_client: None,
         })
     }
 
@@ -188,7 +192,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
     }
 
     /// Start all configured services
-    pub async fn start(self) -> Result<()> {
+    pub async fn start(mut self) -> Result<()> {
         // Start background tasks
         self.start_background_tasks().await?;
 
@@ -273,15 +277,15 @@ You track basics like meds, water, food, sleep without nagging or shaming."
 
     /// Start Discord bot if configured
     #[cfg(feature = "discord")]
-    async fn start_discord(&self) -> Result<Option<tokio::task::JoinHandle<()>>> {
-        use crate::discord::{run_discord_bot, DiscordConfig};
+    async fn start_discord(&mut self) -> Result<Option<tokio::task::JoinHandle<()>>> {
+        use crate::discord::{create_discord_client, DiscordConfig};
 
         if self.config.discord.token.is_empty() {
             info!("Discord token not configured, skipping Discord bot");
             return Ok(None);
         }
 
-        info!("Starting Discord bot");
+        info!("Creating Discord client");
 
         let discord_config = DiscordConfig {
             token: self.config.discord.token.clone(),
@@ -291,9 +295,21 @@ You track basics like meds, water, food, sleep without nagging or shaming."
             max_message_length: 2000,
         };
 
-        let system = self.multi_agent_system.clone();
+        let client = create_discord_client(&discord_config, self.multi_agent_system.clone())
+            .await
+            .map_err(|e| {
+                PatternError::Config(crate::error::ConfigError::Invalid {
+                    field: "discord".to_string(),
+                    reason: format!("Failed to create Discord client: {}", e),
+                })
+            })?;
+        let client_arc = Arc::new(tokio::sync::RwLock::new(client));
+        self.discord_client = Some(client_arc.clone());
+
+        info!("Starting Discord bot");
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_discord_bot(discord_config, system).await {
+            let mut client = client_arc.write().await;
+            if let Err(e) = client.start().await {
                 error!("Discord bot error: {:?}", e);
             }
         });
@@ -317,6 +333,8 @@ You track basics like meds, water, food, sleep without nagging or shaming."
             self.letta_client.clone(),
             self.db.clone(),
             self.multi_agent_system.clone(),
+            #[cfg(feature = "discord")]
+            self.discord_client.clone(),
         );
 
         let handle = match self.config.mcp.transport {

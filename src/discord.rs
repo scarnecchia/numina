@@ -456,21 +456,31 @@ fn split_message(content: &str, max_length: usize) -> Vec<String> {
     chunks
 }
 
-/// Create and run the Discord bot
-pub async fn run_discord_bot(
-    config: DiscordConfig,
+/// Create the Discord client (without starting it)
+pub async fn create_discord_client(
+    config: &DiscordConfig,
     multi_agent_system: Arc<MultiAgentSystem>,
-) -> Result<()> {
+) -> Result<serenity::Client> {
     let handler = PatternDiscordBot::new(multi_agent_system);
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
-    let mut client = Client::builder(&config.token, intents)
+    let client = Client::builder(&config.token, intents)
         .event_handler(handler)
         .await
         .into_diagnostic()?;
+
+    Ok(client)
+}
+
+/// Create and run the Discord bot
+pub async fn run_discord_bot(
+    config: DiscordConfig,
+    multi_agent_system: Arc<MultiAgentSystem>,
+) -> Result<()> {
+    let mut client = create_discord_client(&config, multi_agent_system).await?;
 
     info!("Starting Discord bot...");
     client.start().await.into_diagnostic()?;

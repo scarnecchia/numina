@@ -11,6 +11,9 @@ pub mod discord;
 
 #[cfg(feature = "mcp")]
 pub mod server;
+
+#[cfg(feature = "mcp")]
+pub mod mcp_tools;
 use miette::Result;
 use std::sync::Arc;
 
