@@ -1,8 +1,7 @@
 use clap::Parser;
 use miette::Result;
-use pattern::{mcp_server::PatternServer, PatternService};
-use rmcp::ServiceExt;
-use tokio::io::{stdin, stdout};
+use pattern::{agents::MultiAgentSystemBuilder, db::Database, server::PatternMcpServer};
+
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -45,45 +44,37 @@ async fn main() -> Result<()> {
         .with_file(false)
         .init();
 
-    // Create Pattern service
-    info!(
-        "Initializing Pattern service with database: {}",
-        args.db_path
-    );
-    let mut service = PatternService::new(&args.db_path).await?;
+    // Initialize database
+    info!("Initializing database at: {}", args.db_path);
+    let db = Database::new(&args.db_path).await?;
+    db.migrate().await?;
+    let db = std::sync::Arc::new(db);
+    info!("Database initialized");
 
-    // Initialize Letta client if URL or API key is provided
-    if let Some(api_key) = args.letta_api_key {
+    // Initialize Letta client
+    let letta_client = if let Some(api_key) = args.letta_api_key {
         info!("Connecting to Letta cloud");
-        let letta_client = letta::LettaClient::cloud(api_key)?;
-        service = service.with_letta_client(letta_client);
-        info!("Letta cloud client initialized");
+        letta::LettaClient::cloud(api_key)?
     } else if let Some(letta_url) = args.letta_url {
         info!("Connecting to Letta server at: {}", letta_url);
-        let letta_client = letta::LettaClient::builder().base_url(&letta_url).build()?;
-        service = service.with_letta_client(letta_client);
-        info!("Letta local client initialized");
+        let client_config = letta::ClientConfig::new(&letta_url)?;
+        letta::LettaClient::new(client_config)?
     } else {
-        info!("No Letta URL or API key provided, agent features will be disabled");
-    }
+        info!("Connecting to default Letta server at localhost:8000");
+        letta::LettaClient::local()?
+    };
+    let letta_client = std::sync::Arc::new(letta_client);
+    info!("Letta client initialized");
+
+    // Initialize multi-agent system
+    let multi_agent_system =
+        std::sync::Arc::new(MultiAgentSystemBuilder::new(letta_client.clone(), db.clone()).build());
+    info!("Multi-agent system initialized");
 
     // Create MCP server
-    let server = PatternServer::new(service);
+    let server = PatternMcpServer::new(letta_client, db, multi_agent_system);
 
-    // Run server with stdio transport
+    // Run server
     info!("Starting Pattern MCP server...");
-    let transport = (stdin(), stdout());
-
-    let mcp_server = server
-        .serve(transport)
-        .await
-        .map_err(|e| miette::miette!("Failed to start server: {}", e))?;
-
-    let quit_reason = mcp_server
-        .waiting()
-        .await
-        .map_err(|e| miette::miette!("Server error: {}", e))?;
-
-    info!("Server stopped: {:?}", quit_reason);
-    Ok(())
+    server.run_stdio().await
 }

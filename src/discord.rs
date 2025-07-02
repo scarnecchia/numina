@@ -198,19 +198,13 @@ impl PatternDiscordBot {
             .update_shared_memory(user_id, "active_context", &context)
             .await?;
 
-        // TODO: Actually send to appropriate agent and get response
-        // For now, acknowledge with agent routing info
-        let current_state = state
+        // Send to the appropriate agent and get response
+        let response = state
             .multi_agent_system
-            .get_shared_memory(user_id, "current_state")
-            .await
-            .unwrap_or_else(|_| "initializing...".to_string());
+            .send_message_to_agent(user_id, target_agent.as_deref(), &actual_message)
+            .await?;
 
-        let agent_name = target_agent.as_deref().unwrap_or("pattern");
-        Ok(format!(
-            "[{}] hey {}, got it. vibe: {}",
-            agent_name, msg.author.name, current_state
-        ))
+        Ok(response)
     }
 
     async fn handle_chat_command(&self, ctx: &Context, command: &CommandInteraction) {
@@ -243,16 +237,21 @@ impl PatternDiscordBot {
             .and_then(|opt| opt.value.as_str());
 
         // Process with agents
-        let _user_id = UserId(command.user.id.get() as i64);
+        let user_id = UserId(command.user.id.get() as i64);
 
-        // TODO: Actually send to agents
-        let response = format!(
-            "Processing your message: '{}' {}",
-            message,
-            agent
-                .map(|a| format!("with agent {}", a))
-                .unwrap_or_default()
-        );
+        // Send to agents
+        let state = self.state.read().await;
+        let response = match state
+            .multi_agent_system
+            .send_message_to_agent(user_id, agent, message)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!("Error sending to agent: {:?}", e);
+                format!("Sorry, I encountered an error: {}", e)
+            }
+        };
 
         // Send followup
         if let Err(why) = command
@@ -382,7 +381,7 @@ impl PatternDiscordBot {
         // Get configured agents from the system
         let state = self.state.read().await;
         let agent_configs = state.multi_agent_system.agent_configs();
-        let valid_agents: Vec<String> = agent_configs.keys().cloned().collect();
+        let valid_agents: Vec<String> = agent_configs.keys().map(|id| id.to_string()).collect();
 
         // Check for @agent format
         if let Some(rest) = content.strip_prefix('@') {

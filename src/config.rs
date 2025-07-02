@@ -1,21 +1,25 @@
-use miette::{IntoDiagnostic, Result};
+use crate::{
+    agents::AgentConfig,
+    error::{ConfigError, Result},
+    types::McpTransport,
+};
 use serde::{Deserialize, Serialize};
-use std::env;
+use std::{env, path::Path};
 
 /// Main configuration for Pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Database configuration
     pub database: DatabaseConfig,
-
     /// Discord bot configuration
     pub discord: DiscordConfig,
-
     /// Letta configuration
     pub letta: LettaConfig,
-
     /// MCP server configuration
     pub mcp: McpConfig,
+    /// Agent configurations (optional, uses defaults if empty)
+    #[serde(default)]
+    pub agents: Vec<AgentConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,13 +32,10 @@ pub struct DatabaseConfig {
 pub struct DiscordConfig {
     /// Discord bot token
     pub token: String,
-
     /// Optional channel ID to limit bot responses
     pub channel_id: Option<u64>,
-
     /// Whether to respond to DMs
     pub respond_to_dms: bool,
-
     /// Whether to respond to mentions
     pub respond_to_mentions: bool,
 }
@@ -43,7 +44,6 @@ pub struct DiscordConfig {
 pub struct LettaConfig {
     /// Base URL for Letta server
     pub base_url: String,
-
     /// Optional API key for Letta cloud
     pub api_key: Option<String>,
 }
@@ -52,9 +52,8 @@ pub struct LettaConfig {
 pub struct McpConfig {
     /// Whether MCP server is enabled
     pub enabled: bool,
-
     /// MCP transport type
-    pub transport: String,
+    pub transport: McpTransport,
 }
 
 impl Default for Config {
@@ -75,102 +74,133 @@ impl Default for Config {
             },
             mcp: McpConfig {
                 enabled: false,
-                transport: "stdio".to_string(),
+                transport: McpTransport::Stdio,
             },
+            agents: Vec::new(),
         }
     }
 }
 
 impl Config {
-    /// Load configuration from environment variables and config file
-    pub fn load() -> Result<Self> {
-        let mut config = Self::default();
-
-        // Override with environment variables
-        if let Ok(db_path) = env::var("PATTERN_DB_PATH") {
-            config.database.path = db_path;
+    /// Validate the configuration
+    pub fn validate(&self) -> Result<()> {
+        if self.database.path.is_empty() {
+            return Err(ConfigError::Invalid {
+                field: "database.path".to_string(),
+                reason: "Database path cannot be empty".to_string(),
+            }
+            .into());
         }
 
+        if self.letta.base_url.is_empty() && self.letta.api_key.is_none() {
+            return Err(ConfigError::Invalid {
+                field: "letta".to_string(),
+                reason: "Either base_url or api_key must be provided".to_string(),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
+    /// Load configuration from environment variables and config file
+    pub fn load() -> Result<Self> {
+        // Try to load from file first
+        let config_path = env::var("PATTERN_CONFIG").unwrap_or_else(|_| "pattern.toml".to_string());
+
+        if Path::new(&config_path).exists() {
+            let contents =
+                std::fs::read_to_string(&config_path).map_err(|_e| ConfigError::NotFound {
+                    path: config_path.clone(),
+                })?;
+            let mut config: Config =
+                toml::from_str(&contents).map_err(|e| ConfigError::ParseFailed { source: e })?;
+
+            // Override with environment variables
+            config = Self::override_from_env(config);
+            Ok(config)
+        } else {
+            // Load from environment variables only
+            Ok(Self::from_env())
+        }
+    }
+
+    /// Create config from environment variables
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        // Database
+        if let Ok(path) = env::var("DATABASE_PATH") {
+            config.database.path = path;
+        }
+
+        // Discord
         if let Ok(token) = env::var("DISCORD_TOKEN") {
             config.discord.token = token;
         }
-
         if let Ok(channel_id) = env::var("DISCORD_CHANNEL_ID") {
-            config.discord.channel_id = channel_id.parse().ok();
+            if let Ok(id) = channel_id.parse() {
+                config.discord.channel_id = Some(id);
+            }
         }
 
-        if let Ok(letta_url) = env::var("LETTA_BASE_URL") {
-            config.letta.base_url = letta_url;
+        // Letta
+        if let Ok(url) = env::var("LETTA_BASE_URL") {
+            config.letta.base_url = url;
         }
-
         if let Ok(api_key) = env::var("LETTA_API_KEY") {
             config.letta.api_key = Some(api_key);
         }
 
-        // Try to load from config file
-        if let Ok(config_path) = env::var("PATTERN_CONFIG") {
-            config = Self::load_from_file(&config_path)?;
-        } else if let Ok(contents) = std::fs::read_to_string("pattern.toml") {
-            if let Ok(file_config) = toml::from_str::<Config>(&contents) {
-                // Merge with environment variables (env vars take precedence)
-                config = Self::merge(file_config, config);
+        // MCP
+        if let Ok(enabled) = env::var("MCP_ENABLED") {
+            config.mcp.enabled = enabled.to_lowercase() == "true";
+        }
+        if let Ok(transport) = env::var("MCP_TRANSPORT") {
+            if let Ok(t) = transport.parse() {
+                config.mcp.transport = t;
             }
         }
 
-        Ok(config)
+        config
     }
 
-    /// Load configuration from a TOML file
-    pub fn load_from_file(path: &str) -> Result<Self> {
-        let contents = std::fs::read_to_string(path).into_diagnostic()?;
-        toml::from_str(&contents).into_diagnostic()
-    }
-
-    /// Merge two configs, with the second taking precedence
-    fn merge(base: Self, override_config: Self) -> Self {
-        Self {
-            database: DatabaseConfig {
-                path: if override_config.database.path.is_empty() {
-                    base.database.path
-                } else {
-                    override_config.database.path
-                },
-            },
-            discord: DiscordConfig {
-                token: if override_config.discord.token.is_empty() {
-                    base.discord.token
-                } else {
-                    override_config.discord.token
-                },
-                channel_id: override_config
-                    .discord
-                    .channel_id
-                    .or(base.discord.channel_id),
-                respond_to_dms: override_config.discord.respond_to_dms,
-                respond_to_mentions: override_config.discord.respond_to_mentions,
-            },
-            letta: LettaConfig {
-                base_url: if override_config.letta.base_url == "http://localhost:8000" {
-                    base.letta.base_url
-                } else {
-                    override_config.letta.base_url
-                },
-                api_key: override_config.letta.api_key.or(base.letta.api_key),
-            },
-            mcp: McpConfig {
-                enabled: override_config.mcp.enabled,
-                transport: override_config.mcp.transport,
-            },
-        }
-    }
-
-    /// Validate the configuration
-    pub fn validate(&self) -> Result<()> {
-        if self.discord.token.is_empty() {
-            return Err(miette::miette!("Discord token is required"));
+    /// Override config values with environment variables
+    fn override_from_env(mut self) -> Self {
+        // Database
+        if let Ok(path) = env::var("DATABASE_PATH") {
+            self.database.path = path;
         }
 
-        Ok(())
+        // Discord
+        if let Ok(token) = env::var("DISCORD_TOKEN") {
+            self.discord.token = token;
+        }
+        if let Ok(channel_id) = env::var("DISCORD_CHANNEL_ID") {
+            if let Ok(id) = channel_id.parse() {
+                self.discord.channel_id = Some(id);
+            }
+        }
+
+        // Letta
+        if let Ok(url) = env::var("LETTA_BASE_URL") {
+            self.letta.base_url = url;
+        }
+        if let Ok(api_key) = env::var("LETTA_API_KEY") {
+            self.letta.api_key = Some(api_key);
+        }
+
+        // MCP
+        if let Ok(enabled) = env::var("MCP_ENABLED") {
+            self.mcp.enabled = enabled.to_lowercase() == "true";
+        }
+        if let Ok(transport) = env::var("MCP_TRANSPORT") {
+            if let Ok(t) = transport.parse() {
+                self.mcp.transport = t;
+            }
+        }
+
+        self
     }
 }
 

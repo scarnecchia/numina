@@ -98,6 +98,8 @@ Claude Code has access to several MCP (Model Context Protocol) tools that enhanc
   - Check docs.rs if published
   - Use language server tools to explore the API
 
+
+
 ### 2. Understanding Existing Code
 ```
 1. Find a function call you don't understand
@@ -132,6 +134,8 @@ Claude Code has access to several MCP (Model Context Protocol) tools that enhanc
 5. mcp__language-server__diagnostics → Catch issues early
 6. cargo test → Verify functionality
 ```
+
+see @LSP_EDIT_GUIDE.md for details on potential pitfalls
 
 ## Build & Validation Commands
 
@@ -201,9 +205,10 @@ Pattern (Sleeptime Orchestrator)
 ## Core Dependencies
 
 ```toml
-# MCP SDK - official rust implementation
-rmcp = { version = "0.1", features = ["server"] }
-# or for latest: rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main" }
+# MCP SDK - official rust implementation (must use git version)
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", optional = true }
+# Must use schemars 0.8.x to match rmcp's version
+schemars = "0.8.22"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -295,46 +300,70 @@ Agents coordinate through:
 
 ## MCP Server Implementation
 
-Using the official `rmcp` SDK ([docs](https://github.com/modelcontextprotocol/rust-sdk)):
+Using the official `rmcp` SDK from git (see [MCP_SDK_GUIDE.md](./MCP_SDK_GUIDE.md) for detailed patterns):
 
 ```rust
-use rmcp::{ServerHandler, model::ServerInfo, schemars, tool};
-use letta::LettaClient;
-use std::sync::Arc;
+use rmcp::{
+    handler::server::tool::Parameters,
+    model::{CallToolResult, Content, Implementation, InitializeResult as ServerInfo},
+    Error as McpError, ServerHandler,
+};
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
 
 #[derive(Debug, Clone)]
-pub struct PatternServer {
-    letta_client: Arc<LettaClient>,
-    db_pool: Arc<sqlx::PgPool>,
-    discord_bot: Arc<serenity::Client>,
+pub struct PatternMcpServer {
+    letta_client: Arc<letta::LettaClient>,
+    db: Arc<Database>,
+    multi_agent_system: Arc<MultiAgentSystem>,
+}
+
+// Request structs need JsonSchema derive
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct ScheduleEventRequest {
+    user_id: i64,
+    title: String,
+    start_time: String,
+    description: Option<String>,
+    duration_minutes: Option<u32>,
 }
 
 // Define tools using rmcp macros
-#[tool(tool_box)]
-impl PatternServer {
-    #[tool(description = "Schedule an event with smart time estimation")]
+#[rmcp::tool_router]
+impl PatternMcpServer {
+    #[rmcp::tool(description = "Schedule an event with smart time estimation")]
     async fn schedule_event(
         &self,
-        #[tool(aggr)] req: ScheduleEventRequest,
-    ) -> Result<String, rmcp::Error> {
-        // Implementation
-        Ok("Event scheduled".to_string())
+        params: Parameters<ScheduleEventRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        // Implementation with ADHD time multipliers
+        Ok(CallToolResult::success(vec![Content::text(
+            "Event scheduled with ADHD-aware buffers"
+        )]))
     }
 
-    #[tool(description = "Send message to user via Discord")]
+    #[rmcp::tool(description = "Send message to user via Discord")]
     async fn send_message(
         &self,
-        #[tool(param)] channel_id: u64,
-        #[tool(param)] message: String,
-    ) -> Result<String, rmcp::Error> {
-        // Send via Discord
-        Ok("Message sent".to_string())
+        params: Parameters<SendMessageRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Send via Discord bot instance
+        Ok(CallToolResult::success(vec![Content::text(
+            "Message sent via Discord"
+        )]))
     }
 
-    #[tool(description = "Check activity state for interruption timing")]
-    fn check_activity_state(&self) -> Result<ActivityState, rmcp::Error> {
+    #[rmcp::tool(description = "Check activity state for interruption timing")]
+    async fn check_activity_state(&self) -> Result<CallToolResult, McpError> {
         // Platform-specific activity monitoring
-        Ok(ActivityState::default())
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "interruptible": true,
+                "current_focus": null,
+                "last_activity": "idle"
+            })).unwrap()
+        )]))
     }
 }
 ```
@@ -694,18 +723,18 @@ Leverage Letta's 4-tier memory with local storage:
 ## Current TODOs
 
 ### High Priority
-- [ ] Design multi-agent system with Pattern as sleeptime orchestrator + 5 specialist agents
-- [ ] Implement shared memory blocks (current_state, active_context, bond_evolution)
+- [ ] Add MCP tools to send Discord messages from agents
 - [ ] Implement Pattern as sleeptime agent with 20-30min background checks
 - [ ] Add task CRUD operations to database module
 - [ ] Create task manager with ADHD-aware task breakdown (Entropy agent)
 - [ ] Create shared tools (check_vibe, context_snapshot, find_pattern, suggest_pivot)
+- [ ] Add contract/client tracking (time, invoices, follow-ups)
+- [ ] Implement social memory (birthdays, follow-ups, conversation context)
 
 ### Medium Priority
 - [ ] Add task-related MCP tools
 - [ ] Implement time tracking with ADHD multipliers (Flux agent)
 - [ ] Add energy/attention monitoring (Momentum agent)
-- [ ] Set up Discord bot integration
 
 ### Low Priority
 - [ ] Add activity monitoring for interruption detection
@@ -727,63 +756,76 @@ Leverage Letta's 4-tier memory with local storage:
 - [x] Create architecture breakdown and prioritization plan
 - [x] Add build priority breakdown to CLAUDE.md
 - [x] Add TODO mirroring note to CLAUDE.md
+- [x] Design multi-agent system with Pattern as sleeptime orchestrator + 5 specialist agents
+- [x] Implement shared memory blocks (current_state, active_context, bond_evolution)
+- [x] Refactor multi-agent system to be more generic and flexible
+- [x] Set up Discord bot integration with configurable agent routing
+  - [x] Create Discord bot module (src/discord.rs)
+  - [x] Implement slash commands and DM support
+  - [x] Add dynamic agent routing based on configured agents
+  - [x] Create discord_bot binary with configuration support
+- [x] Refactor to single persistent binary with Discord + MCP features
+  - [x] Create unified main.rs with feature flags
+  - [x] Update MCP server to use new architecture
+  - [x] Add background task support (sleeptime orchestrator)
+- [x] Update MCP server to official SDK patterns
+  - [x] Fix tool definitions using `#[rmcp::tool]` and `#[rmcp::tool_router]`
+  - [x] Update to use `Parameters<T>` wrapper types
+  - [x] Fix response types using `CallToolResult::success(vec![Content::text(...)])`
+  - [x] Update error handling with specific constructors
+  - [x] Document learnings in MCP_SDK_GUIDE.md
 
 ## Current Status
 
-**Architecture**: Library crate with optional MCP server binary
-- Core library provides PatternService for agent and task management
-- MCP server binary behind `mcp` feature flag
-- Clean separation between library and binary concerns
+**Architecture**: Unified binary with feature flags
+- Single `pattern` binary can run Discord bot, MCP server, and background tasks
+- Feature flags: `discord`, `mcp`, `binary`, `full`
+- Modular service architecture via PatternService
 
-**Dependencies**:
-- Core: sqlx, letta, sled, tokio, serde, miette, tracing
-- Optional (MCP): rmcp
-- Optional (binary): clap, tracing-subscriber, tracing-appender
-- Note: async-trait was listed but isn't actually needed
+**Multi-Agent System** ✅:
+- Generic, flexible architecture with configurable agents
+- Shared memory blocks (current_state, active_context, bond_evolution)
+- Background sleeptime orchestrator (30min intervals)
+- Dynamic agent routing in Discord - no hardcoded names
+- Actual agent message routing to Letta implemented
 
-**Features**:
-- `default`: Core library functionality only
-- `mcp`: Enables MCP server support + binary features
-- `mcp-sse`: Enables SSE transport for MCP
-- `binary`: Enables CLI and logging features
+**Discord Bot** ✅:
+- Natural language chat with slash commands
+- DM support with agent routing (@agent, agent:, /agent)
+- Configurable agent detection
+- Message chunking for long responses
 
-**Agent Integration** ✅:
-- `AgentManager` in `src/agent.rs` handles all Letta operations
-- Caching layer to minimize API calls
-- Database persistence of agent mappings
-- Memory update workaround implemented via blocks API
+**MCP Server** ✅:
+- Six tools: chat_with_agent, get/update_agent_memory, schedule_event, send_message, check_activity_state
+- Stdio transport (streamable HTTP available when needed)
+- Uses official modelcontextprotocol/rust-sdk from git
+- Proper tool definitions with `#[rmcp::tool]` attribute
+- Integrated with multi-agent system
 
-**Database** ✅:
-- SQLite with migrations support
-- Schema: users, agents, tasks, events, time_tracking tables
-- Database module with entity structs and basic operations
-- Agent persistence working (stores user->agent mappings)
-
-**MCP Server** (when enabled) ✅:
-- Six tools implemented:
-  - `chat_with_agent` - Send messages to Letta agents and get responses ✅
-  - `get_agent_memory` - Retrieve agent's current memory state ✅
-  - `update_agent_memory` - Update agent memory blocks ✅
-  - `schedule_event` - Schedule events (TODO: implement)
-  - `send_message` - Send Discord messages (TODO: implement)
-  - `check_activity_state` - Check activity/interruptibility (TODO: implement)
-- Runs on stdio transport by default
-- SSE transport available with feature flag
-- Command-line options: `--db-path`, `--letta-url`, `--letta-api-key`
-
-**Running the MCP server**:
+**Running Pattern**:
 ```bash
-# With local Letta server
-cargo run --features mcp --bin mcp -- --letta-url http://localhost:8000
+# Full mode (Discord + MCP + background tasks)
+cargo run --features full
 
-# With Letta cloud
-cargo run --features mcp --bin mcp -- --letta-api-key your-api-key
+# Just Discord
+cargo run --features binary,discord
 
-# Custom database location
-cargo run --features mcp --bin mcp -- --db-path /path/to/data.db --letta-url http://localhost:8000
+# Just MCP
+cargo run --features binary,mcp
 ```
 
 ## Next Steps
+
+### Agent Message Routing (Immediate)
+1. **Implement actual agent responses**
+   - Route messages to specific Letta agents based on agent_id
+   - Use agent-specific prompts from AgentConfig
+   - Handle multi-turn conversations
+
+2. **Discord ↔️ MCP Integration**
+   - Implement `send_message` MCP tool to send Discord messages
+   - Share Discord bot instance with MCP server
+   - Enable agents to proactively reach out
 
 ### Task Management (High Priority)
 1. **Extend database module** with task operations
@@ -792,26 +834,9 @@ cargo run --features mcp --bin mcp -- --db-path /path/to/data.db --letta-url htt
    - Add task breakdown storage
 
 2. **Create task manager module** (`src/tasks.rs`)
-   - Task creation with smart defaults
-   - Task breakdown into subtasks
-   - Priority and dependency management
-
-3. **Add task MCP tools**
-   - `create_task` - Create new task with optional breakdown
-   - `list_tasks` - Get user's tasks with filtering
-   - `update_task` - Update task status/details
-   - `break_down_task` - AI-powered task decomposition
-
-### Discord Integration (Medium Priority)
-1. **Set up Discord bot**
-   - Use serenity crate for Discord API
-   - Implement slash commands
-   - Handle long-running operations with deferred responses
-
-2. **Connect bot to Pattern service**
-   - Forward messages to Letta agents
-   - Display task lists and calendars
-   - Handle notifications and reminders
+   - Task creation with ADHD-aware defaults
+   - Task breakdown with Entropy agent
+   - Time multiplication for realistic estimates
 
 ## Letta-rs API Notes
 
@@ -819,8 +844,10 @@ See [LETTA_API_REFERENCE.md](./LETTA_API_REFERENCE.md) for detailed API patterns
 
 ## References
 
-- [Official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
+- [MCP SDK Implementation Guide](./MCP_SDK_GUIDE.md) - Detailed patterns for using the official SDK
+- [Official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk) - Use git version only
 - [MCP Specification](https://modelcontextprotocol.io/specification/2025-06-18)
 - [Letta Documentation](https://docs.letta.com/)
+- [Letta API Reference](./LETTA_API_REFERENCE.md) - Common gotchas and patterns
 - [Discord.py Interactions Guide](https://discordpy.readthedocs.io/en/stable/interactions/api.html) (concepts apply to serenity)
 - [Activity Detection Research](https://dl.acm.org/doi/10.1145/3290605.3300589)

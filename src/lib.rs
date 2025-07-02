@@ -1,20 +1,16 @@
-//! Pattern - A library for managing Letta agents with task and calendar functionality
-//!
-//! This crate provides the core functionality for:
-//! - Managing Letta AI agents
-//! - Task management with ADHD-aware time estimation
-//! - Calendar scheduling
-//! - Activity monitoring
-
 pub mod agent;
 pub mod agents;
 pub mod config;
 pub mod db;
+pub mod error;
+pub mod service;
+pub mod types;
+
+#[cfg(feature = "discord")]
 pub mod discord;
 
 #[cfg(feature = "mcp")]
-pub mod mcp_server;
-
+pub mod server;
 use miette::Result;
 use std::sync::Arc;
 
@@ -93,9 +89,7 @@ impl PatternService {
 // Re-export commonly used types
 pub use agent::{AgentInstance, AgentManager, UserId};
 pub use agents::{AgentConfig, MemoryBlockConfig, MultiAgentSystem, MultiAgentSystemBuilder};
-pub use db::{
-    Agent, Client, Database, EnergyState, Event, Invoice, SharedMemory, SocialContact, Task, User,
-};
+pub use db::{Agent, Database, Event, SharedMemory, Task, User};
 
 #[cfg(test)]
 mod tests {
