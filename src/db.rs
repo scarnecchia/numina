@@ -99,6 +99,79 @@ pub struct Event {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Shared memory block for multi-agent coordination
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SharedMemory {
+    pub id: i64,
+    pub user_id: i64,
+    pub block_name: String,
+    pub block_value: String,
+    pub max_length: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Client entity for contract work
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Client {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub company: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub notes: Option<String>,
+    pub hourly_rate: Option<f64>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Invoice entity for payment tracking
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Invoice {
+    pub id: i64,
+    pub user_id: i64,
+    pub client_id: i64,
+    pub invoice_number: String,
+    pub amount: f64,
+    pub status: String,
+    pub issued_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub paid_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub notes: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Social contact for relationship tracking
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SocialContact {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub relationship: Option<String>,
+    pub birthday: Option<chrono::NaiveDate>,
+    pub anniversary: Option<chrono::NaiveDate>,
+    pub notes: Option<String>,
+    pub last_contact: Option<chrono::DateTime<chrono::Utc>>,
+    pub energy_cost: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Energy state for pattern tracking
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EnergyState {
+    pub id: i64,
+    pub user_id: i64,
+    pub energy_level: i32,
+    pub attention_state: String,
+    pub mood: Option<String>,
+    pub last_break_minutes: Option<i32>,
+    pub notes: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 impl Database {
     /// Find or create a user by discord ID
     pub async fn get_or_create_user(&self, discord_id: &str) -> Result<User> {
@@ -175,5 +248,160 @@ impl Database {
             created_at: now,
             updated_at: now,
         })
+    }
+
+    /// Get or update a shared memory block
+    pub async fn upsert_shared_memory(
+        &self,
+        user_id: i64,
+        block_name: &str,
+        block_value: &str,
+        max_length: i32,
+    ) -> Result<SharedMemory> {
+        let now = chrono::Utc::now();
+
+        // Try to update existing block
+        let updated = sqlx::query(
+            "UPDATE shared_memory 
+             SET block_value = ?1, max_length = ?2, updated_at = ?3
+             WHERE user_id = ?4 AND block_name = ?5",
+        )
+        .bind(block_value)
+        .bind(max_length)
+        .bind(&now)
+        .bind(user_id)
+        .bind(block_name)
+        .execute(&self.pool)
+        .await
+        .into_diagnostic()?;
+
+        if updated.rows_affected() > 0 {
+            // Fetch and return updated block
+            let block = sqlx::query_as::<_, SharedMemory>(
+                "SELECT * FROM shared_memory WHERE user_id = ?1 AND block_name = ?2",
+            )
+            .bind(user_id)
+            .bind(block_name)
+            .fetch_one(&self.pool)
+            .await
+            .into_diagnostic()?;
+
+            Ok(block)
+        } else {
+            // Create new block
+            let id = sqlx::query_scalar(
+                "INSERT INTO shared_memory (user_id, block_name, block_value, max_length, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id"
+            )
+            .bind(user_id)
+            .bind(block_name)
+            .bind(block_value)
+            .bind(max_length)
+            .bind(&now)
+            .bind(&now)
+            .fetch_one(&self.pool)
+            .await
+            .into_diagnostic()?;
+
+            Ok(SharedMemory {
+                id,
+                user_id,
+                block_name: block_name.to_string(),
+                block_value: block_value.to_string(),
+                max_length,
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+
+    /// Get all shared memory blocks for a user
+    pub async fn get_shared_memory(&self, user_id: i64) -> Result<Vec<SharedMemory>> {
+        let blocks = sqlx::query_as::<_, SharedMemory>(
+            "SELECT * FROM shared_memory WHERE user_id = ?1 ORDER BY block_name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .into_diagnostic()?;
+
+        Ok(blocks)
+    }
+
+    /// Get a specific shared memory block
+    pub async fn get_shared_memory_block(
+        &self,
+        user_id: i64,
+        block_name: &str,
+    ) -> Result<Option<SharedMemory>> {
+        let block = sqlx::query_as::<_, SharedMemory>(
+            "SELECT * FROM shared_memory WHERE user_id = ?1 AND block_name = ?2",
+        )
+        .bind(user_id)
+        .bind(block_name)
+        .fetch_optional(&self.pool)
+        .await
+        .into_diagnostic()?;
+
+        Ok(block)
+    }
+
+    /// Record an energy state
+    pub async fn record_energy_state(
+        &self,
+        user_id: i64,
+        energy_level: i32,
+        attention_state: &str,
+        mood: Option<&str>,
+        last_break_minutes: Option<i32>,
+        notes: Option<&str>,
+    ) -> Result<EnergyState> {
+        let now = chrono::Utc::now();
+        let id = sqlx::query_scalar(
+            "INSERT INTO energy_states (user_id, energy_level, attention_state, mood, last_break_minutes, notes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id"
+        )
+        .bind(user_id)
+        .bind(energy_level)
+        .bind(attention_state)
+        .bind(mood)
+        .bind(last_break_minutes)
+        .bind(notes)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await
+        .into_diagnostic()?;
+
+        Ok(EnergyState {
+            id,
+            user_id,
+            energy_level,
+            attention_state: attention_state.to_string(),
+            mood: mood.map(|s| s.to_string()),
+            last_break_minutes,
+            notes: notes.map(|s| s.to_string()),
+            created_at: now,
+        })
+    }
+
+    /// Get recent energy states for pattern analysis
+    pub async fn get_recent_energy_states(
+        &self,
+        user_id: i64,
+        limit: i32,
+    ) -> Result<Vec<EnergyState>> {
+        let states = sqlx::query_as::<_, EnergyState>(
+            "SELECT * FROM energy_states 
+             WHERE user_id = ?1 
+             ORDER BY created_at DESC 
+             LIMIT ?2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .into_diagnostic()?;
+
+        Ok(states)
     }
 }

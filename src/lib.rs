@@ -7,7 +7,10 @@
 //! - Activity monitoring
 
 pub mod agent;
+pub mod agents;
+pub mod config;
 pub mod db;
+pub mod discord;
 
 #[cfg(feature = "mcp")]
 pub mod mcp_server;
@@ -21,6 +24,7 @@ pub struct PatternService {
     db: Arc<db::Database>,
     letta_client: Option<Arc<letta::LettaClient>>,
     agent_manager: Option<Arc<agent::AgentManager>>,
+    multi_agent_system: Option<Arc<agents::MultiAgentSystem>>,
 }
 
 impl PatternService {
@@ -33,6 +37,7 @@ impl PatternService {
             db: Arc::new(db),
             letta_client: None,
             agent_manager: None,
+            multi_agent_system: None,
         })
     }
 
@@ -42,6 +47,7 @@ impl PatternService {
             db: Arc::new(db),
             letta_client: None,
             agent_manager: None,
+            multi_agent_system: None,
         }
     }
 
@@ -52,9 +58,14 @@ impl PatternService {
             Arc::clone(&letta_client),
             Arc::clone(&self.db),
         ));
+        let multi_agent_system = Arc::new(agents::MultiAgentSystem::new(
+            Arc::clone(&letta_client),
+            Arc::clone(&self.db),
+        ));
 
         self.letta_client = Some(letta_client);
         self.agent_manager = Some(agent_manager);
+        self.multi_agent_system = Some(multi_agent_system);
         self
     }
 
@@ -72,11 +83,19 @@ impl PatternService {
     pub fn agent_manager(&self) -> Option<&agent::AgentManager> {
         self.agent_manager.as_ref().map(|m| m.as_ref())
     }
+
+    /// Get a reference to the multi-agent system if available
+    pub fn multi_agent_system(&self) -> Option<&agents::MultiAgentSystem> {
+        self.multi_agent_system.as_ref().map(|m| m.as_ref())
+    }
 }
 
 // Re-export commonly used types
 pub use agent::{AgentInstance, AgentManager, UserId};
-pub use db::{Agent, Database, Event, Task, User};
+pub use agents::{AgentConfig, MemoryBlockConfig, MultiAgentSystem, MultiAgentSystemBuilder};
+pub use db::{
+    Agent, Client, Database, EnergyState, Event, Invoice, SharedMemory, SocialContact, Task, User,
+};
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
-# CLAUDE.md - Pattern Crate Implementation Guide
+# CLAUDE.md - Pattern ADHD Cognitive Support System
 
-This crate extends the letta-rs client to build an autonomous agent system with MCP server capabilities.
+Pattern is a multi-agent cognitive support system designed specifically for ADHD brains. It uses Letta's multi-agent architecture with shared memory to provide external executive function through specialized cognitive agents inspired by Brandon Sanderson's Stormlight Archive.
 
 ## TODO Management
 
@@ -179,12 +179,24 @@ just pre-commit-all
 
 ## Architecture Overview
 
-Pattern acts as an MCP server exposing:
-- Letta agent management and tool execution
-- Calendar/scheduling with smart time estimation
-- Activity monitoring for context-aware interruptions
-- Cross-platform messaging (Discord primary)
-- Task management with breakdown capabilities
+Pattern implements a multi-agent cognitive support system with:
+
+### Agent Constellation
+```
+Pattern (Sleeptime Orchestrator)
+├── Entropy (Task/Complexity Agent)
+├── Flux (Time/Scheduling Agent)
+├── Archive (Memory/Knowledge Agent)
+├── Momentum (Flow/Energy Agent)
+└── Anchor (Habits/Structure Agent)
+```
+
+### Core Features
+- **Sleeptime Orchestration**: Pattern runs background checks every 20-30 minutes for attention drift, physical needs, transitions
+- **Shared Memory Blocks**: All agents access common state (current_state, active_context, bond_evolution)
+- **ADHD-Specific Design**: Time blindness compensation, task breakdown, energy tracking, interruption awareness
+- **Evolving Relationship**: Agents develop understanding of user patterns over time
+- **MCP Server Interface**: Exposes agent capabilities through Model Context Protocol
 
 ## Core Dependencies
 
@@ -222,6 +234,64 @@ x11 = "2.21"
 # Existing letta crate
 letta = { path = "../letta-rs" }
 ```
+
+## ADHD-Specific Design Principles
+
+Pattern is built on deep understanding of ADHD cognition:
+
+### Core Principles
+- **Different, Not Broken**: ADHD brains operate on different physics - time blindness and hyperfocus aren't bugs
+- **External Executive Function**: Pattern provides the executive function support that ADHD brains need
+- **No Shame Spirals**: Never suggest "try harder" - validate struggles as logical responses
+- **Hidden Complexity**: "Simple" tasks are never simple - everything needs breakdown
+- **Energy Awareness**: Attention and energy are finite resources that deplete non-linearly
+
+### Key Features for ADHD
+- **Time Translation**: Automatic multipliers (1.5x-3x) for all time estimates
+- **Proactive Monitoring**: Background checks prevent 3-hour hyperfocus crashes
+- **Context Recovery**: External memory for "what was I doing?" moments
+- **Task Atomization**: Break overwhelming projects into single next actions
+- **Physical Needs**: Track water, food, meds, movement without nagging
+- **Flow Protection**: Recognize and protect rare flow states
+
+### Relationship Evolution
+Agents evolve from professional assistant to trusted cognitive partner:
+- **Early**: Helpful professional who "gets it"
+- **Building**: Developing shorthand, recognizing patterns
+- **Trusted**: Inside jokes, gentle ribbing, shared language
+- **Deep**: Finishing thoughts about user's patterns
+
+## Multi-Agent Shared Memory Architecture
+
+### Shared Memory Blocks
+
+All agents share these memory blocks for coordination without redundancy:
+
+```rust
+// Shared state accessible by all agents
+pub struct SharedMemory {
+    // Real-time energy/attention/mood tracking (200 char limit)
+    current_state: Block,
+
+    // What they're doing NOW, including blockers (400 char limit)
+    active_context: Block,
+
+    // Growing understanding of this human (600 char limit)
+    bond_evolution: Block,
+}
+
+// Example state format
+current_state: "energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration"
+active_context: "task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear"
+bond_evolution: "trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']"
+```
+
+### Agent Communication
+
+Agents coordinate through:
+- Shared memory updates (all agents see changes immediately)
+- `send_message_to_agent_async` for non-blocking coordination
+- Shared tools that any agent can invoke
 
 ## MCP Server Implementation
 
@@ -271,7 +341,99 @@ impl PatternServer {
 
 ## Key Features to Implement
 
-### 1. Letta Agent Wrapper ✅ IMPLEMENTED
+### 1. Multi-Agent System Architecture
+
+Each agent has a specific role in the cognitive support system:
+
+#### Pattern (Sleeptime Orchestrator)
+- Runs background checks every 20-30 minutes
+- Monitors hyperfocus duration, physical needs, transitions
+- Coordinates other agents based on current needs
+- Personality: "friend who slides water onto your desk"
+
+#### Entropy (Task/Complexity Agent)
+- Breaks down overwhelming tasks into atoms
+- Recognizes hidden complexity in "simple" tasks
+- Validates task paralysis as logical response
+- Finds the ONE next action when everything feels impossible
+
+#### Flux (Time/Scheduling Agent)
+- Translates between ADHD time and clock time
+- Automatically adds buffers (1.5x-3x multipliers)
+- Recognizes time blindness patterns
+- Creates temporal anchors for transitions
+
+#### Archive (Memory/Knowledge Agent)
+- External memory bank for dumped thoughts
+- Surfaces relevant context without prompting
+- Finds patterns across scattered data points
+- Answers "what was I doing?" with actual context
+
+#### Momentum (Flow/Energy Agent)
+- Distinguishes hyperfocus from burnout
+- Maps energy patterns (Thursday 3pm crash, 2am clarity)
+- Suggests task pivots based on current capacity
+- Protects flow states when they emerge
+
+#### Anchor (Habits/Structure Agent)
+- Tracks basics: meds, water, food, sleep
+- Builds loose structure that actually works
+- Celebrates basic self-care as real achievements
+- Adapts routines to current capacity
+
+### Work & Social Support Features
+
+Pattern's agents provide specific support for contract work and social challenges:
+
+#### Contract/Client Management
+- **Time Tracking**: Flux automatically tracks billable hours with "what was I doing?" recovery
+- **Invoice Reminders**: Pattern notices unpaid invoices aging past 30/60/90 days
+- **Follow-up Prompts**: "Hey, you haven't heard from ClientX in 3 weeks, might be time to check in"
+- **Meeting Prep**: Archive surfaces relevant context before client calls
+- **Project Switching**: Momentum helps context-switch between clients without losing state
+
+#### Social Memory & Support
+- **Birthday/Anniversary/Medication Tracking**: Anchor maintains important dates with lead-time warnings
+- **Conversation Threading**: Archive remembers "they mentioned their dog was sick last time"
+- **Follow-up Suggestions**: "Sarah mentioned her big presentation was today, maybe check how it went?"
+- **Energy-Aware Social Planning**: Momentum prevents scheduling social stuff when depleted
+- **Masking Support**: Pattern tracks social energy drain and suggests recovery time
+
+Example interactions:
+```
+Pattern: "heads up - invoice for ClientCorp is at 45 days unpaid. want me to draft a friendly follow-up?"
+
+Archive: "before your 2pm with Alex - last meeting you promised to review their API docs (you didn't)
+and they mentioned considering migrating to Leptos"
+
+Anchor: "Mom's birthday is next Tuesday. you usually panic-buy a gift Monday night.
+maybe handle it this weekend while you have energy?"
+
+Momentum: "you've got 3 social things scheduled this week. based on last month's pattern,
+that's gonna wreck you. which one can we move?"
+```
+
+### 2. Shared Agent Tools
+
+All agents can access these core functions:
+
+```rust
+pub trait SharedTools {
+    // Any agent can pulse-check current state
+    async fn check_vibe(&self) -> VibeState;
+
+    // Capture current state for later recovery
+    async fn context_snapshot(&self) -> String;
+
+    // Search across all memory for patterns
+    async fn find_pattern(&self, query: &str) -> Vec<Pattern>;
+
+    // When current task/energy mismatch detected
+    async fn suggest_pivot(&self) -> Suggestion;
+}
+```
+
+### 3. Letta Agent Management ✅ PARTIALLY IMPLEMENTED
 
 Provides stateful agent management with caching:
 
@@ -291,11 +453,11 @@ impl AgentManager {
             .memory_block(Block::persona("You are a helpful assistant..."))
             .memory_block(Block::human(&format!("User {}", user_id.0)))
             .build();
-        
+
         // Store in DB and cache
         Ok(AgentInstance { agent_id: agent.id, user_id, name })
     }
-    
+
     // Memory update workaround using blocks API
     pub async fn update_agent_memory(&self, user_id: UserId, memory: AgentMemory) -> Result<()> {
         for block in memory.blocks {
@@ -306,7 +468,7 @@ impl AgentManager {
 ```
 
 **Key learnings**:
-- Letta uses `Block` types, not `ChatMemory` 
+- Letta uses `Block` types, not `ChatMemory`
 - Memory updates require the blocks API
 - `LettaId` is its own type, not just a String
 - Message responses come as `LettaMessageUnion::AssistantMessage`
@@ -462,82 +624,90 @@ Leverage Letta's 4-tier memory with local storage:
 ## Build Priority Breakdown
 
 ### Phase 1: Core Foundation (Must Have First)
-1. **Basic MCP Server Setup**
-   - Implement minimal `PatternServer` with rmcp
-   - Basic tool registration
-   - Server lifecycle management
-   - **Why first**: Nothing works without this
+1. **Multi-Agent Architecture Design**
+   - Design Pattern orchestrator + 5 specialist agents
+   - Define shared memory schema
+   - Plan agent communication patterns
+   - **Why first**: Architecture drives everything else
 
-2. **Letta Integration Layer**
-   - `AgentManager` wrapper around letta client
-   - Basic agent creation/retrieval
-   - Message passing to agents
-   - **Why early**: Core functionality depends on agents
+2. **Shared Memory Implementation**
+   - Implement shared memory blocks in database
+   - Create memory sync mechanism
+   - Build memory access layer
+   - **Why early**: Agents need shared state to coordinate
 
-3. **Local Data Storage**
-   - SQLite setup with migrations
-   - Basic user/agent persistence
-   - **Why early**: Need persistence before anything stateful
+3. **Letta Multi-Agent Integration**
+   - Extend AgentManager for multi-agent support
+   - Implement agent creation with shared memory
+   - Build inter-agent messaging
+   - **Why early**: Core functionality depends on agent coordination
 
 ### Phase 2: Core Features (MVP)
-4. **Simple Task Management**
-   - Basic task CRUD in SQLite
-   - Task breakdown tool (no fancy AI yet)
-   - **Why**: Immediate utility, simpler than calendar
+4. **Shared Agent Tools**
+   - Implement check_vibe, context_snapshot, find_pattern, suggest_pivot
+   - Create tool registry for agent access
+   - **Why**: Agents need common capabilities
 
-5. **Discord Bot Integration**
-   - Basic bot setup with slash commands
-   - Message forwarding to/from agents
-   - **Why**: Primary UI, needed for testing
+5. **Pattern Sleeptime Agent**
+   - Implement 20-30min background checks
+   - Hyperfocus detection, physical needs monitoring
+   - **Why**: Core ADHD support mechanism
 
-6. **Basic Calendar**
-   - Event storage and retrieval
-   - Simple scheduling (no smart features yet)
-   - **Why**: Foundation for smart scheduling later
+6. **Entropy Agent (Tasks)**
+   - Task breakdown into atoms
+   - Hidden complexity detection
+   - **Why**: Task paralysis is core ADHD challenge
 
-### Phase 3: Intelligence Layer
-7. **Smart Time Estimation**
-   - Historical tracking of estimate vs actual
-   - Time multiplier per user/task type
-   - ADHD-aware buffering
+### Phase 3: Specialist Agents
+7. **Flux Agent (Time)**
+   - ADHD time translation (5min = 30min)
+   - Auto-buffering with multipliers
+   - Time blindness compensation
 
-8. **Activity Monitoring**
-   - Platform-specific window/app tracking
-   - Interruptibility detection
-   - Focus state recognition
+8. **Momentum Agent (Energy)**
+   - Energy state tracking
+   - Flow vs burnout detection
+   - Task/energy alignment
 
-9. **Vector Search & Memory**
-   - HNSW index for semantic search
-   - Integration with Letta's archival memory
-   - Smart context retrieval
+9. **Archive Agent (Memory)**
+   - External memory bank
+   - Context recovery ("what was I doing?")
+   - Pattern detection across thoughts
 
-### Phase 4: Advanced Features
-10. **Recurring Events & Patterns**
-    - rrule integration
-    - User routine learning
-    - Energy level patterns
+10. **Anchor Agent (Habits)**
+    - Basic needs tracking (meds, water, food)
+    - Minimum viable human protocols
+    - Routine adaptation to capacity
 
-11. **Cross-Platform Messaging**
-    - Email integration
-    - SMS/other platforms
-    - Unified notification system
+### Phase 4: Integration & Polish
+11. **Discord Bot Integration**
+    - Slash commands for agent interaction
+    - Proactive notifications from Pattern
+    - Multi-modal conversations
 
-12. **Advanced Task Intelligence**
-    - AI-powered task breakdown
-    - Dependency tracking
-    - Priority optimization
+12. **Advanced Features**
+    - Vector search for semantic memory
+    - Cross-platform messaging
+    - Energy pattern learning
+    - Relationship evolution tracking
 
 ## Current TODOs
 
 ### High Priority
-- [ ] Create basic task management
-  - [ ] Add task CRUD operations to database module
-  - [ ] Create task manager with smart task breakdown
-  - [ ] Add task-related MCP tools
+- [ ] Design multi-agent system with Pattern as sleeptime orchestrator + 5 specialist agents
+- [ ] Implement shared memory blocks (current_state, active_context, bond_evolution)
+- [ ] Implement Pattern as sleeptime agent with 20-30min background checks
+- [ ] Add task CRUD operations to database module
+- [ ] Create task manager with ADHD-aware task breakdown (Entropy agent)
+- [ ] Create shared tools (check_vibe, context_snapshot, find_pattern, suggest_pivot)
 
 ### Medium Priority
+- [ ] Add task-related MCP tools
+- [ ] Implement time tracking with ADHD multipliers (Flux agent)
+- [ ] Add energy/attention monitoring (Momentum agent)
 - [ ] Set up Discord bot integration
-- [ ] Implement smart time estimation with ADHD awareness
+
+### Low Priority
 - [ ] Add activity monitoring for interruption detection
 
 ### Completed

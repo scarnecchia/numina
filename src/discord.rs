@@ -1,0 +1,480 @@
+use crate::{agent::UserId, agents::MultiAgentSystem};
+use miette::{IntoDiagnostic, Result};
+use serenity::{
+    all::{
+        Command, CreateInteractionResponse, CreateInteractionResponseMessage,
+        EditInteractionResponse,
+    },
+    async_trait,
+    builder::{CreateCommand, CreateEmbed},
+    client::{Context, EventHandler},
+    model::{
+        application::{CommandInteraction, Interaction},
+        channel::Message,
+        gateway::Ready,
+    },
+    prelude::*,
+};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{error, info, warn};
+
+/// Discord bot configuration
+#[derive(Debug, Clone)]
+pub struct DiscordConfig {
+    /// Discord bot token
+    pub token: String,
+    /// Optional channel ID to limit bot responses
+    pub channel_id: Option<u64>,
+    /// Whether to respond to DMs
+    pub respond_to_dms: bool,
+    /// Whether to respond to mentions
+    pub respond_to_mentions: bool,
+    /// Maximum message length before chunking
+    pub max_message_length: usize,
+}
+
+impl Default for DiscordConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            channel_id: None,
+            respond_to_dms: true,
+            respond_to_mentions: true,
+            max_message_length: 2000,
+        }
+    }
+}
+
+/// Shared state for the Discord bot
+#[derive(Clone)]
+pub struct BotState {
+    pub multi_agent_system: Arc<MultiAgentSystem>,
+}
+
+/// Discord bot handler
+pub struct PatternDiscordBot {
+    state: Arc<RwLock<BotState>>,
+}
+
+impl PatternDiscordBot {
+    pub fn new(multi_agent_system: Arc<MultiAgentSystem>) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(BotState { multi_agent_system })),
+        }
+    }
+}
+
+#[async_trait]
+impl EventHandler for PatternDiscordBot {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        info!("{} is connected!", ready.user.name);
+
+        // Register slash commands
+        let commands = vec![
+            CreateCommand::new("chat")
+                .description("Chat with Pattern agents")
+                .add_option(
+                    serenity::all::CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "message",
+                        "Your message to the agents",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    serenity::all::CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "agent",
+                        "Specific agent to talk to (optional)",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("vibe").description("Check current vibe/state"),
+            CreateCommand::new("tasks").description("List current tasks"),
+            CreateCommand::new("memory").description("Show shared memory state"),
+        ];
+
+        for command in commands {
+            if let Err(why) = Command::create_global_command(&ctx.http, command).await {
+                error!("Cannot create slash command: {:?}", why);
+            }
+        }
+    }
+
+    async fn message(&self, ctx: Context, msg: Message) {
+        // Ignore bot's own messages
+        if msg.author.bot {
+            return;
+        }
+
+        let should_respond = {
+            let _state = self.state.read().await;
+
+            // Check if we should respond based on message type
+            let is_dm = msg.guild_id.is_none();
+            let is_mention = msg.mentions_me(&ctx.http).await.unwrap_or(false);
+
+            // For now, respond to all non-bot messages
+            // Later we can add channel filtering, etc.
+            is_dm || is_mention || true
+        };
+
+        if !should_respond {
+            return;
+        }
+
+        // Show typing indicator
+        let typing = msg.channel_id.start_typing(&ctx.http);
+
+        // Process message with agents
+        match self.process_message(&ctx, &msg).await {
+            Ok(response) => {
+                // Split response into chunks if needed
+                for chunk in split_message(&response, 2000) {
+                    if let Err(why) = msg.channel_id.say(&ctx.http, chunk).await {
+                        error!("Error sending message: {:?}", why);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Error processing message: {:?}", e);
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        "Sorry, I encountered an error processing your message.",
+                    )
+                    .await;
+            }
+        }
+
+        // Stop typing indicator
+        typing.stop();
+    }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::Command(command) = interaction {
+            match command.data.name.as_str() {
+                "chat" => self.handle_chat_command(&ctx, &command).await,
+                "vibe" => self.handle_vibe_command(&ctx, &command).await,
+                "tasks" => self.handle_tasks_command(&ctx, &command).await,
+                "memory" => self.handle_memory_command(&ctx, &command).await,
+                _ => {
+                    warn!("Unknown command: {}", command.data.name);
+                }
+            }
+        }
+    }
+}
+
+impl PatternDiscordBot {
+    async fn process_message(&self, _ctx: &Context, msg: &Message) -> Result<String> {
+        let state = self.state.read().await;
+
+        // Convert Discord user ID to our UserId
+        let user_id = UserId(msg.author.id.get() as i64);
+
+        // Initialize user if needed
+        state.multi_agent_system.initialize_user(user_id).await?;
+
+        // Parse message for agent routing
+        let (target_agent, actual_message) = self.parse_agent_routing(&msg.content).await;
+
+        // Update current context with the message
+        let context = format!(
+            "task: chat | user: {} | message: {} | channel: {} | target: {}",
+            msg.author.name,
+            actual_message,
+            if msg.guild_id.is_none() {
+                "DM"
+            } else {
+                "server"
+            },
+            target_agent.as_deref().unwrap_or("pattern")
+        );
+
+        state
+            .multi_agent_system
+            .update_shared_memory(user_id, "active_context", &context)
+            .await?;
+
+        // TODO: Actually send to appropriate agent and get response
+        // For now, acknowledge with agent routing info
+        let current_state = state
+            .multi_agent_system
+            .get_shared_memory(user_id, "current_state")
+            .await
+            .unwrap_or_else(|_| "initializing...".to_string());
+
+        let agent_name = target_agent.as_deref().unwrap_or("pattern");
+        Ok(format!(
+            "[{}] hey {}, got it. vibe: {}",
+            agent_name, msg.author.name, current_state
+        ))
+    }
+
+    async fn handle_chat_command(&self, ctx: &Context, command: &CommandInteraction) {
+        // Defer response for long operations
+        if let Err(why) = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            )
+            .await
+        {
+            error!("Cannot defer response: {:?}", why);
+            return;
+        }
+
+        // Get the message from options
+        let message = command
+            .data
+            .options
+            .iter()
+            .find(|opt| opt.name == "message")
+            .and_then(|opt| opt.value.as_str())
+            .unwrap_or("Hello");
+
+        let agent = command
+            .data
+            .options
+            .iter()
+            .find(|opt| opt.name == "agent")
+            .and_then(|opt| opt.value.as_str());
+
+        // Process with agents
+        let _user_id = UserId(command.user.id.get() as i64);
+
+        // TODO: Actually send to agents
+        let response = format!(
+            "Processing your message: '{}' {}",
+            message,
+            agent
+                .map(|a| format!("with agent {}", a))
+                .unwrap_or_default()
+        );
+
+        // Send followup
+        if let Err(why) = command
+            .edit_response(&ctx.http, EditInteractionResponse::new().content(response))
+            .await
+        {
+            error!("Cannot send followup: {:?}", why);
+        }
+    }
+
+    async fn handle_vibe_command(&self, ctx: &Context, command: &CommandInteraction) {
+        let state = self.state.read().await;
+        let user_id = UserId(command.user.id.get() as i64);
+
+        // Defer response
+        if let Err(why) = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            )
+            .await
+        {
+            error!("Cannot defer response: {:?}", why);
+            return;
+        }
+
+        // Get current state from shared memory
+        match state
+            .multi_agent_system
+            .get_shared_memory(user_id, "current_state")
+            .await
+        {
+            Ok(current_state) => {
+                let embed = CreateEmbed::new()
+                    .title("Current Vibe Check")
+                    .description(&current_state)
+                    .color(0x00ff00);
+
+                if let Err(why) = command
+                    .edit_response(&ctx.http, EditInteractionResponse::new().embed(embed))
+                    .await
+                {
+                    error!("Cannot send vibe response: {:?}", why);
+                }
+            }
+            Err(_e) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new()
+                            .content("Couldn't check vibe right now. Try again later?"),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn handle_tasks_command(&self, ctx: &Context, command: &CommandInteraction) {
+        // TODO: Implement when we have task management
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new().content("Task management coming soon!"),
+                ),
+            )
+            .await;
+    }
+
+    async fn handle_memory_command(&self, ctx: &Context, command: &CommandInteraction) {
+        let state = self.state.read().await;
+        let user_id = UserId(command.user.id.get() as i64);
+
+        // Defer response
+        if let Err(why) = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            )
+            .await
+        {
+            error!("Cannot defer response: {:?}", why);
+            return;
+        }
+
+        // Get all shared memory
+        match state
+            .multi_agent_system
+            .get_all_shared_memory(user_id)
+            .await
+        {
+            Ok(memory) => {
+                let mut embed = CreateEmbed::new()
+                    .title("Shared Memory State")
+                    .color(0x3498db);
+
+                for (key, value) in memory {
+                    embed = embed.field(&key, &value, false);
+                }
+
+                if let Err(why) = command
+                    .edit_response(&ctx.http, EditInteractionResponse::new().embed(embed))
+                    .await
+                {
+                    error!("Cannot send memory response: {:?}", why);
+                }
+            }
+            Err(_e) => {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new()
+                            .content("Couldn't retrieve memory state right now."),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// Parse message for agent routing directives
+    /// Supports formats like:
+    /// - "@entropy help me break down this task"
+    /// - "flux: when should i schedule this?"
+    /// - "/agent momentum how's my energy?"
+    /// - Regular message (goes to default agent)
+    async fn parse_agent_routing(&self, content: &str) -> (Option<String>, String) {
+        // Get configured agents from the system
+        let state = self.state.read().await;
+        let agent_configs = state.multi_agent_system.agent_configs();
+        let valid_agents: Vec<String> = agent_configs.keys().cloned().collect();
+
+        // Check for @agent format
+        if let Some(rest) = content.strip_prefix('@') {
+            if let Some((agent, message)) = rest.split_once(' ') {
+                let agent_lower = agent.to_lowercase();
+                if valid_agents.contains(&agent_lower) {
+                    return (Some(agent_lower), message.trim().to_string());
+                }
+            }
+        }
+
+        // Check for agent: format
+        if let Some((possible_agent, message)) = content.split_once(':') {
+            let agent = possible_agent.trim().to_lowercase();
+            if valid_agents.contains(&agent) {
+                return (Some(agent), message.trim().to_string());
+            }
+        }
+
+        // Check for /agent format
+        if let Some(rest) = content.strip_prefix("/agent ") {
+            if let Some((agent, message)) = rest.split_once(' ') {
+                let agent_lower = agent.to_lowercase();
+                if valid_agents.contains(&agent_lower) {
+                    return (Some(agent_lower), message.trim().to_string());
+                }
+            }
+        }
+
+        // Default: route to first agent (usually the orchestrator) or None
+        let default_agent = valid_agents.first().cloned();
+        (default_agent, content.to_string())
+    }
+}
+
+/// Split a message into chunks that fit Discord's message length limit
+fn split_message(content: &str, max_length: usize) -> Vec<String> {
+    if content.len() <= max_length {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for line in content.lines() {
+        if current.len() + line.len() + 1 > max_length {
+            if !current.is_empty() {
+                chunks.push(current);
+                current = String::new();
+            }
+
+            // If a single line is too long, split it
+            if line.len() > max_length {
+                for chunk in line.chars().collect::<Vec<_>>().chunks(max_length) {
+                    chunks.push(chunk.iter().collect());
+                }
+            } else {
+                current = line.to_string();
+            }
+        } else {
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(line);
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
+/// Create and run the Discord bot
+pub async fn run_discord_bot(
+    config: DiscordConfig,
+    multi_agent_system: Arc<MultiAgentSystem>,
+) -> Result<()> {
+    let handler = PatternDiscordBot::new(multi_agent_system);
+
+    let intents = GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT;
+
+    let mut client = Client::builder(&config.token, intents)
+        .event_handler(handler)
+        .await
+        .into_diagnostic()?;
+
+    info!("Starting Discord bot...");
+    client.start().await.into_diagnostic()?;
+
+    Ok(())
+}
