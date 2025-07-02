@@ -8,5 +8,48 @@ version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+# Enable MCP server functionality
+mcp = ["dep:rmcp", "dep:async-trait", "binary"]
+# Enable SSE transport for MCP server (requires additional dependencies)
+mcp-sse = ["mcp", "rmcp/transport-sse-server"]
+binary = [
+    "miette/fancy",
+    "dep:clap",
+    "dep:tracing-appender",
+    "dep:tracing-subscriber",
+]
+
 [dependencies]
-clap = { version = "4.3.14", features = ["derive"] }
+# Core dependencies
+letta = { path = "../letta-rs" }
+miette = { version = "7.6.0", features = [] }
+serde = { version = "1.0.219", features = ["derive"] }
+sled = "0.34.7"
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio",
+    "sqlite",
+    "uuid",
+    "chrono",
+] }
+tokio = { version = "1.45.1", features = ["full"] }
+tokio-stream = "0.1.17"
+tracing = "0.1.41"
+
+
+# Optional MCP dependencies
+async-trait = { version = "0.1.88", optional = true }
+rmcp = { version = "0.1.5", features = ["server"], optional = true }
+
+# Binary dependencies
+clap = { version = "4.3.14", features = ["derive"], optional = true }
+tracing-appender = { version = "0.2.3", optional = true }
+tracing-subscriber = { version = "0.3.19", features = [
+    "env-filter",
+    "fmt",
+], optional = true }
+
+[[bin]]
+name = "mcp"
+required-features = ["mcp"]
