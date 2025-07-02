@@ -271,33 +271,45 @@ impl PatternServer {
 
 ## Key Features to Implement
 
-### 1. Letta Agent Wrapper
+### 1. Letta Agent Wrapper ✅ IMPLEMENTED
 
-Provides stateful agent management with memory tiers:
+Provides stateful agent management with caching:
 
 ```rust
-struct AgentManager {
+// src/agent.rs - ACTUAL IMPLEMENTATION
+pub struct AgentManager {
     letta: Arc<LettaClient>,
-    agents: HashMap<UserId, AgentInstance>,
+    db: Arc<db::Database>,
+    cache: Arc<RwLock<HashMap<UserId, AgentInstance>>>,
 }
 
 impl AgentManager {
-    async fn get_or_create_agent(&self, user_id: UserId) -> Result<AgentInstance> {
-        // Create personalized agent with memory blocks
-        let agent = self.letta.agents().create(
-            CreateAgentRequest::builder()
-                .name(format!("assistant_{}", user_id))
-                .memory(ChatMemory {
-                    persona: "Helpful assistant with context awareness",
-                    human: &format!("User {}", user_id),
-                })
-                .build()
-        ).await?;
-
-        Ok(AgentInstance { agent_id: agent.id, user_id })
+    pub async fn get_or_create_agent(&self, user_id: UserId) -> Result<AgentInstance> {
+        // Check cache first, then DB, then create new
+        let request = CreateAgentRequest::builder()
+            .name(&agent_name)
+            .memory_block(Block::persona("You are a helpful assistant..."))
+            .memory_block(Block::human(&format!("User {}", user_id.0)))
+            .build();
+        
+        // Store in DB and cache
+        Ok(AgentInstance { agent_id: agent.id, user_id, name })
+    }
+    
+    // Memory update workaround using blocks API
+    pub async fn update_agent_memory(&self, user_id: UserId, memory: AgentMemory) -> Result<()> {
+        for block in memory.blocks {
+            self.letta.blocks().update(block_id, UpdateBlockRequest { ... }).await?;
+        }
     }
 }
 ```
+
+**Key learnings**:
+- Letta uses `Block` types, not `ChatMemory` 
+- Memory updates require the blocks API
+- `LettaId` is its own type, not just a String
+- Message responses come as `LettaMessageUnion::AssistantMessage`
 
 ### 2. Smart Calendar Management
 
@@ -518,16 +530,22 @@ Leverage Letta's 4-tier memory with local storage:
 ## Current TODOs
 
 ### High Priority
-- [ ] Implement Letta integration layer
-  - [ ] Create agent manager module
-  - [ ] Implement agent creation/retrieval
-  - [ ] Add Letta tools to MCP server
+- [ ] Create basic task management
+  - [ ] Add task CRUD operations to database module
+  - [ ] Create task manager with smart task breakdown
+  - [ ] Add task-related MCP tools
 
 ### Medium Priority
-- [ ] Create basic task management
 - [ ] Set up Discord bot integration
+- [ ] Implement smart time estimation with ADHD awareness
+- [ ] Add activity monitoring for interruption detection
 
 ### Completed
+- [x] Implement Letta integration layer
+  - [x] Create agent manager module (src/agent.rs)
+  - [x] Implement agent creation/retrieval with caching
+  - [x] Add Letta tools to MCP server (chat_with_agent, get_agent_memory, update_agent_memory)
+  - [x] Implement memory update workaround using blocks API
 - [x] Restructure as library with optional binary
   - [x] Create lib.rs with core PatternService
   - [x] Move MCP server to bin/mcp.rs
@@ -548,58 +566,86 @@ Leverage Letta's 4-tier memory with local storage:
 - Clean separation between library and binary concerns
 
 **Dependencies**:
-- Core: sqlx, letta, sled, tokio, serde, miette
-- Optional (MCP): rmcp, async-trait
+- Core: sqlx, letta, sled, tokio, serde, miette, tracing
+- Optional (MCP): rmcp
 - Optional (binary): clap, tracing-subscriber, tracing-appender
+- Note: async-trait was listed but isn't actually needed
 
 **Features**:
 - `default`: Core library functionality only
-- `mcp`: Enables MCP server support
+- `mcp`: Enables MCP server support + binary features
 - `mcp-sse`: Enables SSE transport for MCP
 - `binary`: Enables CLI and logging features
 
-**Database**:
+**Agent Integration** ✅:
+- `AgentManager` in `src/agent.rs` handles all Letta operations
+- Caching layer to minimize API calls
+- Database persistence of agent mappings
+- Memory update workaround implemented via blocks API
+
+**Database** ✅:
 - SQLite with migrations support
 - Schema: users, agents, tasks, events, time_tracking tables
 - Database module with entity structs and basic operations
+- Agent persistence working (stores user->agent mappings)
 
-**MCP Server** (when enabled):
-- Three tools: schedule_event, send_message, check_activity_state
+**MCP Server** (when enabled) ✅:
+- Six tools implemented:
+  - `chat_with_agent` - Send messages to Letta agents and get responses ✅
+  - `get_agent_memory` - Retrieve agent's current memory state ✅
+  - `update_agent_memory` - Update agent memory blocks ✅
+  - `schedule_event` - Schedule events (TODO: implement)
+  - `send_message` - Send Discord messages (TODO: implement)
+  - `check_activity_state` - Check activity/interruptibility (TODO: implement)
 - Runs on stdio transport by default
 - SSE transport available with feature flag
+- Command-line options: `--db-path`, `--letta-url`, `--letta-api-key`
+
+**Running the MCP server**:
+```bash
+# With local Letta server
+cargo run --features mcp --bin mcp -- --letta-url http://localhost:8000
+
+# With Letta cloud
+cargo run --features mcp --bin mcp -- --letta-api-key your-api-key
+
+# Custom database location
+cargo run --features mcp --bin mcp -- --db-path /path/to/data.db --letta-url http://localhost:8000
+```
 
 ## Next Steps
 
-### Letta Integration (High Priority)
-1. **Create agent manager module** (`src/agent.rs`)
-   - Wrap Letta client for agent lifecycle management
-   - Handle agent creation with personalized memory blocks
-   - Cache agent instances per user
+### Task Management (High Priority)
+1. **Extend database module** with task operations
+   - Add CRUD methods for tasks
+   - Implement task status transitions
+   - Add task breakdown storage
 
-2. **Implement agent operations**
-   - Create/retrieve agents per user
-   - Send messages to agents
-   - Retrieve agent responses and memory
+2. **Create task manager module** (`src/tasks.rs`)
+   - Task creation with smart defaults
+   - Task breakdown into subtasks
+   - Priority and dependency management
 
-3. **Add Letta MCP tools**
-   - `chat_with_agent` - Send message and get response
-   - `get_agent_memory` - Retrieve current memory state
-   - `update_agent_memory` - Update memory blocks
+3. **Add task MCP tools**
+   - `create_task` - Create new task with optional breakdown
+   - `list_tasks` - Get user's tasks with filtering
+   - `update_task` - Update task status/details
+   - `break_down_task` - AI-powered task decomposition
 
-### SQLite Setup (High Priority)
-1. **Create database module** (`src/db.rs`)
-   - Database connection pool management
-   - Migration runner setup
+### Discord Integration (Medium Priority)
+1. **Set up Discord bot**
+   - Use serenity crate for Discord API
+   - Implement slash commands
+   - Handle long-running operations with deferred responses
 
-2. **Design initial schema**
-   - Users table (id, discord_id, created_at)
-   - Agents table (id, user_id, agent_id, created_at)
-   - Tasks table (id, user_id, title, description, status, etc.)
-   - Events table (id, user_id, title, start, end, etc.)
+2. **Connect bot to Pattern service**
+   - Forward messages to Letta agents
+   - Display task lists and calendars
+   - Handle notifications and reminders
 
-3. **Create migrations**
-   - Use sqlx migrate for schema versioning
-   - Initial migration with base tables
+## Letta-rs API Notes
+
+See [LETTA_API_REFERENCE.md](./LETTA_API_REFERENCE.md) for detailed API patterns and common gotchas discovered during implementation.
 
 ## References
 

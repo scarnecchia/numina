@@ -6,6 +6,7 @@
 //! - Calendar scheduling
 //! - Activity monitoring
 
+pub mod agent;
 pub mod db;
 
 #[cfg(feature = "mcp")]
@@ -19,6 +20,7 @@ use std::sync::Arc;
 pub struct PatternService {
     db: Arc<db::Database>,
     letta_client: Option<Arc<letta::LettaClient>>,
+    agent_manager: Option<Arc<agent::AgentManager>>,
 }
 
 impl PatternService {
@@ -30,6 +32,7 @@ impl PatternService {
         Ok(Self {
             db: Arc::new(db),
             letta_client: None,
+            agent_manager: None,
         })
     }
 
@@ -38,12 +41,20 @@ impl PatternService {
         Self {
             db: Arc::new(db),
             letta_client: None,
+            agent_manager: None,
         }
     }
 
     /// Set the Letta client for agent operations
     pub fn with_letta_client(mut self, client: letta::LettaClient) -> Self {
-        self.letta_client = Some(Arc::new(client));
+        let letta_client = Arc::new(client);
+        let agent_manager = Arc::new(agent::AgentManager::new(
+            Arc::clone(&letta_client),
+            Arc::clone(&self.db),
+        ));
+
+        self.letta_client = Some(letta_client);
+        self.agent_manager = Some(agent_manager);
         self
     }
 
@@ -56,9 +67,15 @@ impl PatternService {
     pub fn letta_client(&self) -> Option<&letta::LettaClient> {
         self.letta_client.as_ref().map(|c| c.as_ref())
     }
+
+    /// Get a reference to the agent manager if available
+    pub fn agent_manager(&self) -> Option<&agent::AgentManager> {
+        self.agent_manager.as_ref().map(|m| m.as_ref())
+    }
 }
 
 // Re-export commonly used types
+pub use agent::{AgentInstance, AgentManager, UserId};
 pub use db::{Agent, Database, Event, Task, User};
 
 #[cfg(test)]

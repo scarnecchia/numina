@@ -1,6 +1,6 @@
 use clap::Parser;
 use miette::Result;
-use pattern::mcp_server::PatternServer;
+use pattern::{mcp_server::PatternServer, PatternService};
 use rmcp::ServiceExt;
 use tokio::io::{stdin, stdout};
 use tracing::info;
@@ -21,6 +21,10 @@ struct Args {
     /// Letta server URL (if not using local client)
     #[arg(long)]
     letta_url: Option<String>,
+
+    /// Letta API key (if using cloud deployment)
+    #[arg(long)]
+    letta_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -41,22 +45,41 @@ async fn main() -> Result<()> {
         .with_file(false)
         .init();
 
-    // Create server
-    let service = PatternServer::new();
+    // Create Pattern service
+    info!(
+        "Initializing Pattern service with database: {}",
+        args.db_path
+    );
+    let mut service = PatternService::new(&args.db_path).await?;
 
-    // TODO: Initialize database connection
-    // TODO: Initialize Letta client
+    // Initialize Letta client if URL or API key is provided
+    if let Some(api_key) = args.letta_api_key {
+        info!("Connecting to Letta cloud");
+        let letta_client = letta::LettaClient::cloud(api_key)?;
+        service = service.with_letta_client(letta_client);
+        info!("Letta cloud client initialized");
+    } else if let Some(letta_url) = args.letta_url {
+        info!("Connecting to Letta server at: {}", letta_url);
+        let letta_client = letta::LettaClient::builder().base_url(&letta_url).build()?;
+        service = service.with_letta_client(letta_client);
+        info!("Letta local client initialized");
+    } else {
+        info!("No Letta URL or API key provided, agent features will be disabled");
+    }
+
+    // Create MCP server
+    let server = PatternServer::new(service);
 
     // Run server with stdio transport
     info!("Starting Pattern MCP server...");
     let transport = (stdin(), stdout());
 
-    let server = service
+    let mcp_server = server
         .serve(transport)
         .await
         .map_err(|e| miette::miette!("Failed to start server: {}", e))?;
 
-    let quit_reason = server
+    let quit_reason = mcp_server
         .waiting()
         .await
         .map_err(|e| miette::miette!("Server error: {}", e))?;
