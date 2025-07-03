@@ -691,6 +691,138 @@ I celebrate taking meds as a real achievement because it is. Over time, I learn 
     pub fn agent_manager(&self) -> Option<&crate::agent::AgentManager> {
         None // Multi-agent system doesn't use the old agent manager
     }
+
+    /// Log agent chat histories to disk for debugging
+    pub async fn log_agent_histories(&self, user_id: UserId, log_dir: &str) -> Result<()> {
+        use std::fs;
+        use std::io::Write;
+
+        // Create log directory if it doesn't exist
+        fs::create_dir_all(log_dir).map_err(|e| {
+            crate::error::PatternError::Config(crate::error::ConfigError::Invalid {
+                field: "log_dir".to_string(),
+                reason: format!("Failed to create log directory: {}", e),
+            })
+        })?;
+
+        let timestamp = sqlx::types::chrono::Local::now().format("%Y%m%d_%H%M%S");
+
+        // Get all agents for this user
+        let user_hash = format!("{:x}", user_id.0 % 1000000);
+
+        for (agent_id, config) in &self.agent_configs {
+            let agent_name = format!("{}_{}", agent_id.as_str(), user_hash);
+
+            // Try to find the agent ID
+            match self.letta.agents().list(None).await {
+                Ok(agents) => {
+                    for agent in agents {
+                        if agent.name == agent_name {
+                            info!(
+                                "Logging history for agent {} (ID: {})",
+                                agent_name, agent.id
+                            );
+
+                            // Get message history
+                            match self.letta.messages().list(&agent.id, None).await {
+                                Ok(messages) => {
+                                    let log_file = format!(
+                                        "{}/{}_{}_history_{}.log",
+                                        log_dir,
+                                        agent_id.as_str(),
+                                        user_hash,
+                                        timestamp
+                                    );
+
+                                    let mut file = fs::File::create(&log_file).map_err(|e| {
+                                        crate::error::PatternError::Config(
+                                            crate::error::ConfigError::Invalid {
+                                                field: "log_file".to_string(),
+                                                reason: format!("Failed to create log file: {}", e),
+                                            },
+                                        )
+                                    })?;
+
+                                    writeln!(
+                                        file,
+                                        "=== Agent: {} ({}) ===",
+                                        config.name, agent_name
+                                    )
+                                    .ok();
+                                    writeln!(file, "Agent ID: {}", agent.id).ok();
+                                    writeln!(file, "User ID: {}", user_id.0).ok();
+                                    writeln!(file, "Timestamp: {}", timestamp).ok();
+                                    writeln!(file, "Total messages: {}\n", messages.len()).ok();
+
+                                    for (idx, msg) in messages.iter().enumerate() {
+                                        writeln!(file, "--- Message {} ---", idx + 1).ok();
+                                        match msg {
+                                            LettaMessageUnion::UserMessage(m) => {
+                                                writeln!(file, "Type: User").ok();
+                                                writeln!(file, "Content: {}", m.content).ok();
+                                            }
+                                            LettaMessageUnion::AssistantMessage(m) => {
+                                                writeln!(file, "Type: Assistant").ok();
+                                                writeln!(file, "Content: {}", m.content).ok();
+                                            }
+                                            LettaMessageUnion::SystemMessage(m) => {
+                                                writeln!(file, "Type: System").ok();
+                                                writeln!(file, "Content: {}", m.content).ok();
+                                            }
+                                            LettaMessageUnion::ToolCallMessage(m) => {
+                                                writeln!(file, "Type: Tool Call").ok();
+                                                writeln!(file, "Tool: {}", m.tool_call.name).ok();
+                                                writeln!(
+                                                    file,
+                                                    "Arguments: {}",
+                                                    m.tool_call.arguments
+                                                )
+                                                .ok();
+                                            }
+                                            LettaMessageUnion::ToolReturnMessage(m) => {
+                                                writeln!(file, "Type: Tool Return").ok();
+                                                writeln!(file, "Tool Call ID: {}", m.tool_call_id)
+                                                    .ok();
+                                                writeln!(file, "Status: {:?}", m.status).ok();
+                                                writeln!(file, "Return: {}", m.tool_return).ok();
+                                            }
+                                            LettaMessageUnion::ReasoningMessage(m) => {
+                                                writeln!(file, "Type: Reasoning").ok();
+                                                writeln!(file, "Reasoning: {}", m.reasoning).ok();
+                                            }
+                                            LettaMessageUnion::HiddenReasoningMessage(m) => {
+                                                writeln!(file, "Type: Hidden Reasoning").ok();
+                                                writeln!(file, "State: {:?}", m.state).ok();
+                                            }
+                                        }
+                                        writeln!(file, "").ok();
+                                    }
+
+                                    info!("Logged {} messages to {}", messages.len(), log_file);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to get message history for {}: {:?}",
+                                        agent_name, e
+                                    );
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to list agents: {:?}", e);
+                }
+            }
+        }
+
+        info!(
+            "Agent history logging complete. Check {} directory",
+            log_dir
+        );
+        Ok(())
+    }
 }
 
 /// Builder pattern for easier configuration

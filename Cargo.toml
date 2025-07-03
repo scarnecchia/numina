@@ -35,7 +35,7 @@ toml = "0.8"
 tracing = "0.1.41"
 
 # Optional dependencies
-rmcp = { path = "../rust-sdk-fork/crates/rmcp", features = [
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = [
     "transport-streamable-http-server-session",
     "transport-streamable-http-server",
     "transport-worker",
