@@ -23,7 +23,7 @@ impl Database {
 
         info!("Connecting to database at: {}", db_path);
 
-        let pool = SqlitePool::connect(&format!("sqlite://{}", db_path))
+        let pool = SqlitePool::connect(&format!("sqlite://{}?mode=rwc", db_path))
             .await
             .map_err(|e| DatabaseError::ConnectionFailed {
                 path: db_path.to_string(),
@@ -57,7 +57,7 @@ impl Database {
     pub async fn get_or_create_user(&self, username: &str) -> Result<User> {
         // Try to get existing user
         let existing = sqlx::query_as::<_, User>(
-            "SELECT id, username, created_at FROM users WHERE username = ?1",
+            "SELECT id, name, discord_id, created_at FROM users WHERE name = ?1",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -72,7 +72,7 @@ impl Database {
         }
 
         // Create new user
-        let id = sqlx::query("INSERT INTO users (username) VALUES (?1)")
+        let id = sqlx::query("INSERT INTO users (name) VALUES (?1)")
             .bind(username)
             .execute(&self.pool)
             .await
@@ -87,20 +87,22 @@ impl Database {
 
     /// Get user by ID
     async fn get_user_by_id(&self, id: i64) -> Result<User> {
-        sqlx::query_as::<_, User>("SELECT id, username, created_at FROM users WHERE id = ?1")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| {
-                match e {
-                    sqlx::Error::RowNotFound => DatabaseError::UserNotFound(id.to_string()),
-                    _ => DatabaseError::QueryFailed {
-                        context: format!("Failed to fetch user with id {}", id),
-                        source: e,
-                    },
-                }
-                .into()
-            })
+        sqlx::query_as::<_, User>(
+            "SELECT id, name, discord_id, created_at FROM users WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            match e {
+                sqlx::Error::RowNotFound => DatabaseError::UserNotFound(id.to_string()),
+                _ => DatabaseError::QueryFailed {
+                    context: format!("Failed to fetch user with id {}", id),
+                    source: e,
+                },
+            }
+            .into()
+        })
     }
 
     /// Get agent for a user
@@ -218,7 +220,8 @@ impl Database {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
-    pub username: String,
+    pub name: String,
+    pub discord_id: Option<String>,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
 }
 
@@ -285,4 +288,162 @@ pub struct TimeTracking {
     pub duration_minutes: Option<i32>,
     pub description: Option<String>,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_database_connection_errors() {
+        // Test invalid path should fail
+        let result = Database::new("/nonexistent/path/db.sqlite").await;
+        assert!(result.is_err());
+
+        // Verify specific error type
+        match result.unwrap_err() {
+            crate::error::PatternError::Database(DatabaseError::ConnectionFailed {
+                path, ..
+            }) => {
+                assert!(path.contains("/nonexistent/path"));
+            }
+            _ => panic!("Expected ConnectionFailed error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_shared_memory() {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+
+        // First create a user
+        let user = db.get_or_create_user("testuser").await.unwrap();
+        let user_id = user.id;
+
+        // Insert new block
+        db.upsert_shared_memory(user_id, "test_block", "initial value", 100)
+            .await
+            .unwrap();
+
+        let block = db
+            .get_shared_memory_block(user_id, "test_block")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(block.block_value, "initial value");
+        assert_eq!(block.max_length, 100);
+        let first_update = block.updated_at;
+
+        // Sleep longer to ensure timestamp changes in SQLite
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        // Update existing block
+        db.upsert_shared_memory(user_id, "test_block", "updated value", 100)
+            .await
+            .unwrap();
+
+        let updated = db
+            .get_shared_memory_block(user_id, "test_block")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.block_value, "updated value");
+        assert!(updated.updated_at > first_update);
+        assert_eq!(updated.created_at, block.created_at); // created_at shouldn't change
+    }
+
+    #[tokio::test]
+    async fn test_agent_uniqueness() {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+
+        let user = db.get_or_create_user("testuser").await.unwrap();
+
+        // Create first agent
+        let id1 = db
+            .create_agent(user.id, "letta_123", "Agent One")
+            .await
+            .unwrap();
+
+        // Try to create another agent with same letta_agent_id (should fail due to unique constraint)
+        let result = db.create_agent(user.id, "letta_123", "Agent Two").await;
+
+        assert!(result.is_err());
+        // Verify it's a database constraint error
+        match result.unwrap_err() {
+            crate::error::PatternError::Database(DatabaseError::QueryFailed {
+                context, ..
+            }) => {
+                assert!(context.contains("Failed to create agent"));
+            }
+            _ => panic!("Expected QueryFailed error"),
+        }
+
+        // Creating with different letta_id should work
+        let id2 = db
+            .create_agent(user.id, "letta_456", "Agent Two")
+            .await
+            .unwrap();
+
+        assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_user_idempotent() {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+
+        // First call creates user
+        let user1 = db.get_or_create_user("testuser").await.unwrap();
+
+        // Second call returns same user
+        let user2 = db.get_or_create_user("testuser").await.unwrap();
+
+        assert_eq!(user1.id, user2.id);
+        assert_eq!(user1.name, user2.name);
+        assert_eq!(user1.created_at, user2.created_at);
+
+        // Different username creates different user
+        let user3 = db.get_or_create_user("otheruser").await.unwrap();
+        assert_ne!(user1.id, user3.id);
+    }
+
+    #[tokio::test]
+    async fn test_shared_memory_constraints() {
+        let db = Database::new(":memory:").await.unwrap();
+        db.migrate().await.unwrap();
+
+        // Test with invalid user_id (foreign key constraint)
+        let result = db
+            .upsert_shared_memory(999, "test_block", "value", 100)
+            .await;
+
+        assert!(result.is_err());
+        // Verify it's a database error (foreign key constraint)
+        match result.unwrap_err() {
+            crate::error::PatternError::Database(DatabaseError::QueryFailed { .. }) => {}
+            _ => panic!("Expected QueryFailed error for foreign key constraint"),
+        }
+
+        // Create user first
+        let user = db.get_or_create_user("testuser").await.unwrap();
+
+        // Test very long block name (assuming reasonable limit in schema)
+        let long_name = "a".repeat(1000);
+        let result = db
+            .upsert_shared_memory(user.id, &long_name, "value", 100)
+            .await;
+
+        // This might succeed or fail depending on schema - just verify it doesn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_database_is_send_sync() {
+        // Compile-time test that Database can be shared across threads
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Database>();
+    }
 }

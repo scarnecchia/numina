@@ -32,6 +32,8 @@ pub struct DatabaseConfig {
 pub struct DiscordConfig {
     /// Discord bot token
     pub token: String,
+    /// Discord application ID
+    pub application_id: Option<u64>,
     /// Optional channel ID to limit bot responses
     pub channel_id: Option<u64>,
     /// Whether to respond to DMs
@@ -54,6 +56,8 @@ pub struct McpConfig {
     pub enabled: bool,
     /// MCP transport type
     pub transport: McpTransport,
+    /// Port for HTTP/SSE transports
+    pub port: Option<u16>,
 }
 
 impl Default for Config {
@@ -64,6 +68,7 @@ impl Default for Config {
             },
             discord: DiscordConfig {
                 token: String::new(),
+                application_id: None,
                 channel_id: None,
                 respond_to_dms: true,
                 respond_to_mentions: true,
@@ -75,6 +80,7 @@ impl Default for Config {
             mcp: McpConfig {
                 enabled: false,
                 transport: McpTransport::Stdio,
+                port: None,
             },
             agents: Vec::new(),
         }
@@ -138,6 +144,11 @@ impl Config {
         if let Ok(token) = env::var("DISCORD_TOKEN") {
             config.discord.token = token;
         }
+        if let Ok(app_id) = env::var("APP_ID") {
+            if let Ok(id) = app_id.parse() {
+                config.discord.application_id = Some(id);
+            }
+        }
         if let Ok(channel_id) = env::var("DISCORD_CHANNEL_ID") {
             if let Ok(id) = channel_id.parse() {
                 config.discord.channel_id = Some(id);
@@ -161,6 +172,11 @@ impl Config {
                 config.mcp.transport = t;
             }
         }
+        if let Ok(port) = env::var("MCP_PORT") {
+            if let Ok(p) = port.parse() {
+                config.mcp.port = Some(p);
+            }
+        }
 
         config
     }
@@ -175,6 +191,11 @@ impl Config {
         // Discord
         if let Ok(token) = env::var("DISCORD_TOKEN") {
             self.discord.token = token;
+        }
+        if let Ok(app_id) = env::var("APP_ID") {
+            if let Ok(id) = app_id.parse() {
+                self.discord.application_id = Some(id);
+            }
         }
         if let Ok(channel_id) = env::var("DISCORD_CHANNEL_ID") {
             if let Ok(id) = channel_id.parse() {
@@ -197,6 +218,11 @@ impl Config {
         if let Ok(transport) = env::var("MCP_TRANSPORT") {
             if let Ok(t) = transport.parse() {
                 self.mcp.transport = t;
+            }
+        }
+        if let Ok(port) = env::var("MCP_PORT") {
+            if let Ok(p) = port.parse() {
+                self.mcp.port = Some(p);
             }
         }
 

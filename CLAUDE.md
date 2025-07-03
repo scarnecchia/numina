@@ -137,6 +137,22 @@ Claude Code has access to several MCP (Model Context Protocol) tools that enhanc
 
 see @LSP_EDIT_GUIDE.md for details on potential pitfalls
 
+## Testing Strategy
+
+All tests should validate actual behavior and be able to fail:
+- **Unit tests**: Test individual functions with edge cases
+- **Integration tests**: Test module interactions
+- **Database tests**: Use in-memory SQLite for speed
+- **No mock-heavy tests**: Prefer testing real behavior
+- **Meaningful assertions**: Tests should catch actual bugs
+
+Run tests with:
+```bash
+cargo test --lib           # Run all library tests
+cargo test --lib -- db::   # Run specific module tests
+just pre-commit-all        # Run all checks before committing
+```
+
 ## Build & Validation Commands
 
 **Required validation before any commit:**
@@ -723,7 +739,6 @@ Leverage Letta's 4-tier memory with local storage:
 ## Current TODOs
 
 ### High Priority
-- [ ] Add MCP tools to send Discord messages from agents
 - [ ] Implement Pattern as sleeptime agent with 20-30min background checks
 - [ ] Add task CRUD operations to database module
 - [ ] Create task manager with ADHD-aware task breakdown (Entropy agent)
@@ -738,6 +753,7 @@ Leverage Letta's 4-tier memory with local storage:
 
 ### Low Priority
 - [ ] Add activity monitoring for interruption detection
+- [ ] Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
 
 ### Completed
 - [x] Implement Letta integration layer
@@ -774,6 +790,16 @@ Leverage Letta's 4-tier memory with local storage:
   - [x] Fix response types using `CallToolResult::success(vec![Content::text(...)])`
   - [x] Update error handling with specific constructors
   - [x] Document learnings in MCP_SDK_GUIDE.md
+- [x] Implement actual agent message routing to Letta agents
+- [x] Add MCP tools to send Discord messages from agents
+- [x] Implement channel name resolution for Discord tools
+- [x] Add comprehensive test suite across all modules
+- [x] Implement HTTP transport for MCP server
+  - [x] Add streamable HTTP support using hyper
+  - [x] Handle Letta connection errors gracefully
+  - [x] Add retry logic with progressive delays
+  - [x] Create manual registration script for slow Letta
+  - [x] Document known Letta performance issues
 
 ## Current Status
 
@@ -782,25 +808,42 @@ Leverage Letta's 4-tier memory with local storage:
 - Feature flags: `discord`, `mcp`, `binary`, `full`
 - Modular service architecture via PatternService
 
+**Database** ✅:
+- SQLite with migrations
+- Users table now has `name` field (+ optional `discord_id`)
+- Shared memory, agents, tasks, events, time tracking
+- Contract/client tracking schema ready
+- Social memory schema ready
+
+**Testing** ✅:
+- Comprehensive test suite that validates actual behavior
+- Tests that can actually fail (not just string checks)
+- Coverage across server, db, types, and agents modules
+
 **Multi-Agent System** ✅:
 - Generic, flexible architecture with configurable agents
 - Shared memory blocks (current_state, active_context, bond_evolution)
 - Background sleeptime orchestrator (30min intervals)
 - Dynamic agent routing in Discord - no hardcoded names
-- Actual agent message routing to Letta implemented
+- Full Letta integration with message routing
 
 **Discord Bot** ✅:
 - Natural language chat with slash commands
 - DM support with agent routing (@agent, agent:, /agent)
 - Configurable agent detection
 - Message chunking for long responses
+- Channel name resolution ("Server/channel" format)
 
 **MCP Server** ✅:
-- Six tools: chat_with_agent, get/update_agent_memory, schedule_event, send_message, check_activity_state
-- Stdio transport (streamable HTTP available when needed)
+- Ten tools: chat_with_agent, get/update_agent_memory, schedule_event, send_message, check_activity_state
+- Discord integration tools: send_discord_message, send_discord_embed, get_channel_info, send_discord_dm
+- Channel resolution accepts both IDs and "guild/channel" names
+- **HTTP Transport**: Fully implemented streamable HTTP transport on configurable port
+- Stdio transport still available as fallback
 - Uses official modelcontextprotocol/rust-sdk from git
 - Proper tool definitions with `#[rmcp::tool]` attribute
 - Integrated with multi-agent system
+- Handles Letta slowness with retries and manual registration option
 
 **Running Pattern**:
 ```bash
@@ -816,27 +859,53 @@ cargo run --features binary,mcp
 
 ## Next Steps
 
-### Agent Message Routing (Immediate)
-1. **Implement actual agent responses**
-   - Route messages to specific Letta agents based on agent_id
-   - Use agent-specific prompts from AgentConfig
-   - Handle multi-turn conversations
-
-2. **Discord ↔️ MCP Integration**
-   - Implement `send_message` MCP tool to send Discord messages
-   - Share Discord bot instance with MCP server
-   - Enable agents to proactively reach out
+### Sleeptime Orchestrator (Immediate)
+1. **Implement Pattern's background checks**
+   - Actually perform meaningful checks every 20-30min
+   - Monitor for hyperfocus duration (>45min warnings)
+   - Check physical needs (water, food, movement)
+   - Detect transitions and context switches
+   - Update shared memory with findings
+   - Optionally send Discord messages for important alerts
 
 ### Task Management (High Priority)
 1. **Extend database module** with task operations
    - Add CRUD methods for tasks
    - Implement task status transitions
-   - Add task breakdown storage
+   - Add task breakdown storage (parent/child tasks)
+   - Track estimated vs actual time
 
 2. **Create task manager module** (`src/tasks.rs`)
    - Task creation with ADHD-aware defaults
-   - Task breakdown with Entropy agent
-   - Time multiplication for realistic estimates
+   - Task breakdown into atomic units
+   - Automatic time multiplication (2-3x)
+   - Hidden complexity detection
+   - Integration with Entropy agent
+
+3. **Add task-related MCP tools**
+   - `create_task`, `update_task`, `list_tasks`
+   - `break_down_task` (uses Entropy agent)
+   - `estimate_task_time` (uses Flux agent)
+
+### Shared Agent Tools (High Priority)
+1. **Implement core shared tools**
+   - `check_vibe()`: Quick state assessment
+   - `context_snapshot()`: Capture current context
+   - `find_pattern()`: Search memory for patterns
+   - `suggest_pivot()`: Task/energy mismatch detection
+
+### Contract & Social Features (Medium Priority)
+1. **Contract/Client tracking**
+   - CRUD operations for clients, projects, invoices
+   - Time entry tracking with billable hours
+   - Invoice aging alerts (30/60/90 days)
+   - Follow-up reminders
+
+2. **Social memory**
+   - Birthday/anniversary tracking with reminders
+   - Conversation context storage
+   - Follow-up suggestions
+   - Energy cost tracking for social interactions
 
 ## Letta-rs API Notes
 

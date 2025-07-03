@@ -10,6 +10,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
+    init_logging();
     println!("Starting Pattern Discord Bot");
 
     // Load environment variables
@@ -48,6 +49,7 @@ async fn main() -> Result<()> {
     // Convert config to discord module format
     let discord_config = DiscordConfig {
         token: config.discord.token,
+        application_id: config.discord.application_id,
         channel_id: config.discord.channel_id,
         respond_to_dms: config.discord.respond_to_dms,
         respond_to_mentions: config.discord.respond_to_mentions,
@@ -60,4 +62,42 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_logging() {
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    // Create logs directory if it doesn't exist
+    std::fs::create_dir_all("logs").ok();
+
+    // Create file appender
+    let file_appender = tracing_appender::rolling::daily("logs", "discord_bot.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Leak the guard to keep it alive for the entire program
+    Box::leak(Box::new(_guard));
+
+    // Set up subscribers
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "pattern=debug,letta=debug,discord=info,serenity=info".into()),
+        )
+        .with(
+            // Console output
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_line_number(true),
+        )
+        .with(
+            // File output
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_line_number(true)
+                .with_ansi(false),
+        )
+        .init();
 }

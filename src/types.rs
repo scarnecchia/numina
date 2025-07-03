@@ -241,3 +241,214 @@ impl fmt::Display for ChannelId {
         write!(f, "{}", self.0)
     }
 }
+
+/// Task priority levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskPriority {
+    Low,
+    Medium,
+    High,
+    Urgent,
+}
+
+impl TaskPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Urgent => "urgent",
+        }
+    }
+}
+
+impl FromStr for TaskPriority {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "urgent" => Ok(Self::Urgent),
+            _ => Ok(Self::Medium), // Default to medium
+        }
+    }
+}
+
+/// Task status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "pending" => Self::Pending,
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Pending, // Default
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_id_validation() {
+        // Valid IDs
+        assert!(AgentId::new("pattern").is_ok());
+        assert!(AgentId::new("test_agent").is_ok());
+        assert!(AgentId::new("agent-123").is_ok());
+        assert!(AgentId::new("UPPERCASE").is_ok());
+
+        // Invalid IDs
+        assert!(matches!(
+            AgentId::new(""),
+            Err(ValidationError::EmptyAgentId)
+        ));
+        assert!(matches!(
+            AgentId::new("agent with spaces"),
+            Err(ValidationError::InvalidAgentId(_))
+        ));
+        assert!(matches!(
+            AgentId::new("agent@invalid"),
+            Err(ValidationError::InvalidAgentId(_))
+        ));
+
+        // Case normalization
+        let id = AgentId::new("MixedCase").unwrap();
+        assert_eq!(id.as_str(), "mixedcase");
+    }
+
+    #[test]
+    fn test_memory_block_id_validation() {
+        // Valid IDs
+        assert!(MemoryBlockId::new("current_state").is_ok());
+        assert!(MemoryBlockId::new("block123").is_ok());
+
+        // Invalid IDs
+        assert!(matches!(
+            MemoryBlockId::new(""),
+            Err(ValidationError::EmptyMemoryBlockId)
+        ));
+        assert!(matches!(
+            MemoryBlockId::new("block-with-dash"),
+            Err(ValidationError::InvalidMemoryBlockId(_))
+        ));
+        assert!(matches!(
+            MemoryBlockId::new("block.period"),
+            Err(ValidationError::InvalidMemoryBlockId(_))
+        ));
+    }
+
+    #[test]
+    fn test_mcp_transport_parsing() {
+        assert_eq!(
+            McpTransport::from_str("stdio").unwrap(),
+            McpTransport::Stdio
+        );
+        assert_eq!(McpTransport::from_str("SSE").unwrap(), McpTransport::Sse);
+        assert_eq!(McpTransport::from_str("HTTP").unwrap(), McpTransport::Http);
+
+        assert!(matches!(
+            McpTransport::from_str("websocket"),
+            Err(ValidationError::InvalidTransport(_))
+        ));
+    }
+
+    #[test]
+    fn test_standard_memory_blocks() {
+        let current = StandardMemoryBlock::CurrentState;
+        assert_eq!(current.max_length(), 200);
+        assert!(current.default_value().contains("unknown"));
+
+        let context = StandardMemoryBlock::ActiveContext;
+        assert_eq!(context.max_length(), 400);
+
+        let bond = StandardMemoryBlock::BondEvolution;
+        assert_eq!(bond.max_length(), 600);
+        assert!(bond.default_value().contains("trust"));
+    }
+
+    #[test]
+    fn test_standard_agents() {
+        let pattern = StandardAgent::Pattern;
+        assert!(pattern.is_sleeptime());
+        assert_eq!(pattern.name(), "Pattern");
+
+        let entropy = StandardAgent::Entropy;
+        assert!(!entropy.is_sleeptime());
+        assert!(entropy.description().contains("complexity"));
+
+        // Verify all agents have unique IDs
+        let agents = vec![
+            StandardAgent::Pattern,
+            StandardAgent::Entropy,
+            StandardAgent::Flux,
+            StandardAgent::Archive,
+            StandardAgent::Momentum,
+            StandardAgent::Anchor,
+        ];
+
+        let ids: Vec<String> = agents.iter().map(|a| a.id().as_str().to_string()).collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+        sorted_ids.dedup();
+        assert_eq!(sorted_ids.len(), agents.len());
+    }
+
+    #[test]
+    fn test_task_priority() {
+        assert_eq!(TaskPriority::from_str("high").unwrap(), TaskPriority::High);
+        assert_eq!(
+            TaskPriority::from_str("URGENT").unwrap(),
+            TaskPriority::Urgent
+        );
+        assert_eq!(
+            TaskPriority::from_str("invalid").unwrap(),
+            TaskPriority::Medium
+        ); // default
+
+        assert_eq!(TaskPriority::Low.as_str(), "low");
+    }
+
+    #[test]
+    fn test_serialization() {
+        // Test AgentId serialization
+        let agent_id = AgentId::new("test_agent").unwrap();
+        let json = serde_json::to_string(&agent_id).unwrap();
+        assert_eq!(json, "\"test_agent\"");
+
+        let deserialized: AgentId = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, agent_id);
+
+        // Test McpTransport serialization
+        let transport = McpTransport::Sse;
+        let json = serde_json::to_string(&transport).unwrap();
+        assert_eq!(json, "\"sse\"");
+
+        // Test TaskStatus serialization
+        let status = TaskStatus::InProgress;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"in_progress\"");
+    }
+}

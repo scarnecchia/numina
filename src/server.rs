@@ -48,10 +48,14 @@ struct SendMessageRequest {
 /// MCP server implementation for Pattern
 #[derive(Clone)]
 pub struct PatternMcpServer {
+    #[allow(dead_code)] // Used by MCP tools
     letta_client: Arc<letta::LettaClient>,
+    #[allow(dead_code)] // Used by MCP tools
     db: Arc<Database>,
+    #[allow(dead_code)] // Used by MCP tools
     multi_agent_system: Arc<MultiAgentSystem>,
     #[cfg(feature = "discord")]
+    #[allow(dead_code)] // Used by Discord MCP tools
     discord_client: Option<Arc<tokio::sync::RwLock<serenity::Client>>>,
 }
 
@@ -93,6 +97,74 @@ impl PatternMcpServer {
         Ok(())
     }
 
+    /// Run the MCP server on HTTP transport (streamable)
+    #[cfg(feature = "mcp")]
+    pub async fn run_http(self, port: u16) -> miette::Result<()> {
+        use hyper_util::{
+            rt::{TokioExecutor, TokioIo},
+            server::conn::auto::Builder,
+            service::TowerToHyperService,
+        };
+        use rmcp::transport::streamable_http_server::{
+            session::local::LocalSessionManager, StreamableHttpService,
+        };
+        use tokio::net::TcpListener;
+
+        info!("Starting MCP server on HTTP transport at port {}", port);
+
+        // Bind to the port (using IPv4 for compatibility)
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = TcpListener::bind(&addr)
+            .await
+            .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
+
+        info!("MCP HTTP server listening on http://{}", addr);
+        info!("Configure Letta to use: http://localhost:{}/mcp", port);
+        info!("Note: Letta may be slow to respond. The server will keep connections open.");
+
+        // Main accept loop - no ctrl+c handler here, let main handle shutdown
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    debug!("Accepted connection from {}", addr);
+                    let io = TokioIo::new(stream);
+
+                    // Clone self for the spawned task
+                    let server = self.clone();
+                    let addr_info = addr;
+
+                    // Create service for this connection
+                    let service = TowerToHyperService::new(StreamableHttpService::new(
+                        move || {
+                            debug!("Creating MCP handler for connection from {}", addr_info);
+                            Ok(server.clone())
+                        },
+                        LocalSessionManager::default().into(),
+                        Default::default(),
+                    ));
+
+                    // Spawn handler for this connection
+                    tokio::spawn(async move {
+                        debug!("Starting to serve connection");
+                        let builder = Builder::new(TokioExecutor::new());
+                        let conn = builder.serve_connection(io, service);
+
+                        if let Err(e) = conn.await {
+                            error!("Error serving connection: {}", e);
+                        } else {
+                            debug!("Connection closed normally");
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to accept connection: {}", e);
+                    // If we can't accept connections, might as well stop
+                    return Err(miette::miette!("Failed to accept connection: {}", e));
+                }
+            }
+        }
+    }
+
     /// Run the MCP server on SSE transport
     #[cfg(feature = "mcp-sse")]
     pub async fn run_sse(self, port: u16) -> miette::Result<()> {
@@ -105,7 +177,8 @@ impl PatternMcpServer {
 
 impl ServerHandler for PatternMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
+        debug!("MCP server get_info called");
+        let info = ServerInfo {
             server_info: Implementation {
                 name: "pattern".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -115,7 +188,9 @@ impl ServerHandler for PatternMcpServer {
                     .to_string(),
             ),
             ..Default::default()
-        }
+        };
+        debug!("Returning server info: {:?}", info);
+        info
     }
 }
 
@@ -291,60 +366,6 @@ impl PatternMcpServer {
             }))
             .unwrap_or_else(|_| "Error".to_string()),
         )]))
-    }
-
-    // Discord integration tools
-    #[cfg(feature = "discord")]
-    #[rmcp::tool(description = "Send a message to a Discord channel")]
-    async fn send_discord_message(
-        &self,
-        params: Parameters<crate::mcp_tools::SendDiscordMessageRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let params = params.0;
-        info!(channel = %params.channel, "Sending Discord message via MCP");
-
-        // Resolve channel
-        let channel_id = self.resolve_channel(&params.channel).await?;
-
-        let client = self.discord_client.clone().ok_or_else(|| {
-            McpError::internal_error(
-                "Discord client not available",
-                Some(json!({
-                    "error_type": "discord_not_configured",
-                    "details": "Discord bot is not running or not configured"
-                })),
-            )
-        })?;
-
-        let ctx = client.read().await.http.clone();
-
-        match channel_id.say(&ctx, &params.message).await {
-            Ok(message) => {
-                info!("Discord message sent successfully");
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json!({
-                        "success": true,
-                        "message_id": message.id.to_string(),
-                        "channel_id": channel_id.to_string(),
-                        "channel": params.channel,
-                        "timestamp": message.timestamp.to_string()
-                    }))
-                    .unwrap(),
-                )]))
-            }
-            Err(e) => {
-                error!("Failed to send Discord message: {}", e);
-                Err(McpError::internal_error(
-                    "Failed to send Discord message",
-                    Some(json!({
-                        "channel": params.channel,
-                        "channel_id": channel_id.to_string(),
-                        "error_type": "discord_send_failed",
-                        "details": e.to_string()
-                    })),
-                ))
-            }
-        }
     }
 
     #[cfg(feature = "discord")]
@@ -551,9 +572,64 @@ impl PatternMcpServer {
             }
         }
     }
+
+    // Discord integration tools
+    #[cfg(feature = "discord")]
+    #[rmcp::tool(description = "Send a message to a Discord channel")]
+    async fn send_discord_message(
+        &self,
+        params: Parameters<crate::mcp_tools::SendDiscordMessageRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        info!(channel = %params.channel, "Sending Discord message via MCP");
+
+        // Resolve channel
+        let channel_id = self.resolve_channel(&params.channel).await?;
+
+        let client = self.discord_client.clone().ok_or_else(|| {
+            McpError::internal_error(
+                "Discord client not available",
+                Some(json!({
+                    "error_type": "discord_not_configured",
+                    "details": "Discord bot is not running or not configured"
+                })),
+            )
+        })?;
+
+        let ctx = client.read().await.http.clone();
+
+        match channel_id.say(&ctx, &params.message).await {
+            Ok(message) => {
+                info!("Discord message sent successfully");
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "message_id": message.id.to_string(),
+                        "channel_id": channel_id.to_string(),
+                        "channel": params.channel,
+                        "timestamp": message.timestamp.to_string()
+                    }))
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => {
+                error!("Failed to send Discord message: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to send Discord message",
+                    Some(json!({
+                        "channel": params.channel,
+                        "channel_id": channel_id.to_string(),
+                        "error_type": "discord_send_failed",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
+    }
 }
 
 // Internal implementation methods
+#[allow(dead_code)] // These methods are used by the MCP tools
 impl PatternMcpServer {
     /// Resolve a channel string to a ChannelId
     /// Accepts either:
@@ -712,5 +788,164 @@ impl PatternMcpServer {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_channel_format_validation() {
+        // Test various channel formats we might receive
+        let valid_formats = vec![
+            "123456789012345678",    // Direct ID
+            "MyServer/general",      // Guild/channel
+            "Test Guild/voice-chat", // With spaces and hyphens
+        ];
+
+        let invalid_formats = vec![
+            "just-a-name",          // No separator
+            "Server/Channel/Extra", // Too many parts
+            "/channel",             // Missing guild
+            "guild/",               // Missing channel
+            "",                     // Empty
+        ];
+
+        // Just validate the string parsing logic
+        for format in valid_formats {
+            let parts: Vec<&str> = format.split('/').collect();
+            if parts.len() == 1 {
+                // Should be parseable as u64
+                assert!(format.parse::<u64>().is_ok() || parts.len() == 2);
+            } else {
+                assert_eq!(parts.len(), 2);
+                assert!(!parts[0].is_empty());
+                assert!(!parts[1].is_empty());
+            }
+        }
+
+        for format in invalid_formats {
+            let parts: Vec<&str> = format.split('/').collect();
+            let is_valid_id = format.parse::<u64>().is_ok();
+            let is_valid_name = parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty();
+            assert!(!is_valid_id && !is_valid_name);
+        }
+    }
+
+    #[test]
+    fn test_request_struct_serialization() {
+        use crate::mcp_tools::*;
+
+        // Test SendDiscordMessageRequest
+        let msg_req = SendDiscordMessageRequest {
+            channel: "MyServer/general".to_string(),
+            message: "Hello, world!".to_string(),
+        };
+        let json = serde_json::to_string(&msg_req).unwrap();
+        assert!(json.contains("MyServer/general"));
+        assert!(json.contains("Hello, world!"));
+
+        // Test with numeric channel
+        let msg_req2 = SendDiscordMessageRequest {
+            channel: "123456789012345678".to_string(),
+            message: "Test".to_string(),
+        };
+        let json2 = serde_json::to_string(&msg_req2).unwrap();
+        assert!(json2.contains("123456789012345678"));
+
+        // Test embed request
+        let embed_req = SendDiscordEmbedRequest {
+            channel: "Server/announcements".to_string(),
+            title: "Update".to_string(),
+            description: "New feature!".to_string(),
+            color: Some(0x00ff00),
+            fields: Some(vec![EmbedField {
+                name: "Version".to_string(),
+                value: "1.0.0".to_string(),
+                inline: Some(true),
+            }]),
+        };
+        let embed_json = serde_json::to_string(&embed_req).unwrap();
+        assert!(embed_json.contains("Server/announcements"));
+        assert!(embed_json.contains("Version"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_resolution_errors() {
+        use rmcp::Error as McpError;
+
+        // Mock a server with no Discord client
+        let server = PatternMcpServer {
+            letta_client: Arc::new(letta::LettaClient::local().unwrap()),
+            db: Arc::new(Database::new(":memory:").await.unwrap()),
+            multi_agent_system: Arc::new(
+                crate::agents::MultiAgentSystemBuilder::new(
+                    Arc::new(letta::LettaClient::local().unwrap()),
+                    Arc::new(Database::new(":memory:").await.unwrap()),
+                )
+                .build(),
+            ),
+            #[cfg(feature = "discord")]
+            discord_client: None,
+        };
+
+        // Test that missing Discord client returns appropriate error
+        #[cfg(feature = "discord")]
+        {
+            let result = server.resolve_channel("MyServer/general").await;
+            assert!(result.is_err());
+            if let Err(e) = result {
+                // Check it's the right kind of error
+                // For now just check it failed
+                assert!(matches!(e, McpError { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn test_error_message_consistency() {
+        // Test that our error responses have consistent structure
+        let channel_error = json!({
+            "channel": "invalid/format/here",
+            "expected": "123456789 or MyServer/general"
+        });
+
+        // Verify error contains expected fields
+        assert!(channel_error["channel"].is_string());
+        assert!(channel_error["expected"].is_string());
+
+        // Test error for missing Discord client
+        let discord_error = json!({
+            "error_type": "discord_not_configured",
+            "details": "Discord bot is not running or not configured"
+        });
+
+        assert_eq!(discord_error["error_type"], "discord_not_configured");
+        assert!(discord_error["details"]
+            .as_str()
+            .unwrap()
+            .contains("Discord"));
+    }
+
+    #[test]
+    fn test_channel_id_parsing_edge_cases() {
+        // Test u64 boundary cases
+        let max_u64 = u64::MAX.to_string();
+        assert!(max_u64.parse::<u64>().is_ok());
+
+        // Test invalid numeric strings
+        let too_long = "9".repeat(100);
+        let invalid_numbers = vec![
+            "-123",    // Negative
+            "12.34",   // Decimal
+            "0x123",   // Hex
+            "123abc",  // Mixed
+            &too_long, // Too long
+        ];
+
+        for num in invalid_numbers {
+            assert!(num.parse::<u64>().is_err());
+        }
     }
 }

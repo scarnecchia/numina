@@ -11,8 +11,11 @@ use tracing::{error, info};
 
 /// Core service orchestrator for Pattern
 pub struct PatternService {
+    #[allow(dead_code)] // Used by Discord/MCP features
     config: Config,
+    #[allow(dead_code)] // Used by MCP feature
     db: Arc<Database>,
+    #[allow(dead_code)] // Used by MCP feature
     letta_client: Arc<letta::LettaClient>,
     multi_agent_system: Arc<MultiAgentSystem>,
     #[cfg(feature = "discord")]
@@ -192,9 +195,12 @@ You track basics like meds, water, food, sleep without nagging or shaming."
     }
 
     /// Start all configured services
-    pub async fn start(mut self) -> Result<()> {
+    pub async fn start(self) -> Result<()> {
+        // Convert to Arc for sharing between services
+        let service = Arc::new(self);
+
         // Start background tasks
-        self.start_background_tasks().await?;
+        service.start_background_tasks().await?;
 
         // Collect service handles
         let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -202,7 +208,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
         // Start Discord if configured
         #[cfg(feature = "discord")]
         {
-            if let Some(handle) = self.start_discord().await? {
+            if let Some(handle) = service.clone().start_discord().await? {
                 handles.push(handle);
             }
         }
@@ -210,7 +216,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
         // Start MCP if configured
         #[cfg(feature = "mcp")]
         {
-            if let Some(handle) = self.start_mcp().await? {
+            if let Some(handle) = service.clone().start_mcp().await? {
                 handles.push(handle);
             }
         }
@@ -218,7 +224,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
         // Wait for services or just run background tasks
         if handles.is_empty() {
             info!("No services enabled. Running background tasks only.");
-            self.wait_for_shutdown().await?
+            service.wait_for_shutdown().await?
         } else {
             // Wait for all services
             for handle in handles {
@@ -277,7 +283,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
 
     /// Start Discord bot if configured
     #[cfg(feature = "discord")]
-    async fn start_discord(&mut self) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    async fn start_discord(self: Arc<Self>) -> Result<Option<tokio::task::JoinHandle<()>>> {
         use crate::discord::{create_discord_client, DiscordConfig};
 
         if self.config.discord.token.is_empty() {
@@ -289,6 +295,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
 
         let discord_config = DiscordConfig {
             token: self.config.discord.token.clone(),
+            application_id: self.config.discord.application_id,
             channel_id: self.config.discord.channel_id,
             respond_to_dms: self.config.discord.respond_to_dms,
             respond_to_mentions: self.config.discord.respond_to_mentions,
@@ -304,7 +311,6 @@ You track basics like meds, water, food, sleep without nagging or shaming."
                 })
             })?;
         let client_arc = Arc::new(tokio::sync::RwLock::new(client));
-        self.discord_client = Some(client_arc.clone());
 
         info!("Starting Discord bot");
         let handle = tokio::spawn(async move {
@@ -319,7 +325,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
 
     /// Start MCP server if configured
     #[cfg(feature = "mcp")]
-    async fn start_mcp(&self) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    async fn start_mcp(self: Arc<Self>) -> Result<Option<tokio::task::JoinHandle<()>>> {
         use crate::server::PatternMcpServer;
 
         if !self.config.mcp.enabled {
@@ -359,8 +365,60 @@ You track basics like meds, water, food, sleep without nagging or shaming."
                 }
             }
             crate::types::McpTransport::Http => {
-                error!("MCP HTTP transport not yet implemented");
-                return Ok(None);
+                let port = self.config.mcp.port.unwrap_or(8080);
+                let multi_agent_system = self.multi_agent_system.clone();
+
+                tokio::spawn(async move {
+                    // Start the HTTP server first
+                    let server_handle = tokio::spawn(async move {
+                        if let Err(e) = server.run_http(port).await {
+                            error!("MCP HTTP server error: {:?}", e);
+                        }
+                    });
+
+                    // Give the server time to start up fully
+                    info!("Waiting for MCP HTTP server to be ready...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+                    // Then configure Letta to use it with retries
+                    for attempt in 1..=3 {
+                        info!(
+                            "Attempting to configure MCP server in Letta (attempt {}/3)",
+                            attempt
+                        );
+                        info!("Note: Letta can be slow to respond. This may take a moment...");
+
+                        match multi_agent_system.configure_mcp_server(port).await {
+                            Ok(_) => {
+                                info!("Successfully configured MCP server in Letta");
+                                break;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to configure MCP server in Letta (attempt {}): {:?}",
+                                    attempt, e
+                                );
+                                if attempt < 3 {
+                                    // Wait longer between retries, especially for slow Letta responses
+                                    let wait_time = 3 + attempt * 2; // 5s, 7s
+                                    info!("Waiting {} seconds before retry...", wait_time);
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(wait_time))
+                                        .await;
+                                } else {
+                                    // Don't fail the whole service if MCP registration fails
+                                    // The server is still running and can be configured manually
+                                    error!("Failed to configure MCP server after 3 attempts.");
+                                    error!("This might be due to Letta being slow or having a backlog.");
+                                    error!("The MCP server is still running at http://localhost:{}/mcp", port);
+                                    error!("You can manually configure it in Letta's ADE when it's ready.");
+                                }
+                            }
+                        }
+                    }
+
+                    // Wait for the server to finish
+                    let _ = server_handle.await;
+                })
             }
         };
 

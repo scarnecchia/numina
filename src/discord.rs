@@ -24,6 +24,8 @@ use tracing::{error, info, warn};
 pub struct DiscordConfig {
     /// Discord bot token
     pub token: String,
+    /// Discord application ID
+    pub application_id: Option<u64>,
     /// Optional channel ID to limit bot responses
     pub channel_id: Option<u64>,
     /// Whether to respond to DMs
@@ -38,6 +40,7 @@ impl Default for DiscordConfig {
     fn default() -> Self {
         Self {
             token: String::new(),
+            application_id: None,
             channel_id: None,
             respond_to_dms: true,
             respond_to_mentions: true,
@@ -249,7 +252,15 @@ impl PatternDiscordBot {
             Ok(resp) => resp,
             Err(e) => {
                 error!("Error sending to agent: {:?}", e);
-                format!("Sorry, I encountered an error: {}", e)
+
+                // Provide detailed error in debug mode
+                #[cfg(debug_assertions)]
+                let error_msg = format!("Error details:\n```\n{:?}\n```\nThis usually means the agent is still initializing or Letta is slow to respond. Try again in a few seconds.", e);
+
+                #[cfg(not(debug_assertions))]
+                let error_msg = format!("Sorry, I encountered an error: {}", e);
+
+                error_msg
             }
         };
 
@@ -467,10 +478,13 @@ pub async fn create_discord_client(
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
-    let client = Client::builder(&config.token, intents)
-        .event_handler(handler)
-        .await
-        .into_diagnostic()?;
+    let mut client_builder = Client::builder(&config.token, intents).event_handler(handler);
+
+    if let Some(app_id) = config.application_id {
+        client_builder = client_builder.application_id(app_id.into());
+    }
+
+    let client = client_builder.await.into_diagnostic()?;
 
     Ok(client)
 }

@@ -11,7 +11,7 @@ use letta::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 /// Configuration for an agent in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -50,6 +50,130 @@ pub struct MultiAgentSystem {
 }
 
 impl MultiAgentSystem {
+    /// Configure Letta to use our MCP server for Discord tools
+    pub async fn configure_mcp_server(&self, mcp_port: u16) -> Result<()> {
+        use letta::types::tool::{McpServerConfig, McpServerType, StreamableHttpServerConfig};
+
+        info!("Configuring Pattern MCP server in Letta");
+
+        // First, try to list existing tools to see if server is already configured
+        match self
+            .letta
+            .tools()
+            .list_mcp_tools_by_server("pattern-discord")
+            .await
+        {
+            Ok(tools) => {
+                info!(
+                    "MCP server 'pattern-discord' already configured with {} tools",
+                    tools.len()
+                );
+                return Ok(());
+            }
+            Err(_) => {
+                // Server doesn't exist yet, continue with configuration
+                debug!("MCP server not found, creating new configuration");
+            }
+        }
+
+        // Create MCP server config for streamable HTTP transport
+        let server_config = McpServerConfig::StreamableHttp(StreamableHttpServerConfig {
+            server_name: "pattern-discord".to_string(),
+            server_type: Some(McpServerType::StreamableHttp),
+            server_url: format!("http://localhost:{}/mcp", mcp_port),
+            auth_header: None, // Could add auth later if needed
+            auth_token: None,
+            custom_headers: None,
+        });
+
+        // Add the MCP server to Letta
+        match self.letta.tools().add_mcp_server(server_config).await {
+            Ok(_) => {
+                info!("Successfully added MCP server to Letta");
+            }
+            Err(e) => {
+                // Check if it's a "already exists" error
+                match &e {
+                    letta::LettaError::Api {
+                        status, message, ..
+                    } => {
+                        if *status == 409 || message.contains("already exists") {
+                            info!("MCP server already exists in Letta, continuing...");
+                        } else {
+                            return Err(crate::error::PatternError::Agent(
+                                AgentError::CreationFailed {
+                                    name: "MCP server config".to_string(),
+                                    source: e,
+                                },
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(crate::error::PatternError::Agent(
+                            AgentError::CreationFailed {
+                                name: "MCP server config".to_string(),
+                                source: e,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Wait a moment for the server to be fully ready
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // List available tools from the MCP server
+        info!("Listing tools from MCP server 'pattern-discord'...");
+        let tools = match self
+            .letta
+            .tools()
+            .list_mcp_tools_by_server("pattern-discord")
+            .await
+        {
+            Ok(tools) => tools,
+            Err(e) => {
+                error!("Failed to list MCP tools: {:?}", e);
+                // Try to get more information about the error
+                match &e {
+                    letta::LettaError::Api {
+                        status,
+                        message,
+                        body,
+                        ..
+                    } => {
+                        error!(
+                            "API Error - Status: {}, Message: {}, Body: {:?}",
+                            status, message, body
+                        );
+                    }
+                    letta::LettaError::Http(http_err) => {
+                        error!("HTTP Error: {:?}", http_err);
+                    }
+                    _ => {
+                        error!("Other error type: {:?}", e);
+                    }
+                }
+                return Err(crate::error::PatternError::Agent(
+                    AgentError::CreationFailed {
+                        name: "MCP tools list".to_string(),
+                        source: e,
+                    },
+                ));
+            }
+        };
+
+        info!("MCP server configured with {} tools", tools.len());
+        for tool in &tools {
+            debug!(
+                "  - {}: {}",
+                tool.name,
+                tool.description.as_deref().unwrap_or("No description")
+            );
+        }
+
+        Ok(())
+    }
     /// Create a new multi-agent system
     pub fn new(letta: Arc<LettaClient>, db: Arc<Database>) -> Self {
         Self {
@@ -124,7 +248,10 @@ impl MultiAgentSystem {
             .await?;
 
         // Check if agent already exists
-        let agent_name = format!("{}_u{}", agent_id.as_str(), user_id.0);
+        // Use a simpler naming scheme to avoid validation issues
+        // Hash the user_id to keep it shorter while still unique
+        let user_hash = format!("{:x}", user_id.0 % 1000000); // Keep it to 6 hex chars max
+        let agent_name = format!("{}_{}", agent_id.as_str(), user_hash);
         if let Some(existing) = self.db.get_agent_for_user(user.id).await? {
             if existing.name == agent_name {
                 debug!("Agent {} already exists", agent_name);
@@ -148,15 +275,37 @@ impl MultiAgentSystem {
 
         let request = CreateAgentRequest::builder()
             .name(&agent_name)
-            .memory_blocks(memory_blocks)
+            .model("letta/letta-free")
+            .embedding("letta/letta-free")
+            .agent_type(letta::types::AgentType::MemGPT)
+            .include_base_tools(true) // Include standard Letta tools
+            .tools(vec![
+                "send_message".to_string(),           // Basic messaging
+                "archival_memory_insert".to_string(), // Store important info
+                "archival_memory_search".to_string(), // Retrieve context
+            ])
+            .memory_blocks(memory_blocks) // Add the memory blocks
             .build();
 
+        info!(
+            "Creating agent '{}' for user {} with agent_id '{}'",
+            agent_name,
+            user_id.0,
+            agent_id.as_str()
+        );
+
         let agent = self.letta.agents().create(request).await.map_err(|e| {
+            error!("Failed to create agent '{}': {:?}", agent_name, e);
             crate::error::AgentError::CreationFailed {
                 name: agent_name.clone(),
                 source: e,
             }
         })?;
+
+        info!(
+            "Successfully created agent '{}' with ID: {}",
+            agent_name, agent.id
+        );
 
         // Store agent in database
         self.db
@@ -276,21 +425,35 @@ impl MultiAgentSystem {
             .await?;
 
         // Send message to the agent
+        debug!(
+            "Sending message to agent {} (ID: {})",
+            target_agent.as_str(),
+            letta_agent_id
+        );
         let user_message = MessageCreate::user(message);
 
         let request = CreateMessagesRequest::builder()
             .messages(vec![user_message])
             .build();
 
+        debug!("Calling Letta API to send message...");
         let response = self
             .letta
             .messages()
             .create(&letta_agent_id, request)
             .await
-            .map_err(|e| AgentError::MessageFailed {
-                agent: target_agent.clone(),
-                source: e,
+            .map_err(|e| {
+                error!("Message send failed after timeout: {:?}", e);
+                AgentError::MessageFailed {
+                    agent: target_agent.clone(),
+                    source: e,
+                }
             })?;
+
+        debug!(
+            "Received response from Letta with {} messages",
+            response.messages.len()
+        );
 
         // Extract the assistant's response
         let assistant_message = response
@@ -356,5 +519,184 @@ impl MultiAgentSystemBuilder {
         }
 
         system
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{StandardAgent, StandardMemoryBlock};
+
+    #[tokio::test]
+    async fn test_memory_block_validation() {
+        let db = Arc::new(Database::new(":memory:").await.unwrap());
+        db.migrate().await.unwrap();
+        let letta = Arc::new(letta::LettaClient::local().unwrap());
+
+        let mut system = MultiAgentSystem::new(letta, db);
+
+        // Add memory config
+        system.add_memory_config(MemoryBlockConfig {
+            name: StandardMemoryBlock::CurrentState.id(),
+            max_length: 50,
+            default_value: "test".to_string(),
+            description: "Test block".to_string(),
+        });
+
+        let user_id = UserId(1);
+        system.initialize_user(user_id).await.unwrap();
+
+        // Test length validation
+        let long_value = "a".repeat(100);
+        let result = system
+            .update_shared_memory(user_id, "current_state", &long_value)
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::PatternError::Agent(AgentError::MemoryTooLong {
+                max, actual, ..
+            }) => {
+                assert_eq!(max, 50);
+                assert_eq!(actual, 100);
+            }
+            _ => panic!("Expected MemoryTooLong error"),
+        }
+
+        // Valid update should work
+        let result = system
+            .update_shared_memory(user_id, "current_state", "valid value")
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_agent_config_uniqueness() {
+        let db = Arc::new(Database::new(":memory:").await.unwrap());
+        db.migrate().await.unwrap();
+        let letta = Arc::new(letta::LettaClient::local().unwrap());
+
+        let mut system = MultiAgentSystem::new(letta, db);
+
+        // Add two agents with same ID (second should override)
+        let config1 = AgentConfig {
+            id: StandardAgent::Pattern.id(),
+            name: "Pattern v1".to_string(),
+            description: "First version".to_string(),
+            system_prompt: "Prompt 1".to_string(),
+            is_sleeptime: true,
+            sleeptime_interval: Some(1800),
+        };
+
+        let config2 = AgentConfig {
+            id: StandardAgent::Pattern.id(),
+            name: "Pattern v2".to_string(),
+            description: "Second version".to_string(),
+            system_prompt: "Prompt 2".to_string(),
+            is_sleeptime: false,
+            sleeptime_interval: None,
+        };
+
+        system.add_agent_config(config1);
+        system.add_agent_config(config2);
+
+        assert_eq!(system.agent_configs().len(), 1);
+        let stored = system
+            .agent_configs()
+            .get(&StandardAgent::Pattern.id())
+            .unwrap();
+        assert_eq!(stored.name, "Pattern v2");
+        assert!(!stored.is_sleeptime);
+    }
+
+    #[tokio::test]
+    async fn test_builder_pattern() {
+        let db = Arc::new(Database::new(":memory:").await.unwrap());
+        db.migrate().await.unwrap();
+        let letta = Arc::new(letta::LettaClient::local().unwrap());
+
+        let system = MultiAgentSystemBuilder::new(letta, db)
+            .with_agent(AgentConfig {
+                id: StandardAgent::Entropy.id(),
+                name: "Entropy".to_string(),
+                description: "Task agent".to_string(),
+                system_prompt: "Break down tasks".to_string(),
+                is_sleeptime: false,
+                sleeptime_interval: None,
+            })
+            .with_memory_block(MemoryBlockConfig {
+                name: StandardMemoryBlock::ActiveContext.id(),
+                max_length: 400,
+                default_value: "idle".to_string(),
+                description: "Current context".to_string(),
+            })
+            .build();
+
+        assert_eq!(system.agent_configs().len(), 1);
+        assert_eq!(system.memory_configs().len(), 1);
+        assert!(system
+            .agent_configs()
+            .contains_key(&StandardAgent::Entropy.id()));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_agent_error() {
+        let db = Arc::new(Database::new(":memory:").await.unwrap());
+        db.migrate().await.unwrap();
+        let letta = Arc::new(letta::LettaClient::local().unwrap());
+
+        let system = MultiAgentSystem::new(letta, db);
+        let user_id = UserId(1);
+
+        // Try to send message to non-existent agent
+        let result = system
+            .send_message_to_agent(user_id, Some("nonexistent"), "hello")
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::PatternError::Agent(AgentError::UnknownAgent { agent }) => {
+                assert_eq!(agent.as_str(), "nonexistent");
+            }
+            _ => panic!("Expected UnknownAgent error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_block_not_found() {
+        let db = Arc::new(Database::new(":memory:").await.unwrap());
+        db.migrate().await.unwrap();
+        let letta = Arc::new(letta::LettaClient::local().unwrap());
+
+        let system = MultiAgentSystem::new(letta, db);
+        let user_id = UserId(1);
+
+        // Try to update non-configured memory block
+        let result = system
+            .update_shared_memory(user_id, "unknown_block", "value")
+            .await;
+
+        assert!(result.is_err());
+        // Should fail because block isn't configured
+    }
+
+    #[test]
+    fn test_agent_config_serialization() {
+        let config = AgentConfig {
+            id: StandardAgent::Flux.id(),
+            name: "Flux".to_string(),
+            description: "Time agent".to_string(),
+            system_prompt: "Manage time".to_string(),
+            is_sleeptime: false,
+            sleeptime_interval: None,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"id\":\"flux\""));
+        assert!(json.contains("\"is_sleeptime\":false"));
+
+        let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, config.id);
+        assert_eq!(deserialized.is_sleeptime, false);
     }
 }

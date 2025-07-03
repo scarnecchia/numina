@@ -6,6 +6,8 @@ path = "pattern.db"
 [discord]
 # Discord bot token - required
 token = "your_discord_bot_token_here"
+# Optional: Discord application ID (usually auto-detected from token)
+# application_id = 1234567890123456789
 # Optional: Limit bot to specific channel
 # channel_id = 123456789012345678
 respond_to_dms = true
@@ -18,4 +20,7 @@ base_url = "http://localhost:8000"
 
 [mcp]
 enabled = false
+# Transport options: "stdio", "sse", "http"
 transport = "stdio"
+# Port for HTTP/SSE transports (default: 8080)
+# port = 8080
