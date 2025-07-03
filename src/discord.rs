@@ -92,6 +92,14 @@ impl EventHandler for PatternDiscordBot {
                         "Specific agent to talk to (optional)",
                     )
                     .required(false),
+                )
+                .add_option(
+                    serenity::all::CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "private",
+                        "Make this conversation visible only to you (default: false)",
+                    )
+                    .required(false),
                 ),
             CreateCommand::new("vibe").description("Check current vibe/state"),
             CreateCommand::new("tasks").description("List current tasks"),
@@ -118,9 +126,8 @@ impl EventHandler for PatternDiscordBot {
             let is_dm = msg.guild_id.is_none();
             let is_mention = msg.mentions_me(&ctx.http).await.unwrap_or(false);
 
-            // For now, respond to all non-bot messages
-            // Later we can add channel filtering, etc.
-            is_dm || is_mention || true
+            // Only respond to DMs and mentions, not all messages
+            is_dm || is_mention
         };
 
         if !should_respond {
@@ -157,6 +164,10 @@ impl EventHandler for PatternDiscordBot {
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
+            info!(
+                "Received slash command: {} from user {}",
+                command.data.name, command.user.name
+            );
             match command.data.name.as_str() {
                 "chat" => self.handle_chat_command(&ctx, &command).await,
                 "vibe" => self.handle_vibe_command(&ctx, &command).await,
@@ -211,11 +222,24 @@ impl PatternDiscordBot {
     }
 
     async fn handle_chat_command(&self, ctx: &Context, command: &CommandInteraction) {
+        info!("Processing chat command from user {}", command.user.name);
+
+        // Get the private option
+        let is_private = command
+            .data
+            .options
+            .iter()
+            .find(|opt| opt.name == "private")
+            .and_then(|opt| opt.value.as_bool())
+            .unwrap_or(false);
+
         // Defer response for long operations
         if let Err(why) = command
             .create_response(
                 &ctx.http,
-                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(is_private),
+                ),
             )
             .await
         {
@@ -244,13 +268,58 @@ impl PatternDiscordBot {
 
         // Send to agents
         let state = self.state.read().await;
-        let response = match state
-            .multi_agent_system
-            .send_message_to_agent(user_id, agent, message)
-            .await
+
+        // Initialize user if needed (ensures all agents are created)
+        if let Err(e) = state.multi_agent_system.initialize_user(user_id).await {
+            error!("Failed to initialize user: {:?}", e);
+        }
+
+        // Send progress updates for long operations
+        let ctx_clone = ctx.clone();
+        let command_clone = command.clone();
+        let progress_task = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            let _ = command_clone
+                .edit_response(
+                    &ctx_clone.http,
+                    EditInteractionResponse::new()
+                        .content("🤔 Still thinking... (Letta can be slow sometimes)"),
+                )
+                .await;
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            let _ = command_clone
+                .edit_response(
+                    &ctx_clone.http,
+                    EditInteractionResponse::new()
+                        .content("⏳ Taking longer than usual... (cloud agents need time)"),
+                )
+                .await;
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+            let _ = command_clone
+                .edit_response(
+                    &ctx_clone.http,
+                    EditInteractionResponse::new()
+                        .content("😅 Almost there... (seriously, any moment now)"),
+                )
+                .await;
+        });
+
+        let response = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(90), // 90 second timeout for cloud agents
+            state
+                .multi_agent_system
+                .send_message_to_agent(user_id, agent, message),
+        )
+        .await
         {
-            Ok(resp) => resp,
-            Err(e) => {
+            Ok(Ok(resp)) => {
+                progress_task.abort(); // Cancel progress update
+                resp
+            }
+            Ok(Err(e)) => {
+                progress_task.abort();
                 error!("Error sending to agent: {:?}", e);
 
                 // Provide detailed error in debug mode
@@ -261,6 +330,11 @@ impl PatternDiscordBot {
                 let error_msg = format!("Sorry, I encountered an error: {}", e);
 
                 error_msg
+            }
+            Err(_) => {
+                progress_task.abort();
+                error!("Request timed out after 90 seconds");
+                "Sorry, the request timed out. Letta might be overloaded. Please try again in a moment.".to_string()
             }
         };
 

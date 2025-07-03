@@ -148,7 +148,7 @@ impl Database {
     /// Get shared memory blocks for a user
     pub async fn get_shared_memory(&self, user_id: i64) -> Result<Vec<SharedMemory>> {
         sqlx::query_as::<_, SharedMemory>(
-            "SELECT id, user_id, block_name, block_value, max_length, created_at, updated_at 
+            "SELECT id, user_id, block_name, block_value, max_length, created_at, updated_at
              FROM shared_memory WHERE user_id = ?1",
         )
         .bind(user_id)
@@ -170,7 +170,7 @@ impl Database {
         block_name: &str,
     ) -> Result<Option<SharedMemory>> {
         sqlx::query_as::<_, SharedMemory>(
-            "SELECT id, user_id, block_name, block_value, max_length, created_at, updated_at 
+            "SELECT id, user_id, block_name, block_value, max_length, created_at, updated_at
              FROM shared_memory WHERE user_id = ?1 AND block_name = ?2",
         )
         .bind(user_id)
@@ -195,9 +195,9 @@ impl Database {
         max_length: i32,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO shared_memory (user_id, block_name, block_value, max_length) 
+            "INSERT INTO shared_memory (user_id, block_name, block_value, max_length)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(user_id, block_name) DO UPDATE SET 
+             ON CONFLICT(user_id, block_name) DO UPDATE SET
                 block_value = excluded.block_value,
                 updated_at = CURRENT_TIMESTAMP",
         )

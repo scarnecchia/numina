@@ -1,11 +1,11 @@
 # Pattern Configuration Example
 
 [database]
-path = "pattern.db"
+path = "test_pattern.db"
 
 [discord]
 # Discord bot token - required
-token = "your_discord_bot_token_here"
+token = ""
 # Optional: Discord application ID (usually auto-detected from token)
 # application_id = 1234567890123456789
 # Optional: Limit bot to specific channel
@@ -14,7 +14,7 @@ respond_to_dms = true
 respond_to_mentions = true
 
 [letta]
-base_url = "http://localhost:8000"
+base_url = "http://localhost:8283"
 # For Letta cloud:
 # api_key = "your_letta_api_key_here"
 

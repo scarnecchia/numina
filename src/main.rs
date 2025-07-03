@@ -45,11 +45,14 @@ fn init_logging() {
                 .unwrap_or_else(|_| "pattern=debug,letta=debug,discord=info".into()),
         )
         .with(
-            // Console output
+            // Console output - pretty and human-readable
             tracing_subscriber::fmt::layer()
-                .with_target(true)
+                .with_target(false) // Don't show module paths for cleaner output
                 .with_thread_ids(false)
-                .with_line_number(true),
+                .with_line_number(false) // Less clutter
+                .with_level(true)
+                .with_timer(tracing_subscriber::fmt::time::time())
+                .pretty(), // Pretty format with colors and indentation
         )
         .with(
             // File output

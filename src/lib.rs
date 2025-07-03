@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agents;
 pub mod config;
+pub mod coordination;
 pub mod db;
 pub mod error;
 pub mod service;

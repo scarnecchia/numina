@@ -39,6 +39,7 @@ When finishing work, update this list with any changes.
 
 ## Development Principles
 
+- **ALWAYS check if files/scripts/functions exist before creating new ones** - Use `ls`, `find`, `grep`, or read existing code first
 - Run `cargo check` frequently when producing code. This will help you catch errors early.
 - NEVER use `unsafe{}`. If you feel you need to, stop, think about other ways, and ask the user for help if needed.
 - NEVER ignore a failing test or change a test to make your code pass
@@ -47,95 +48,9 @@ When finishing work, update this list with any changes.
 - **ALWAYS ENSURE that tests will fail (via assert or panic with descriptive message) on any error condition**
 - Use the web or context7 to help find docs, in addition to any other reference material
 
-## MCP Tools Available
+## MCP Tools & Documentation
 
-Claude Code has access to several MCP (Model Context Protocol) tools that enhance development workflows:
-
-### Context7 Tools
-- **`mcp__context7__resolve-library-id`**: Resolves package names to Context7 library IDs
-  - Use when you need to look up documentation for external libraries
-  - Returns matching libraries with trust scores and documentation coverage
-- **`mcp__context7__get-library-docs`**: Fetches library documentation
-  - Requires library ID from resolve-library-id
-  - Can focus on specific topics within documentation
-  - Default 10k token limit (configurable)
-
-### Language Server Tools (rust-analyzer)
-- **`mcp__language-server__definition`**: Jump to symbol definitions
-  - Find where functions, types, constants are implemented
-  - Requires qualified symbol names (e.g., `pattern::server::PatternServer`)
-- **`mcp__language-server__diagnostics`**: Get file diagnostics
-  - Shows errors, warnings from rust-analyzer
-  - Use before/after edits to verify code health
-- **`mcp__language-server__edit_file`**: Batch file edits
-  - Apply multiple line-based edits efficiently
-  - Alternative to standard Edit tool for complex changes
-- **`mcp__language-server__hover`**: Get type info and docs
-  - Position-based (file, line, column)
-  - Shows types, trait implementations, documentation
-- **`mcp__language-server__references`**: Find all symbol usages
-  - Critical before refactoring to understand impact
-  - Returns all locations where symbol appears
-- **`mcp__language-server__rename_symbol`**: Safe symbol renaming
-  - Updates symbol and all references automatically
-  - Position-based operation
-
-## MCP Workflow Examples
-
-### 1. Researching External Dependencies
-```
-1. User asks about using a library (e.g., "How do I use tokio channels?")
-2. mcp__context7__resolve-library-id("tokio") → Get library ID
-3. mcp__context7__get-library-docs(id, topic="channels") → Get relevant docs
-4. Implement based on official documentation
-```
-
-**Note on letta-rs documentation:**
-- The letta crate may not be on Context7 yet
-- Alternative sources:
-  - Read source directly: `../letta-rs/src/` (we have local access)
-  - Generate docs: `cd ../letta-rs && cargo doc --open`
-  - Check docs.rs if published
-  - Use language server tools to explore the API
-
-
-
-### 2. Understanding Existing Code
-```
-1. Find a function call you don't understand
-2. mcp__language-server__hover(file, line, col) → Get quick info
-3. mcp__language-server__definition("module::function") → See implementation
-4. mcp__language-server__references("module::function") → See usage patterns
-```
-
-### 3. Safe Refactoring
-```
-1. mcp__language-server__references("OldName") → Assess impact
-2. mcp__language-server__rename_symbol(file, line, col, "NewName") → Rename everywhere
-3. mcp__language-server__diagnostics(file) → Verify no breakage
-4. cargo test → Ensure tests still pass
-```
-
-### 4. Fixing Compilation Errors
-```
-1. cargo check → Initial error list
-2. mcp__language-server__diagnostics(file) → Detailed diagnostics with context
-3. mcp__language-server__hover on error locations → Understand type mismatches
-4. mcp__language-server__edit_file → Apply fixes
-5. mcp__language-server__diagnostics(file) → Verify fixes
-```
-
-### 5. Implementing New Features
-```
-1. mcp__context7 tools → Research library APIs if using external deps
-2. Glob/Grep → Find similar patterns in codebase
-3. mcp__language-server__definition → Understand interfaces to implement
-4. Write implementation
-5. mcp__language-server__diagnostics → Catch issues early
-6. cargo test → Verify functionality
-```
-
-see @LSP_EDIT_GUIDE.md for details on potential pitfalls
+See [MCP Integration Guide](./docs/guides/MCP_INTEGRATION.md) for detailed information about available MCP tools and workflows.
 
 ## Testing Strategy
 
@@ -197,474 +112,31 @@ just pre-commit-all
 - Use language server diagnostics to catch issues before running `cargo check`
 
 
-## Architecture Overview
+## Project Documentation
 
-Pattern implements a multi-agent cognitive support system with:
+### Architecture & Design
+- [Pattern ADHD Architecture](./docs/architecture/PATTERN_ADHD_ARCHITECTURE.md) - Multi-agent cognitive support system design
+- [Agent Routing](./docs/architecture/AGENT-ROUTING.md) - How messages are routed to agents
+- [System Prompts](./docs/architecture/pattern-system-prompts.md) - Agent personality and behavior
 
-### Agent Constellation
-```
-Pattern (Sleeptime Orchestrator)
-├── Entropy (Task/Complexity Agent)
-├── Flux (Time/Scheduling Agent)
-├── Archive (Memory/Knowledge Agent)
-├── Momentum (Flow/Energy Agent)
-└── Anchor (Habits/Structure Agent)
-```
+### Integration Guides
+- [MCP Integration](./docs/guides/MCP_INTEGRATION.md) - MCP tools and workflows
+- [Letta Integration](./docs/guides/LETTA_INTEGRATION.md) - Multi-agent implementation with Letta
+- [Discord Setup](./docs/guides/DISCORD_SETUP.md) - Discord bot configuration
 
-### Core Features
-- **Sleeptime Orchestration**: Pattern runs background checks every 20-30 minutes for attention drift, physical needs, transitions
-- **Shared Memory Blocks**: All agents access common state (current_state, active_context, bond_evolution)
-- **ADHD-Specific Design**: Time blindness compensation, task breakdown, energy tracking, interruption awareness
-- **Evolving Relationship**: Agents develop understanding of user patterns over time
-- **MCP Server Interface**: Exposes agent capabilities through Model Context Protocol
+### API References
+- [Letta API Reference](./docs/api/LETTA_API_REFERENCE.md) - Common patterns and gotchas
 
-## Core Dependencies
+### Troubleshooting
+- [Discord Issues](./docs/troubleshooting/DISCORD_ISSUES.md) - Known Discord integration issues
+- [MCP HTTP Setup](./docs/guides/MCP_HTTP_SETUP.md) - MCP transport configuration
 
-```toml
-# MCP SDK - official rust implementation (must use git version)
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", optional = true }
-# Must use schemars 0.8.x to match rmcp's version
-schemars = "0.8.22"
+## Quick Overview
 
-# Async runtime
-tokio = { version = "1.40", features = ["full"] }
-tokio-stream = "0.1"
+Pattern is a multi-agent ADHD cognitive support system using Letta. See documentation above for details.
 
-# Discord bot
-serenity = { version = "0.12", features = ["framework", "cache", "rustls_backend"] }
 
-# Calendar & scheduling
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
-rrule = "0.13"  # recurring events
 
-# Embedded data persistence (no external services needed)
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono"] }
-sled = "0.34"  # embedded key-value store
-
-# Vector search
-hnsw = "0.11"  # embedded vector similarity search
-
-# Activity monitoring (platform-specific)
-sysinfo = "0.32"
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.60", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
-[target.'cfg(target_os = "linux")'.dependencies]
-x11 = "2.21"
-
-# Existing letta crate
-letta = { path = "../letta-rs" }
-```
-
-## ADHD-Specific Design Principles
-
-Pattern is built on deep understanding of ADHD cognition:
-
-### Core Principles
-- **Different, Not Broken**: ADHD brains operate on different physics - time blindness and hyperfocus aren't bugs
-- **External Executive Function**: Pattern provides the executive function support that ADHD brains need
-- **No Shame Spirals**: Never suggest "try harder" - validate struggles as logical responses
-- **Hidden Complexity**: "Simple" tasks are never simple - everything needs breakdown
-- **Energy Awareness**: Attention and energy are finite resources that deplete non-linearly
-
-### Key Features for ADHD
-- **Time Translation**: Automatic multipliers (1.5x-3x) for all time estimates
-- **Proactive Monitoring**: Background checks prevent 3-hour hyperfocus crashes
-- **Context Recovery**: External memory for "what was I doing?" moments
-- **Task Atomization**: Break overwhelming projects into single next actions
-- **Physical Needs**: Track water, food, meds, movement without nagging
-- **Flow Protection**: Recognize and protect rare flow states
-
-### Relationship Evolution
-Agents evolve from professional assistant to trusted cognitive partner:
-- **Early**: Helpful professional who "gets it"
-- **Building**: Developing shorthand, recognizing patterns
-- **Trusted**: Inside jokes, gentle ribbing, shared language
-- **Deep**: Finishing thoughts about user's patterns
-
-## Multi-Agent Shared Memory Architecture
-
-### Shared Memory Blocks
-
-All agents share these memory blocks for coordination without redundancy:
-
-```rust
-// Shared state accessible by all agents
-pub struct SharedMemory {
-    // Real-time energy/attention/mood tracking (200 char limit)
-    current_state: Block,
-
-    // What they're doing NOW, including blockers (400 char limit)
-    active_context: Block,
-
-    // Growing understanding of this human (600 char limit)
-    bond_evolution: Block,
-}
-
-// Example state format
-current_state: "energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration"
-active_context: "task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear"
-bond_evolution: "trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']"
-```
-
-### Agent Communication
-
-Agents coordinate through:
-- Shared memory updates (all agents see changes immediately)
-- `send_message_to_agent_async` for non-blocking coordination
-- Shared tools that any agent can invoke
-
-## MCP Server Implementation
-
-Using the official `rmcp` SDK from git (see [MCP_SDK_GUIDE.md](./MCP_SDK_GUIDE.md) for detailed patterns):
-
-```rust
-use rmcp::{
-    handler::server::tool::Parameters,
-    model::{CallToolResult, Content, Implementation, InitializeResult as ServerInfo},
-    Error as McpError, ServerHandler,
-};
-use serde::{Deserialize, Serialize};
-use schemars::JsonSchema;
-
-#[derive(Debug, Clone)]
-pub struct PatternMcpServer {
-    letta_client: Arc<letta::LettaClient>,
-    db: Arc<Database>,
-    multi_agent_system: Arc<MultiAgentSystem>,
-}
-
-// Request structs need JsonSchema derive
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-struct ScheduleEventRequest {
-    user_id: i64,
-    title: String,
-    start_time: String,
-    description: Option<String>,
-    duration_minutes: Option<u32>,
-}
-
-// Define tools using rmcp macros
-#[rmcp::tool_router]
-impl PatternMcpServer {
-    #[rmcp::tool(description = "Schedule an event with smart time estimation")]
-    async fn schedule_event(
-        &self,
-        params: Parameters<ScheduleEventRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let params = params.0;
-        // Implementation with ADHD time multipliers
-        Ok(CallToolResult::success(vec![Content::text(
-            "Event scheduled with ADHD-aware buffers"
-        )]))
-    }
-
-    #[rmcp::tool(description = "Send message to user via Discord")]
-    async fn send_message(
-        &self,
-        params: Parameters<SendMessageRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        // Send via Discord bot instance
-        Ok(CallToolResult::success(vec![Content::text(
-            "Message sent via Discord"
-        )]))
-    }
-
-    #[rmcp::tool(description = "Check activity state for interruption timing")]
-    async fn check_activity_state(&self) -> Result<CallToolResult, McpError> {
-        // Platform-specific activity monitoring
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json!({
-                "interruptible": true,
-                "current_focus": null,
-                "last_activity": "idle"
-            })).unwrap()
-        )]))
-    }
-}
-```
-
-## Key Features to Implement
-
-### 1. Multi-Agent System Architecture
-
-Each agent has a specific role in the cognitive support system:
-
-#### Pattern (Sleeptime Orchestrator)
-- Runs background checks every 20-30 minutes
-- Monitors hyperfocus duration, physical needs, transitions
-- Coordinates other agents based on current needs
-- Personality: "friend who slides water onto your desk"
-
-#### Entropy (Task/Complexity Agent)
-- Breaks down overwhelming tasks into atoms
-- Recognizes hidden complexity in "simple" tasks
-- Validates task paralysis as logical response
-- Finds the ONE next action when everything feels impossible
-
-#### Flux (Time/Scheduling Agent)
-- Translates between ADHD time and clock time
-- Automatically adds buffers (1.5x-3x multipliers)
-- Recognizes time blindness patterns
-- Creates temporal anchors for transitions
-
-#### Archive (Memory/Knowledge Agent)
-- External memory bank for dumped thoughts
-- Surfaces relevant context without prompting
-- Finds patterns across scattered data points
-- Answers "what was I doing?" with actual context
-
-#### Momentum (Flow/Energy Agent)
-- Distinguishes hyperfocus from burnout
-- Maps energy patterns (Thursday 3pm crash, 2am clarity)
-- Suggests task pivots based on current capacity
-- Protects flow states when they emerge
-
-#### Anchor (Habits/Structure Agent)
-- Tracks basics: meds, water, food, sleep
-- Builds loose structure that actually works
-- Celebrates basic self-care as real achievements
-- Adapts routines to current capacity
-
-### Work & Social Support Features
-
-Pattern's agents provide specific support for contract work and social challenges:
-
-#### Contract/Client Management
-- **Time Tracking**: Flux automatically tracks billable hours with "what was I doing?" recovery
-- **Invoice Reminders**: Pattern notices unpaid invoices aging past 30/60/90 days
-- **Follow-up Prompts**: "Hey, you haven't heard from ClientX in 3 weeks, might be time to check in"
-- **Meeting Prep**: Archive surfaces relevant context before client calls
-- **Project Switching**: Momentum helps context-switch between clients without losing state
-
-#### Social Memory & Support
-- **Birthday/Anniversary/Medication Tracking**: Anchor maintains important dates with lead-time warnings
-- **Conversation Threading**: Archive remembers "they mentioned their dog was sick last time"
-- **Follow-up Suggestions**: "Sarah mentioned her big presentation was today, maybe check how it went?"
-- **Energy-Aware Social Planning**: Momentum prevents scheduling social stuff when depleted
-- **Masking Support**: Pattern tracks social energy drain and suggests recovery time
-
-Example interactions:
-```
-Pattern: "heads up - invoice for ClientCorp is at 45 days unpaid. want me to draft a friendly follow-up?"
-
-Archive: "before your 2pm with Alex - last meeting you promised to review their API docs (you didn't)
-and they mentioned considering migrating to Leptos"
-
-Anchor: "Mom's birthday is next Tuesday. you usually panic-buy a gift Monday night.
-maybe handle it this weekend while you have energy?"
-
-Momentum: "you've got 3 social things scheduled this week. based on last month's pattern,
-that's gonna wreck you. which one can we move?"
-```
-
-### 2. Shared Agent Tools
-
-All agents can access these core functions:
-
-```rust
-pub trait SharedTools {
-    // Any agent can pulse-check current state
-    async fn check_vibe(&self) -> VibeState;
-
-    // Capture current state for later recovery
-    async fn context_snapshot(&self) -> String;
-
-    // Search across all memory for patterns
-    async fn find_pattern(&self, query: &str) -> Vec<Pattern>;
-
-    // When current task/energy mismatch detected
-    async fn suggest_pivot(&self) -> Suggestion;
-}
-```
-
-### 3. Letta Agent Management ✅ PARTIALLY IMPLEMENTED
-
-Provides stateful agent management with caching:
-
-```rust
-// src/agent.rs - ACTUAL IMPLEMENTATION
-pub struct AgentManager {
-    letta: Arc<LettaClient>,
-    db: Arc<db::Database>,
-    cache: Arc<RwLock<HashMap<UserId, AgentInstance>>>,
-}
-
-impl AgentManager {
-    pub async fn get_or_create_agent(&self, user_id: UserId) -> Result<AgentInstance> {
-        // Check cache first, then DB, then create new
-        let request = CreateAgentRequest::builder()
-            .name(&agent_name)
-            .memory_block(Block::persona("You are a helpful assistant..."))
-            .memory_block(Block::human(&format!("User {}", user_id.0)))
-            .build();
-
-        // Store in DB and cache
-        Ok(AgentInstance { agent_id: agent.id, user_id, name })
-    }
-
-    // Memory update workaround using blocks API
-    pub async fn update_agent_memory(&self, user_id: UserId, memory: AgentMemory) -> Result<()> {
-        for block in memory.blocks {
-            self.letta.blocks().update(block_id, UpdateBlockRequest { ... }).await?;
-        }
-    }
-}
-```
-
-**Key learnings**:
-- Letta uses `Block` types, not `ChatMemory`
-- Memory updates require the blocks API
-- `LettaId` is its own type, not just a String
-- Message responses come as `LettaMessageUnion::AssistantMessage`
-
-### 2. Smart Calendar Management
-
-References:
-- [Time blocking for ADHD](https://www.tiimoapp.com/resource-hub/time-blocking-for-adhders) - multiply time estimates by 2-4x
-- [Calendar organization guide](https://akiflow.com/blog/adhd-calendar-guide/) - buffer time between tasks
-
-```rust
-struct SmartScheduler {
-    calendar: CalendarService,
-    user_patterns: HashMap<UserId, UserTimePatterns>,
-}
-
-impl SmartScheduler {
-    async fn schedule_task(&self, task: Task, user_id: UserId) -> Result<Event> {
-        let patterns = self.user_patterns.get(&user_id);
-
-        // Apply time multiplier based on historical accuracy
-        let duration = task.estimated_duration * patterns.time_multiplier;
-
-        // Add buffer time (5min per 30min of task)
-        let buffer = duration.num_minutes() / 30 * 5;
-
-        // Find optimal slot considering energy levels
-        let slot = self.find_slot(duration + buffer, patterns).await?;
-
-        Ok(Event {
-            start: slot.start,
-            end: slot.end,
-            buffer_before: 5,
-            buffer_after: buffer,
-            ..task.into()
-        })
-    }
-}
-```
-
-### 3. Context-Aware Interruptions
-
-Based on research showing [78-98% accuracy in detecting natural stopping points](https://dl.acm.org/doi/10.1145/3290605.3300589):
-
-```rust
-struct ActivityMonitor {
-    last_input: Instant,
-    current_app: String,
-    typing_intensity: f32,
-}
-
-impl ActivityMonitor {
-    fn detect_interruptibility(&self) -> InterruptibilityScore {
-        // Detect hyperfocus: >45min without break, high input intensity
-        if self.last_input.elapsed() < Duration::from_secs(5)
-           && self.typing_intensity > 0.8 {
-            return InterruptibilityScore::Low;
-        }
-
-        // Natural break points: app switch, idle time
-        if self.last_input.elapsed() > Duration::from_mins(2) {
-            return InterruptibilityScore::High;
-        }
-
-        InterruptibilityScore::Medium
-    }
-}
-```
-
-### 4. Discord Integration
-
-Handle long-running operations with Discord's interaction model:
-
-```rust
-use serenity::builder::CreateInteractionResponseMessage;
-use serenity::model::application::CommandInteraction;
-
-async fn handle_analysis_command(
-    ctx: &Context,
-    interaction: &CommandInteraction,
-) -> Result<()> {
-    // Defer response for long operations
-    interaction.create_response(&ctx.http, |r| {
-        r.kind(InteractionResponseType::DeferredChannelMessageWithSource)
-    }).await?;
-
-    // Perform analysis
-    let result = perform_long_analysis().await?;
-
-    // Send followup within 15min window
-    interaction.create_followup(&ctx.http, |f| {
-        f.content(format!("Analysis complete: {}", result))
-    }).await?;
-
-    Ok(())
-}
-```
-
-## Data Architecture
-
-### Embedded Storage (No External Databases)
-
-All data stored locally using embedded databases:
-
-```rust
-struct DataStore {
-    sqlite: SqlitePool,        // relational data
-    kv: sled::Db,             // key-value cache
-    vectors: hnsw::HNSW,      // vector similarity search
-}
-
-impl DataStore {
-    async fn new(path: &Path) -> Result<Self> {
-        // Everything in one directory
-        let sqlite = SqlitePool::connect(&format!("sqlite://{}/data.db", path)).await?;
-        let kv = sled::open(path.join("cache"))?;
-
-        // Build vector index from stored embeddings
-        let vectors = Self::load_or_create_index(&sqlite).await?;
-
-        Ok(Self { sqlite, kv, vectors })
-    }
-}
-```
-
-**SQLite** handles:
-- User data, agent configs
-- Calendar events and tasks
-- Stored embeddings (as blobs)
-- Full-text search via FTS5
-
-**Sled** provides:
-- Session cache
-- Activity state tracking
-- Rate limiting counters
-- Fast ephemeral data
-
-**HNSW** enables:
-- Semantic memory search
-- No external vector DB needed
-- Rebuilds from SQLite on startup
-
-Alternative: [sqlite-vss](https://github.com/asg017/sqlite-vss) extension for vectors directly in SQLite.
-
-### Memory Management
-
-Leverage Letta's 4-tier memory with local storage:
-- **Core**: Current context (2KB limit) - in-memory
-- **Archival**: SQLite + HNSW for unlimited storage with vector search
-- **Message**: Recent history in Sled cache
-- **Recall**: Semantic search via HNSW index
 
 ## Build Priority Breakdown
 
@@ -736,9 +208,12 @@ Leverage Letta's 4-tier memory with local storage:
     - Energy pattern learning
     - Relationship evolution tracking
 
+
+
 ## Current TODOs
 
 ### High Priority
+- [ ] Test SSE MCP integration with Letta (now implemented, needs testing)
 - [ ] Implement Pattern as sleeptime agent with 20-30min background checks
 - [ ] Add task CRUD operations to database module
 - [ ] Create task manager with ADHD-aware task breakdown (Entropy agent)
@@ -750,58 +225,24 @@ Leverage Letta's 4-tier memory with local storage:
 - [ ] Add task-related MCP tools
 - [ ] Implement time tracking with ADHD multipliers (Flux agent)
 - [ ] Add energy/attention monitoring (Momentum agent)
+- [ ] Consider alternative to MCP if SSE doesn't work (direct tool registration via Letta API)
 
 ### Low Priority
 - [ ] Add activity monitoring for interruption detection
 - [ ] Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
 
 ### Completed
-- [x] Implement Letta integration layer
-  - [x] Create agent manager module (src/agent.rs)
-  - [x] Implement agent creation/retrieval with caching
-  - [x] Add Letta tools to MCP server (chat_with_agent, get_agent_memory, update_agent_memory)
-  - [x] Implement memory update workaround using blocks API
-- [x] Restructure as library with optional binary
-  - [x] Create lib.rs with core PatternService
-  - [x] Move MCP server to bin/mcp.rs
-  - [x] Update Cargo.toml with feature flags (mcp, binary, mcp-sse)
-- [x] Set up basic MCP server structure
-- [x] Create database module with SQLite schema
-- [x] Design initial schema (users, agents, tasks, events, time_tracking)
-- [x] Create migrations
-- [x] Create architecture breakdown and prioritization plan
-- [x] Add build priority breakdown to CLAUDE.md
-- [x] Add TODO mirroring note to CLAUDE.md
-- [x] Design multi-agent system with Pattern as sleeptime orchestrator + 5 specialist agents
-- [x] Implement shared memory blocks (current_state, active_context, bond_evolution)
-- [x] Refactor multi-agent system to be more generic and flexible
-- [x] Set up Discord bot integration with configurable agent routing
-  - [x] Create Discord bot module (src/discord.rs)
-  - [x] Implement slash commands and DM support
-  - [x] Add dynamic agent routing based on configured agents
-  - [x] Create discord_bot binary with configuration support
-- [x] Refactor to single persistent binary with Discord + MCP features
-  - [x] Create unified main.rs with feature flags
-  - [x] Update MCP server to use new architecture
-  - [x] Add background task support (sleeptime orchestrator)
-- [x] Update MCP server to official SDK patterns
-  - [x] Fix tool definitions using `#[rmcp::tool]` and `#[rmcp::tool_router]`
-  - [x] Update to use `Parameters<T>` wrapper types
-  - [x] Fix response types using `CallToolResult::success(vec![Content::text(...)])`
-  - [x] Update error handling with specific constructors
-  - [x] Document learnings in MCP_SDK_GUIDE.md
-- [x] Implement actual agent message routing to Letta agents
-- [x] Add MCP tools to send Discord messages from agents
-- [x] Implement channel name resolution for Discord tools
-- [x] Add comprehensive test suite across all modules
-- [x] Implement HTTP transport for MCP server
-  - [x] Add streamable HTTP support using hyper
-  - [x] Handle Letta connection errors gracefully
-  - [x] Add retry logic with progressive delays
-  - [x] Create manual registration script for slow Letta
-  - [x] Document known Letta performance issues
+- [x] Letta integration layer with agent management
+- [x] Library restructure with feature flags
+- [x] Database module with SQLite migrations
+- [x] Multi-agent system architecture (Pattern + 5 agents)
+- [x] Discord bot with slash commands and agent routing
+- [x] MCP server with 10+ tools (official SDK patterns)
+- [x] Multiple MCP transports (stdio, HTTP, SSE)
+- [x] Comprehensive test suite
+- [x] Documentation refactoring
 
-## Current Status
+## Current Status (2025-01-03)
 
 **Architecture**: Unified binary with feature flags
 - Single `pattern` binary can run Discord bot, MCP server, and background tasks
@@ -826,6 +267,16 @@ Leverage Letta's 4-tier memory with local storage:
 - Background sleeptime orchestrator (30min intervals)
 - Dynamic agent routing in Discord - no hardcoded names
 - Full Letta integration with message routing
+- **NEW**: Proper system prompt + persona separation in agent creation
+- **NEW**: Agent tagging for broadcast filtering
+- **NEW**: Pattern is primary conversant/interface, delegates to specialists
+
+**Agent Coordination** ✅:
+- Created coordination.rs module with message tagging system
+- MessageSource enum to distinguish User/Agent/System/Tool messages
+- Inter-agent communication rules in all system prompts
+- Prevents infinite loops from tool confirmations
+- cleanup_agents.sh script supports both local and Letta Cloud
 
 **Discord Bot** ✅:
 - Natural language chat with slash commands
@@ -833,17 +284,20 @@ Leverage Letta's 4-tier memory with local storage:
 - Configurable agent detection
 - Message chunking for long responses
 - Channel name resolution ("Server/channel" format)
+- Fixed ephemeral messages, timeouts, and initialization issues
 
 **MCP Server** ✅:
 - Ten tools: chat_with_agent, get/update_agent_memory, schedule_event, send_message, check_activity_state
 - Discord integration tools: send_discord_message, send_discord_embed, get_channel_info, send_discord_dm
 - Channel resolution accepts both IDs and "guild/channel" names
-- **HTTP Transport**: Fully implemented streamable HTTP transport on configurable port
-- Stdio transport still available as fallback
+- **Transports implemented**: 
+  - Stdio transport for local development
+  - Streamable HTTP (has issues with Letta's Python client)
+  - SSE transport (recommended for Letta compatibility)
+- **SSE configuration**: Set `mcp.transport = "sse"` and `mcp.port = 8081`
 - Uses official modelcontextprotocol/rust-sdk from git
 - Proper tool definitions with `#[rmcp::tool]` attribute
 - Integrated with multi-agent system
-- Handles Letta slowness with retries and manual registration option
 
 **Running Pattern**:
 ```bash
@@ -907,16 +361,18 @@ cargo run --features binary,mcp
    - Follow-up suggestions
    - Energy cost tracking for social interactions
 
-## Letta-rs API Notes
-
-See [LETTA_API_REFERENCE.md](./LETTA_API_REFERENCE.md) for detailed API patterns and common gotchas discovered during implementation.
-
 ## References
 
-- [MCP SDK Implementation Guide](./MCP_SDK_GUIDE.md) - Detailed patterns for using the official SDK
+### External Documentation
 - [Official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk) - Use git version only
 - [MCP Specification](https://modelcontextprotocol.io/specification/2025-06-18)
 - [Letta Documentation](https://docs.letta.com/)
-- [Letta API Reference](./LETTA_API_REFERENCE.md) - Common gotchas and patterns
 - [Discord.py Interactions Guide](https://discordpy.readthedocs.io/en/stable/interactions/api.html) (concepts apply to serenity)
 - [Activity Detection Research](https://dl.acm.org/doi/10.1145/3290605.3300589)
+
+### Project Documentation
+See the organized documentation in the `docs/` directory, especially:
+- Architecture guides in `docs/architecture/`
+- Integration guides in `docs/guides/`
+- API references in `docs/api/`
+- Troubleshooting in `docs/troubleshooting/`

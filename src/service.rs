@@ -62,26 +62,31 @@ impl PatternService {
     async fn create_letta_client(config: &Config) -> Result<letta::LettaClient> {
         if let Some(api_key) = &config.letta.api_key {
             info!("Connecting to Letta cloud");
-            Ok(letta::LettaClient::cloud(api_key).map_err(|e| {
-                crate::error::AgentError::LettaConnectionFailed {
+            // Use builder to set longer timeout for cloud operations
+            let client = letta::LettaClient::builder()
+                .base_url("https://api.letta.com")
+                .auth(letta::auth::AuthConfig::bearer(api_key))
+                .timeout(std::time::Duration::from_secs(120)) // 2 minute timeout for cloud
+                .build()
+                .map_err(|e| crate::error::AgentError::LettaConnectionFailed {
                     url: "cloud".to_string(),
                     source: e,
-                }
-            })?)
+                })?;
+            Ok(client)
         } else {
             info!("Connecting to Letta at {}", config.letta.base_url);
-            let client_config = letta::ClientConfig::new(&config.letta.base_url).map_err(|e| {
-                crate::error::AgentError::LettaConnectionFailed {
+
+            // Use builder to set a longer timeout for slow Letta operations
+            let client = letta::LettaClient::builder()
+                .base_url(&config.letta.base_url)
+                .auth(letta::auth::AuthConfig::none())
+                .timeout(std::time::Duration::from_secs(60)) // 60 second timeout
+                .build()
+                .map_err(|e| crate::error::AgentError::LettaConnectionFailed {
                     url: config.letta.base_url.clone(),
                     source: e,
-                }
-            })?;
-            Ok(letta::LettaClient::new(client_config).map_err(|e| {
-                crate::error::AgentError::LettaConnectionFailed {
-                    url: config.letta.base_url.clone(),
-                    source: e,
-                }
-            })?)
+                })?;
+            Ok(client)
         }
     }
 
@@ -203,6 +208,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
         service.start_background_tasks().await?;
 
         // Collect service handles
+        #[allow(unused_mut)]
         let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Start Discord if configured
@@ -352,10 +358,35 @@ You track basics like meds, water, food, sleep without nagging or shaming."
             crate::types::McpTransport::Sse => {
                 #[cfg(feature = "mcp-sse")]
                 {
+                    let port = self.config.mcp.port.unwrap_or(8080);
+                    let multi_agent_system = self.multi_agent_system.clone();
+
                     tokio::spawn(async move {
-                        if let Err(e) = server.run_sse(8080).await {
-                            error!("MCP SSE server error: {:?}", e);
+                        // Start the SSE server first
+                        let server_handle = tokio::spawn(async move {
+                            if let Err(e) = server.run_sse(port).await {
+                                error!("MCP SSE server error: {:?}", e);
+                            }
+                        });
+
+                        // Give the server time to start up
+                        info!("Waiting for MCP SSE server to be ready...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+                        // Configure Letta to use the SSE server
+                        if let Err(e) = multi_agent_system.configure_mcp_server_sse(port).await {
+                            error!("Failed to configure SSE MCP server in Letta: {:?}", e);
+                        } else {
+                            info!("Successfully configured SSE MCP server in Letta");
+
+                            // Initialize agents
+                            if let Err(e) = multi_agent_system.initialize_system_agents().await {
+                                error!("Failed to initialize system agents: {:?}", e);
+                            }
                         }
+
+                        // Wait for server to finish
+                        let _ = server_handle.await;
                     })
                 }
                 #[cfg(not(feature = "mcp-sse"))]
@@ -391,6 +422,16 @@ You track basics like meds, water, food, sleep without nagging or shaming."
                         match multi_agent_system.configure_mcp_server(port).await {
                             Ok(_) => {
                                 info!("Successfully configured MCP server in Letta");
+
+                                // Now initialize all agents with the MCP tools
+                                info!("Initializing system agents with MCP tools...");
+                                if let Err(e) = multi_agent_system.initialize_system_agents().await
+                                {
+                                    error!("Failed to initialize system agents: {:?}", e);
+                                } else {
+                                    info!("System agents initialized successfully");
+                                }
+
                                 break;
                             }
                             Err(e) => {
@@ -409,7 +450,10 @@ You track basics like meds, water, food, sleep without nagging or shaming."
                                     // The server is still running and can be configured manually
                                     error!("Failed to configure MCP server after 3 attempts.");
                                     error!("This might be due to Letta being slow or having a backlog.");
-                                    error!("The MCP server is still running at http://localhost:{}/mcp", port);
+                                    error!(
+                                        "The MCP server is still running at http://localhost:{}",
+                                        port
+                                    );
                                     error!("You can manually configure it in Letta's ADE when it's ready.");
                                 }
                             }

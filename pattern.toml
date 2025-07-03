@@ -14,7 +14,7 @@ respond_to_dms = true
 respond_to_mentions = true
 
 [letta]
-base_url = "http://localhost:8000"
+base_url = "http://localhost:8283"
 # For Letta cloud:
 # api_key = "your_letta_api_key_here"
 

@@ -1,7 +1,9 @@
 use crate::{agent::UserId, agents::MultiAgentSystem, db::Database};
 use rmcp::{
-    handler::server::tool::Parameters,
-    model::{CallToolResult, Content, Implementation, InitializeResult as ServerInfo},
+    handler::server::{router::tool::ToolRouter, tool::Parameters},
+    model::{
+        CallToolResult, Content, Implementation, InitializeResult as ServerInfo, ServerCapabilities,
+    },
     Error as McpError, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,8 @@ pub struct PatternMcpServer {
     #[cfg(feature = "discord")]
     #[allow(dead_code)] // Used by Discord MCP tools
     discord_client: Option<Arc<tokio::sync::RwLock<serenity::Client>>>,
+    #[allow(dead_code)] // Used by the ServerHandler trait
+    tool_router: ToolRouter<Self>,
 }
 
 impl PatternMcpServer {
@@ -68,12 +72,19 @@ impl PatternMcpServer {
             Arc<tokio::sync::RwLock<serenity::Client>>,
         >,
     ) -> Self {
+        let tool_router = Self::tool_router();
+        info!(
+            "Tool router initialized with {} tools",
+            tool_router.list_all().len()
+        );
+
         Self {
             letta_client,
             db,
             multi_agent_system,
             #[cfg(feature = "discord")]
             discord_client,
+            tool_router,
         }
     }
 
@@ -119,14 +130,14 @@ impl PatternMcpServer {
             .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
 
         info!("MCP HTTP server listening on http://{}", addr);
-        info!("Configure Letta to use: http://localhost:{}/mcp", port);
+        info!("Configure Letta to use: http://localhost:{}", port);
         info!("Note: Letta may be slow to respond. The server will keep connections open.");
 
         // Main accept loop - no ctrl+c handler here, let main handle shutdown
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    debug!("Accepted connection from {}", addr);
+                    info!("Accepted new MCP connection from {}", addr);
                     let io = TokioIo::new(stream);
 
                     // Clone self for the spawned task
@@ -136,7 +147,7 @@ impl PatternMcpServer {
                     // Create service for this connection
                     let service = TowerToHyperService::new(StreamableHttpService::new(
                         move || {
-                            debug!("Creating MCP handler for connection from {}", addr_info);
+                            info!("Creating new MCP handler instance for {}", addr_info);
                             Ok(server.clone())
                         },
                         LocalSessionManager::default().into(),
@@ -150,9 +161,9 @@ impl PatternMcpServer {
                         let conn = builder.serve_connection(io, service);
 
                         if let Err(e) = conn.await {
-                            error!("Error serving connection: {}", e);
+                            error!("Error serving MCP connection: {}", e);
                         } else {
-                            debug!("Connection closed normally");
+                            info!("MCP connection closed normally");
                         }
                     });
                 }
@@ -168,16 +179,51 @@ impl PatternMcpServer {
     /// Run the MCP server on SSE transport
     #[cfg(feature = "mcp-sse")]
     pub async fn run_sse(self, port: u16) -> miette::Result<()> {
+        use rmcp::transport::{sse_server::SseServerConfig, SseServer};
+        use tokio_util::sync::CancellationToken;
+
         info!("Starting MCP server on SSE transport at port {}", port);
 
-        // TODO: Implement SSE transport when available in rmcp
-        Err(miette::miette!("SSE transport not yet implemented"))
+        let addr = format!("0.0.0.0:{}", port);
+        let addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| miette::miette!("Failed to parse address: {}", e))?;
+
+        info!("MCP SSE server listening on http://{}/sse", addr);
+        info!("Configure Letta to use: http://localhost:{}/sse", port);
+
+        // Create SSE server configuration
+        let config = SseServerConfig {
+            bind: addr,
+            sse_path: "/sse".to_string(),
+            post_path: "/message".to_string(),
+            ct: CancellationToken::new(),
+            sse_keep_alive: Some(std::time::Duration::from_secs(30)),
+        };
+
+        // Create and serve
+        let sse_server = SseServer::serve_with_config(config)
+            .await
+            .map_err(|e| miette::miette!("Failed to start SSE server: {}", e))?;
+
+        // Handle incoming connections
+        let handler = self;
+        let ct = sse_server.with_service(move || {
+            info!("SSE client connected");
+            handler.clone()
+        });
+
+        // Wait for shutdown
+        ct.cancelled().await;
+        info!("SSE server shutdown");
+
+        Ok(())
     }
 }
 
 impl ServerHandler for PatternMcpServer {
     fn get_info(&self) -> ServerInfo {
-        debug!("MCP server get_info called");
+        info!("MCP server get_info called - this is the initial handshake");
         let info = ServerInfo {
             server_info: Implementation {
                 name: "pattern".to_string(),
@@ -187,15 +233,37 @@ impl ServerHandler for PatternMcpServer {
                 "Pattern MCP server for multi-agent ADHD support system with Discord integration"
                     .to_string(),
             ),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         };
         debug!("Returning server info: {:?}", info);
         info
     }
+
+    async fn list_tools(
+        &self,
+        _params: Option<rmcp::model::PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        let tools = self.tool_router.list_all();
+        info!("list_tools called, returning {} tools", tools.len());
+        for tool in &tools {
+            debug!(
+                "  - {}: {}",
+                tool.name,
+                tool.description.as_deref().unwrap_or("")
+            );
+        }
+
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            next_cursor: None,
+        })
+    }
 }
 
 // Tool implementations for agent operations
-#[rmcp::tool_router(router = agent_tool_router)]
+#[rmcp::tool_router]
 impl PatternMcpServer {
     #[rmcp::tool(description = "Send a message to a Letta agent and get a response")]
     async fn chat_with_agent(
@@ -888,6 +956,7 @@ mod tests {
             ),
             #[cfg(feature = "discord")]
             discord_client: None,
+            tool_router: PatternMcpServer::tool_router(),
         };
 
         // Test that missing Discord client returns appropriate error
