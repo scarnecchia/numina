@@ -63,7 +63,7 @@ futures = { version = "0.3", optional = true }
 schemars = "0.8.22"
 
 [features]
-default = []
+default = ["full"]
 # Enable Discord bot functionality
 discord = ["dep:serenity"]
 # Enable MCP server functionality
@@ -91,13 +91,3 @@ full = ["discord", "mcp", "binary", "mcp-sse"]
 name = "pattern"
 path = "src/main.rs"
 required-features = ["binary"]
-
-[[bin]]
-name = "mcp"
-path = "src/bin/mcp.rs"
-required-features = ["mcp", "binary"]
-
-[[bin]]
-name = "discord_bot"
-path = "src/bin/discord_bot.rs"
-required-features = ["discord", "binary"]

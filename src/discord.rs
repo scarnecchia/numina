@@ -104,6 +104,16 @@ impl EventHandler for PatternDiscordBot {
             CreateCommand::new("vibe").description("Check current vibe/state"),
             CreateCommand::new("tasks").description("List current tasks"),
             CreateCommand::new("memory").description("Show shared memory state"),
+            CreateCommand::new("debug_agents")
+                .description("Debug: Log agent chat histories to disk")
+                .add_option(
+                    serenity::all::CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "private",
+                        "Make this response visible only to you (default: true)",
+                    )
+                    .required(false),
+                ),
         ];
 
         for command in commands {
@@ -173,6 +183,7 @@ impl EventHandler for PatternDiscordBot {
                 "vibe" => self.handle_vibe_command(&ctx, &command).await,
                 "tasks" => self.handle_tasks_command(&ctx, &command).await,
                 "memory" => self.handle_memory_command(&ctx, &command).await,
+                "debug_agents" => self.handle_debug_agents_command(&ctx, &command).await,
                 _ => {
                     warn!("Unknown command: {}", command.data.name);
                 }
@@ -450,6 +461,73 @@ impl PatternDiscordBot {
                         &ctx.http,
                         EditInteractionResponse::new()
                             .content("Couldn't retrieve memory state right now."),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn handle_debug_agents_command(&self, ctx: &Context, command: &CommandInteraction) {
+        info!(
+            "Processing debug_agents command from user {}",
+            command.user.name
+        );
+
+        // Get the private option (default true for debug)
+        let is_private = command
+            .data
+            .options
+            .iter()
+            .find(|opt| opt.name == "private")
+            .and_then(|opt| opt.value.as_bool())
+            .unwrap_or(true);
+
+        // Defer response
+        if let Err(why) = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(is_private),
+                ),
+            )
+            .await
+        {
+            error!("Cannot defer response: {:?}", why);
+            return;
+        }
+
+        // Get user ID
+        let user_id = UserId(command.user.id.get() as i64);
+
+        // Log agent histories
+        let state = self.state.read().await;
+        let log_dir = "logs/agent_histories";
+
+        match state
+            .multi_agent_system
+            .log_agent_histories(user_id, log_dir)
+            .await
+        {
+            Ok(_) => {
+                let response = format!(
+                    "✅ Agent histories logged successfully!\n\
+                    📁 Check the `{}` directory for timestamped log files.\n\
+                    📝 Each agent's full conversation history has been saved.",
+                    log_dir
+                );
+
+                let _ = command
+                    .edit_response(&ctx.http, EditInteractionResponse::new().content(&response))
+                    .await;
+            }
+            Err(e) => {
+                error!("Failed to log agent histories: {:?}", e);
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().content(
+                            "❌ Failed to log agent histories. Check server logs for details.",
+                        ),
                     )
                     .await;
             }

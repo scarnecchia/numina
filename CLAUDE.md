@@ -213,6 +213,9 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 ## Current TODOs
 
 ### High Priority
+- [ ] Test the new agent system prompts with actual Letta
+- [ ] Monitor agent behavior for message loops with new coordination rules
+- [ ] Load all system prompts and agent configurations from a config file
 - [ ] Test SSE MCP integration with Letta (now implemented, needs testing)
 - [ ] Implement Pattern as sleeptime agent with 20-30min background checks
 - [ ] Add task CRUD operations to database module
@@ -222,6 +225,8 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - [ ] Implement social memory (birthdays, follow-ups, conversation context)
 
 ### Medium Priority
+- [ ] Add Discord context tools to MCP (channel history, user info)
+- [ ] Consider whether to keep sleeptime memory counterparts for all agents
 - [ ] Add task-related MCP tools
 - [ ] Implement time tracking with ADHD multipliers (Flux agent)
 - [ ] Add energy/attention monitoring (Momentum agent)
@@ -241,6 +246,7 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - [x] Multiple MCP transports (stdio, HTTP, SSE)
 - [x] Comprehensive test suite
 - [x] Documentation refactoring
+- [x] Agent update functionality (instead of delete/recreate for cloud limits)
 
 ## Current Status (2025-01-03)
 
@@ -277,6 +283,8 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - Inter-agent communication rules in all system prompts
 - Prevents infinite loops from tool confirmations
 - cleanup_agents.sh script supports both local and Letta Cloud
+- **NEW**: Added no-emoji rule to system prompts to prevent emoji explosions
+- **NEW**: Both system prompt (unchangeable) and persona (evolvable) blocks configured
 
 **Discord Bot** ✅:
 - Natural language chat with slash commands
@@ -285,6 +293,7 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - Message chunking for long responses
 - Channel name resolution ("Server/channel" format)
 - Fixed ephemeral messages, timeouts, and initialization issues
+- **NEW**: `/debug_agents` command to log agent chat histories to disk for debugging
 
 **MCP Server** ✅:
 - Ten tools: chat_with_agent, get/update_agent_memory, schedule_event, send_message, check_activity_state
@@ -299,6 +308,13 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - Proper tool definitions with `#[rmcp::tool]` attribute
 - Integrated with multi-agent system
 
+**Debug Features** ✅:
+- Agent history logging to disk with `log_agent_histories()` method
+- Logs all message types: user, assistant, system, tool calls, reasoning
+- Accessible via `/debug_agents` Discord command
+- Files saved to `logs/agent_histories/` with timestamps
+- Uses async file I/O to avoid blocking the runtime
+
 **Running Pattern**:
 ```bash
 # Full mode (Discord + MCP + background tasks)
@@ -310,6 +326,81 @@ cargo run --features binary,discord
 # Just MCP
 cargo run --features binary,mcp
 ```
+
+## Partner/Conversant Architecture (2025-01-03)
+
+**Key Distinction**: Pattern uses a partner-centric model to ensure privacy and personalization.
+
+### Terminology
+- **Partner**: The person who owns a constellation of agents and gets ADHD support
+- **Conversant**: Someone interacting with Pattern through the partner's agents (e.g., in Discord)
+
+### Architecture Overview
+```
+Single MCP Server (shared infrastructure)
+    ↓
+Partner 1 Constellation:
+- pattern_1 (orchestrator)
+- entropy_1, flux_1, archive_1, momentum_1, anchor_1
+- Shared memory: partner_1_state, partner_1_context, partner_1_bonds
+- Private content: DMs, personal notes, sensitive context
+
+Partner 2 Constellation:
+- pattern_2 (orchestrator)  
+- entropy_2, flux_2, archive_2, momentum_2, anchor_2
+- Shared memory: partner_2_state, partner_2_context, partner_2_bonds
+- Private content: Isolated from Partner 1
+
+Discord/Platform Context:
+- DM from partner → exclusive access to their constellation
+- Channel message from partner → their constellation + channel context
+- Channel message from conversant → routed through channel owner's constellation
+```
+
+### Privacy & Context Isolation
+1. **Strict Boundaries**: DM content NEVER bleeds into public channels
+2. **Context Loading**: Dynamic memory block swapping based on interaction context
+3. **Partner Registry**: Track constellation ownership and access permissions
+4. **Channel Context**: Public interactions can see channel history but not private memory
+
+### Implementation Strategy
+1. **Agent State Updates**: Use Letta's update APIs instead of delete/recreate (cloud limits)
+   - ✅ Added `update_agent()` method to update system prompts without recreation
+   - ✅ Added `update_all_agents()` to batch update all agents for a user
+   - ✅ Automatic update detection in `create_or_get_agent()`
+2. **Dynamic Memory Loading**: 
+   - Primary blocks: Partner's personal memory (always loaded)
+   - Secondary blocks: Conversant info (loaded for group interactions)
+   - Channel blocks: Shared channel context (public interactions only)
+3. **Routing Logic**:
+   ```rust
+   match message_source {
+       DM(user_id) => load_partner_constellation(user_id),
+       Channel(channel_id, user_id) => {
+           let partner = get_channel_owner(channel_id);
+           let constellation = load_partner_constellation(partner);
+           constellation.add_conversant_context(user_id);
+       }
+   }
+   ```
+
+### Scaling Considerations
+- Each partner gets a full constellation (6 agents)
+- Agents persist between conversations (no constant recreation)
+- Inactive agents can be "hibernated" after timeout
+- Multi-partner MCP server handles routing and context switching
+
+### Future Enhancements
+- **Agent Pooling**: Share specialist agents across partners for better resource usage
+- **Context Inheritance**: Learn from all interactions while maintaining privacy
+- **Cross-Partner Insights**: Anonymous pattern detection across all partners
+- **Conversant Profiles**: Build understanding of frequent conversants
+
+This architecture ensures:
+- Complete privacy for partner's personal context
+- Consistent agent personalities within each constellation
+- Efficient resource usage through shared infrastructure
+- Flexibility for future multi-tenant scenarios
 
 ## Next Steps
 
@@ -360,6 +451,24 @@ cargo run --features binary,mcp
    - Conversation context storage
    - Follow-up suggestions
    - Energy cost tracking for social interactions
+
+## Future Enhancement Ideas
+
+### Debug Agent Logging Improvements
+- **Selective Agent Logging**: Add option to log only specific agents
+- **Discord Channel Upload**: Send logs directly to a debug channel
+- **Date Range Filtering**: Log only messages from last N hours/days
+- **Zip Compression**: Bundle all logs into a downloadable archive
+- **Log Formatting Options**: JSON, CSV, or markdown formats
+- **Message Filtering**: Filter by message type (user/assistant/tool/etc)
+- **Conversation Threading**: Group messages by conversation sessions
+
+### Agent Configuration File
+- Move all system prompts to YAML/TOML configuration
+- Allow hot-reloading of agent personalities
+- Version control for prompt iterations
+- Environment-specific configurations (dev/prod)
+- Agent capability matrices in config
 
 ## References
 

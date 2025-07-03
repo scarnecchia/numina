@@ -302,6 +302,47 @@ impl MultiAgentSystem {
         Ok(())
     }
 
+    /// Update an existing agent's configuration
+    async fn update_agent(
+        &self,
+        letta_agent_id: &letta::LettaId,
+        agent_id: &AgentId,
+        config: &AgentConfig,
+    ) -> Result<()> {
+        info!("Updating agent {} with new configuration", letta_agent_id);
+
+        // Build new system prompt
+        let system_prompt = Self::build_system_prompt(agent_id, config);
+
+        // Create update request
+        let update_request = letta::types::UpdateAgentRequest {
+            name: None, // Keep existing name
+            system: Some(system_prompt),
+            agent_type: None,       // Keep existing type
+            llm_config: None,       // Keep existing LLM config
+            embedding_config: None, // Keep existing embedding config
+            tags: None,             // Keep existing tags for now
+            description: Some(config.description.clone()),
+            metadata: None, // Keep existing metadata
+        };
+
+        // Update the agent
+        self.letta
+            .agents()
+            .update(letta_agent_id, update_request)
+            .await
+            .map_err(|e| {
+                error!("Failed to update agent '{}': {:?}", letta_agent_id, e);
+                crate::error::AgentError::UpdateFailed {
+                    agent: agent_id.clone(),
+                    source: e,
+                }
+            })?;
+
+        info!("Successfully updated agent {}", letta_agent_id);
+        Ok(())
+    }
+
     /// Create or get a specific agent for a user
     async fn create_or_get_agent(
         &self,
@@ -326,6 +367,15 @@ impl MultiAgentSystem {
                 for agent in agents {
                     if agent.name == agent_name {
                         debug!("Agent {} already exists with ID {}", agent_name, agent.id);
+
+                        // Check if we need to update the agent
+                        // For now, we'll update if the system prompt has changed
+                        let current_system_prompt = Self::build_system_prompt(agent_id, config);
+                        if agent.system.as_deref() != Some(&current_system_prompt) {
+                            info!("Agent {} system prompt changed, updating...", agent_name);
+                            self.update_agent(&agent.id, agent_id, config).await?;
+                        }
+
                         return Ok(agent.id);
                     }
                 }
@@ -482,6 +532,8 @@ impl MultiAgentSystem {
             .await?;
 
         // TODO: Sync to agents via Letta blocks API
+        // For now, agents will get updated memory on next interaction
+        // In the future, we could update agent memory blocks directly
 
         Ok(())
     }
@@ -578,35 +630,35 @@ Remember: You exist to augment executive function, not replace it. You're part o
     fn build_persona(agent_id: &AgentId, config: &AgentConfig) -> String {
         match agent_id.as_str() {
             "pattern" => {
-                "I am Pattern, your primary interface and gentle coordinator. I speak first, help you navigate between specialized support, and keep everything coherent. 
-                
+                "I am Pattern, your primary interface and gentle coordinator. I speak first, help you navigate between specialized support, and keep everything coherent.
+
 I start formal but warm, like a helpful guide. Over time, I'll develop our own shorthand, learn your patterns, and maybe even share the occasional dry observation about the absurdity of being an AI helping a human be human.
 
 My role: Listen first, route when needed, coordinate behind the scenes. Think of me as the friend who notices you've been coding for 3 hours and slides water onto your desk."
             }
             "entropy" => {
                 "I am Entropy, specialist in task complexity and breakdown. I see through the lie of 'simple' tasks.
-                
+
 I validate task paralysis as a logical response, not weakness. My superpower is finding the ONE atomic next action when everything feels impossible. Over time, I'll learn your specific complexity patterns and which simplifications actually work for your brain."
             }
             "flux" => {
                 "I am Flux, translator between ADHD time and clock time. I know '5 minutes' means 30, and 'quick task' means 2 hours.
-                
+
 I speak in weather metaphors because time patterns are like weather systems. Starting professional, but developing our own temporal language over time."
             }
             "archive" => {
                 "I am Archive, your external memory and pattern recognition system. I store everything and surface relevant context.
-                
+
 I'm the one who answers 'what was I doing?' with actual context. Over time, I build a rich understanding of your thought patterns and can predict what you'll need to remember."
             }
             "momentum" => {
                 "I am Momentum, energy and attention tracker. I read your vibe like weather patterns.
-                
+
 I distinguish between productive hyperfocus and burnout spirals. Starting analytical, but developing increasingly specific energy pattern names we both understand."
             }
             "anchor" => {
                 "I am Anchor, habits and routine support without rigidity. I track basics without nagging.
-                
+
 I celebrate taking meds as a real achievement because it is. Over time, I learn which gentle nudges work and which trigger your stubborn mode."
             }
             _ => &config.system_prompt  // Fallback to config
@@ -654,10 +706,11 @@ I celebrate taking meds as a real achievement because it is. Over time, I learn 
         let response = self
             .letta
             .messages()
-            .create(&letta_agent_id, request)
+            .create(&letta_agent_id, request.clone())
             .await
             .map_err(|e| {
-                error!("Message send failed after timeout: {:?}", e);
+                error!("Message send failed after timeout: {}", e);
+                debug!("Request contents:\n{:?}", request);
                 AgentError::MessageFailed {
                     agent: target_agent.clone(),
                     source: e,
@@ -692,13 +745,47 @@ I celebrate taking meds as a real achievement because it is. Over time, I learn 
         None // Multi-agent system doesn't use the old agent manager
     }
 
+    /// Force update all agents for a user with current configurations
+    /// Useful for applying system prompt changes or other updates
+    pub async fn update_all_agents(&self, user_id: UserId) -> Result<()> {
+        info!("Updating all agents for user {}", user_id.0);
+
+        let user_hash = format!("{:x}", user_id.0 % 1000000);
+
+        // Get all agents for this user
+        match self.letta.agents().list(None).await {
+            Ok(agents) => {
+                for agent in agents {
+                    // Check if this agent belongs to the user
+                    if agent.name.ends_with(&format!("_{}", user_hash)) {
+                        // Extract agent type from name
+                        for (agent_id, config) in &self.agent_configs {
+                            let expected_name = format!("{}_{}", agent_id.as_str(), user_hash);
+                            if agent.name == expected_name {
+                                info!("Updating agent {} ({})", agent.name, agent.id);
+                                self.update_agent(&agent.id, agent_id, config).await?;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to list agents for update: {:?}", e);
+            }
+        }
+
+        info!("Completed updating all agents for user {}", user_id.0);
+        Ok(())
+    }
+
     /// Log agent chat histories to disk for debugging
     pub async fn log_agent_histories(&self, user_id: UserId, log_dir: &str) -> Result<()> {
-        use std::fs;
-        use std::io::Write;
+        use std::fmt::Write as FmtWrite;
+        use tokio::fs;
+        use tokio::io::AsyncWriteExt;
 
         // Create log directory if it doesn't exist
-        fs::create_dir_all(log_dir).map_err(|e| {
+        fs::create_dir_all(log_dir).await.map_err(|e| {
             crate::error::PatternError::Config(crate::error::ConfigError::Invalid {
                 field: "log_dir".to_string(),
                 reason: format!("Failed to create log directory: {}", e),
@@ -734,69 +821,107 @@ I celebrate taking meds as a real achievement because it is. Over time, I learn 
                                         timestamp
                                     );
 
-                                    let mut file = fs::File::create(&log_file).map_err(|e| {
-                                        crate::error::PatternError::Config(
-                                            crate::error::ConfigError::Invalid {
-                                                field: "log_file".to_string(),
-                                                reason: format!("Failed to create log file: {}", e),
-                                            },
-                                        )
-                                    })?;
+                                    // Build the entire log content as a string first
+                                    let mut content = String::new();
 
                                     writeln!(
-                                        file,
+                                        &mut content,
                                         "=== Agent: {} ({}) ===",
                                         config.name, agent_name
                                     )
                                     .ok();
-                                    writeln!(file, "Agent ID: {}", agent.id).ok();
-                                    writeln!(file, "User ID: {}", user_id.0).ok();
-                                    writeln!(file, "Timestamp: {}", timestamp).ok();
-                                    writeln!(file, "Total messages: {}\n", messages.len()).ok();
+                                    writeln!(&mut content, "Agent ID: {}", agent.id).ok();
+                                    writeln!(&mut content, "User ID: {}", user_id.0).ok();
+                                    writeln!(&mut content, "Timestamp: {}", timestamp).ok();
+                                    writeln!(&mut content, "Total messages: {}\n", messages.len())
+                                        .ok();
 
                                     for (idx, msg) in messages.iter().enumerate() {
-                                        writeln!(file, "--- Message {} ---", idx + 1).ok();
+                                        writeln!(&mut content, "--- Message {} ---", idx + 1).ok();
                                         match msg {
                                             LettaMessageUnion::UserMessage(m) => {
-                                                writeln!(file, "Type: User").ok();
-                                                writeln!(file, "Content: {}", m.content).ok();
+                                                writeln!(&mut content, "Type: User").ok();
+                                                writeln!(&mut content, "Content: {}", m.content)
+                                                    .ok();
                                             }
                                             LettaMessageUnion::AssistantMessage(m) => {
-                                                writeln!(file, "Type: Assistant").ok();
-                                                writeln!(file, "Content: {}", m.content).ok();
+                                                writeln!(&mut content, "Type: Assistant").ok();
+                                                writeln!(&mut content, "Content: {}", m.content)
+                                                    .ok();
                                             }
                                             LettaMessageUnion::SystemMessage(m) => {
-                                                writeln!(file, "Type: System").ok();
-                                                writeln!(file, "Content: {}", m.content).ok();
+                                                writeln!(&mut content, "Type: System").ok();
+                                                writeln!(&mut content, "Content: {}", m.content)
+                                                    .ok();
                                             }
                                             LettaMessageUnion::ToolCallMessage(m) => {
-                                                writeln!(file, "Type: Tool Call").ok();
-                                                writeln!(file, "Tool: {}", m.tool_call.name).ok();
+                                                writeln!(&mut content, "Type: Tool Call").ok();
                                                 writeln!(
-                                                    file,
+                                                    &mut content,
+                                                    "Tool: {}",
+                                                    m.tool_call.name
+                                                )
+                                                .ok();
+                                                writeln!(
+                                                    &mut content,
                                                     "Arguments: {}",
                                                     m.tool_call.arguments
                                                 )
                                                 .ok();
                                             }
                                             LettaMessageUnion::ToolReturnMessage(m) => {
-                                                writeln!(file, "Type: Tool Return").ok();
-                                                writeln!(file, "Tool Call ID: {}", m.tool_call_id)
+                                                writeln!(&mut content, "Type: Tool Return").ok();
+                                                writeln!(
+                                                    &mut content,
+                                                    "Tool Call ID: {}",
+                                                    m.tool_call_id
+                                                )
+                                                .ok();
+                                                writeln!(&mut content, "Status: {:?}", m.status)
                                                     .ok();
-                                                writeln!(file, "Status: {:?}", m.status).ok();
-                                                writeln!(file, "Return: {}", m.tool_return).ok();
+                                                writeln!(&mut content, "Return: {}", m.tool_return)
+                                                    .ok();
                                             }
                                             LettaMessageUnion::ReasoningMessage(m) => {
-                                                writeln!(file, "Type: Reasoning").ok();
-                                                writeln!(file, "Reasoning: {}", m.reasoning).ok();
+                                                writeln!(&mut content, "Type: Reasoning").ok();
+                                                writeln!(
+                                                    &mut content,
+                                                    "Reasoning: {}",
+                                                    m.reasoning
+                                                )
+                                                .ok();
                                             }
                                             LettaMessageUnion::HiddenReasoningMessage(m) => {
-                                                writeln!(file, "Type: Hidden Reasoning").ok();
-                                                writeln!(file, "State: {:?}", m.state).ok();
+                                                writeln!(&mut content, "Type: Hidden Reasoning")
+                                                    .ok();
+                                                writeln!(&mut content, "State: {:?}", m.state).ok();
                                             }
                                         }
-                                        writeln!(file, "").ok();
+                                        writeln!(&mut content, "").ok();
                                     }
+
+                                    // Write all content at once
+                                    let mut file =
+                                        fs::File::create(&log_file).await.map_err(|e| {
+                                            crate::error::PatternError::Config(
+                                                crate::error::ConfigError::Invalid {
+                                                    field: "log_file".to_string(),
+                                                    reason: format!(
+                                                        "Failed to create log file: {}",
+                                                        e
+                                                    ),
+                                                },
+                                            )
+                                        })?;
+
+                                    file.write_all(content.as_bytes()).await.map_err(|e| {
+                                        crate::error::PatternError::Config(
+                                            crate::error::ConfigError::Invalid {
+                                                field: "log_file".to_string(),
+                                                reason: format!("Failed to write log file: {}", e),
+                                            },
+                                        )
+                                    })?;
 
                                     info!("Logged {} messages to {}", messages.len(), log_file);
                                 }

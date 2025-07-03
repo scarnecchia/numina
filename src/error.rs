@@ -117,6 +117,17 @@ pub enum AgentError {
         source: letta::LettaError,
     },
 
+    #[error("Failed to update agent '{agent}'")]
+    #[diagnostic(
+        code(pattern::agent::update_failed),
+        help("Check agent exists and update parameters are valid")
+    )]
+    UpdateFailed {
+        agent: AgentId,
+        #[source]
+        source: letta::LettaError,
+    },
+
     #[error("Failed to send message to agent")]
     #[diagnostic(
         code(pattern::agent::message_failed),
