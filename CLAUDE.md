@@ -282,8 +282,8 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 ### High Priority
 - [x] Add MCP tools for group messaging (send_group_message, list_groups, create_group, delete_group)
 - [x] Unified messaging interface - single send_message tool with routing (2025-01-04)
-- [ ] Test different group manager types (Dynamic, Supervisor, Sleeptime)
-- [ ] Experiment with flexible group configurations
+- [x] Create default groups from architecture (main, crisis, planning, memory) (2025-01-04)
+- [x] Add group selection logic to Discord bot based on message content (2025-01-04)
 - [ ] Build custom tiered sleeptime monitor (rules-based + Pattern intervention)
 - [ ] Implement passive knowledge sharing via Letta sources
 - [ ] Add task CRUD operations to database module
@@ -349,12 +349,15 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
   - Core memory blocks (immediate access)
   - Letta sources (searchable knowledge)
   - Archival memory (deep storage)
-- **NEW**: Native Letta groups for agent coordination:
-  - Overlapping groups for different contexts
-  - Multiple manager types (dynamic, supervisor, sleeptime)
-  - Shared conversation history within groups
+- **Native Letta groups for agent coordination** ✅:
+  - Main group: Dynamic manager for natural conversation (all agents)
+  - Crisis group: Round-robin for quick intervention (Pattern, Momentum, Anchor)
+  - Planning group: Supervisor mode with Entropy leading (Entropy, Flux, Pattern)
+  - Memory group: Sleeptime manager with Archive leading (Pattern, Archive)
+  - Groups created automatically on user initialization (2025-01-04)
 - Background sleeptime via Letta's sleeptime manager
 - Dynamic agent routing in Discord - no hardcoded names
+- **NEW**: Smart group selection based on message content (crisis, planning, memory keywords)
 - Full Letta integration with message routing
 - Pattern is primary conversant/interface, delegates to specialists
 - Database caching eliminates API calls for existing agents

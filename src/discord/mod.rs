@@ -634,6 +634,106 @@ impl PatternDiscordBot {
         let default_agent = valid_agents.first().cloned();
         (default_agent, content.to_string())
     }
+
+    /// Select the appropriate group based on message content
+    /// This implements the group selection logic from our architecture
+    fn select_group_for_message(&self, message: &str) -> String {
+        let message_lower = message.to_lowercase();
+
+        // Crisis detection - look for panic/stress language
+        if self.is_crisis_message(&message_lower) {
+            return "crisis".to_string();
+        }
+
+        // Planning detection - look for planning/organizing keywords
+        if self.is_planning_message(&message_lower) {
+            return "planning".to_string();
+        }
+
+        // Memory/context questions - look for recall/memory keywords
+        if self.is_memory_message(&message_lower) {
+            return "memory".to_string();
+        }
+
+        // Default to main group for general conversation
+        "main".to_string()
+    }
+
+    /// Detect crisis/panic language that needs immediate support
+    fn is_crisis_message(&self, message: &str) -> bool {
+        let crisis_keywords = [
+            "help",
+            "panic",
+            "spiral",
+            "can't",
+            "overwhelming",
+            "freaking out",
+            "emergency",
+            "crisis",
+            "meltdown",
+            "losing it",
+            "falling apart",
+            "can't breathe",
+            "too much",
+            "drowning",
+            "paralyzed",
+            "stuck",
+        ];
+
+        crisis_keywords
+            .iter()
+            .any(|&keyword| message.contains(keyword))
+    }
+
+    /// Detect planning/organization requests
+    fn is_planning_message(&self, message: &str) -> bool {
+        let planning_keywords = [
+            "plan",
+            "organize",
+            "schedule",
+            "prioritize",
+            "break down",
+            "todo",
+            "task",
+            "project",
+            "deadline",
+            "steps",
+            "how do i",
+            "where do i start",
+            "help me figure out",
+            "what should i do",
+            "need to get",
+            "have to finish",
+        ];
+
+        planning_keywords
+            .iter()
+            .any(|&keyword| message.contains(keyword))
+    }
+
+    /// Detect memory/recall questions
+    fn is_memory_message(&self, message: &str) -> bool {
+        let memory_keywords = [
+            "remember",
+            "recall",
+            "forgot",
+            "what was",
+            "what did",
+            "last time",
+            "yesterday",
+            "earlier",
+            "before",
+            "previous",
+            "context",
+            "working on",
+            "talked about",
+            "mentioned",
+        ];
+
+        memory_keywords
+            .iter()
+            .any(|&keyword| message.contains(keyword))
+    }
 }
 
 /// Split a message into chunks that fit Discord's message length limit
