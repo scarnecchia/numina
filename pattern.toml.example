@@ -1,27 +1,54 @@
-# Pattern Configuration Example
+# Pattern Configuration
+# Copy to pattern.toml and customize
+
+# Minimal required configuration:
+# - Discord token (or set DISCORD_TOKEN env var)
+# - That's it! Everything else has sensible defaults.
 
 [database]
 path = "pattern.db"
 
 [discord]
-# Discord bot token - required
-token = "your_discord_bot_token_here"
-# Optional: Discord application ID (usually auto-detected from token)
-# application_id = 1234567890123456789
-# Optional: Limit bot to specific channel
-# channel_id = 123456789012345678
-respond_to_dms = true
-respond_to_mentions = true
+# Bot token - REQUIRED (or use DISCORD_TOKEN env var)
+token = "YOUR_DISCORD_BOT_TOKEN"
+respond_to_dms = true      # Required: respond to direct messages
+respond_to_mentions = true  # Required: respond when mentioned
+# channel_id = 123456      # Optional: limit to specific channel
 
 [letta]
-base_url = "http://localhost:8000"
-# For Letta cloud:
-# api_key = "your_letta_api_key_here"
+# Defaults to local Letta at http://localhost:8000
+# For Letta Cloud, just set api_key:
+# api_key = "YOUR_API_KEY"
 
 [mcp]
-enabled = true
-# Transport options: "stdio", "sse", "http"
-# SSE recommended for Letta compatibility
-transport = "sse"
-# Port for HTTP/SSE transports (default: 8080)
-port = 8081
+# MCP server is optional, disabled by default
+enabled = false
+# transport = "sse"  # Options: stdio, http, sse
+# port = 3000       # For http/sse transports
+
+# Agent configuration (optional)
+# Default agents are compiled into the binary - no config needed!
+# To customize agents:
+# agent_config_path = "/path/to/custom-agents.toml"
+# Or set AGENT_CONFIG_PATH environment variable
+
+# Model capability configuration (optional)
+# These map capability levels to specific models
+[models.default]
+routine = "groq/llama-3.1-8b-instant"         # Fast responses
+interactive = "groq/llama-3.3-70b-versatile"  # Conversations
+investigative = "openai/gpt-4o"               # Analysis
+critical = "anthropic/claude-3-opus-20240229" # Critical tasks
+temperature = 0.7                             # Default temperature for all models
+
+# Per-agent model overrides (optional)
+# [models.agents.pattern]
+# # Pattern might need better models as the orchestrator
+# interactive = "openai/gpt-4o"
+# critical = "anthropic/claude-3-opus-20240229"
+# temperature = 0.5  # Lower temperature for more consistent orchestration
+#
+# [models.agents.entropy]
+# # Entropy does complex task breakdown
+# investigative = "anthropic/claude-3-sonnet-20240229"
+# temperature = 0.8  # Higher temperature for creative problem solving

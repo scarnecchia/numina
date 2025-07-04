@@ -1,5 +1,6 @@
-use crate::{agent::UserId, agents::MultiAgentSystem};
+use crate::{agent::MultiAgentSystem, agent::UserId};
 use miette::{IntoDiagnostic, Result};
+use serde::{Deserialize, Serialize};
 use serenity::{
     all::{
         Command, CreateInteractionResponse, CreateInteractionResponseMessage,
@@ -15,9 +16,20 @@ use serenity::{
     },
     prelude::*,
 };
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+
+/// Discord channel reference
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChannelId(pub u64);
+
+impl fmt::Display for ChannelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Discord bot configuration
 #[derive(Debug, Clone)]
@@ -223,11 +235,55 @@ impl PatternDiscordBot {
             .update_shared_memory(user_id, "active_context", &context)
             .await?;
 
-        // Send to the appropriate agent and get response
-        let response = state
-            .multi_agent_system
-            .send_message_to_agent(user_id, target_agent.as_deref(), &actual_message)
-            .await?;
+        // Send to the appropriate agent or group and get response
+        let response = if let Some(agent) = target_agent {
+            // Specific agent requested - send directly
+            state
+                .multi_agent_system
+                .send_message_to_agent(user_id, Some(&agent), &actual_message)
+                .await?
+        } else {
+            // No specific agent - select appropriate group based on message content
+            let group_name = self.select_group_for_message(&actual_message);
+            info!("Routing message to '{}' group", group_name);
+
+            match state
+                .multi_agent_system
+                .send_message_to_group(user_id, &group_name, &actual_message)
+                .await
+            {
+                Ok(resp) => {
+                    // Extract the best response from the group
+                    // For now, just concatenate all responses
+                    resp.messages
+                        .iter()
+                        .filter_map(|msg| match msg {
+                            letta::types::LettaMessageUnion::SystemMessage(_) => None,
+                            letta::types::LettaMessageUnion::UserMessage(_) => None,
+                            letta::types::LettaMessageUnion::AssistantMessage(m) => {
+                                Some(m.content.clone())
+                            }
+                            letta::types::LettaMessageUnion::ReasoningMessage(_) => None,
+                            letta::types::LettaMessageUnion::HiddenReasoningMessage(_) => None,
+                            letta::types::LettaMessageUnion::ToolCallMessage(_) => None,
+                            letta::types::LettaMessageUnion::ToolReturnMessage(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to send to group, falling back to pattern agent: {}",
+                        e
+                    );
+                    // Fallback to pattern agent
+                    state
+                        .multi_agent_system
+                        .send_message_to_agent(user_id, Some("pattern"), &actual_message)
+                        .await?
+                }
+            }
+        };
 
         Ok(response)
     }

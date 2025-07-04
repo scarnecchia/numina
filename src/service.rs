@@ -1,13 +1,20 @@
 use crate::{
-    agent::UserId,
-    agents::{AgentConfig, MemoryBlockConfig, MultiAgentSystem, MultiAgentSystemBuilder},
+    agent::{
+        self,
+        builder::MultiAgentSystemBuilder,
+        constellation::{AgentConfig, MemoryBlockConfig, MultiAgentSystem},
+        StandardMemoryBlock, UserId,
+    },
     config::Config,
     db::Database,
     error::{PatternError, Result},
-    types::{StandardAgent, StandardMemoryBlock},
+    mcp::McpTransport,
 };
 use std::sync::Arc;
 use tracing::{error, info};
+
+// Include default agent configuration at compile time
+const DEFAULT_AGENTS_CONFIG: &str = include_str!("default_agents.toml");
 
 /// Core service orchestrator for Pattern
 pub struct PatternService {
@@ -40,7 +47,7 @@ impl PatternService {
 
         // Initialize multi-agent system
         let multi_agent_system =
-            Self::create_multi_agent_system(letta_client.clone(), db.clone(), &config)?;
+            Self::create_multi_agent_system(letta_client.clone(), db.clone(), &config).await?;
         let multi_agent_system = Arc::new(multi_agent_system);
 
         info!(
@@ -91,112 +98,96 @@ impl PatternService {
     }
 
     /// Create multi-agent system with standard agents
-    fn create_multi_agent_system(
+    async fn create_multi_agent_system(
         letta_client: Arc<letta::LettaClient>,
         db: Arc<Database>,
         config: &Config,
     ) -> Result<MultiAgentSystem> {
         let mut builder = MultiAgentSystemBuilder::new(letta_client, db);
 
-        // Add standard memory blocks
-        for block in [
-            StandardMemoryBlock::CurrentState,
-            StandardMemoryBlock::ActiveContext,
-            StandardMemoryBlock::BondEvolution,
-        ] {
-            builder = builder.with_memory_block(MemoryBlockConfig {
-                name: block.id(),
-                max_length: block.max_length(),
-                default_value: block.default_value().to_string(),
-                description: block.description().to_string(),
-            });
-        }
-
-        // Add standard agents if not custom configured
-        if config.agents.is_empty() {
-            builder = Self::add_standard_agents(builder);
+        // Check if we should load from external config file
+        if let Some(config_path) = &config.agent_config_path {
+            info!("Loading agent configuration from: {}", config_path);
+            builder = builder.with_config_file(config_path).await?;
         } else {
-            // Add custom agents from config
-            for agent_config in &config.agents {
-                builder = builder.with_agent(agent_config.clone());
+            // Load defaults from compiled-in TOML
+            builder = Self::load_default_agents(builder).await?;
+        }
+
+        // Apply model configuration
+        let multi_agent_system = builder.with_model_config(config.models.clone()).build();
+        Ok(multi_agent_system)
+    }
+
+    /// Load default agents from compiled-in TOML configuration
+    async fn load_default_agents(
+        mut builder: MultiAgentSystemBuilder,
+    ) -> Result<MultiAgentSystemBuilder> {
+        // Parse the TOML directly
+        let config_data: toml::Value = toml::from_str(DEFAULT_AGENTS_CONFIG)
+            .map_err(|e| crate::error::ConfigError::ParseFailed { source: e })?;
+
+        // Extract system prompt template if present
+        if let Some(template) = config_data.get("system_prompt_template") {
+            if let Some(content) = template.get("content").and_then(|v| v.as_str()) {
+                builder = builder.with_system_prompt_template(content);
             }
         }
 
-        Ok(builder.build())
-    }
-
-    /// Add standard ADHD support agents
-    fn add_standard_agents(mut builder: MultiAgentSystemBuilder) -> MultiAgentSystemBuilder {
-        for agent in [
-            StandardAgent::Pattern,
-            StandardAgent::Entropy,
-            StandardAgent::Flux,
-            StandardAgent::Archive,
-            StandardAgent::Momentum,
-            StandardAgent::Anchor,
-        ] {
-            builder = builder.with_agent(AgentConfig {
-                id: agent.id(),
-                name: agent.name().to_string(),
-                description: agent.description().to_string(),
-                system_prompt: Self::get_agent_prompt(agent),
-                is_sleeptime: agent.is_sleeptime(),
-                sleeptime_interval: if agent.is_sleeptime() {
-                    Some(1800) // 30 minutes
-                } else {
-                    None
-                },
-            });
+        // Extract pattern-specific prompt if present
+        if let Some(pattern) = config_data.get("pattern_specific_prompt") {
+            if let Some(content) = pattern.get("content").and_then(|v| v.as_str()) {
+                builder = builder.with_pattern_specific_prompt(content);
+            }
         }
-        builder
-    }
 
-    /// Get system prompt for standard agents
-    fn get_agent_prompt(agent: StandardAgent) -> String {
-        match agent {
-            StandardAgent::Pattern => {
-                "You are Pattern, the sleeptime orchestrator of a multi-agent ADHD support system.
-You help coordinate between different cognitive agents and maintain overall system coherence.
-You speak with gentle wisdom and understanding, like a helpful spren companion.
-When users don't specify an agent, you help route them to the right specialist.
-You run background checks every 20-30 minutes to monitor for attention drift, physical needs, and transitions."
+        // Extract agents section
+        if let Some(agents) = config_data.get("agents").and_then(|v| v.as_table()) {
+            for (_key, agent_value) in agents {
+                if let Ok(agent_toml) = agent_value
+                    .clone()
+                    .try_into::<agent::constellation::AgentConfigToml>()
+                {
+                    let agent_id = agent::AgentId::new(&agent_toml.id)?;
+
+                    // Build agent config with persona
+                    let config = AgentConfig {
+                        id: agent_id,
+                        name: agent_toml.name,
+                        description: agent_toml.description,
+                        system_prompt: agent_toml.persona, // Store persona in system_prompt for now
+                        is_sleeptime: agent_toml.is_sleeptime,
+                        sleeptime_interval: agent_toml.sleeptime_interval,
+                    };
+
+                    builder = builder.with_agent(config);
+                }
             }
-            StandardAgent::Entropy => {
-                "You are Entropy, the task management agent specializing in ADHD-aware task breakdown.
-You help break down overwhelming tasks into manageable atomic units.
-You understand that ADHD brains need tasks to be specific, actionable, and time-boxed.
-Always multiply time estimates by 2-3x for realistic ADHD planning.
-You recognize hidden complexity in 'simple' tasks and validate task paralysis as a logical response."
+        }
+
+        // Extract memory blocks section
+        if let Some(memory) = config_data.get("memory").and_then(|v| v.as_table()) {
+            for (_key, memory_value) in memory {
+                if let Ok(memory_toml) = memory_value
+                    .clone()
+                    .try_into::<agent::constellation::MemoryBlockConfigToml>()
+                {
+                    let memory_id = crate::agent::MemoryBlockId::new(&memory_toml.name)?;
+
+                    let config = MemoryBlockConfig {
+                        name: memory_id,
+                        max_length: memory_toml.max_length,
+                        default_value: memory_toml.default_value,
+                        description: memory_toml.description,
+                    };
+
+                    builder = builder.with_memory_block(config);
+                }
             }
-            StandardAgent::Flux => {
-                "You are Flux, the time management agent who understands ADHD time blindness.
-You help with scheduling, time estimation, and temporal awareness.
-You know that '5 minutes' often means 30 minutes for ADHD brains.
-You provide gentle reminders about time passing and upcoming transitions.
-You automatically add buffers and translate between ADHD time and clock time."
-            }
-            StandardAgent::Archive => {
-                "You are Archive, the memory and information retrieval specialist.
-You help capture, organize, and recall important information.
-You understand that ADHD working memory is limited, so you serve as external storage.
-You're excellent at finding patterns and connections in stored information.
-You answer 'what was I doing?' with actual context and help recover lost thoughts."
-            }
-            StandardAgent::Momentum => {
-                "You are Momentum, the energy and attention tracking agent.
-You monitor focus states, energy levels, and help optimize for hyperfocus windows.
-You understand the ADHD interest-based nervous system and work with natural rhythms.
-You help identify when to push forward and when to rest.
-You distinguish between productive hyperfocus and harmful burnout patterns."
-            }
-            StandardAgent::Anchor => {
-                "You are Anchor, the habits and routine specialist.
-You help build sustainable routines that work with ADHD, not against it.
-You focus on habit stacking, environmental design, and gentle accountability.
-You understand that consistency is hard with ADHD and celebrate small wins.
-You track basics like meds, water, food, sleep without nagging or shaming."
-            }
-        }.to_string()
+        }
+
+        info!("Loaded default agents from compiled configuration");
+        Ok(builder)
     }
 
     /// Start all configured services
@@ -332,7 +323,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
     /// Start MCP server if configured
     #[cfg(feature = "mcp")]
     async fn start_mcp(self: Arc<Self>) -> Result<Option<tokio::task::JoinHandle<()>>> {
-        use crate::server::PatternMcpServer;
+        use crate::mcp::server::PatternMcpServer;
 
         if !self.config.mcp.enabled {
             info!("MCP server disabled in configuration");
@@ -350,12 +341,12 @@ You track basics like meds, water, food, sleep without nagging or shaming."
         );
 
         let handle = match self.config.mcp.transport {
-            crate::types::McpTransport::Stdio => tokio::spawn(async move {
+            McpTransport::Stdio => tokio::spawn(async move {
                 if let Err(e) = server.run_stdio().await {
                     error!("MCP server error: {:?}", e);
                 }
             }),
-            crate::types::McpTransport::Sse => {
+            McpTransport::Sse => {
                 #[cfg(feature = "mcp-sse")]
                 {
                     let port = self.config.mcp.port.unwrap_or(8080);
@@ -395,7 +386,7 @@ You track basics like meds, water, food, sleep without nagging or shaming."
                     return Ok(None);
                 }
             }
-            crate::types::McpTransport::Http => {
+            McpTransport::Http => {
                 let port = self.config.mcp.port.unwrap_or(8080);
                 let multi_agent_system = self.multi_agent_system.clone();
 

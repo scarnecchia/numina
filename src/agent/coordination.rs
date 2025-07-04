@@ -1,4 +1,4 @@
-use crate::{agent::UserId, agents::MultiAgentSystem, types::AgentId};
+use crate::agent::{constellation::MultiAgentSystem, AgentId, UserId};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -104,6 +104,7 @@ impl TaggedMessage {
 }
 
 /// Agent coordination utilities
+#[derive(Debug)]
 pub struct AgentCoordinator {
     system: Arc<MultiAgentSystem>,
 }
@@ -190,7 +191,7 @@ impl AgentCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::StandardAgent;
+    use crate::agent::StandardAgent;
 
     #[test]
     fn test_message_tagging() {

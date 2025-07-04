@@ -178,6 +178,21 @@ async fn handle_analysis_command(
 }
 ```
 
+## Agent Messaging Loops (Fixed 2025-01-04)
+
+### The Name Prefix Bug
+Agents would get stuck in infinite loops when asked to prefix their messages with their names:
+- Agent would output: `*Flux:* *Flux:* *Flux:*` indefinitely
+- Caused JSON parsing errors and message timeouts
+- Root cause: Tool name conflicts and missing terminal rules
+
+### Solution
+- Removed generic `send_message` MCP tool that conflicted with Letta defaults
+- Updated agent configurations to exclude conflicting tools
+- Added proper terminal rules to Discord messaging tools
+
+See [AGENT_LOOPS.md](./AGENT_LOOPS.md) for detailed information.
+
 ## Critical Issue: letta/letta-free Model Timeouts
 
 **IMPORTANT**: The default `letta/letta-free` model has severe timeout issues that prevent agents from responding. Messages will timeout and never reach the agent.

@@ -94,9 +94,12 @@ transport = "stdio"
 
 ### Background Tasks
 
-- **Sleeptime Orchestrator**: Pattern agent runs checks every 20-30 minutes
-- **State Tracking**: Updates shared memory with system state
+- **Cost-Optimized Monitoring**: Two-tier system with lightweight checks + AI intervention
+- **Flexible Group Coordination**: Use Letta groups for different contexts
+- **Memory Management**: Three-tier hierarchy (core blocks, sources, archival)
 - **Future**: Task scheduling, energy monitoring, habit tracking
+
+See [Memory and Groups Architecture](../architecture/MEMORY_AND_GROUPS.md) for details.
 
 ### Discord Features
 

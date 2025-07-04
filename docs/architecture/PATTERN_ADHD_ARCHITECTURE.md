@@ -13,12 +13,17 @@ Pattern (Sleeptime Orchestrator)
 └── Anchor (Habits/Structure Agent)
 ```
 
+
 ## Core Features
-- **Sleeptime Orchestration**: Pattern runs background checks every 20-30 minutes for attention drift, physical needs, transitions
-- **Shared Memory Blocks**: All agents access common state (current_state, active_context, bond_evolution)
+- **Native Letta Groups**: Flexible agent coordination with overlapping groups
+- **Three-Tier Memory**: Core blocks (immediate), Letta sources (searchable), archival (deep storage)
+- **Cost-Optimized Sleeptime**: Two-tier monitoring with rules-based checks + AI intervention
+- **Passive Knowledge Sharing**: Agents write insights to embedded documents for semantic search
 - **ADHD-Specific Design**: Time blindness compensation, task breakdown, energy tracking, interruption awareness
 - **Evolving Relationship**: Agents develop understanding of user patterns over time
 - **MCP Server Interface**: Exposes agent capabilities through Model Context Protocol
+
+For detailed architecture, see [Memory and Groups Architecture](./MEMORY_AND_GROUPS.md).
 
 ## ADHD-Specific Design Principles
 
@@ -46,7 +51,35 @@ Agents evolve from professional assistant to trusted cognitive partner:
 - **Trusted**: Inside jokes, gentle ribbing, shared language
 - **Deep**: Finishing thoughts about user's patterns
 
-## Multi-Agent Shared Memory Architecture
+## Multi-Agent Architecture
+
+Pattern uses Letta's native groups API for flexible agent coordination:
+
+### Flexible Group Patterns
+Groups are created dynamically based on needs:
+- Different manager types (dynamic, supervisor, round-robin, sleeptime)
+- Overlapping membership - same agents in multiple groups
+- Context-specific coordination styles
+- Experiment and evolve group configurations
+
+### Memory Hierarchy
+1. **Core Memory Blocks** (Always in context):
+   - `current_state`: Real-time status
+   - `active_context`: Recent important events
+   - `bond_evolution`: Relationship dynamics
+
+2. **Letta Sources** (Searchable knowledge):
+   - Agent observations and insights
+   - Pattern detection across time
+   - Accumulated wisdom
+
+3. **Archival Memory** (Deep storage):
+   - Full conversation history
+   - Important flagged moments
+
+See [Memory and Groups Architecture](./MEMORY_AND_GROUPS.md) for implementation details.
+
+## Legacy: Multi-Agent Shared Memory Architecture
 
 ### Shared Memory Blocks
 

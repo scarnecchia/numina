@@ -15,13 +15,14 @@ Pattern implements a constellation of AI agents that work together to support co
 
 ## Features
 
-- **Multi-Agent Architecture**: Configurable agents with specialized roles and shared memory
+- **Multi-Agent Architecture**: Native Letta groups API for flexible coordination
+- **Three-Tier Memory**: Core blocks, searchable sources, and archival storage
 - **Discord Integration**: Natural language interface through Discord bot
 - **MCP Server**: Expose agent capabilities via Model Context Protocol
-- **HTTP Transport**: Persistent MCP connections for Letta integration
-- **Background Tasks**: Sleeptime orchestrator for proactive support
+- **Cost-Optimized Sleeptime**: Two-tier monitoring (rules-based + AI intervention)
+- **Flexible Group Patterns**: Create any coordination style you need
 - **Task Management**: ADHD-aware task breakdown with time multiplication
-- **Flexible Framework**: Build your own agent configurations
+- **Passive Knowledge Sharing**: Agents share insights via embedded documents
 
 ## Quick Start
 
@@ -32,22 +33,39 @@ Pattern implements a constellation of AI agents that work together to support co
 - Letta server running locally or Letta cloud API key
 - Discord bot token (optional, for Discord integration)
 
-### Basic Setup
+### Installation
 
 ```bash
-# Clone and build
+# Clone the repository
 git clone [repository]
 cd pattern
-cargo build --release
 
-# Set up environment
-cp .env.example .env
-# Edit .env with your configuration
-
-# Run Pattern with all features
+# Quick start - only Discord token required!
+export DISCORD_TOKEN=your_bot_token_here
 cargo run --features full
+```
 
-# Or run specific components
+That's it! Pattern will use sensible defaults for everything else.
+
+### Configuration Options
+
+```bash
+# Option 1: Environment variable (simplest)
+export DISCORD_TOKEN=your_bot_token_here
+
+# Option 2: Config file
+cp pattern.toml.example pattern.toml
+# Edit pattern.toml to add your Discord token
+
+# Option 3: .env file
+cp .env.example .env
+# Edit .env to add your Discord token
+```
+
+### Running Components
+
+```bash
+cargo run --features full             # All components (recommended)
 cargo run --features binary,discord  # Just Discord bot
 cargo run --features binary,mcp      # Just MCP server
 ```
@@ -58,6 +76,7 @@ All documentation is organized in the `docs/` directory:
 
 - **[Documentation Index](docs/README.md)** - Start here for comprehensive guides
 - **[Architecture](docs/architecture/)** - System design and agent details
+  - **[Memory & Groups](docs/architecture/MEMORY_AND_GROUPS.md)** - Memory hierarchy and Letta groups
 - **[Setup Guides](docs/guides/)** - Discord, MCP, and usage instructions
 - **[Testing Guide](docs/guides/TESTING.md)** - How to test Pattern
 - **[Development](CLAUDE.md)** - Development guide, TODOs, and progress
@@ -174,6 +193,12 @@ cargo test --lib -- agents::
 - Meaningful sleeptime background checks
 - Task CRUD operations
 - Shared agent tools implementation
+
+### Recently Completed
+- Fixed agent infinite loop when prefixing messages with names
+- Removed MCP tool conflicts with Letta's default tools
+- Implemented database caching for agent IDs (multi-agent support)
+- Optimized agent initialization performance
 
 ### Planned
 - Contract/client tracking for freelancers

@@ -1,20 +1,14 @@
 pub mod agent;
-pub mod agents;
 pub mod config;
-pub mod coordination;
 pub mod db;
 pub mod error;
 pub mod service;
-pub mod types;
 
 #[cfg(feature = "discord")]
 pub mod discord;
 
 #[cfg(feature = "mcp")]
-pub mod server;
-
-#[cfg(feature = "mcp")]
-pub mod mcp_tools;
+pub mod mcp;
 use miette::Result;
 use std::sync::Arc;
 
@@ -23,8 +17,8 @@ use std::sync::Arc;
 pub struct PatternService {
     db: Arc<db::Database>,
     letta_client: Option<Arc<letta::LettaClient>>,
-    agent_manager: Option<Arc<agent::AgentManager>>,
-    multi_agent_system: Option<Arc<agents::MultiAgentSystem>>,
+    agent_manager: Option<Arc<agent::coordination::AgentCoordinator>>,
+    multi_agent_system: Option<Arc<agent::constellation::MultiAgentSystem>>,
 }
 
 impl PatternService {
@@ -54,17 +48,16 @@ impl PatternService {
     /// Set the Letta client for agent operations
     pub fn with_letta_client(mut self, client: letta::LettaClient) -> Self {
         let letta_client = Arc::new(client);
-        let agent_manager = Arc::new(agent::AgentManager::new(
+        let multi_agent_system = Arc::new(agent::constellation::MultiAgentSystem::new(
             Arc::clone(&letta_client),
             Arc::clone(&self.db),
         ));
-        let multi_agent_system = Arc::new(agents::MultiAgentSystem::new(
-            Arc::clone(&letta_client),
-            Arc::clone(&self.db),
-        ));
+        let agent_coordinator = Arc::new(agent::coordination::AgentCoordinator::new(Arc::clone(
+            &multi_agent_system,
+        )));
 
         self.letta_client = Some(letta_client);
-        self.agent_manager = Some(agent_manager);
+        self.agent_manager = Some(agent_coordinator);
         self.multi_agent_system = Some(multi_agent_system);
         self
     }
@@ -79,20 +72,21 @@ impl PatternService {
         self.letta_client.as_ref().map(|c| c.as_ref())
     }
 
-    /// Get a reference to the agent manager if available
-    pub fn agent_manager(&self) -> Option<&agent::AgentManager> {
+    /// Get a reference to the agent coordinator if available
+    pub fn agent_coordinator(&self) -> Option<&agent::coordination::AgentCoordinator> {
         self.agent_manager.as_ref().map(|m| m.as_ref())
     }
 
     /// Get a reference to the multi-agent system if available
-    pub fn multi_agent_system(&self) -> Option<&agents::MultiAgentSystem> {
+    pub fn multi_agent_system(&self) -> Option<&agent::MultiAgentSystem> {
         self.multi_agent_system.as_ref().map(|m| m.as_ref())
     }
 }
 
 // Re-export commonly used types
-pub use agent::{AgentInstance, AgentManager, UserId};
-pub use agents::{AgentConfig, MemoryBlockConfig, MultiAgentSystem, MultiAgentSystemBuilder};
+pub use agent::builder::MultiAgentSystemBuilder;
+pub use agent::constellation::{AgentConfig, MemoryBlockConfig, MultiAgentSystem};
+pub use agent::UserId;
 pub use db::{Agent, Database, Event, SharedMemory, Task, User};
 
 #[cfg(test)]

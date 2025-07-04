@@ -9,6 +9,10 @@ license = "AGPL-3.0"
 default-run = "pattern"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+name = "pattern"
+path = "src/lib.rs"
+
 [dependencies]
 # Core dependencies
 dotenv = "0.15"

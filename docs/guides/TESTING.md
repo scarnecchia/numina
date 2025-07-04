@@ -175,6 +175,7 @@ cargo test --features full
 ### Specific Module Tests
 ```bash
 cargo test --lib -- db::
-cargo test --lib -- agents::
-cargo test --lib -- server::
+cargo test --lib -- agent::
+cargo test --lib -- mcp::
+cargo test --lib -- discord::
 ```

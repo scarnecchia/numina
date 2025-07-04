@@ -2,6 +2,8 @@
 
 This guide documents the challenges with multi-agent coordination in Pattern and our solutions.
 
+**Note**: Many coordination challenges are solved by using Letta's native groups API. See [Memory and Groups Architecture](../architecture/MEMORY_AND_GROUPS.md) for the recommended approach.
+
 ## The Problem
 
 Pattern uses Letta's multi-agent system where agents can communicate via the `send_message_to_agent` tool. However, this creates several critical issues:
@@ -49,25 +51,46 @@ The broadcast tool uses agent tags for filtering, which we should leverage.
 
 ## Solutions Implemented
 
-### 1. Agent Tagging Strategy
+### 1. Use Letta Groups API (Recommended)
 
-We can use Letta's agent tagging system to control message routing:
+The best solution is to use Letta's native groups API instead of broadcast messages:
 
-```python
-# Agent creation with tags
-CreateAgentRequest.builder()
-    .name("pattern_12345")
-    .tags(["orchestrator", "sleeptime", "user_12345"])
-    
-CreateAgentRequest.builder()
-    .name("entropy_12345")
-    .tags(["specialist", "tasks", "user_12345"])
+```rust
+// Create a group for coordinated responses
+let group = client.groups().create(GroupCreate {
+    agent_ids: vec![pattern_id, entropy_id, flux_id],
+    manager_config: Some(GroupCreateManagerConfig::Dynamic(DynamicManager {
+        manager_agent_id: pattern_id,
+        termination_token: None,
+        max_turns: None,
+    })),
+    shared_block_ids: Some(vec![shared_memory_id]),
+}).await?;
+
+// Send message to group - agents coordinate naturally
+client.groups().send_message(&group.id, vec![MessageCreate::user("...")]).await?;
 ```
 
-This enables:
-- Broadcast to all user agents: `send_message_to_agents_matching_all_tags(["user_12345"])`
-- Broadcast to specialists only: `send_message_to_agents_matching_all_tags(["specialist", "user_12345"])`
-- Skip sleeptime agents: exclude those with "sleeptime" tag
+Benefits:
+- Shared conversation history
+- No broadcast loops
+- Built-in coordination patterns
+- Flexible manager types
+
+### 2. Agent Tagging Strategy (Legacy)
+
+If using individual agents, leverage Letta's tagging:
+
+```rust
+// Agent creation with tags
+CreateAgentRequest::builder()
+    .name("pattern_12345")
+    .tags(vec!["orchestrator", "sleeptime", "user_12345"])
+    
+CreateAgentRequest::builder()
+    .name("entropy_12345")
+    .tags(vec!["specialist", "tasks", "user_12345"])
+```
 
 ### 2. Prompt Engineering (Immediate Fix)
 

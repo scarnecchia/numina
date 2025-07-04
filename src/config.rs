@@ -1,10 +1,10 @@
 use crate::{
-    agents::AgentConfig,
+    agent::constellation::AgentConfig,
     error::{ConfigError, Result},
-    types::McpTransport,
+    mcp::McpTransport,
 };
 use serde::{Deserialize, Serialize};
-use std::{env, path::Path};
+use std::{collections::HashMap, env, path::Path};
 
 /// Main configuration for Pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +20,12 @@ pub struct Config {
     /// Agent configurations (optional, uses defaults if empty)
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+    /// Path to external agent configuration file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_config_path: Option<String>,
+    /// Model capability mappings
+    #[serde(default)]
+    pub models: ModelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +66,53 @@ pub struct McpConfig {
     pub port: Option<u16>,
 }
 
+/// Model capability configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Default model mappings for each capability level
+    #[serde(default)]
+    pub default: CapabilityModels,
+    /// Per-agent model overrides (agent_id -> capability mappings)
+    #[serde(default)]
+    pub agents: HashMap<String, CapabilityModels>,
+}
+
+/// Model mappings for each capability level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityModels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub investigative: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critical: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            default: CapabilityModels::default(),
+            agents: HashMap::new(),
+        }
+    }
+}
+
+impl Default for CapabilityModels {
+    fn default() -> Self {
+        Self {
+            routine: Some("groq/llama-3.1-8b-instant".to_string()),
+            interactive: Some("groq/llama-3.3-70b-versatile".to_string()),
+            investigative: Some("openai/gpt-4o".to_string()),
+            critical: Some("anthropic/claude-3-opus-20240229".to_string()),
+            temperature: Some(0.7),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -78,11 +131,13 @@ impl Default for Config {
                 api_key: None,
             },
             mcp: McpConfig {
-                enabled: false,
+                enabled: false, // Disabled by default for simplicity
                 transport: McpTransport::Stdio,
                 port: None,
             },
             agents: Vec::new(),
+            agent_config_path: None,
+            models: ModelConfig::default(),
         }
     }
 }
@@ -178,6 +233,14 @@ impl Config {
             }
         }
 
+        // Agent config path
+        if let Ok(path) = env::var("AGENT_CONFIG_PATH") {
+            config.agent_config_path = Some(path);
+        }
+
+        // Model configs are loaded from file only, not env vars
+        config.models = ModelConfig::default();
+
         config
     }
 
@@ -224,6 +287,11 @@ impl Config {
             if let Ok(p) = port.parse() {
                 self.mcp.port = Some(p);
             }
+        }
+
+        // Agent config path
+        if let Ok(path) = env::var("AGENT_CONFIG_PATH") {
+            self.agent_config_path = Some(path);
         }
 
         self

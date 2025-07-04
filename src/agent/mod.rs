@@ -1,6 +1,18 @@
+//! Agent-related types and functionality
+
+use crate::error::ValidationError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+// Re-export submodules
+pub mod builder;
+pub mod constellation;
+pub mod coordination;
+pub mod human;
+
+// Re-export commonly used types
+pub use constellation::MultiAgentSystem;
+pub use human::UserId;
 
 /// Agent identifier type with proper validation
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -74,58 +86,6 @@ impl fmt::Display for MemoryBlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
-}
-
-/// MCP transport type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpTransport {
-    Stdio,
-    Sse,
-    #[serde(rename = "http")]
-    Http,
-}
-
-impl fmt::Display for McpTransport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            McpTransport::Stdio => write!(f, "stdio"),
-            McpTransport::Sse => write!(f, "sse"),
-            McpTransport::Http => write!(f, "http"),
-        }
-    }
-}
-
-impl FromStr for McpTransport {
-    type Err = ValidationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "stdio" => Ok(McpTransport::Stdio),
-            "sse" => Ok(McpTransport::Sse),
-            "http" => Ok(McpTransport::Http),
-            _ => Err(ValidationError::InvalidTransport(s.to_string())),
-        }
-    }
-}
-
-/// Validation errors for types
-#[derive(Debug, thiserror::Error)]
-pub enum ValidationError {
-    #[error("Agent ID cannot be empty")]
-    EmptyAgentId,
-
-    #[error("Invalid agent ID format: {0}")]
-    InvalidAgentId(String),
-
-    #[error("Memory block ID cannot be empty")]
-    EmptyMemoryBlockId,
-
-    #[error("Invalid memory block ID format: {0}")]
-    InvalidMemoryBlockId(String),
-
-    #[error("Unknown MCP transport: {0}")]
-    InvalidTransport(String),
 }
 
 /// Standard memory blocks used by all agents
@@ -232,78 +192,52 @@ impl fmt::Display for StandardAgent {
     }
 }
 
-/// Discord channel reference
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ChannelId(pub u64);
-
-impl fmt::Display for ChannelId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
+/// Model capability levels that agents can request
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    /// Everyday tasks, quick checks, simple queries
+    Routine,
+    /// Normal conversations, standard dialogue
+    Interactive,
+    /// Research, debugging, analysis, problem solving
+    Investigative,
+    /// High-stakes decisions, complex planning, critical tasks
+    Critical,
 }
 
-/// Task priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskPriority {
-    Low,
-    Medium,
-    High,
-    Urgent,
-}
-
-impl TaskPriority {
-    pub fn as_str(&self) -> &'static str {
+impl ModelCapability {
+    pub fn description(&self) -> &'static str {
         match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Urgent => "urgent",
+            Self::Routine => "Everyday tasks, quick checks, simple queries",
+            Self::Interactive => "Normal conversations, standard dialogue",
+            Self::Investigative => "Research, debugging, analysis, problem solving",
+            Self::Critical => "High-stakes decisions, complex planning, critical tasks",
         }
     }
 }
 
-impl FromStr for TaskPriority {
+impl fmt::Display for ModelCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ModelCapability::Routine => write!(f, "routine"),
+            ModelCapability::Interactive => write!(f, "interactive"),
+            ModelCapability::Investigative => write!(f, "investigative"),
+            ModelCapability::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+impl FromStr for ModelCapability {
     type Err = ValidationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "urgent" => Ok(Self::Urgent),
-            _ => Ok(Self::Medium), // Default to medium
-        }
-    }
-}
-
-/// Task status
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in_progress",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "pending" => Self::Pending,
-            "in_progress" => Self::InProgress,
-            "completed" => Self::Completed,
-            "cancelled" => Self::Cancelled,
-            _ => Self::Pending, // Default
+            "routine" => Ok(ModelCapability::Routine),
+            "interactive" => Ok(ModelCapability::Interactive),
+            "investigative" => Ok(ModelCapability::Investigative),
+            "critical" => Ok(ModelCapability::Critical),
+            _ => Err(ValidationError::InvalidModelCapability(s.to_string())),
         }
     }
 }
@@ -361,21 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_transport_parsing() {
-        assert_eq!(
-            McpTransport::from_str("stdio").unwrap(),
-            McpTransport::Stdio
-        );
-        assert_eq!(McpTransport::from_str("SSE").unwrap(), McpTransport::Sse);
-        assert_eq!(McpTransport::from_str("HTTP").unwrap(), McpTransport::Http);
-
-        assert!(matches!(
-            McpTransport::from_str("websocket"),
-            Err(ValidationError::InvalidTransport(_))
-        ));
-    }
-
-    #[test]
     fn test_standard_memory_blocks() {
         let current = StandardMemoryBlock::CurrentState;
         assert_eq!(current.max_length(), 200);
@@ -417,18 +336,19 @@ mod tests {
     }
 
     #[test]
-    fn test_task_priority() {
-        assert_eq!(TaskPriority::from_str("high").unwrap(), TaskPriority::High);
+    fn test_model_capability() {
         assert_eq!(
-            TaskPriority::from_str("URGENT").unwrap(),
-            TaskPriority::Urgent
+            ModelCapability::from_str("routine").unwrap(),
+            ModelCapability::Routine
         );
         assert_eq!(
-            TaskPriority::from_str("invalid").unwrap(),
-            TaskPriority::Medium
-        ); // default
-
-        assert_eq!(TaskPriority::Low.as_str(), "low");
+            ModelCapability::from_str("CRITICAL").unwrap(),
+            ModelCapability::Critical
+        );
+        assert!(matches!(
+            ModelCapability::from_str("invalid"),
+            Err(ValidationError::InvalidModelCapability(_))
+        ));
     }
 
     #[test]
@@ -441,14 +361,9 @@ mod tests {
         let deserialized: AgentId = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, agent_id);
 
-        // Test McpTransport serialization
-        let transport = McpTransport::Sse;
-        let json = serde_json::to_string(&transport).unwrap();
-        assert_eq!(json, "\"sse\"");
-
-        // Test TaskStatus serialization
-        let status = TaskStatus::InProgress;
-        let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, "\"in_progress\"");
+        // Test ModelCapability serialization
+        let capability = ModelCapability::Interactive;
+        let json = serde_json::to_string(&capability).unwrap();
+        assert_eq!(json, "\"interactive\"");
     }
 }

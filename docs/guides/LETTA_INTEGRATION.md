@@ -7,31 +7,33 @@ This document covers Pattern's integration with Letta for multi-agent functional
 Pattern provides stateful agent management with caching:
 
 ```rust
-// src/agent.rs - ACTUAL IMPLEMENTATION
-pub struct AgentManager {
+// src/agent/constellation.rs - ACTUAL IMPLEMENTATION
+pub struct MultiAgentSystem {
     letta: Arc<LettaClient>,
-    db: Arc<db::Database>,
-    cache: Arc<RwLock<HashMap<UserId, AgentInstance>>>,
+    db: Arc<Database>,
+    config: AgentConfigs,
+    model_config: ModelConfig,
 }
 
-impl AgentManager {
-    pub async fn get_or_create_agent(&self, user_id: UserId) -> Result<AgentInstance> {
-        // Check cache first, then DB, then create new
+impl MultiAgentSystem {
+    pub async fn create_or_get_agent(&self, user_id: UserId, agent_id: AgentId) -> Result<Agent> {
+        // Check DB cache first, then create if needed
+        let config = self.get_agent_config(agent_id)?;
         let request = CreateAgentRequest::builder()
             .name(&agent_name)
-            .memory_block(Block::persona("You are a helpful assistant..."))
+            .memory_block(Block::system(&config.system_prompt))
+            .memory_block(Block::persona(&config.persona))
             .memory_block(Block::human(&format!("User {}", user_id.0)))
             .build();
 
-        // Store in DB and cache
-        Ok(AgentInstance { agent_id: agent.id, user_id, name })
+        // Store in DB cache
+        Ok(agent)
     }
 
-    // Memory update workaround using blocks API
-    pub async fn update_agent_memory(&self, user_id: UserId, memory: AgentMemory) -> Result<()> {
-        for block in memory.blocks {
-            self.letta.blocks().update(block_id, UpdateBlockRequest { ... }).await?;
-        }
+    // Shared memory using blocks API
+    pub async fn update_shared_memory(&self, user_id: UserId, block_name: &str, content: &str) -> Result<()> {
+        let block_id = self.get_or_create_memory_block(user_id, block_name).await?;
+        self.letta.blocks().update(&block_id, UpdateBlockRequest { ... }).await?;
     }
 }
 ```
@@ -45,12 +47,17 @@ impl AgentManager {
 
 ## Multi-Agent System with Letta
 
-Pattern uses Letta's agent system to implement the multi-agent cognitive support:
+Pattern uses Letta's agent system with flexible coordination patterns:
 
-1. **Agent Creation**: Each user gets their own constellation of 6 agents
-2. **Shared Memory**: Agents share memory blocks for coordination
-3. **Message Routing**: Discord messages are routed to appropriate agents
+1. **Agent Creation**: Each user gets their own constellation of agents
+2. **Memory Hierarchy**: 
+   - Core memory blocks (immediate access)
+   - Letta sources (searchable knowledge)
+   - Archival memory (deep storage)
+3. **Native Groups API**: Create flexible agent groups with different coordination styles
 4. **State Management**: Agent state is cached and persisted to SQLite
+
+See [Memory and Groups Architecture](../architecture/MEMORY_AND_GROUPS.md) for details.
 
 ## Common Patterns
 
@@ -69,7 +76,31 @@ let request = CreateAgentRequest::builder()
     .build();
 ```
 
-### Sending Messages to Agents
+### Using Letta Groups for Multi-Agent Coordination
+
+```rust
+use letta_rs::types::groups::{GroupCreate, GroupCreateManagerConfig, DynamicManager};
+
+// Create a flexible agent group
+let group = client.groups().create(GroupCreate {
+    agent_ids: vec![pattern_id, entropy_id, flux_id, momentum_id, anchor_id, archive_id],
+    description: "ADHD support constellation".to_string(),
+    manager_config: Some(GroupCreateManagerConfig::Dynamic(DynamicManager {
+        manager_agent_id: pattern_id,
+        termination_token: None,
+        max_turns: None,
+    })),
+    shared_block_ids: Some(vec![current_state_id, active_context_id]),
+}).await?;
+
+// Send message to entire group
+let response = client.groups().send_message(
+    &group.id,
+    vec![MessageCreate::user("I'm feeling overwhelmed with tasks")]
+).await?;
+```
+
+### Sending Messages to Individual Agents
 
 ```rust
 pub async fn send_message_to_agent(
@@ -95,6 +126,23 @@ pub async fn send_message_to_agent(
 }
 ```
 
+### Passive Knowledge Sharing via Sources
+
+Agents can share insights through Letta's source documents:
+
+```rust
+// Agent writes observation to shared source
+let observation = "User consistently underestimates task time by 3x";
+client.sources().create(SourceCreate {
+    name: "task_patterns.md".to_string(),
+    content: observation,
+    // Automatically embedded for semantic search
+}).await?;
+
+// Other agents can search for relevant patterns
+let results = client.sources().search("time estimation patterns").await?;
+```
+
 ## Performance Considerations
 
 ### Model Selection
@@ -111,6 +159,8 @@ export LETTA_EMBEDDING_MODEL="letta/letta-free"
 - Agent instances are cached in memory after first creation
 - Cache is checked before database or Letta API calls
 - This significantly reduces latency for repeat interactions
+- **NEW**: Database caching for agent IDs eliminates API calls for existing agents
+- **NEW**: Batch fetching of agent lists during initialization
 
 ### Connection Handling
 
@@ -146,6 +196,7 @@ These tools allow external systems to interact with the Pattern agent constellat
 - Use faster models (Groq, Anthropic, etc.)
 - Implement retry logic with exponential backoff
 - Consider pre-creating agents during user initialization
+- **FIXED**: Database caching now prevents repeated API calls for existing agents
 
 ### Memory Update Issues
 - Use the blocks API, not direct memory updates
@@ -156,6 +207,7 @@ These tools allow external systems to interact with the Pattern agent constellat
 - Verify agent names match expected format
 - Check Discord user ID mapping
 - Ensure Letta client is properly authenticated
+- **FIXED**: Tool name conflicts causing infinite loops (removed generic send_message)
 
 ## References
 

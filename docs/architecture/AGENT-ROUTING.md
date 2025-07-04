@@ -60,23 +60,29 @@ Pattern: Hello! I'm here to help coordinate your cognitive support. What do you 
 
 2. **Agent names are dynamic** - based on what's configured in MultiAgentSystemBuilder
 
-### Next Steps
+### Next Steps: Letta Groups Integration
 
-1. **Enhanced Agent Capabilities**
-   - Give agents access to shared tools
-   - Implement agent-to-agent communication
-   - Add context from previous conversations
+1. **Migrate to Groups API**
+   - Replace individual routing with group-based coordination
+   - Create flexible group configurations
+   - Leverage native multi-agent conversation support
+   - See [Memory and Groups Architecture](./MEMORY_AND_GROUPS.md)
 
-2. **Specialized Agent Behaviors**
-   - Entropy: Task breakdown algorithms
-   - Flux: Calendar integration
-   - Archive: Vector search for memory
-   - Momentum: Activity monitoring
-   - Anchor: Habit tracking
+2. **Enhanced Memory System**
+   - Implement three-tier memory hierarchy
+   - Add passive knowledge sharing via sources
+   - Build cost-optimized sleeptime processing
 
-3. **Multi-turn Conversations**
-   - Maintain conversation context
-   - Handle follow-up questions
-   - Agent handoffs ("let me connect you with Flux for scheduling")
+3. **Specialized Agent Behaviors**
+   - Entropy: Task breakdown with ADHD awareness
+   - Flux: Time translation and reality checks
+   - Archive: Memory consolidation and pattern detection
+   - Momentum: Energy state tracking
+   - Anchor: Gentle habit support
 
-The foundation is now in place - agents receive messages and respond based on their specialized prompts!
+4. **Flexible Coordination Patterns**
+   - Experiment with different group managers
+   - Create context-specific agent groups
+   - Build overlapping groups for different needs
+
+The foundation is now in place - next step is leveraging Letta's native multi-agent support!

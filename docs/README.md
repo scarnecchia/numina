@@ -5,7 +5,9 @@ Pattern is a multi-agent cognitive support system designed specifically for ADHD
 ## Documentation Structure
 
 ### 📐 Architecture
-- [Agent Architecture](architecture/pattern-agent-architecture.md) - Multi-agent system design
+- [Pattern ADHD Architecture](architecture/PATTERN_ADHD_ARCHITECTURE.md) - Core system design
+- [Memory and Groups](architecture/MEMORY_AND_GROUPS.md) - Memory hierarchy and Letta groups
+- [Agent Architecture](architecture/pattern-agent-architecture.md) - Individual agent details
 - [System Prompts](architecture/pattern-system-prompts.md) - Agent personality definitions
 - [Agent Routing](architecture/AGENT-ROUTING.md) - How messages are routed to agents
 
@@ -16,6 +18,9 @@ Pattern is a multi-agent cognitive support system designed specifically for ADHD
 - [Testing Guide](guides/TESTING.md) - How to test Pattern
 
 ### 🔧 Development Guides
+- [Letta Integration](guides/LETTA_INTEGRATION.md) - Multi-agent implementation with Letta
+- [MCP Integration](guides/MCP_INTEGRATION.md) - MCP tools and workflows
+- [Agent Coordination](guides/AGENT_COORDINATION.md) - Managing multi-agent systems
 - [MCP SDK Guide](guides/MCP_SDK_GUIDE.md) - Working with the MCP Rust SDK
 - [LSP Edit Guide](guides/LSP_EDIT_GUIDE.md) - Using language server protocol tools
 - [CLAUDE.md](../CLAUDE.md) - Main development reference and TODOs

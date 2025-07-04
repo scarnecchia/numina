@@ -1,7 +1,9 @@
-use crate::error::{DatabaseError, Result};
+use crate::error::{DatabaseError, Result, ValidationError};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
+use sqlx::Row;
 use std::path::Path;
+use std::str::FromStr;
 use tracing::{debug, info};
 
 /// Database connection pool wrapper
@@ -105,42 +107,68 @@ impl Database {
         })
     }
 
-    /// Get agent for a user
-    pub async fn get_agent_for_user(&self, user_id: i64) -> Result<Option<Agent>> {
+    /// Get all agents for a user
+    pub async fn get_agents_for_user(&self, user_id: i64) -> Result<Vec<Agent>> {
         sqlx::query_as::<_, Agent>(
-            "SELECT id, user_id, letta_agent_id, name, created_at FROM agents WHERE user_id = ?1",
+            "SELECT id, user_id, agent_type, letta_agent_id, name, created_at, updated_at FROM agents WHERE user_id = ?1",
         )
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|e| {
             DatabaseError::QueryFailed {
-                context: format!("Failed to fetch agent for user {}", user_id),
+                context: format!("Failed to fetch agents for user {}", user_id),
                 source: e,
             }
             .into()
         })
     }
 
-    /// Create a new agent
-    pub async fn create_agent(
+    /// Get a specific agent for a user by type
+    pub async fn get_agent_by_type(&self, user_id: i64, agent_type: &str) -> Result<Option<Agent>> {
+        sqlx::query_as::<_, Agent>(
+            "SELECT id, user_id, agent_type, letta_agent_id, name, created_at, updated_at FROM agents WHERE user_id = ?1 AND agent_type = ?2",
+        )
+        .bind(user_id)
+        .bind(agent_type)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: format!("Failed to fetch agent {} for user {}", agent_type, user_id),
+                source: e,
+            }
+            .into()
+        })
+    }
+
+    /// Create or update an agent
+    pub async fn upsert_agent(
         &self,
         user_id: i64,
+        agent_type: &str,
         letta_agent_id: &str,
         name: &str,
     ) -> Result<i64> {
-        let id =
-            sqlx::query("INSERT INTO agents (user_id, letta_agent_id, name) VALUES (?1, ?2, ?3)")
-                .bind(user_id)
-                .bind(letta_agent_id)
-                .bind(name)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| DatabaseError::QueryFailed {
-                    context: format!("Failed to create agent '{}'", name),
-                    source: e,
-                })?
-                .last_insert_rowid();
+        let id = sqlx::query(
+            "INSERT INTO agents (user_id, agent_type, letta_agent_id, name) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id, agent_type) DO UPDATE SET
+                letta_agent_id = excluded.letta_agent_id,
+                name = excluded.name,
+                updated_at = CURRENT_TIMESTAMP
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(agent_type)
+        .bind(letta_agent_id)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::QueryFailed {
+            context: format!("Failed to upsert agent '{}' of type '{}'", name, agent_type),
+            source: e,
+        })?
+        .get::<i64, _>("id");
 
         Ok(id)
     }
@@ -214,6 +242,142 @@ impl Database {
 
         Ok(())
     }
+
+    /// Create a new group
+    pub async fn create_group(
+        &self,
+        user_id: i64,
+        group_id: &str,
+        name: &str,
+        manager_type: GroupManagerType,
+        manager_config: Option<&str>,
+        shared_block_ids: Option<&[String]>,
+    ) -> Result<Group> {
+        let shared_block_ids_json = shared_block_ids.map(|ids| serde_json::to_string(ids).unwrap());
+
+        let _id = sqlx::query(
+            "INSERT INTO groups (user_id, group_id, name, manager_type, manager_config, shared_block_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(user_id)
+        .bind(group_id)
+        .bind(name)
+        .bind(manager_type.as_i32())
+        .bind(manager_config)
+        .bind(shared_block_ids_json.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::QueryFailed {
+            context: format!("Failed to create group '{}'", name),
+            source: e,
+        })?
+        .last_insert_rowid();
+
+        // Fetch the created group
+        self.get_group(user_id, group_id).await?.ok_or_else(|| {
+            DatabaseError::QueryFailed {
+                context: format!("Group '{}' not found after creation", group_id),
+                source: sqlx::Error::RowNotFound,
+            }
+            .into()
+        })
+    }
+
+    /// Get a group by user_id and group_id
+    pub async fn get_group(&self, user_id: i64, group_id: &str) -> Result<Option<Group>> {
+        sqlx::query_as::<_, Group>(
+            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, created_at, updated_at
+             FROM groups WHERE user_id = ?1 AND group_id = ?2",
+        )
+        .bind(user_id)
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: format!("Failed to fetch group '{}'", group_id),
+                source: e,
+            }
+            .into()
+        })
+    }
+
+    /// List all groups for a user
+    pub async fn list_user_groups(&self, user_id: i64) -> Result<Vec<Group>> {
+        sqlx::query_as::<_, Group>(
+            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, created_at, updated_at
+             FROM groups WHERE user_id = ?1 ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: "Failed to list user groups".to_string(),
+                source: e,
+            }
+            .into()
+        })
+    }
+
+    /// Delete a group
+    pub async fn delete_group(&self, user_id: i64, group_id: &str) -> Result<()> {
+        let result = sqlx::query("DELETE FROM groups WHERE user_id = ?1 AND group_id = ?2")
+            .bind(user_id)
+            .bind(group_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed {
+                context: format!("Failed to delete group '{}'", group_id),
+                source: e,
+            })?;
+
+        if result.rows_affected() == 0 {
+            return Err(DatabaseError::QueryFailed {
+                context: format!("Group '{}' not found", group_id),
+                source: sqlx::Error::RowNotFound,
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
+    /// Update a group's configuration
+    pub async fn update_group_config(
+        &self,
+        user_id: i64,
+        group_id: &str,
+        manager_config: Option<&str>,
+        shared_block_ids: Option<&[String]>,
+    ) -> Result<()> {
+        let shared_block_ids_json = shared_block_ids.map(|ids| serde_json::to_string(ids).unwrap());
+
+        let result = sqlx::query(
+            "UPDATE groups SET manager_config = ?1, shared_block_ids = ?2, updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ?3 AND group_id = ?4",
+        )
+        .bind(manager_config)
+        .bind(shared_block_ids_json.as_deref())
+        .bind(user_id)
+        .bind(group_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::QueryFailed {
+            context: format!("Failed to update group '{}'", group_id),
+            source: e,
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(DatabaseError::QueryFailed {
+                context: format!("Group '{}' not found", group_id),
+                source: sqlx::Error::RowNotFound,
+            }
+            .into());
+        }
+
+        Ok(())
+    }
 }
 
 /// User entity
@@ -230,9 +394,77 @@ pub struct User {
 pub struct Agent {
     pub id: i64,
     pub user_id: i64,
+    pub agent_type: String,
     pub letta_agent_id: String,
     pub name: String,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+}
+
+/// Task priority levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskPriority {
+    Low,
+    Medium,
+    High,
+    Urgent,
+}
+
+impl TaskPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Urgent => "urgent",
+        }
+    }
+}
+
+impl FromStr for TaskPriority {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> std::result::Result<TaskPriority, ValidationError> {
+        match s.to_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "urgent" => Ok(Self::Urgent),
+            _ => Ok(Self::Medium), // Default to medium
+        }
+    }
+}
+
+/// Task status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "pending" => Self::Pending,
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Pending, // Default
+        }
+    }
 }
 
 /// Task entity
@@ -288,6 +520,67 @@ pub struct TimeTracking {
     pub duration_minutes: Option<i32>,
     pub description: Option<String>,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+}
+
+/// Manager type for Letta groups
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum GroupManagerType {
+    RoundRobin = 0,
+    Supervisor = 1,
+    Dynamic = 2,
+    Sleeptime = 3,
+    VoiceSleeptime = 4,
+    Swarm = 5,
+}
+
+impl GroupManagerType {
+    pub fn from_i32(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::RoundRobin),
+            1 => Some(Self::Supervisor),
+            2 => Some(Self::Dynamic),
+            3 => Some(Self::Sleeptime),
+            4 => Some(Self::VoiceSleeptime),
+            5 => Some(Self::Swarm),
+            _ => None,
+        }
+    }
+
+    pub fn as_i32(&self) -> i32 {
+        *self as i32
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round_robin",
+            Self::Supervisor => "supervisor",
+            Self::Dynamic => "dynamic",
+            Self::Sleeptime => "sleeptime",
+            Self::VoiceSleeptime => "voice_sleeptime",
+            Self::Swarm => "swarm",
+        }
+    }
+}
+
+/// Group entity for multi-agent coordination
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Group {
+    pub id: i64,
+    pub user_id: i64,
+    pub group_id: String,
+    pub name: String,
+    pub manager_type: i32,
+    pub manager_config: Option<String>,
+    pub shared_block_ids: Option<String>,
+    pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+}
+
+impl Group {
+    pub fn manager_type(&self) -> Option<GroupManagerType> {
+        GroupManagerType::from_i32(self.manager_type)
+    }
 }
 
 #[cfg(test)]
@@ -352,42 +645,6 @@ mod tests {
         assert_eq!(updated.block_value, "updated value");
         assert!(updated.updated_at > first_update);
         assert_eq!(updated.created_at, block.created_at); // created_at shouldn't change
-    }
-
-    #[tokio::test]
-    async fn test_agent_uniqueness() {
-        let db = Database::new(":memory:").await.unwrap();
-        db.migrate().await.unwrap();
-
-        let user = db.get_or_create_user("testuser").await.unwrap();
-
-        // Create first agent
-        let id1 = db
-            .create_agent(user.id, "letta_123", "Agent One")
-            .await
-            .unwrap();
-
-        // Try to create another agent with same letta_agent_id (should fail due to unique constraint)
-        let result = db.create_agent(user.id, "letta_123", "Agent Two").await;
-
-        assert!(result.is_err());
-        // Verify it's a database constraint error
-        match result.unwrap_err() {
-            crate::error::PatternError::Database(DatabaseError::QueryFailed {
-                context, ..
-            }) => {
-                assert!(context.contains("Failed to create agent"));
-            }
-            _ => panic!("Expected QueryFailed error"),
-        }
-
-        // Creating with different letta_id should work
-        let id2 = db
-            .create_agent(user.id, "letta_456", "Agent Two")
-            .await
-            .unwrap();
-
-        assert_ne!(id1, id2);
     }
 
     #[tokio::test]

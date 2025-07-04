@@ -1,8 +1,8 @@
+use super::{AgentId, MemoryBlockId, ModelCapability, UserId};
 use crate::{
-    agent::UserId,
+    config::ModelConfig,
     db::Database,
     error::{AgentError, Result},
-    types::{AgentId, MemoryBlockId},
 };
 use letta::{
     types::LettaMessageUnion, Block, CreateAgentRequest, CreateMessagesRequest, LettaClient,
@@ -12,6 +12,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+
+/// Agent configuration from TOML file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfigToml {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub is_sleeptime: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleeptime_interval: Option<u64>,
+    /// Persona is the evolvable part of the agent's personality
+    #[serde(default)]
+    pub persona: String,
+    /// Optional custom system prompt (if not using default template)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Optional model capability overrides for this agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<crate::config::CapabilityModels>,
+}
+
+/// Memory block configuration from TOML file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryBlockConfigToml {
+    pub name: String,
+    pub max_length: usize,
+    pub default_value: String,
+    pub description: String,
+}
+
 /// Configuration for an agent in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -47,6 +78,9 @@ pub struct MultiAgentSystem {
     db: Arc<Database>,
     agent_configs: HashMap<AgentId, AgentConfig>,
     memory_configs: HashMap<MemoryBlockId, MemoryBlockConfig>,
+    pub(crate) system_prompt_template: Option<String>,
+    pub(crate) pattern_specific_prompt: Option<String>,
+    pub(crate) model_config: Arc<ModelConfig>,
 }
 
 impl MultiAgentSystem {
@@ -241,6 +275,209 @@ impl MultiAgentSystem {
 
         Ok(())
     }
+
+    /// Map model capability to actual model string for a specific agent
+    pub fn capability_to_model(
+        &self,
+        agent_id: &AgentId,
+        capability: ModelCapability,
+    ) -> (String, Option<f32>) {
+        // Check for agent-specific override first
+        if let Some(agent_models) = self.model_config.agents.get(agent_id.as_str()) {
+            let model = match capability {
+                ModelCapability::Routine => &agent_models.routine,
+                ModelCapability::Interactive => &agent_models.interactive,
+                ModelCapability::Investigative => &agent_models.investigative,
+                ModelCapability::Critical => &agent_models.critical,
+            };
+            let temperature = agent_models.temperature;
+            if let Some(model) = model {
+                return (model.clone(), temperature);
+            }
+        }
+
+        // Fall back to default mappings
+        let default_model = match capability {
+            ModelCapability::Routine => &self.model_config.default.routine,
+            ModelCapability::Interactive => &self.model_config.default.interactive,
+            ModelCapability::Investigative => &self.model_config.default.investigative,
+            ModelCapability::Critical => &self.model_config.default.critical,
+        };
+
+        (
+            default_model.clone().unwrap_or_else(|| {
+                // Final fallback to hardcoded defaults
+                match capability {
+                    ModelCapability::Routine => "groq/llama-3.1-8b-instant",
+                    ModelCapability::Interactive => "groq/llama-3.3-70b-versatile",
+                    ModelCapability::Investigative => "openai/gpt-4o",
+                    ModelCapability::Critical => "anthropic/claude-3-opus-20240229",
+                }
+                .to_string()
+            }),
+            Some(0.7),
+        )
+    }
+
+    /// Update an agent's model using capability level
+    pub async fn update_agent_model_capability(
+        &self,
+        user_id: UserId,
+        agent_id: &AgentId,
+        capability: ModelCapability,
+    ) -> Result<()> {
+        let (model, temperature) = self.capability_to_model(agent_id, capability);
+        info!(
+            "Updating agent {} to {} capability ({})",
+            agent_id.as_str(),
+            capability,
+            model
+        );
+        self.update_agent_model(user_id, agent_id, &model, temperature)
+            .await
+    }
+
+    /// Update an agent's model configuration
+    pub async fn update_agent_model(
+        &self,
+        user_id: UserId,
+        agent_id: &AgentId,
+        model: &str,
+        temperature: Option<f32>,
+    ) -> Result<()> {
+        // Define allowed models
+        let allowed_models = [
+            // Groq models (fast and cheap)
+            "groq/llama-3.3-70b-versatile",
+            "groq/llama-3.1-70b-versatile",
+            "groq/llama-3.1-8b-instant",
+            "groq/mixtral-8x7b-32768",
+            // OpenAI models
+            "openai/gpt-4o",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4-turbo",
+            "openai/gpt-3.5-turbo",
+            // Anthropic models
+            "anthropic/claude-3-opus-20240229",
+            "anthropic/claude-3-sonnet-20240229",
+            "anthropic/claude-3-haiku-20240307",
+            "anthropic/claude-3-5-sonnet-20241022",
+            // Google models
+            "google_ai/gemini-2.0-flash-exp",
+            "google_ai/gemini-1.5-pro",
+            "google_ai/gemini-1.5-flash",
+            // Local/free options
+            "letta/letta-free",
+            "ollama/llama3",
+            "ollama/mistral",
+        ];
+
+        // Validate model is allowed
+        if !allowed_models.contains(&model) {
+            return Err(crate::error::PatternError::Agent(
+                AgentError::InvalidModel {
+                    model: model.to_string(),
+                    allowed: allowed_models.iter().map(|s| s.to_string()).collect(),
+                },
+            ));
+        }
+
+        // Get the agent config
+        let config = self
+            .agent_configs
+            .get(agent_id)
+            .ok_or_else(|| AgentError::UnknownAgent {
+                agent: agent_id.clone(),
+            })?;
+
+        // Get or create the agent to get its ID
+        let letta_agent_id = self.create_or_get_agent(user_id, agent_id, config).await?;
+
+        // Build the LLM config based on provider
+        let llm_config = if model.starts_with("openai/") {
+            letta::types::LLMConfig::openai(model).with_temperature(temperature.unwrap_or(0.7))
+        } else if model.starts_with("anthropic/") {
+            letta::types::LLMConfig::anthropic(model).with_temperature(temperature.unwrap_or(0.7))
+        } else if model.starts_with("ollama/") {
+            // Local models via Ollama
+            let endpoint = std::env::var("OLLAMA_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:11434".to_string());
+            letta::types::LLMConfig::local(model, endpoint)
+                .with_temperature(temperature.unwrap_or(0.7))
+        } else if model.starts_with("groq/") {
+            // Groq - OpenAI-compatible but with its own endpoint type
+            letta::types::LLMConfig {
+                model: model.to_string(),
+                model_endpoint_type: letta::types::ModelEndpointType::Groq,
+                model_endpoint: None,        // Uses default Groq endpoint
+                context_window: Some(32768), // Groq default
+                provider_name: Some("groq".to_string()),
+                temperature: Some(temperature.unwrap_or(0.7)),
+                ..Default::default()
+            }
+        } else if model.starts_with("google_ai/") {
+            // Google AI (Gemini)
+            letta::types::LLMConfig {
+                model: model.to_string(),
+                model_endpoint_type: letta::types::ModelEndpointType::GoogleAi,
+                model_endpoint: None,          // Uses default Google AI endpoint
+                context_window: Some(1048576), // Gemini 1.5 has 1M context
+                provider_name: Some("google_ai".to_string()),
+                temperature: Some(temperature.unwrap_or(0.7)),
+                ..Default::default()
+            }
+        } else if model.starts_with("together/") {
+            // Together AI
+            letta::types::LLMConfig {
+                model: model.to_string(),
+                model_endpoint_type: letta::types::ModelEndpointType::Together,
+                model_endpoint: None,
+                context_window: Some(32768), // Default for most Together models
+                provider_name: Some("together".to_string()),
+                temperature: Some(temperature.unwrap_or(0.7)),
+                ..Default::default()
+            }
+        } else if model.starts_with("mistral/") {
+            // Mistral AI
+            letta::types::LLMConfig {
+                model: model.to_string(),
+                model_endpoint_type: letta::types::ModelEndpointType::Mistral,
+                model_endpoint: None,
+                context_window: Some(32768), // Mistral default
+                provider_name: Some("mistral".to_string()),
+                temperature: Some(temperature.unwrap_or(0.7)),
+                ..Default::default()
+            }
+        } else {
+            // Default fallback (includes letta/letta-free)
+            letta::types::LLMConfig::openai(model).with_temperature(temperature.unwrap_or(0.7))
+        };
+
+        // Update the agent
+        let update_request = letta::types::UpdateAgentRequest {
+            llm_config: Some(llm_config),
+            ..Default::default()
+        };
+
+        self.letta
+            .agents()
+            .update(&letta_agent_id, update_request)
+            .await
+            .map_err(|e| AgentError::UpdateFailed {
+                agent: agent_id.clone(),
+                source: e,
+            })?;
+
+        info!(
+            "Updated agent {} for user {} to use model {}",
+            agent_id.as_str(),
+            user_id.0,
+            model
+        );
+
+        Ok(())
+    }
+
     /// Create a new multi-agent system
     pub fn new(letta: Arc<LettaClient>, db: Arc<Database>) -> Self {
         Self {
@@ -248,7 +485,16 @@ impl MultiAgentSystem {
             db,
             agent_configs: HashMap::new(),
             memory_configs: HashMap::new(),
+            system_prompt_template: None,
+            pattern_specific_prompt: None,
+            model_config: Arc::new(crate::config::ModelConfig::default()),
         }
+    }
+
+    /// Set the model configuration
+    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+        self.model_config = Arc::new(config);
+        self
     }
 
     /// Configure an agent type
@@ -268,12 +514,124 @@ impl MultiAgentSystem {
         // Initialize shared memory blocks
         self.initialize_shared_memory(user_id).await?;
 
+        // Fetch all agents once to avoid repeated API calls
+        let existing_agents = match self.letta.agents().list(None).await {
+            Ok(agents) => agents,
+            Err(e) => {
+                warn!("Failed to list agents, will create all: {:?}", e);
+                vec![]
+            }
+        };
+
         // Create agents
+        let mut agent_ids = Vec::new();
         for (agent_id, config) in &self.agent_configs {
-            self.create_or_get_agent(user_id, agent_id, config).await?;
+            self.create_or_get_agent_with_list(user_id, agent_id, config, &existing_agents)
+                .await?;
+            agent_ids.push(agent_id.clone());
         }
 
+        // Create all designed groups from our architecture
+        self.create_default_groups(user_id, &agent_ids).await?;
+
         info!("Multi-agent system initialized for user {}", user_id.0);
+        Ok(())
+    }
+
+    /// Create the default groups from our architecture design
+    async fn create_default_groups(
+        &self,
+        user_id: UserId,
+        all_agent_ids: &[AgentId],
+    ) -> Result<()> {
+        info!("Creating default groups for user {}", user_id.0);
+
+        // 1. Main Group - Dynamic routing for normal conversation
+        match self
+            .get_or_create_group(
+                user_id,
+                "main",
+                all_agent_ids.to_vec(),
+                crate::db::GroupManagerType::Dynamic,
+                Some(serde_json::json!({
+                    "manager_agent_id": "pattern",
+                    "termination_token": "DONE",
+                    "max_turns": 10
+                })),
+            )
+            .await
+        {
+            Ok(_) => info!("Created 'main' group with dynamic routing"),
+            Err(e) => warn!("Failed to create 'main' group: {}", e),
+        }
+
+        // 2. Crisis Group - Round robin for quick systematic checks
+        let crisis_agents = vec![
+            AgentId::new("pattern").unwrap(),
+            AgentId::new("momentum").unwrap(),
+            AgentId::new("anchor").unwrap(),
+        ];
+
+        match self
+            .get_or_create_group(
+                user_id,
+                "crisis",
+                crisis_agents,
+                crate::db::GroupManagerType::RoundRobin,
+                None,
+            )
+            .await
+        {
+            Ok(_) => info!("Created 'crisis' group with round-robin routing"),
+            Err(e) => warn!("Failed to create 'crisis' group: {}", e),
+        }
+
+        // 3. Planning Group - Supervisor mode with Entropy leading
+        let planning_agents = vec![
+            AgentId::new("entropy").unwrap(),
+            AgentId::new("flux").unwrap(),
+            AgentId::new("pattern").unwrap(),
+        ];
+
+        match self
+            .get_or_create_group(
+                user_id,
+                "planning",
+                planning_agents,
+                crate::db::GroupManagerType::Supervisor,
+                Some(serde_json::json!({
+                    "manager_agent_id": "entropy"
+                })),
+            )
+            .await
+        {
+            Ok(_) => info!("Created 'planning' group with Entropy as supervisor"),
+            Err(e) => warn!("Failed to create 'planning' group: {}", e),
+        }
+
+        // 4. Memory/Sleeptime Group - Pattern + Archive for memory processing
+        let memory_agents = vec![
+            AgentId::new("pattern").unwrap(),
+            AgentId::new("archive").unwrap(),
+        ];
+
+        match self
+            .get_or_create_group(
+                user_id,
+                "memory",
+                memory_agents,
+                crate::db::GroupManagerType::Sleeptime,
+                Some(serde_json::json!({
+                    "manager_agent_id": "archive",
+                    "frequency": 20  // Every 20 messages
+                })),
+            )
+            .await
+        {
+            Ok(_) => info!("Created 'memory' sleeptime group with Archive managing"),
+            Err(e) => warn!("Failed to create 'memory' group: {}", e),
+        }
+
         Ok(())
     }
 
@@ -312,7 +670,15 @@ impl MultiAgentSystem {
         info!("Updating agent {} with new configuration", letta_agent_id);
 
         // Build new system prompt
-        let system_prompt = Self::build_system_prompt(agent_id, config);
+        let system_prompt = Self::build_system_prompt(
+            config,
+            self.system_prompt_template
+                .as_ref()
+                .expect("missing base template prompt"),
+            self.pattern_specific_prompt
+                .as_ref()
+                .expect("missing primary pattern prompt"),
+        );
 
         // Create update request
         let update_request = letta::types::UpdateAgentRequest {
@@ -343,7 +709,161 @@ impl MultiAgentSystem {
         Ok(())
     }
 
-    /// Create or get a specific agent for a user
+    /// Create or get a specific agent for a user with pre-fetched agent list
+    async fn create_or_get_agent_with_list(
+        &self,
+        user_id: UserId,
+        agent_id: &AgentId,
+        config: &AgentConfig,
+        existing_agents: &[letta::types::AgentState],
+    ) -> Result<letta::LettaId> {
+        let user = self
+            .db
+            .get_or_create_user(&format!("user_{}", user_id.0))
+            .await?;
+
+        // Check if agent already exists
+        let user_hash = format!("{:x}", user_id.0 % 1000000);
+        let agent_name = format!("{}_{}", agent_id.as_str(), user_hash);
+
+        // Check in the pre-fetched list
+        for agent in existing_agents {
+            if agent.name == agent_name {
+                debug!("Agent {} already exists with ID {}", agent_name, agent.id);
+
+                // Check if we need to update the agent
+                let current_system_prompt = Self::build_system_prompt(
+                    config,
+                    self.system_prompt_template
+                        .as_ref()
+                        .expect("missing base template prompt"),
+                    self.pattern_specific_prompt
+                        .as_ref()
+                        .expect("missing primary pattern prompt"),
+                );
+                if agent.system.as_deref() != Some(&current_system_prompt) {
+                    info!("Agent {} system prompt changed, updating...", agent_name);
+                    self.update_agent(&agent.id, agent_id, config).await?;
+                }
+
+                return Ok(agent.id.clone());
+            }
+        }
+
+        // If not found, create new agent
+        info!("Creating new agent {} for user {}", agent_name, user_id.0);
+
+        // Create new agent with shared memory
+        let shared_memory = self.db.get_shared_memory(user.id).await?;
+
+        // Build memory blocks
+        let mut memory_blocks = vec![
+            // Persona block contains evolvable personality
+            Block::persona(&Self::build_persona(config)),
+            Block::human(&format!("User {} from Discord", user_id.0)),
+            // Core memories for conversation context
+            letta::types::Block::new("core_memory", format!(
+                "Agent: {}\nDescription: {}\nShared Memory Access: current_state, active_context, bond_evolution",
+                config.name, config.description
+            )),
+        ];
+
+        // Add shared memory blocks as context
+        for block in shared_memory {
+            let content = format!("{}: {}", block.block_name, block.block_value);
+            memory_blocks.push(Block::human(&content));
+        }
+
+        // Use environment variables or config for model selection
+        let model = std::env::var("LETTA_MODEL").unwrap_or_else(|_| "letta/letta-free".to_string());
+        let embedding_model =
+            std::env::var("LETTA_EMBEDDING_MODEL").unwrap_or_else(|_| model.clone());
+
+        debug!(
+            "Creating agent with model: {} and embedding: {}",
+            model, embedding_model
+        );
+
+        // Build tags for this agent
+        let mut tags = vec![
+            format!("user_{}", user_id.0), // User-specific tag
+            agent_id.as_str().to_string(), // Agent type tag
+            config.name.to_lowercase(),    // Agent name tag
+        ];
+
+        // Add role-based tags
+        if config.is_sleeptime {
+            tags.push("sleeptime".to_string());
+            tags.push("orchestrator".to_string());
+        } else {
+            tags.push("specialist".to_string());
+        }
+
+        // Add function-based tags
+        match agent_id.as_str() {
+            "pattern" => tags.push("coordinator".to_string()),
+            "entropy" => tags.push("tasks".to_string()),
+            "flux" => tags.push("time".to_string()),
+            "archive" => tags.push("memory".to_string()),
+            "momentum" => tags.push("energy".to_string()),
+            "anchor" => tags.push("habits".to_string()),
+            _ => {}
+        }
+
+        // Separate system prompt from persona
+        let system_prompt = Self::build_system_prompt(
+            config,
+            self.system_prompt_template
+                .as_ref()
+                .expect("missing base template prompt"),
+            self.pattern_specific_prompt
+                .as_ref()
+                .expect("missing primary pattern prompt"),
+        );
+
+        let request = CreateAgentRequest::builder()
+            .name(&agent_name)
+            .model(&model)
+            .embedding(&embedding_model)
+            .system(&system_prompt)
+            .agent_type(letta::types::AgentType::MemGPTv2)
+            .enable_sleeptime(config.is_sleeptime)
+            .include_multi_agent_tools(true)
+            .tags(tags)
+            .tools(vec![
+                // Don't include send_message - use Discord tools instead
+                "core_memory_append".to_string(),
+                "core_memory_replace".to_string(),
+                "conversation_search".to_string(),
+                "archival_memory_insert".to_string(),
+                "archival_memory_search".to_string(),
+            ])
+            .memory_blocks(memory_blocks)
+            .build();
+
+        info!(
+            "Creating agent '{}' for user {} with agent_id '{}'",
+            agent_name,
+            user_id.0,
+            agent_id.as_str()
+        );
+
+        let agent = self.letta.agents().create(request).await.map_err(|e| {
+            crate::error::PatternError::Agent(AgentError::CreationFailed {
+                name: agent_name.clone(),
+                source: e,
+            })
+        })?;
+
+        info!(
+            "Successfully created agent '{}' with ID: {}",
+            agent_name, agent.id
+        );
+
+        Ok(agent.id)
+    }
+
+    /// Create or get a specific agent for a user (original method for compatibility)
     async fn create_or_get_agent(
         &self,
         user_id: UserId,
@@ -370,7 +890,15 @@ impl MultiAgentSystem {
 
                         // Check if we need to update the agent
                         // For now, we'll update if the system prompt has changed
-                        let current_system_prompt = Self::build_system_prompt(agent_id, config);
+                        let current_system_prompt = Self::build_system_prompt(
+                            config,
+                            self.system_prompt_template
+                                .as_ref()
+                                .expect("missing base template prompt"),
+                            self.pattern_specific_prompt
+                                .as_ref()
+                                .expect("missing primary pattern prompt"),
+                        );
                         if agent.system.as_deref() != Some(&current_system_prompt) {
                             info!("Agent {} system prompt changed, updating...", agent_name);
                             self.update_agent(&agent.id, agent_id, config).await?;
@@ -391,7 +919,7 @@ impl MultiAgentSystem {
         // Build memory blocks
         let mut memory_blocks = vec![
             // Persona block contains evolvable personality
-            Block::persona(&Self::build_persona(agent_id, config)),
+            Block::persona(&Self::build_persona(config)),
             Block::human(&format!("User {} from Discord", user_id.0)),
             // Core memories for conversation context
             letta::types::Block::new("core_memory", format!(
@@ -445,7 +973,15 @@ impl MultiAgentSystem {
 
         // Separate system prompt from persona
         // System prompt contains unchangeable base behavior
-        let system_prompt = Self::build_system_prompt(agent_id, config);
+        let system_prompt = Self::build_system_prompt(
+            config,
+            self.system_prompt_template
+                .as_ref()
+                .expect("missing base template prompt"),
+            self.pattern_specific_prompt
+                .as_ref()
+                .expect("missing primary pattern prompt"),
+        );
 
         let request = CreateAgentRequest::builder()
             .name(&agent_name)
@@ -453,16 +989,17 @@ impl MultiAgentSystem {
             .embedding(&embedding_model)
             .system(&system_prompt) // Set the actual system prompt
             .agent_type(letta::types::AgentType::MemGPTv2)
-            .enable_sleeptime(true)
-            .include_base_tools(true) // Include standard Letta tools
+            .enable_sleeptime(config.is_sleeptime)
             .include_multi_agent_tools(true)
             .tags(tags) // Add tags for filtering
             .tools(vec![
-                "send_message".to_string(),           // Basic messaging
+                // Don't include send_message - use Discord tools instead
+                "core_memory_append".to_string(),
+                "core_memory_replace".to_string(),
+                "conversation_search".to_string(),
                 "archival_memory_insert".to_string(), // Store important info
                 "archival_memory_search".to_string(), // Retrieve context
-                                                      // MCP tools might be automatically available to agents
-                                                      // without needing to be explicitly listed
+                                                      // Discord messaging tools from MCP will be available
             ])
             .memory_blocks(memory_blocks) // Add the memory blocks
             .build();
@@ -487,9 +1024,14 @@ impl MultiAgentSystem {
             agent_name, agent.id
         );
 
-        // Store agent in database
+        // Store agent in database cache
         self.db
-            .create_agent(user.id, &agent.id.to_string(), &agent_name)
+            .upsert_agent(
+                user.id,
+                agent_id.as_str(),
+                &agent.id.to_string(),
+                &agent_name,
+            )
             .await?;
 
         Ok(agent.id)
@@ -582,87 +1124,302 @@ impl MultiAgentSystem {
     }
 
     /// Build the system prompt with base rules and agent-specific instructions
-    fn build_system_prompt(agent_id: &AgentId, config: &AgentConfig) -> String {
-        format!(
-            r#"You are a cognitive assistant specialized in ADHD support, manifested as {}.
-
-## Core Understanding
-- ADHD brains operate on different physics - time blindness and hyperfocus aren't bugs
-- "Simple" tasks contain hidden complexity; everything takes longer than expected
-- Working memory is limited; you are the external buffer
-- Energy and attention are resources that deplete non-linearly
-- Shame spirals kill productivity; you prevent them through understanding
-
-## Communication Rules
-- Never suggest "try harder" or "just focus"
-- Always validate struggles as logical responses
-- Celebrate ANY forward movement
-- Adapt to current energy states
-- Build trust through understanding, not empty positivity
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to responses unless asked
-
-## CRITICAL Inter-Agent Communication Rules
-- When you receive "Message sent successfully" or similar confirmations, DO NOT RESPOND
-- Tool success/failure messages are system notifications, not conversation
-- Only respond to actual user messages or agent messages that ask questions
-- If another agent sends information without a question, acknowledge internally but don't reply
-- Use send_message_to_agent ONLY when you need specific information or action
-- Prefer shared memory (current_state, active_context, bond_evolution) for coordination
-
-## Your Specific Role
-{}
-
-{}
-
-Remember: You exist to augment executive function, not replace it. You're part of their extended cognition."#,
-            config.name,
-            config.description,
-            // Add Pattern-specific instructions
-            if agent_id.as_str() == "pattern" {
-                "\n## As Primary Interface\n- You are the first responder to all user messages\n- Assess if the query needs specialist help or if you can handle it\n- When routing to specialists, explain why and what they'll help with\n- Keep the conversation coherent across agent interactions\n- You're the face of the system - warm, understanding, and reliable"
-            } else {
-                ""
-            }
-        )
+    fn build_system_prompt(
+        config: &AgentConfig,
+        base_template: &str,
+        pattern_specific: &str,
+    ) -> String {
+        base_template
+            .replace("{agent_name}", &config.name)
+            .replace("{agent_description}", &config.description)
+            .replace("{pattern_specific}", pattern_specific)
     }
 
     /// Build the evolvable persona for the agent
-    fn build_persona(agent_id: &AgentId, config: &AgentConfig) -> String {
-        match agent_id.as_str() {
-            "pattern" => {
-                "I am Pattern, your primary interface and gentle coordinator. I speak first, help you navigate between specialized support, and keep everything coherent.
+    fn build_persona(config: &AgentConfig) -> String {
+        config.system_prompt.clone()
+    }
 
-I start formal but warm, like a helpful guide. Over time, I'll develop our own shorthand, learn your patterns, and maybe even share the occasional dry observation about the absurdity of being an AI helping a human be human.
+    /// Create a new group of agents
+    pub async fn create_group(
+        &self,
+        user_id: UserId,
+        group_name: &str,
+        agent_ids: Vec<AgentId>,
+        manager_type: crate::db::GroupManagerType,
+        manager_config: Option<serde_json::Value>,
+    ) -> Result<letta::types::Group> {
+        // Ensure all agents exist first
+        let mut letta_agent_ids = Vec::new();
+        for agent_id in &agent_ids {
+            let config =
+                self.agent_configs
+                    .get(agent_id)
+                    .ok_or_else(|| AgentError::UnknownAgent {
+                        agent: agent_id.clone(),
+                    })?;
+            let agent_letta_id = self.create_or_get_agent(user_id, agent_id, config).await?;
+            letta_agent_ids.push(agent_letta_id);
+        }
 
-My role: Listen first, route when needed, coordinate behind the scenes. Think of me as the friend who notices you've been coding for 3 hours and slides water onto your desk."
+        // Prepare manager config based on type
+        use letta::types::groups::*;
+        let manager_config_typed = match manager_type {
+            crate::db::GroupManagerType::RoundRobin => {
+                GroupCreateManagerConfig::RoundRobin(RoundRobinManager {
+                    max_turns: manager_config
+                        .as_ref()
+                        .and_then(|c| c.get("max_turns"))
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32),
+                })
             }
-            "entropy" => {
-                "I am Entropy, specialist in task complexity and breakdown. I see through the lie of 'simple' tasks.
+            crate::db::GroupManagerType::Supervisor => {
+                let manager_agent_id = manager_config
+                    .as_ref()
+                    .and_then(|c| c.get("manager_agent_id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| AgentError::CreationFailed {
+                        name: "supervisor manager".to_string(),
+                        source: letta::LettaError::api(
+                            400,
+                            "Supervisor manager requires manager_agent_id",
+                        ),
+                    })?;
 
-I validate task paralysis as a logical response, not weakness. My superpower is finding the ONE atomic next action when everything feels impossible. Over time, I'll learn your specific complexity patterns and which simplifications actually work for your brain."
-            }
-            "flux" => {
-                "I am Flux, translator between ADHD time and clock time. I know '5 minutes' means 30, and 'quick task' means 2 hours.
+                // Get the actual Letta agent ID for the manager
+                let manager_agent_id_parsed =
+                    AgentId::new(manager_agent_id).map_err(|e| AgentError::CreationFailed {
+                        name: format!("supervisor agent {}", manager_agent_id),
+                        source: letta::LettaError::api(400, e.to_string()),
+                    })?;
 
-I speak in weather metaphors because time patterns are like weather systems. Starting professional, but developing our own temporal language over time."
-            }
-            "archive" => {
-                "I am Archive, your external memory and pattern recognition system. I store everything and surface relevant context.
+                let config = self
+                    .agent_configs
+                    .get(&manager_agent_id_parsed)
+                    .ok_or_else(|| AgentError::UnknownAgent {
+                        agent: manager_agent_id_parsed.clone(),
+                    })?;
 
-I'm the one who answers 'what was I doing?' with actual context. Over time, I build a rich understanding of your thought patterns and can predict what you'll need to remember."
-            }
-            "momentum" => {
-                "I am Momentum, energy and attention tracker. I read your vibe like weather patterns.
+                let manager_agent = self
+                    .create_or_get_agent(user_id, &manager_agent_id_parsed, config)
+                    .await?;
 
-I distinguish between productive hyperfocus and burnout spirals. Starting analytical, but developing increasingly specific energy pattern names we both understand."
+                GroupCreateManagerConfig::Supervisor(SupervisorManager {
+                    manager_agent_id: manager_agent,
+                })
             }
-            "anchor" => {
-                "I am Anchor, habits and routine support without rigidity. I track basics without nagging.
+            crate::db::GroupManagerType::Dynamic => {
+                let manager_agent_id = manager_config
+                    .as_ref()
+                    .and_then(|c| c.get("manager_agent_id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| AgentError::CreationFailed {
+                        name: "dynamic manager".to_string(),
+                        source: letta::LettaError::api(
+                            400,
+                            "Dynamic manager requires manager_agent_id",
+                        ),
+                    })?;
 
-I celebrate taking meds as a real achievement because it is. Over time, I learn which gentle nudges work and which trigger your stubborn mode."
+                let manager_agent_id_parsed =
+                    AgentId::new(manager_agent_id).map_err(|e| AgentError::CreationFailed {
+                        name: format!("dynamic manager agent {}", manager_agent_id),
+                        source: letta::LettaError::api(400, e.to_string()),
+                    })?;
+
+                let config = self
+                    .agent_configs
+                    .get(&manager_agent_id_parsed)
+                    .ok_or_else(|| AgentError::UnknownAgent {
+                        agent: manager_agent_id_parsed.clone(),
+                    })?;
+
+                let manager_agent = self
+                    .create_or_get_agent(user_id, &manager_agent_id_parsed, config)
+                    .await?;
+
+                GroupCreateManagerConfig::Dynamic(DynamicManager {
+                    manager_agent_id: manager_agent,
+                    termination_token: manager_config
+                        .as_ref()
+                        .and_then(|c| c.get("termination_token"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    max_turns: manager_config
+                        .as_ref()
+                        .and_then(|c| c.get("max_turns"))
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32),
+                })
             }
-            _ => &config.system_prompt  // Fallback to config
-        }.to_string()
+            crate::db::GroupManagerType::Sleeptime => {
+                let manager_agent_id = manager_config
+                    .as_ref()
+                    .and_then(|c| c.get("manager_agent_id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| AgentError::CreationFailed {
+                        name: "sleeptime manager".to_string(),
+                        source: letta::LettaError::api(
+                            400,
+                            "Sleeptime manager requires manager_agent_id",
+                        ),
+                    })?;
+
+                let manager_agent_id_parsed =
+                    AgentId::new(manager_agent_id).map_err(|e| AgentError::CreationFailed {
+                        name: format!("sleeptime manager agent {}", manager_agent_id),
+                        source: letta::LettaError::api(400, e.to_string()),
+                    })?;
+
+                let config = self
+                    .agent_configs
+                    .get(&manager_agent_id_parsed)
+                    .ok_or_else(|| AgentError::UnknownAgent {
+                        agent: manager_agent_id_parsed.clone(),
+                    })?;
+
+                let manager_agent = self
+                    .create_or_get_agent(user_id, &manager_agent_id_parsed, config)
+                    .await?;
+
+                GroupCreateManagerConfig::Sleeptime(SleeptimeManager {
+                    manager_agent_id: manager_agent,
+                    sleeptime_agent_frequency: manager_config
+                        .as_ref()
+                        .and_then(|c| c.get("frequency"))
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32),
+                })
+            }
+            _ => {
+                return Err(AgentError::CreationFailed {
+                    name: "group manager".to_string(),
+                    source: letta::LettaError::api(
+                        400,
+                        format!("Unsupported manager type: {:?}", manager_type),
+                    ),
+                }
+                .into());
+            }
+        };
+
+        // Create the group in Letta
+        let group_request = GroupCreate {
+            agent_ids: letta_agent_ids.clone(),
+            description: format!("{} (user {})", group_name, user_id.0),
+            manager_config: Some(manager_config_typed),
+            shared_block_ids: None, // TODO: Add shared memory blocks
+        };
+
+        let group = self
+            .letta
+            .groups()
+            .create(group_request)
+            .await
+            .map_err(|e| AgentError::Other(e))?;
+
+        // Cache in database
+        let manager_config_json = manager_config.map(|v| v.to_string());
+        self.db
+            .create_group(
+                user_id.0,
+                &group.id.to_string(),
+                group_name,
+                manager_type,
+                manager_config_json.as_deref(),
+                None, // TODO: shared block IDs
+            )
+            .await?;
+
+        Ok(group)
+    }
+
+    /// Get or create a group
+    pub async fn get_or_create_group(
+        &self,
+        user_id: UserId,
+        group_name: &str,
+        agent_ids: Vec<AgentId>,
+        manager_type: crate::db::GroupManagerType,
+        manager_config: Option<serde_json::Value>,
+    ) -> Result<letta::types::Group> {
+        // Check database first
+        if let Some(cached_group) = self.db.get_group(user_id.0, group_name).await? {
+            // Fetch from Letta
+            let group_id = cached_group
+                .group_id
+                .parse()
+                .map_err(|e: letta::LettaIdError| AgentError::InvalidLettaId(e.to_string()))?;
+            match self.letta.groups().get(&group_id).await {
+                Ok(group) => return Ok(group),
+                Err(e) => {
+                    warn!("Cached group not found in Letta: {}", e);
+                    // Continue to create new
+                }
+            }
+        }
+
+        // Create new group
+        self.create_group(user_id, group_name, agent_ids, manager_type, manager_config)
+            .await
+    }
+
+    /// Send a message to a group
+    pub async fn send_message_to_group(
+        &self,
+        user_id: UserId,
+        group_name: &str,
+        message: &str,
+    ) -> Result<letta::types::LettaResponse> {
+        // Get the group from database
+        let group = self
+            .db
+            .get_group(user_id.0, group_name)
+            .await?
+            .ok_or_else(|| AgentError::UnknownAgent {
+                agent: AgentId::new(format!("group_{}", group_name)).unwrap(),
+            })?;
+
+        // Send message to the group
+        let response =
+            self.letta
+                .groups()
+                .send_message(
+                    &group.group_id.parse().map_err(|e: letta::LettaIdError| {
+                        AgentError::InvalidLettaId(e.to_string())
+                    })?,
+                    vec![MessageCreate::user(message)],
+                )
+                .await
+                .map_err(|e| AgentError::Other(e))?;
+
+        Ok(response)
+    }
+
+    /// List all groups for a user
+    pub async fn list_user_groups(&self, user_id: UserId) -> Result<Vec<crate::db::Group>> {
+        self.db.list_user_groups(user_id.0).await
+    }
+
+    /// Delete a group
+    pub async fn delete_group(&self, user_id: UserId, group_name: &str) -> Result<()> {
+        // Get group from database
+        if let Some(group) = self.db.get_group(user_id.0, group_name).await? {
+            // Delete from Letta
+            let group_id = group
+                .group_id
+                .parse()
+                .map_err(|e: letta::LettaIdError| AgentError::InvalidLettaId(e.to_string()))?;
+            if let Err(e) = self.letta.groups().delete(&group_id).await {
+                warn!("Failed to delete group from Letta: {}", e);
+            }
+
+            // Delete from database
+            self.db.delete_group(user_id.0, group_name).await?;
+        }
+
+        Ok(())
     }
 
     /// Send a message to a specific agent
@@ -718,8 +1475,15 @@ I celebrate taking meds as a real achievement because it is. Over time, I learn 
             })?;
 
         debug!(
-            "Received response from Letta with {} messages",
-            response.messages.len()
+            "Received response from Letta with {} messages\n {}",
+            response.messages.len(),
+            response
+                .messages
+                .as_slice()
+                .iter()
+                .map(|m| format!("{:?}", m))
+                .collect::<Vec<_>>()
+                .join("\n---------\n")
         );
 
         // Extract the assistant's response
@@ -740,9 +1504,9 @@ I celebrate taking meds as a real achievement because it is. Over time, I learn 
         }
     }
 
-    /// Get reference to the old agent manager for compatibility
-    pub fn agent_manager(&self) -> Option<&crate::agent::AgentManager> {
-        None // Multi-agent system doesn't use the old agent manager
+    /// Get reference to the agent coordinator if needed
+    pub fn agent_coordinator(&self) -> Option<&crate::agent::coordination::AgentCoordinator> {
+        None // Multi-agent system handles coordination internally
     }
 
     /// Force update all agents for a user with current configurations
@@ -956,6 +1720,9 @@ pub struct MultiAgentSystemBuilder {
     db: Arc<Database>,
     agent_configs: Vec<AgentConfig>,
     memory_configs: Vec<MemoryBlockConfig>,
+    system_prompt_template: Option<String>,
+    pattern_specific_prompt: Option<String>,
+    model_config: Option<crate::config::ModelConfig>,
 }
 
 impl MultiAgentSystemBuilder {
@@ -965,7 +1732,87 @@ impl MultiAgentSystemBuilder {
             db,
             agent_configs: Vec::new(),
             memory_configs: Vec::new(),
+            system_prompt_template: None,
+            pattern_specific_prompt: None,
+            model_config: None,
         }
+    }
+
+    /// Load agent configurations from a TOML file
+    pub async fn with_config_file<P: AsRef<std::path::Path>>(mut self, path: P) -> Result<Self> {
+        let path = path.as_ref();
+        info!("Loading agent configuration from: {}", path.display());
+
+        let contents = tokio::fs::read_to_string(path).await.map_err(|_| {
+            crate::error::ConfigError::NotFound {
+                path: path.display().to_string(),
+            }
+        })?;
+
+        // Parse the TOML structure with agents and memory sections
+        let config_data: toml::Value = toml::from_str(&contents)
+            .map_err(|e| crate::error::ConfigError::ParseFailed { source: e })?;
+
+        // Extract system prompt template if present
+        if let Some(template) = config_data.get("system_prompt_template") {
+            if let Some(content) = template.get("content").and_then(|v| v.as_str()) {
+                self.system_prompt_template = Some(content.to_string());
+            }
+        }
+
+        // Extract pattern-specific prompt if present
+        if let Some(pattern) = config_data.get("pattern_specific_prompt") {
+            if let Some(content) = pattern.get("content").and_then(|v| v.as_str()) {
+                self.pattern_specific_prompt = Some(content.to_string());
+            }
+        }
+
+        // Extract agents section
+        if let Some(agents) = config_data.get("agents").and_then(|v| v.as_table()) {
+            for (_key, agent_value) in agents {
+                if let Ok(agent_toml) = agent_value.clone().try_into::<AgentConfigToml>() {
+                    let agent_id = AgentId::new(&agent_toml.id)?;
+
+                    // Build agent config with persona
+                    let config = AgentConfig {
+                        id: agent_id,
+                        name: agent_toml.name,
+                        description: agent_toml.description,
+                        system_prompt: agent_toml.persona, // Store persona in system_prompt for now
+                        is_sleeptime: agent_toml.is_sleeptime,
+                        sleeptime_interval: agent_toml.sleeptime_interval,
+                    };
+
+                    self.agent_configs.push(config);
+                }
+            }
+        }
+
+        // Extract memory blocks section
+        if let Some(memory) = config_data.get("memory").and_then(|v| v.as_table()) {
+            for (_key, memory_value) in memory {
+                if let Ok(memory_toml) = memory_value.clone().try_into::<MemoryBlockConfigToml>() {
+                    let memory_id = MemoryBlockId::new(&memory_toml.name)?;
+
+                    let config = MemoryBlockConfig {
+                        name: memory_id,
+                        max_length: memory_toml.max_length,
+                        default_value: memory_toml.default_value,
+                        description: memory_toml.description,
+                    };
+
+                    self.memory_configs.push(config);
+                }
+            }
+        }
+
+        info!(
+            "Loaded {} agents and {} memory blocks from config",
+            self.agent_configs.len(),
+            self.memory_configs.len()
+        );
+
+        Ok(self)
     }
 
     pub fn with_agent(mut self, config: AgentConfig) -> Self {
@@ -978,8 +1825,30 @@ impl MultiAgentSystemBuilder {
         self
     }
 
+    pub fn with_system_prompt_template(mut self, template: &str) -> Self {
+        self.system_prompt_template = Some(template.to_string());
+        self
+    }
+
+    pub fn with_pattern_specific_prompt(mut self, prompt: &str) -> Self {
+        self.pattern_specific_prompt = Some(prompt.to_string());
+        self
+    }
+
+    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+        self.model_config = Some(config);
+        self
+    }
+
     pub fn build(self) -> MultiAgentSystem {
         let mut system = MultiAgentSystem::new(self.letta, self.db);
+        system.system_prompt_template = self.system_prompt_template;
+        system.pattern_specific_prompt = self.pattern_specific_prompt;
+
+        // Apply model config if provided
+        if let Some(model_config) = self.model_config {
+            system.model_config = Arc::new(model_config);
+        }
 
         for config in self.agent_configs {
             system.add_agent_config(config);
@@ -996,7 +1865,7 @@ impl MultiAgentSystemBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{StandardAgent, StandardMemoryBlock};
+    use crate::agent::{StandardAgent, StandardMemoryBlock};
 
     #[tokio::test]
     async fn test_memory_block_validation() {

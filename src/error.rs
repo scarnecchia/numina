@@ -1,4 +1,4 @@
-use crate::types::{AgentId, MemoryBlockId};
+use crate::agent::{AgentId, MemoryBlockId};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -24,7 +24,7 @@ pub enum PatternError {
 
     #[error("Validation error")]
     #[diagnostic(help("Check input format and constraints"))]
-    Validation(#[from] crate::types::ValidationError),
+    Validation(#[from] ValidationError),
 }
 
 /// Database-specific errors
@@ -128,6 +128,13 @@ pub enum AgentError {
         source: letta::LettaError,
     },
 
+    #[error("Invalid model '{model}' - allowed models: {}", allowed.join(", "))]
+    #[diagnostic(
+        code(pattern::agent::invalid_model),
+        help("Use one of the allowed models listed above")
+    )]
+    InvalidModel { model: String, allowed: Vec<String> },
+
     #[error("Failed to send message to agent")]
     #[diagnostic(
         code(pattern::agent::message_failed),
@@ -159,6 +166,13 @@ pub enum AgentError {
     #[error("Letta Error: {0}")]
     #[diagnostic()]
     Other(#[from] letta::LettaError),
+}
+
+/// Convert LettaIdError to AgentError
+impl From<letta::LettaIdError> for AgentError {
+    fn from(err: letta::LettaIdError) -> Self {
+        AgentError::InvalidLettaId(err.to_string())
+    }
 }
 
 /// Discord-specific errors
@@ -234,6 +248,28 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+}
+
+/// Validation errors for types
+#[derive(Debug, thiserror::Error)]
+pub enum ValidationError {
+    #[error("Agent ID cannot be empty")]
+    EmptyAgentId,
+
+    #[error("Invalid agent ID format: {0}")]
+    InvalidAgentId(String),
+
+    #[error("Memory block ID cannot be empty")]
+    EmptyMemoryBlockId,
+
+    #[error("Invalid memory block ID format: {0}")]
+    InvalidMemoryBlockId(String),
+
+    #[error("Unknown MCP transport: {0}")]
+    InvalidTransport(String),
+
+    #[error("Invalid model capability: {0}")]
+    InvalidModelCapability(String),
 }
 
 /// Type alias for Results in Pattern
