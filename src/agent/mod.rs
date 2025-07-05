@@ -136,18 +136,21 @@ impl fmt::Display for StandardMemoryBlock {
     }
 }
 
-/// Standard agent IDs
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StandardAgent {
+/// Agent types - standard agents plus support for custom agents
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentType {
     Pattern,
     Entropy,
     Flux,
     Archive,
     Momentum,
     Anchor,
+    #[serde(rename = "custom")]
+    Custom(String),
 }
 
-impl StandardAgent {
+impl AgentType {
     pub fn id(&self) -> AgentId {
         match self {
             Self::Pattern => AgentId("pattern".to_string()),
@@ -156,10 +159,11 @@ impl StandardAgent {
             Self::Archive => AgentId("archive".to_string()),
             Self::Momentum => AgentId("momentum".to_string()),
             Self::Anchor => AgentId("anchor".to_string()),
+            Self::Custom(name) => AgentId(name.clone()),
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Pattern => "Pattern",
             Self::Entropy => "Entropy",
@@ -167,10 +171,11 @@ impl StandardAgent {
             Self::Archive => "Archive",
             Self::Momentum => "Momentum",
             Self::Anchor => "Anchor",
+            Self::Custom(name) => name,
         }
     }
 
-    pub fn description(&self) -> &'static str {
+    pub fn description(&self) -> &str {
         match self {
             Self::Pattern => "Sleeptime orchestrator and main coordinator",
             Self::Entropy => "Task complexity and breakdown specialist",
@@ -178,17 +183,46 @@ impl StandardAgent {
             Self::Archive => "Memory and knowledge retrieval system",
             Self::Momentum => "Energy and flow state tracker",
             Self::Anchor => "Habits and routine builder",
+            Self::Custom(_) => "Custom agent",
         }
     }
 
     pub fn is_sleeptime(&self) -> bool {
         matches!(self, Self::Pattern)
     }
+
+    pub fn knowledge_file(&self) -> String {
+        match self {
+            Self::Pattern => "coordination_patterns.md".to_string(),
+            Self::Entropy => "task_patterns.md".to_string(),
+            Self::Flux => "time_patterns.md".to_string(),
+            Self::Archive => "memory_patterns.md".to_string(),
+            Self::Momentum => "energy_patterns.md".to_string(),
+            Self::Anchor => "routine_patterns.md".to_string(),
+            Self::Custom(name) => format!("{}_patterns.md", name.to_lowercase()),
+        }
+    }
 }
 
-impl fmt::Display for StandardAgent {
+impl fmt::Display for AgentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.name())
+    }
+}
+
+impl FromStr for AgentType {
+    type Err = ValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pattern" => Ok(AgentType::Pattern),
+            "entropy" => Ok(AgentType::Entropy),
+            "flux" => Ok(AgentType::Flux),
+            "archive" => Ok(AgentType::Archive),
+            "momentum" => Ok(AgentType::Momentum),
+            "anchor" => Ok(AgentType::Anchor),
+            _ => Ok(AgentType::Custom(s.to_string())),
+        }
     }
 }
 
@@ -309,23 +343,29 @@ mod tests {
     }
 
     #[test]
-    fn test_standard_agents() {
-        let pattern = StandardAgent::Pattern;
+    fn test_agent_types() {
+        let pattern = AgentType::Pattern;
         assert!(pattern.is_sleeptime());
         assert_eq!(pattern.name(), "Pattern");
 
-        let entropy = StandardAgent::Entropy;
+        let entropy = AgentType::Entropy;
         assert!(!entropy.is_sleeptime());
         assert!(entropy.description().contains("complexity"));
 
-        // Verify all agents have unique IDs
+        // Test custom agent
+        let custom = AgentType::Custom("MyAgent".to_string());
+        assert_eq!(custom.name(), "MyAgent");
+        assert_eq!(custom.description(), "Custom agent");
+        assert_eq!(custom.knowledge_file(), "myagent_patterns.md");
+
+        // Verify all standard agents have unique IDs
         let agents = vec![
-            StandardAgent::Pattern,
-            StandardAgent::Entropy,
-            StandardAgent::Flux,
-            StandardAgent::Archive,
-            StandardAgent::Momentum,
-            StandardAgent::Anchor,
+            AgentType::Pattern,
+            AgentType::Entropy,
+            AgentType::Flux,
+            AgentType::Archive,
+            AgentType::Momentum,
+            AgentType::Anchor,
         ];
 
         let ids: Vec<String> = agents.iter().map(|a| a.id().as_str().to_string()).collect();
@@ -365,5 +405,32 @@ mod tests {
         let capability = ModelCapability::Interactive;
         let json = serde_json::to_string(&capability).unwrap();
         assert_eq!(json, "\"interactive\"");
+
+        // Test AgentType serialization
+        let standard = AgentType::Pattern;
+        let json = serde_json::to_string(&standard).unwrap();
+        assert_eq!(json, "\"pattern\"");
+
+        let custom = AgentType::Custom("CustomBot".to_string());
+        let json = serde_json::to_string(&custom).unwrap();
+        assert_eq!(json, "{\"custom\":\"CustomBot\"}");
+    }
+
+    #[test]
+    fn test_agent_type_from_str() {
+        // Standard agents
+        assert_eq!(AgentType::from_str("pattern").unwrap(), AgentType::Pattern);
+        assert_eq!(AgentType::from_str("ENTROPY").unwrap(), AgentType::Entropy);
+        assert_eq!(AgentType::from_str("Flux").unwrap(), AgentType::Flux);
+
+        // Custom agents - any unrecognized string becomes Custom
+        assert_eq!(
+            AgentType::from_str("my_custom_agent").unwrap(),
+            AgentType::Custom("my_custom_agent".to_string())
+        );
+        assert_eq!(
+            AgentType::from_str("NotAStandardAgent").unwrap(),
+            AgentType::Custom("NotAStandardAgent".to_string())
+        );
     }
 }

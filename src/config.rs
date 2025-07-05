@@ -26,12 +26,32 @@ pub struct Config {
     /// Model capability mappings
     #[serde(default)]
     pub models: ModelConfig,
+    /// Partner configurations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partners: Option<PartnersConfig>,
+    /// Cache configuration
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// Path to SQLite database file
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Path to cache directory
+    pub directory: String,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            directory: ".pattern_cache".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +95,25 @@ pub struct ModelConfig {
     /// Per-agent model overrides (agent_id -> capability mappings)
     #[serde(default)]
     pub agents: HashMap<String, CapabilityModels>,
+}
+
+/// Partners configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartnersConfig {
+    /// List of partner users
+    pub users: Vec<PartnerUser>,
+}
+
+/// Individual partner configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartnerUser {
+    /// Discord user ID as string
+    pub discord_id: String,
+    /// Partner's display name
+    pub name: String,
+    /// Whether to auto-initialize at boot
+    #[serde(default)]
+    pub auto_initialize: bool,
 }
 
 /// Model mappings for each capability level
@@ -138,6 +177,8 @@ impl Default for Config {
             agents: Vec::new(),
             agent_config_path: None,
             models: ModelConfig::default(),
+            partners: None,
+            cache: CacheConfig::default(),
         }
     }
 }

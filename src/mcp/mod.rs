@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 pub mod core_tools;
 pub mod discord_tools;
+pub mod knowledge_tools;
 pub mod server;
 
 /// MCP transport type
@@ -44,46 +45,81 @@ impl FromStr for McpTransport {
 // MCP request types
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatWithAgentRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub message: String,
     pub agent_id: Option<String>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GetAgentMemoryRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub agent_id: Option<String>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct UpdateAgentMemoryRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub memory_json: String,
     pub agent_id: Option<String>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ScheduleEventRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub title: String,
     pub start_time: String,
+    pub end_time: String,
     pub description: Option<String>,
-    pub duration_minutes: Option<u32>,
+    pub location: Option<String>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct UpdateAgentModelRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub agent_id: String,
     pub capability: crate::agent::ModelCapability,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct RecordEnergyStateRequest {
+    pub user_id: String,
+    pub energy_level: i32,       // 1-10
+    pub attention_state: String, // focused, scattered, hyperfocus, etc
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mood: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_break_minutes: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 // Group-related request types
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SendGroupMessageRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub group_name: String,
     pub message: String,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 // Unified message sending
@@ -100,7 +136,7 @@ pub enum MessageDestinationType {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SendMessageRequest {
-    pub user_id: i64,
+    pub user_id: String,
     pub destination_type: MessageDestinationType,
     pub destination: String,
     pub message: String,
@@ -111,4 +147,25 @@ pub struct SendMessageRequest {
     pub embed_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_fields: Option<Vec<discord_tools::EmbedField>>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
+}
+
+/// Schema helper for u32 fields that need explicit int32 format
+pub fn schema_u32(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
+
+    let mut schema = SchemaObject::default();
+    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Integer)));
+    schema.format = Some("int32".to_string());
+    Schema::Object(schema)
+}
+
+/// Empty request type for tools that don't take parameters
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct EmptyRequest {
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }

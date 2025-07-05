@@ -26,42 +26,125 @@ else
     fi
 fi
 
+# Function to delete groups containing an agent
+delete_groups_for_agent() {
+    local agent_id=$1
+    local agent_name=$2
+    
+    # Get groups this agent is in
+    if [ -n "$AUTH_HEADER" ]; then
+        GROUPS_JSON=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents/$agent_id/groups" 2>/dev/null || echo "[]")
+    else
+        GROUPS_JSON=$(curl -s "$BASE_URL/v1/agents/$agent_id/groups" 2>/dev/null || echo "[]")
+    fi
+    
+    # Check if we got valid JSON and it's not empty
+    if echo "$GROUPS_JSON" | jq -e '. | length > 0' >/dev/null 2>&1; then
+        echo "  Agent $agent_name is in groups:"
+        
+        # Process each group
+        echo "$GROUPS_JSON" | jq -r '.[] | @base64' | while read -r group_data; do
+            # Decode the group data
+            GROUP=$(echo "$group_data" | base64 -d)
+            GROUP_ID=$(echo "$GROUP" | jq -r '.id')
+            GROUP_DESC=$(echo "$GROUP" | jq -r '.description')
+            
+            echo "    - $GROUP_DESC (ID: $GROUP_ID)"
+            echo -n "    🗑️  Deleting group $GROUP_DESC... "
+            
+            if [ -n "$AUTH_HEADER" ]; then
+                HTTP_STATUS=$(curl -s -w "%{http_code}" -X DELETE -H "$AUTH_HEADER" "$BASE_URL/v1/groups/$GROUP_ID" -o /dev/null)
+            else
+                HTTP_STATUS=$(curl -s -w "%{http_code}" -X DELETE "$BASE_URL/v1/groups/$GROUP_ID" -o /dev/null)
+            fi
+            
+            if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 204 ]; then
+                echo "✅"
+            else
+                echo "❌ Failed (HTTP $HTTP_STATUS)"
+            fi
+        done
+    fi
+}
+
 # Function to delete agents matching pattern
 delete_pattern_agents() {
     echo "🔍 Searching for Pattern agents..."
     
     # Get all agents
     if [ -n "$AUTH_HEADER" ]; then
-        AGENTS=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents" | jq -r '.[] | select(.name | startswith("pattern_") or startswith("entropy_") or startswith("flux_") or startswith("archive_") or startswith("momentum_") or startswith("anchor_")) | .id + ":" + .name')
+        AGENTS_JSON=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents")
     else
-        AGENTS=$(curl -s "$BASE_URL/v1/agents" | jq -r '.[] | select(.name | startswith("pattern_") or startswith("entropy_") or startswith("flux_") or startswith("archive_") or startswith("momentum_") or startswith("anchor_")) | .id + ":" + .name')
+        AGENTS_JSON=$(curl -s "$BASE_URL/v1/agents")
     fi
     
-    if [ -z "$AGENTS" ]; then
+    # Filter for pattern agents
+    PATTERN_AGENTS=$(echo "$AGENTS_JSON" | jq -r '.[] | select(.name | startswith("pattern_") or startswith("entropy_") or startswith("flux_") or startswith("archive_") or startswith("momentum_") or startswith("anchor_")) | @base64')
+    
+    if [ -z "$PATTERN_AGENTS" ]; then
         echo "✅ No Pattern agents found to clean up"
         return
     fi
     
     echo "Found the following agents to delete:"
-    echo "$AGENTS" | while IFS=: read -r id name; do
-        echo "  - $name (ID: $id)"
+    
+    # First pass: display agents and their groups
+    echo "$PATTERN_AGENTS" | while read -r agent_data; do
+        # Decode the agent data
+        AGENT=$(echo "$agent_data" | base64 -d)
+        ID=$(echo "$AGENT" | jq -r '.id')
+        NAME=$(echo "$AGENT" | jq -r '.name')
+        
+        echo "  - $NAME (ID: $ID)"
+        
+        # Get groups for this agent
+        if [ -n "$AUTH_HEADER" ]; then
+            GROUPS_JSON=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents/$ID/groups" 2>/dev/null || echo "[]")
+        else
+            GROUPS_JSON=$(curl -s "$BASE_URL/v1/agents/$ID/groups" 2>/dev/null || echo "[]")
+        fi
+        
+        # Check if we got valid JSON
+        if echo "$GROUPS_JSON" | jq -e '. | length > 0' >/dev/null 2>&1; then
+            echo "$GROUPS_JSON" | jq -r '.[] | "    In group: " + .description + " (ID: " + .id + ")"'
+        fi
     done
     echo
     
-    read -p "Delete all these agents? (y/N) " -n 1 -r
+    read -p "Delete all these agents and their groups? (y/N) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "$AGENTS" | while IFS=: read -r id name; do
-            echo -n "🗑️  Deleting $name... "
+        # Second pass: delete groups
+        echo "🗑️  Deleting groups first..."
+        echo "$PATTERN_AGENTS" | while read -r agent_data; do
+            # Decode the agent data
+            AGENT=$(echo "$agent_data" | base64 -d)
+            ID=$(echo "$AGENT" | jq -r '.id')
+            NAME=$(echo "$AGENT" | jq -r '.name')
+            
+            delete_groups_for_agent "$ID" "$NAME"
+        done
+        
+        # Third pass: delete agents
+        echo
+        echo "🗑️  Now deleting agents..."
+        echo "$PATTERN_AGENTS" | while read -r agent_data; do
+            # Decode the agent data
+            AGENT=$(echo "$agent_data" | base64 -d)
+            ID=$(echo "$AGENT" | jq -r '.id')
+            NAME=$(echo "$AGENT" | jq -r '.name')
+            
+            echo -n "🗑️  Deleting $NAME... "
             if [ -n "$AUTH_HEADER" ]; then
-                RESULT=$(curl -s -X DELETE -H "$AUTH_HEADER" "$BASE_URL/v1/agents/$id")
+                HTTP_STATUS=$(curl -s -w "%{http_code}" -X DELETE -H "$AUTH_HEADER" "$BASE_URL/v1/agents/$ID" -o /dev/null)
             else
-                RESULT=$(curl -s -X DELETE "$BASE_URL/v1/agents/$id")
+                HTTP_STATUS=$(curl -s -w "%{http_code}" -X DELETE "$BASE_URL/v1/agents/$ID" -o /dev/null)
             fi
-            if [ $? -eq 0 ]; then
+            
+            if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 204 ]; then
                 echo "✅"
             else
-                echo "❌ Failed"
+                echo "❌ Failed (HTTP $HTTP_STATUS)"
             fi
         done
     else
@@ -91,12 +174,32 @@ delete_user_agents() {
     echo "Found the following agents for user $user_id:"
     echo "$AGENTS" | while IFS=: read -r id name; do
         echo "  - $name (ID: $id)"
+        
+        # Show groups this agent is in
+        if [ -n "$AUTH_HEADER" ]; then
+            GROUPS=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents/$id/groups" 2>/dev/null | jq -r '.[] | "    In group: " + .name + " (ID: " + .id + ")"' 2>/dev/null)
+        else
+            GROUPS=$(curl -s "$BASE_URL/v1/agents/$id/groups" 2>/dev/null | jq -r '.[] | "    In group: " + .name + " (ID: " + .id + ")"' 2>/dev/null)
+        fi
+        
+        if [ -n "$GROUPS" ]; then
+            echo "$GROUPS"
+        fi
     done
     echo
     
-    read -p "Delete these agents? (y/N) " -n 1 -r
+    read -p "Delete these agents and their groups? (y/N) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
+        # First delete groups
+        echo "🗑️  Deleting groups first..."
+        echo "$AGENTS" | while IFS=: read -r id name; do
+            delete_groups_for_agent "$id" "$name"
+        done
+        
+        # Then delete agents
+        echo
+        echo "🗑️  Now deleting agents..."
         echo "$AGENTS" | while IFS=: read -r id name; do
             echo -n "🗑️  Deleting $name... "
             if [ -n "$AUTH_HEADER" ]; then
@@ -118,11 +221,39 @@ delete_user_agents() {
 # Function to list all agents
 list_agents() {
     echo "📋 All agents in Letta:"
+    
+    # Get all agents first
     if [ -n "$AUTH_HEADER" ]; then
-        curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents" | jq -r '.[] | "  - \(.name) (ID: \(.id))"'
+        AGENTS_JSON=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents")
     else
-        curl -s "$BASE_URL/v1/agents" | jq -r '.[] | "  - \(.name) (ID: \(.id))"'
+        AGENTS_JSON=$(curl -s "$BASE_URL/v1/agents")
     fi
+    
+    # Process each agent
+    echo "$AGENTS_JSON" | jq -r '.[] | @base64' | while read -r agent_data; do
+        # Decode the agent data
+        AGENT=$(echo "$agent_data" | base64 -d)
+        ID=$(echo "$AGENT" | jq -r '.id')
+        NAME=$(echo "$AGENT" | jq -r '.name')
+        
+        echo "  - $NAME (ID: $ID)"
+        
+        # Get groups for this agent
+        if [ -n "$AUTH_HEADER" ]; then
+            GROUPS_JSON=$(curl -s -H "$AUTH_HEADER" "$BASE_URL/v1/agents/$ID/groups" 2>/dev/null || echo "[]")
+        else
+            GROUPS_JSON=$(curl -s "$BASE_URL/v1/agents/$ID/groups" 2>/dev/null || echo "[]")
+        fi
+        
+        # Check if we got valid JSON
+        if echo "$GROUPS_JSON" | jq -e . >/dev/null 2>&1; then
+            # Process groups if any exist
+            GROUP_COUNT=$(echo "$GROUPS_JSON" | jq '. | length')
+            if [ "$GROUP_COUNT" -gt 0 ]; then
+                echo "$GROUPS_JSON" | jq -r '.[] | "    In group: " + .description + " (ID: " + .id + ")"'
+            fi
+        fi
+    done
 }
 
 # Main menu

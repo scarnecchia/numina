@@ -81,9 +81,15 @@ pub struct MultiAgentSystem {
     pub(crate) system_prompt_template: Option<String>,
     pub(crate) pattern_specific_prompt: Option<String>,
     pub(crate) model_config: Arc<ModelConfig>,
+    cache: Option<Arc<crate::cache::PatternCache>>,
 }
 
 impl MultiAgentSystem {
+    /// Get a reference to the database
+    pub fn db(&self) -> &Arc<Database> {
+        &self.db
+    }
+
     /// Initialize system agents (create all agents upfront)
     pub async fn initialize_system_agents(&self) -> Result<()> {
         info!("Initializing system agents...");
@@ -93,6 +99,52 @@ impl MultiAgentSystem {
 
         info!("System agents initialized successfully");
         Ok(())
+    }
+
+    /// Initialize a partner's constellation by Discord ID
+    pub async fn initialize_partner(&self, discord_id: &str, name: &str) -> Result<UserId> {
+        use crate::error::ValidationError;
+
+        // Parse Discord ID to u64
+        let discord_id_u64 = discord_id.parse::<u64>().map_err(|_| {
+            crate::error::PatternError::Validation(ValidationError::InvalidAgentId(format!(
+                "Invalid Discord ID format: {}",
+                discord_id
+            )))
+        })?;
+
+        // Get or create database user
+        let user = self
+            .db
+            .get_or_create_user_by_discord_id(discord_id_u64, name)
+            .await?;
+
+        let user_id = UserId(user.id);
+
+        // Check if already initialized
+        if self.is_user_initialized(user_id).await? {
+            info!(
+                "Partner {} (user_id: {}) already initialized",
+                name, user_id.0
+            );
+            return Ok(user_id);
+        }
+
+        // Initialize the constellation
+        info!(
+            "Initializing constellation for partner {} (user_id: {})",
+            name, user_id.0
+        );
+        self.initialize_user(user_id).await?;
+
+        Ok(user_id)
+    }
+
+    /// Check if a user's constellation is already initialized
+    pub async fn is_user_initialized(&self, user_id: UserId) -> Result<bool> {
+        // Check if user has any agents in the database
+        let agents = self.db.get_agents_for_user(user_id.0).await?;
+        Ok(!agents.is_empty())
     }
 
     /// Configure Letta to use our MCP server with SSE transport
@@ -126,6 +178,8 @@ impl MultiAgentSystem {
         match self.letta.tools().add_mcp_server(server_config).await {
             Ok(_) => {
                 info!("Successfully added SSE MCP server to Letta");
+                // Register all MCP tools once after server is configured
+                self.register_all_mcp_tools().await?;
             }
             Err(e) => {
                 // Check if it's already exists error
@@ -135,6 +189,8 @@ impl MultiAgentSystem {
                     } => {
                         if *status == 409 || message.contains("already exists") {
                             info!("SSE MCP server already exists in Letta, continuing...");
+                            // Still register tools in case they're missing
+                            self.register_all_mcp_tools().await?;
                         } else {
                             return Err(crate::error::PatternError::Agent(
                                 AgentError::CreationFailed {
@@ -209,6 +265,8 @@ impl MultiAgentSystem {
                     "MCP server 'pattern_mcp' already configured with {} tools",
                     tools.len()
                 );
+                // Still ensure all tools are registered
+                self.register_all_mcp_tools().await?;
                 return Ok(());
             }
             Err(_) => {
@@ -232,6 +290,8 @@ impl MultiAgentSystem {
         match self.letta.tools().add_mcp_server(server_config).await {
             Ok(_) => {
                 info!("Successfully added MCP server to Letta");
+                // Register all MCP tools once after server is configured
+                self.register_all_mcp_tools().await?;
             }
             Err(e) => {
                 // Check if it's a "already exists" error
@@ -241,6 +301,8 @@ impl MultiAgentSystem {
                     } => {
                         if *status == 409 || message.contains("already exists") {
                             info!("MCP server already exists in Letta, continuing...");
+                            // Still register tools in case they're missing
+                            self.register_all_mcp_tools().await?;
                         } else {
                             return Err(crate::error::PatternError::Agent(
                                 AgentError::CreationFailed {
@@ -488,12 +550,19 @@ impl MultiAgentSystem {
             system_prompt_template: None,
             pattern_specific_prompt: None,
             model_config: Arc::new(crate::config::ModelConfig::default()),
+            cache: None,
         }
     }
 
     /// Set the model configuration
     pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = Arc::new(config);
+        self
+    }
+
+    /// Set the cache instance
+    pub fn with_cache(mut self, cache: Arc<crate::cache::PatternCache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -722,6 +791,47 @@ impl MultiAgentSystem {
             .get_or_create_user(&format!("user_{}", user_id.0))
             .await?;
 
+        // Build current system prompt for comparison
+        let current_system_prompt = Self::build_system_prompt(
+            config,
+            self.system_prompt_template
+                .as_ref()
+                .expect("missing base template prompt"),
+            self.pattern_specific_prompt
+                .as_ref()
+                .expect("missing primary pattern prompt"),
+        );
+        let current_system_prompt_hash = crate::cache::hash_string(&current_system_prompt);
+
+        // Check cache first if available
+        if let Some(cache) = &self.cache {
+            if let Some(cached_agent) = cache.get_agent(user_id.0, agent_id.as_str()).await? {
+                // Verify system prompt hasn't changed
+                if cached_agent.system_prompt_hash == current_system_prompt_hash {
+                    debug!(
+                        "Agent {} found in cache with ID {}",
+                        agent_id.as_str(),
+                        cached_agent.letta_id
+                    );
+                    // Parse the string ID back to LettaId
+                    return Ok(cached_agent.letta_id.parse().map_err(|_| {
+                        crate::error::PatternError::Validation(
+                            crate::error::ValidationError::InvalidAgentId(format!(
+                                "Failed to parse cached agent ID: {}",
+                                cached_agent.letta_id
+                            )),
+                        )
+                    })?);
+                } else {
+                    debug!(
+                        "Agent {} found in cache but system prompt changed",
+                        agent_id.as_str()
+                    );
+                    // Will update the agent below
+                }
+            }
+        }
+
         // Check if agent already exists
         let user_hash = format!("{:x}", user_id.0 % 1000000);
         let agent_name = format!("{}_{}", agent_id.as_str(), user_hash);
@@ -904,6 +1014,32 @@ impl MultiAgentSystem {
                             self.update_agent(&agent.id, agent_id, config).await?;
                         }
 
+                        // Check if MCP tools need to be attached
+                        let needs_tools = match self.letta.agents().list_tools(&agent.id).await {
+                            Ok(tools) => {
+                                // Check if any MCP tools are missing
+                                let has_mcp_tools = tools.iter().any(|t| {
+                                    t.name.contains("send_message")
+                                        || t.name.contains("agent_memory")
+                                        || t.name.contains("agent_knowledge")
+                                });
+                                !has_mcp_tools
+                            }
+                            Err(_) => true, // If we can't check, assume we need tools
+                        };
+
+                        if needs_tools {
+                            debug!("Attaching MCP tools to existing agent {}", agent_name);
+                            if let Err(e) = self.attach_mcp_tools_to_agent(&agent.id).await {
+                                warn!(
+                                    "Failed to attach MCP tools to existing agent {}: {:?}",
+                                    agent_name, e
+                                );
+                            }
+                        } else {
+                            debug!("Agent {} already has MCP tools attached", agent_name);
+                        }
+
                         return Ok(agent.id);
                     }
                 }
@@ -990,8 +1126,9 @@ impl MultiAgentSystem {
             .system(&system_prompt) // Set the actual system prompt
             .agent_type(letta::types::AgentType::MemGPTv2)
             .enable_sleeptime(config.is_sleeptime)
-            .include_multi_agent_tools(true)
             .tags(tags) // Add tags for filtering
+            .include_base_tools(false)
+            .include_multi_agent_tools(false)
             .tools(vec![
                 // Don't include send_message - use Discord tools instead
                 "core_memory_append".to_string(),
@@ -1034,7 +1171,148 @@ impl MultiAgentSystem {
             )
             .await?;
 
+        // Attach MCP tools to the newly created agent
+        if let Err(e) = self.attach_mcp_tools_to_agent(&agent.id).await {
+            warn!(
+                "Failed to attach MCP tools to agent {}: {:?}",
+                agent_name, e
+            );
+            // Don't fail agent creation if tool attachment fails
+        }
+
         Ok(agent.id)
+    }
+
+    /// Register all MCP tools with Letta (call once after server starts)
+    async fn register_all_mcp_tools(&self) -> Result<()> {
+        info!("Registering all MCP tools with Letta...");
+
+        let mcp_tools = vec![
+            "get_agent_memory",
+            "update_agent_memory",
+            "update_agent_model",
+            "schedule_event",
+            "check_activity_state",
+            "record_energy_state",
+            "send_message",
+            "write_agent_knowledge",
+            "read_agent_knowledge",
+            "list_knowledge_files",
+            "sync_knowledge_to_letta",
+        ];
+
+        let server_name = "pattern_mcp";
+        let mut registered_count = 0;
+
+        for tool_name in &mcp_tools {
+            match self
+                .letta
+                .tools()
+                .add_mcp_tool(server_name, tool_name)
+                .await
+            {
+                Ok(tool) => {
+                    debug!(
+                        "Registered MCP tool '{}' with Letta: {:?}",
+                        tool_name, tool.id
+                    );
+                    registered_count += 1;
+                }
+                Err(e) => {
+                    // Tool might already be registered, which is fine
+                    debug!(
+                        "Failed to register MCP tool '{}' (may already exist): {:?}",
+                        tool_name, e
+                    );
+                }
+            }
+        }
+
+        info!("Registered {} MCP tools with Letta", registered_count);
+        Ok(())
+    }
+
+    /// Attach MCP tools to an agent after creation
+    pub async fn attach_mcp_tools_to_agent(&self, agent_id: &letta::LettaId) -> Result<()> {
+        debug!("Attaching MCP tools to agent {}", agent_id);
+
+        // List of MCP tool names that should be attached to all agents
+        let mcp_tools = vec![
+            "get_agent_memory",
+            "update_agent_memory",
+            "update_agent_model",
+            "schedule_event",
+            "check_activity_state",
+            "record_energy_state",
+            "send_message",
+            "write_agent_knowledge",
+            "read_agent_knowledge",
+            "list_knowledge_files",
+            "sync_knowledge_to_letta",
+        ];
+
+        // Get all available tools from Letta
+        let available_tools = self.letta.tools().list(None).await.map_err(|e| {
+            error!("Failed to list available tools: {:?}", e);
+            AgentError::Other(e)
+        })?;
+
+        // Find and attach each MCP tool
+        let mut attached_count = 0;
+        for tool_name in mcp_tools {
+            // Find the tool ID by name
+            let tool = available_tools.iter().find(|t| t.name == tool_name);
+
+            if let Some(tool) = tool {
+                if let Some(tool_id) = &tool.id {
+                    match self.letta.agents().attach_tool(agent_id, tool_id).await {
+                        Ok(_) => {
+                            attached_count += 1;
+                        }
+                        Err(e) => {
+                            // Tool might already be attached, which is fine
+                            debug!(
+                                "Failed to attach tool '{}' to agent {} (may already be attached): {:?}",
+                                tool_name, agent_id, e
+                            );
+                        }
+                    }
+                } else {
+                    warn!("Tool '{}' found but has no ID", tool_name);
+                }
+            } else {
+                debug!("MCP tool '{}' not found in available tools", tool_name);
+            }
+        }
+
+        if attached_count > 0 {
+            info!(
+                "Attached {} MCP tools to agent {}",
+                attached_count, agent_id
+            );
+        }
+
+        // Optionally verify tools in debug mode
+        #[cfg(debug_assertions)]
+        {
+            match self.letta.agents().list_tools(agent_id).await {
+                Ok(attached_tools) => {
+                    debug!(
+                        "Agent {} has {} total tools attached",
+                        agent_id,
+                        attached_tools.len()
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to list attached tools for agent {}: {:?}",
+                        agent_id, e
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Update shared memory and sync to agents
@@ -1319,16 +1597,23 @@ impl MultiAgentSystem {
             .await
             .map_err(|e| AgentError::Other(e))?;
 
-        // Cache in database
+        // Cache in database with serialized group data
         let manager_config_json = manager_config.map(|v| v.to_string());
+        let group_data_json =
+            serde_json::to_string(&group).map_err(|e| AgentError::CreationFailed {
+                name: format!("group {}", group_name),
+                source: letta::LettaError::api(500, format!("Failed to serialize group: {}", e)),
+            })?;
+
         self.db
-            .create_group(
+            .create_group_with_cache(
                 user_id.0,
                 &group.id.to_string(),
                 group_name,
                 manager_type,
                 manager_config_json.as_deref(),
                 None, // TODO: shared block IDs
+                Some(&group_data_json),
             )
             .await?;
 
@@ -1345,16 +1630,36 @@ impl MultiAgentSystem {
         manager_config: Option<serde_json::Value>,
     ) -> Result<letta::types::Group> {
         // Check database first
-        if let Some(cached_group) = self.db.get_group(user_id.0, group_name).await? {
-            // Fetch from Letta
+        if let Some(cached_group) = self.db.get_group_by_name(user_id.0, group_name).await? {
+            // Try to use cached group data first
+            if let Some(group_data) = cached_group.group_data {
+                match serde_json::from_str::<letta::types::Group>(&group_data) {
+                    Ok(group) => {
+                        info!("Using cached group '{}' with ID: {}", group_name, group.id);
+                        return Ok(group);
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize cached group data: {}", e);
+                        // Fall through to API fetch
+                    }
+                }
+            }
+
+            // If no cached data or deserialization failed, try to fetch from Letta
             let group_id = cached_group
                 .group_id
                 .parse()
                 .map_err(|e: letta::LettaIdError| AgentError::InvalidLettaId(e.to_string()))?;
             match self.letta.groups().get(&group_id).await {
-                Ok(group) => return Ok(group),
+                Ok(group) => {
+                    info!("Retrieved group '{}' from Letta API", group_name);
+                    return Ok(group);
+                }
                 Err(e) => {
-                    warn!("Cached group not found in Letta: {}", e);
+                    warn!(
+                        "Cached group '{}' not found in Letta (will recreate): {}",
+                        group_name, e
+                    );
                     // Continue to create new
                 }
             }
@@ -1865,7 +2170,7 @@ impl MultiAgentSystemBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{StandardAgent, StandardMemoryBlock};
+    use crate::agent::{AgentType, StandardMemoryBlock};
 
     #[tokio::test]
     async fn test_memory_block_validation() {
@@ -1920,7 +2225,7 @@ mod tests {
 
         // Add two agents with same ID (second should override)
         let config1 = AgentConfig {
-            id: StandardAgent::Pattern.id(),
+            id: AgentType::Pattern.id(),
             name: "Pattern v1".to_string(),
             description: "First version".to_string(),
             system_prompt: "Prompt 1".to_string(),
@@ -1929,7 +2234,7 @@ mod tests {
         };
 
         let config2 = AgentConfig {
-            id: StandardAgent::Pattern.id(),
+            id: AgentType::Pattern.id(),
             name: "Pattern v2".to_string(),
             description: "Second version".to_string(),
             system_prompt: "Prompt 2".to_string(),
@@ -1943,7 +2248,7 @@ mod tests {
         assert_eq!(system.agent_configs().len(), 1);
         let stored = system
             .agent_configs()
-            .get(&StandardAgent::Pattern.id())
+            .get(&AgentType::Pattern.id())
             .unwrap();
         assert_eq!(stored.name, "Pattern v2");
         assert!(!stored.is_sleeptime);
@@ -1957,7 +2262,7 @@ mod tests {
 
         let system = MultiAgentSystemBuilder::new(letta, db)
             .with_agent(AgentConfig {
-                id: StandardAgent::Entropy.id(),
+                id: AgentType::Entropy.id(),
                 name: "Entropy".to_string(),
                 description: "Task agent".to_string(),
                 system_prompt: "Break down tasks".to_string(),
@@ -1976,7 +2281,7 @@ mod tests {
         assert_eq!(system.memory_configs().len(), 1);
         assert!(system
             .agent_configs()
-            .contains_key(&StandardAgent::Entropy.id()));
+            .contains_key(&AgentType::Entropy.id()));
     }
 
     #[tokio::test]
@@ -2023,7 +2328,7 @@ mod tests {
     #[test]
     fn test_agent_config_serialization() {
         let config = AgentConfig {
-            id: StandardAgent::Flux.id(),
+            id: AgentType::Flux.id(),
             name: "Flux".to_string(),
             description: "Time agent".to_string(),
             system_prompt: "Manage time".to_string(),

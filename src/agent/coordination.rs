@@ -191,7 +191,7 @@ impl AgentCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::StandardAgent;
+    use crate::agent::AgentType;
 
     #[test]
     fn test_message_tagging() {
@@ -200,7 +200,7 @@ mod tests {
         assert!(user_msg.requires_response);
 
         let agent_msg =
-            TaggedMessage::from_agent(StandardAgent::Pattern.id(), "Update".to_string(), false);
+            TaggedMessage::from_agent(AgentType::Pattern.id(), "Update".to_string(), false);
         assert!(!agent_msg.requires_response);
 
         let tool_msg = TaggedMessage::from_tool("send_message".to_string(), "Success".to_string());
@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn test_should_respond() {
-        let pattern_id = StandardAgent::Pattern.id();
-        let entropy_id = StandardAgent::Entropy.id();
+        let pattern_id = AgentType::Pattern.id();
+        let entropy_id = AgentType::Entropy.id();
 
         // User messages always get responses
         let user_msg = TaggedMessage::from_user(UserId(1), "Hello".to_string());
@@ -243,14 +243,14 @@ mod tests {
         assert_eq!(user_msg.format_with_source(), "[USER 42] Hello");
 
         let agent_msg =
-            TaggedMessage::from_agent(StandardAgent::Flux.id(), "Time update".to_string(), true);
+            TaggedMessage::from_agent(AgentType::Flux.id(), "Time update".to_string(), true);
         assert_eq!(
             agent_msg.format_with_source(),
             "[AGENT flux - NEEDS RESPONSE] Time update"
         );
 
         let info_msg =
-            TaggedMessage::from_agent(StandardAgent::Archive.id(), "Stored".to_string(), false);
+            TaggedMessage::from_agent(AgentType::Archive.id(), "Stored".to_string(), false);
         assert_eq!(
             info_msg.format_with_source(),
             "[AGENT archive - INFO ONLY] Stored"

@@ -39,6 +39,7 @@ When finishing work, update this list with any changes.
 
 ## Development Principles
 
+- **ALWAYS prefer enums to string validation** - Rust enums are very powerful! Use them for type safety. The ability to have unit, tuple, and struct variants means you can have e.g. an `AgentType` enum with all standard agents and then a `Custom(String)` variant as a catch-all.
 - **ALWAYS check if files/scripts/functions exist before creating new ones** - Use `ls`, `find`, `grep`, or read existing code first
 - Run `cargo check` frequently when producing code. This will help you catch errors early.
 - NEVER use `unsafe{}`. If you feel you need to, stop, think about other ways, and ask the user for help if needed.
@@ -256,7 +257,7 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
    ```rust
    fn select_group(message: &str, user_state: &UserState) -> Option<GroupId> {
        // Crisis detection → crisis group
-       // Planning keywords → planning group  
+       // Planning keywords → planning group
        // Memory questions → archive-led group
        // Default → main conversational group
    }
@@ -285,7 +286,7 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - [x] Create default groups from architecture (main, crisis, planning, memory) (2025-01-04)
 - [x] Add group selection logic to Discord bot based on message content (2025-01-04)
 - [ ] Build custom tiered sleeptime monitor (rules-based + Pattern intervention)
-- [ ] Implement passive knowledge sharing via Letta sources
+- [x] Implement passive knowledge sharing via Letta sources (2025-01-04)
 - [ ] Add task CRUD operations to database module
 - [ ] Create task manager with ADHD-aware task breakdown
 - [ ] Add contract/client tracking (time, invoices, follow-ups)
@@ -301,6 +302,7 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 ### Low Priority
 - [ ] Add activity monitoring for interruption detection
 - [ ] Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
+- [ ] Refactor caching from SQLite KV store to foyer library (disk-backed async cache)
 
 ### Completed
 - [x] Letta integration layer with agent management
@@ -320,6 +322,81 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - [x] Optimized agent initialization to eliminate API calls for existing agents
 - [x] Model capability abstraction system (Routine/Interactive/Investigative/Critical)
 - [x] Configurable model mappings in pattern.toml (global and per-agent)
+- [x] Implement passive knowledge sharing via Letta sources (2025-01-04)
+- [x] Knowledge tools for agents (write_agent_knowledge, read_agent_knowledge, sync_knowledge_to_letta)
+- [x] Implement schedule_event MCP tool with database storage (2025-01-07)
+- [x] Implement check_activity_state MCP tool with energy state tracking (2025-01-07)
+- [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-01-07)
+
+## Current Status (2025-01-07)
+
+**Recent Changes**:
+- **Implemented MCP tools for events and activity tracking**:
+  - `schedule_event` - Creates events in database with ADHD-aware time tracking
+  - `check_activity_state` - Checks latest energy state to determine interruptibility
+  - `record_energy_state` - Records energy level (1-10), attention state, mood, and break time
+- **Added database operations**:
+  - `create_event()` and `get_upcoming_events()` for event management
+  - `record_energy_state()` and `get_latest_energy_state()` for activity tracking
+  - Added Event and EnergyState structs with proper serialization
+- **ADHD-aware features**:
+  - Interruptibility logic based on attention state (never interrupt hyperfocus)
+  - Break reminders after 90 minutes of work
+  - Energy level tracking for task/capacity alignment
+- **Implemented automatic MCP tool attachment**:
+  - Added `attach_mcp_tools_to_agent()` method to attach tools after agent creation
+  - Moved tool attachment methods from memory.rs to agents.rs in letta-rs
+  - Tools are now automatically attached when agents are created
+
+**Known Issues with MCP Tools**:
+- **Tool call errors**: Agents are experiencing errors when trying to use newly attached MCP tools
+- **Context contamination**: Some tool call errors seem to contaminate the agent's context, causing them to stop responding
+- **Specific errors from logs**: [TODO: Add specific error messages from logs]
+  - Archive agent tried to use `schedule_event` but got a tool call error
+  - Error seems to persist in context, preventing further responses
+- **Possible causes**:
+  - Tools may not be properly registered with Letta server
+  - Tool parameter formats might not match what agents expect
+  - MCP server might not be running when tools are attached
+  - Tool IDs might not be resolved correctly
+
+## Current Status (2025-01-06)
+
+**Recent Changes**:
+- **Optimized group caching**: Added group_data column to cache full Letta Group structs
+  - Added migration 20240107000000_add_group_data.sql
+  - create_group_with_cache() method stores serialized Group JSON
+  - get_or_create_group() deserializes cached data, avoiding API calls
+  - SQLite being used as key-value store (future: migrate to foyer library)
+- **Added missing methods**:
+  - initialize_partner() - Initialize constellation by Discord ID
+  - is_user_initialized() - Check if user has agents in database
+  - get_agent_cached() - Get agent ID from DB cache only
+  - get_agents_cached() - Get multiple agent IDs from DB cache
+  - get_group_cached() - Get group ID from DB cache only
+
+## Current Status (2025-01-05)
+
+**Recent Changes**:
+- **Fixed partner info threading**: Agents now receive actual partner names and Discord IDs instead of "Unknown"
+  - `get_user_by_id` made public in db.rs
+  - `initialize_user` fetches user info and passes to agent creation
+  - `create_or_get_agent_with_list` accepts partner_name and discord_id parameters
+  - Human blocks show "Partner: Orual (Discord ID: 549170854458687509)"
+- **Fixed group caching**: Groups won't be recreated constantly
+  - Added `get_group_by_name` to database module
+  - `get_or_create_group` now properly checks by name instead of UUID
+- **Simplified MCP tools**:
+  - Disabled Letta's built-in multi-agent tools (`include_multi_agent_tools(false)`)
+  - Removed duplicate `chat_with_agent` and `send_group_message` tools
+  - Unified everything under single `send_message` tool that handles:
+    - Agent-to-agent: `destination_type: "agent", destination: "pattern"`
+    - Groups: `destination_type: "group", destination: "main"`
+    - Discord: `destination_type: "discord_channel"` or `"discord_dm"`
+- **Updated agent instructions**:
+  - Added explicit instruction to use send_message tool after reasoning
+  - Clarified how to use send_message for different communication types
+  - Agents respond to users via Discord (not direct response)
 
 ## Current Status (2025-01-04)
 

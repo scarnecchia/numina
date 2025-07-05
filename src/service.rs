@@ -5,7 +5,7 @@ use crate::{
         constellation::{AgentConfig, MemoryBlockConfig, MultiAgentSystem},
         StandardMemoryBlock, UserId,
     },
-    config::Config,
+    config::{Config, PartnersConfig},
     db::Database,
     error::{PatternError, Result},
     mcp::McpTransport,
@@ -221,6 +221,25 @@ impl PatternService {
         // Wait for services or just run background tasks
         if handles.is_empty() {
             info!("No services enabled. Running background tasks only.");
+
+            // If no MCP server is running, we still need to initialize partners
+            #[allow(unused_variables)]
+            let mcp_enabled = false;
+            #[cfg(feature = "mcp")]
+            let mcp_enabled = service.config.mcp.enabled;
+
+            if !mcp_enabled {
+                if let Some(partners_config) = &service.config.partners {
+                    info!("Initializing partners without MCP server...");
+                    if let Err(e) =
+                        Self::initialize_partners(&service.multi_agent_system, partners_config)
+                            .await
+                    {
+                        error!("Failed to initialize partners: {:?}", e);
+                    }
+                }
+            }
+
             service.wait_for_shutdown().await?
         } else {
             // Wait for all services
@@ -299,14 +318,18 @@ impl PatternService {
             max_message_length: 2000,
         };
 
-        let client = create_discord_client(&discord_config, self.multi_agent_system.clone())
-            .await
-            .map_err(|e| {
-                PatternError::Config(crate::error::ConfigError::Invalid {
-                    field: "discord".to_string(),
-                    reason: format!("Failed to create Discord client: {}", e),
-                })
-            })?;
+        let client = create_discord_client(
+            &discord_config,
+            self.multi_agent_system.clone(),
+            self.db.clone(),
+        )
+        .await
+        .map_err(|e| {
+            PatternError::Config(crate::error::ConfigError::Invalid {
+                field: "discord".to_string(),
+                reason: format!("Failed to create Discord client: {}", e),
+            })
+        })?;
         let client_arc = Arc::new(tokio::sync::RwLock::new(client));
 
         info!("Starting Discord bot");
@@ -341,16 +364,38 @@ impl PatternService {
         );
 
         let handle = match self.config.mcp.transport {
-            McpTransport::Stdio => tokio::spawn(async move {
-                if let Err(e) = server.run_stdio().await {
-                    error!("MCP server error: {:?}", e);
-                }
-            }),
+            McpTransport::Stdio => {
+                // For stdio, we need to initialize partners before starting the server
+                // since stdio doesn't have a configuration step with Letta
+                let partners_config = self.config.partners.clone();
+                let multi_agent_system = self.multi_agent_system.clone();
+
+                tokio::spawn(async move {
+                    // Initialize partners first for stdio
+                    if let Some(partners_config) = &partners_config {
+                        info!("Initializing partners for stdio MCP transport...");
+                        if let Err(e) = PatternService::initialize_partners(
+                            &multi_agent_system,
+                            partners_config,
+                        )
+                        .await
+                        {
+                            error!("Failed to initialize partners: {:?}", e);
+                        }
+                    }
+
+                    // Then run the stdio server
+                    if let Err(e) = server.run_stdio().await {
+                        error!("MCP server error: {:?}", e);
+                    }
+                })
+            }
             McpTransport::Sse => {
                 #[cfg(feature = "mcp-sse")]
                 {
                     let port = self.config.mcp.port.unwrap_or(8080);
                     let multi_agent_system = self.multi_agent_system.clone();
+                    let partners_config = self.config.partners.clone();
 
                     tokio::spawn(async move {
                         // Start the SSE server first
@@ -370,9 +415,16 @@ impl PatternService {
                         } else {
                             info!("Successfully configured SSE MCP server in Letta");
 
-                            // Initialize agents
-                            if let Err(e) = multi_agent_system.initialize_system_agents().await {
-                                error!("Failed to initialize system agents: {:?}", e);
+                            // Initialize partners if configured
+                            if let Some(partners_config) = &partners_config {
+                                if let Err(e) = PatternService::initialize_partners(
+                                    &multi_agent_system,
+                                    partners_config,
+                                )
+                                .await
+                                {
+                                    error!("Failed to initialize partners: {:?}", e);
+                                }
                             }
                         }
 
@@ -389,6 +441,7 @@ impl PatternService {
             McpTransport::Http => {
                 let port = self.config.mcp.port.unwrap_or(8080);
                 let multi_agent_system = self.multi_agent_system.clone();
+                let partners_config = self.config.partners.clone();
 
                 tokio::spawn(async move {
                     // Start the HTTP server first
@@ -414,13 +467,16 @@ impl PatternService {
                             Ok(_) => {
                                 info!("Successfully configured MCP server in Letta");
 
-                                // Now initialize all agents with the MCP tools
-                                info!("Initializing system agents with MCP tools...");
-                                if let Err(e) = multi_agent_system.initialize_system_agents().await
-                                {
-                                    error!("Failed to initialize system agents: {:?}", e);
-                                } else {
-                                    info!("System agents initialized successfully");
+                                // Initialize partners if configured
+                                if let Some(partners_config) = &partners_config {
+                                    if let Err(e) = PatternService::initialize_partners(
+                                        &multi_agent_system,
+                                        partners_config,
+                                    )
+                                    .await
+                                    {
+                                        error!("Failed to initialize partners: {:?}", e);
+                                    }
                                 }
 
                                 break;
@@ -458,6 +514,46 @@ impl PatternService {
         };
 
         Ok(Some(handle))
+    }
+
+    /// Initialize partner constellations at boot time
+    async fn initialize_partners(
+        multi_agent_system: &Arc<MultiAgentSystem>,
+        partners_config: &PartnersConfig,
+    ) -> Result<()> {
+        info!("Initializing {} partners", partners_config.users.len());
+
+        for partner in &partners_config.users {
+            if partner.auto_initialize {
+                info!(
+                    "Auto-initializing partner: {} (Discord ID: {})",
+                    partner.name, partner.discord_id
+                );
+
+                match multi_agent_system
+                    .initialize_partner(&partner.discord_id, &partner.name)
+                    .await
+                {
+                    Ok(user_id) => {
+                        info!(
+                            "Successfully initialized partner {} with user_id {}",
+                            partner.name, user_id.0
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to initialize partner {} ({}): {}",
+                            partner.name, partner.discord_id, e
+                        );
+                        // Continue with other partners even if one fails
+                    }
+                }
+            } else {
+                info!("Skipping partner {} (auto_initialize=false)", partner.name);
+            }
+        }
+
+        Ok(())
     }
 
     /// Wait for shutdown signal

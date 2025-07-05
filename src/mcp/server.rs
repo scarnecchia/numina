@@ -3,6 +3,10 @@ use crate::{
     db::Database,
     mcp::{
         discord_tools::{SendDiscordDmRequest, SendDiscordMessageRequest},
+        knowledge_tools::{
+            KnowledgeTools, ReadAgentKnowledgeRequest, SyncKnowledgeRequest,
+            WriteAgentKnowledgeRequest,
+        },
         MessageDestinationType,
     },
 };
@@ -19,7 +23,7 @@ use tracing::{debug, error, info};
 
 use super::{core_tools::CoreTools, discord_tools::DiscordTools, SendMessageRequest};
 use super::{
-    ChatWithAgentRequest, GetAgentMemoryRequest, ScheduleEventRequest, SendGroupMessageRequest,
+    GetAgentMemoryRequest, RecordEnergyStateRequest, ScheduleEventRequest, SendGroupMessageRequest,
     UpdateAgentMemoryRequest, UpdateAgentModelRequest,
 };
 
@@ -241,14 +245,6 @@ impl ServerHandler for PatternMcpServer {
 // Tool implementations for agent operations
 #[rmcp::tool_router]
 impl PatternMcpServer {
-    #[rmcp::tool(description = "Send a message to a Letta agent and get a response")]
-    async fn chat_with_agent(
-        &self,
-        params: Parameters<ChatWithAgentRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        self.core_tools.chat_with_agent(params).await
-    }
-
     #[rmcp::tool(description = "Get the current memory state of an agent")]
     async fn get_agent_memory(
         &self,
@@ -278,25 +274,41 @@ impl PatternMcpServer {
         &self,
         params: Parameters<ScheduleEventRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.core_tools.schedule_event(params).await
+        info!("MCP server received schedule_event request");
+        debug!("Raw params: {:?}", params);
+
+        match self.core_tools.schedule_event(params).await {
+            Ok(result) => {
+                info!("schedule_event completed successfully");
+                Ok(result)
+            }
+            Err(e) => {
+                error!("schedule_event failed: {:?}", e);
+                Err(e)
+            }
+        }
     }
 
     #[rmcp::tool(description = "Check activity state for interruption timing")]
-    async fn check_activity_state(&self) -> Result<CallToolResult, McpError> {
+    async fn check_activity_state(
+        &self,
+        _params: Parameters<super::EmptyRequest>,
+    ) -> Result<CallToolResult, McpError> {
         self.core_tools.check_activity_state().await
     }
 
-    // Group management tools
-    #[rmcp::tool(description = "Send a message to a group of agents")]
-    async fn send_group_message(
+    #[rmcp::tool(description = "Record current energy and attention state")]
+    async fn record_energy_state(
         &self,
-        params: Parameters<SendGroupMessageRequest>,
+        params: Parameters<RecordEnergyStateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_group_message(params).await
+        self.core_tools.record_energy_state(params).await
     }
 
+    // Unified messaging tool below replaces both chat_with_agent and send_group_message
+
     #[rmcp::tool(
-        description = "Send a message to various destinations: agents, groups, or Discord"
+        description = "Send a message to various destinations: agents, groups, or Discord."
     )]
     pub async fn send_message(
         &self,
@@ -318,9 +330,20 @@ impl PatternMcpServer {
                     Some(params.destination.as_str())
                 };
 
+                let user_id = params.user_id.parse::<i64>().map_err(|e| {
+                    McpError::invalid_params(
+                        "Invalid user_id format",
+                        Some(json!({
+                            "user_id": params.user_id,
+                            "error": e.to_string(),
+                            "hint": "user_id must be a valid integer"
+                        })),
+                    )
+                })?;
+
                 match self
                     .core_tools
-                    .chat_with_agent_internal(UserId(params.user_id), &params.message, agent_id)
+                    .chat_with_agent_internal(UserId(user_id), &params.message, agent_id)
                     .await
                 {
                     Ok(response) => {
@@ -347,15 +370,26 @@ impl PatternMcpServer {
                         user_id: params.user_id,
                         group_name: params.destination,
                         message: params.message,
+                        request_heartbeat: params.request_heartbeat,
                     }))
                     .await
             }
             #[cfg(feature = "discord")]
             MessageDestinationType::DiscordDm => {
+                let discord_user_id = self
+                    .db
+                    .get_discord_id_for_user(
+                        i64::from_str_radix(&params.destination, 10).unwrap_or_default(),
+                    )
+                    .await
+                    .expect("discord id should exist in the database")
+                    .unwrap();
+
                 self.discord_tools
                     .send_discord_dm(SendDiscordDmRequest {
-                        user_id: params.user_id as u64,
+                        user_id: u64::from_str_radix(&discord_user_id, 10).unwrap(),
                         message: params.message,
+                        request_heartbeat: params.request_heartbeat,
                     })
                     .await
             }
@@ -365,8 +399,125 @@ impl PatternMcpServer {
                     .send_discord_channel_message(SendDiscordMessageRequest {
                         channel: params.destination,
                         message: params.message,
+                        request_heartbeat: params.request_heartbeat,
                     })
                     .await
+            }
+        }
+    }
+
+    // Knowledge tools
+    #[rmcp::tool(description = "Write insights to an agent's knowledge file for passive sharing")]
+    async fn write_agent_knowledge(
+        &self,
+        params: Parameters<WriteAgentKnowledgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+
+        match KnowledgeTools::write_agent_knowledge(
+            params.agent,
+            params.category,
+            params.insight,
+            params.context,
+        )
+        .await
+        {
+            Ok(message) => {
+                info!("Knowledge written successfully");
+                Ok(CallToolResult::success(vec![Content::text(message)]))
+            }
+            Err(e) => {
+                error!("Failed to write knowledge: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to write agent knowledge",
+                    Some(json!({
+                        "error_type": "knowledge_write_failure",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
+    }
+
+    #[rmcp::tool(description = "Read insights from a specific agent's knowledge file")]
+    async fn read_agent_knowledge(
+        &self,
+        params: Parameters<ReadAgentKnowledgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+
+        match KnowledgeTools::read_agent_knowledge(
+            params.agent,
+            params.category_filter,
+            params.limit,
+        )
+        .await
+        {
+            Ok(content) => {
+                info!("Knowledge read successfully");
+                Ok(CallToolResult::success(vec![Content::text(content)]))
+            }
+            Err(e) => {
+                error!("Failed to read knowledge: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to read agent knowledge",
+                    Some(json!({
+                        "error_type": "knowledge_read_failure",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
+    }
+
+    #[rmcp::tool(description = "List all available knowledge files and their sizes")]
+    async fn list_knowledge_files(
+        &self,
+        _params: Parameters<super::EmptyRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        match KnowledgeTools::list_knowledge_files().await {
+            Ok(content) => {
+                info!("Knowledge files listed successfully");
+                Ok(CallToolResult::success(vec![Content::text(content)]))
+            }
+            Err(e) => {
+                error!("Failed to list knowledge files: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to list knowledge files",
+                    Some(json!({
+                        "error_type": "knowledge_list_failure",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
+    }
+
+    #[rmcp::tool(
+        description = "Synchronize knowledge files with Letta sources for semantic search"
+    )]
+    async fn sync_knowledge_to_letta(
+        &self,
+        params: Parameters<SyncKnowledgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+
+        match KnowledgeTools::sync_knowledge_to_letta(&self.letta_client, UserId(params.user_id))
+            .await
+        {
+            Ok(message) => {
+                info!("Knowledge synced to Letta successfully");
+                Ok(CallToolResult::success(vec![Content::text(message)]))
+            }
+            Err(e) => {
+                error!("Failed to sync knowledge to Letta: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to sync knowledge to Letta",
+                    Some(json!({
+                        "error_type": "knowledge_sync_failure",
+                        "details": e.to_string()
+                    })),
+                ))
             }
         }
     }
@@ -426,6 +577,7 @@ mod tests {
         let msg_req = SendDiscordMessageRequest {
             channel: "MyServer/general".to_string(),
             message: "Hello, world!".to_string(),
+            request_heartbeat: None,
         };
         let json = serde_json::to_string(&msg_req).unwrap();
         assert!(json.contains("MyServer/general"));
@@ -435,6 +587,7 @@ mod tests {
         let msg_req2 = SendDiscordMessageRequest {
             channel: "123456789012345678".to_string(),
             message: "Test".to_string(),
+            request_heartbeat: None,
         };
         let json2 = serde_json::to_string(&msg_req2).unwrap();
         assert!(json2.contains("123456789012345678"));
@@ -450,6 +603,7 @@ mod tests {
                 value: "1.0.0".to_string(),
                 inline: Some(true),
             }]),
+            request_heartbeat: None,
         };
         let embed_json = serde_json::to_string(&embed_req).unwrap();
         assert!(embed_json.contains("Server/announcements"));
@@ -485,6 +639,7 @@ mod tests {
             let request = SendDiscordMessageRequest {
                 channel: "MyServer/general".to_string(),
                 message: "Test message".to_string(),
+                request_heartbeat: None,
             };
 
             let result = server

@@ -14,6 +14,9 @@ pub struct SendDiscordMessageRequest {
     /// Channel ID or "guild/channel" format (e.g. "MyServer/general")
     pub channel: String,
     pub message: String,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -24,6 +27,9 @@ pub struct SendDiscordEmbedRequest {
     pub description: String,
     pub color: Option<u32>,
     pub fields: Option<Vec<EmbedField>>,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -37,12 +43,18 @@ pub struct EmbedField {
 pub struct GetDiscordChannelInfoRequest {
     /// Channel ID or "guild/channel" format (e.g. "MyServer/general")
     pub channel: String,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SendDiscordDmRequest {
     pub user_id: u64,
     pub message: String,
+    /// Whether to request another agent turn after this tool completes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_heartbeat: Option<bool>,
 }
 
 /// Core MCP tools handler

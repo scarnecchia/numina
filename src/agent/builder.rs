@@ -21,6 +21,7 @@ pub struct MultiAgentSystemBuilder {
     system_prompt_template: Option<String>,
     pattern_specific_prompt: Option<String>,
     model_config: Option<ModelConfig>,
+    cache: Option<Arc<crate::cache::PatternCache>>,
 }
 
 impl MultiAgentSystemBuilder {
@@ -33,6 +34,7 @@ impl MultiAgentSystemBuilder {
             system_prompt_template: None,
             pattern_specific_prompt: None,
             model_config: None,
+            cache: None,
         }
     }
 
@@ -139,6 +141,11 @@ impl MultiAgentSystemBuilder {
         self
     }
 
+    pub fn with_cache(mut self, cache: Arc<crate::cache::PatternCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
     pub fn build(self) -> MultiAgentSystem {
         let mut system = MultiAgentSystem::new(self.letta, self.db);
         system.system_prompt_template = self.system_prompt_template;
@@ -147,6 +154,11 @@ impl MultiAgentSystemBuilder {
         // Apply model config if provided
         if let Some(model_config) = self.model_config {
             system.model_config = Arc::new(model_config);
+        }
+
+        // Apply cache if provided
+        if let Some(cache) = self.cache {
+            system = system.with_cache(cache);
         }
 
         for config in self.agent_configs {

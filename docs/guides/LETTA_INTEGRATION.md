@@ -159,8 +159,11 @@ export LETTA_EMBEDDING_MODEL="letta/letta-free"
 - Agent instances are cached in memory after first creation
 - Cache is checked before database or Letta API calls
 - This significantly reduces latency for repeat interactions
-- **NEW**: Database caching for agent IDs eliminates API calls for existing agents
-- **NEW**: Batch fetching of agent lists during initialization
+- **Database caching**: Agent and group IDs stored in SQLite
+- **Batch operations**: Fetch all agents once during initialization
+- **Group caching** (2025-01-06): Full Group structs cached as JSON
+- **Fast-path methods**: `get_agent_cached()`, `get_group_cached()` skip API calls
+- **Future**: Migrate to foyer library for proper async disk-backed cache
 
 ### Connection Handling
 

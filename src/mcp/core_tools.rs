@@ -11,8 +11,8 @@ use std::{future::Future, sync::Arc};
 use tracing::{debug, error, info};
 
 use super::{
-    ChatWithAgentRequest, GetAgentMemoryRequest, ScheduleEventRequest, SendGroupMessageRequest,
-    UpdateAgentMemoryRequest, UpdateAgentModelRequest,
+    ChatWithAgentRequest, GetAgentMemoryRequest, RecordEnergyStateRequest, ScheduleEventRequest,
+    SendGroupMessageRequest, UpdateAgentMemoryRequest, UpdateAgentModelRequest,
 };
 
 /// Core MCP tools handler
@@ -23,20 +23,30 @@ pub struct CoreTools {
 
 // Core MCP tool implementations
 impl CoreTools {
+    /// Parse user_id from string (handles Discord IDs and other large numbers)
+    fn parse_user_id(user_id_str: &str) -> Result<i64, McpError> {
+        user_id_str.parse::<i64>().map_err(|e| {
+            McpError::invalid_params(
+                "Invalid user_id format",
+                Some(json!({
+                    "user_id": user_id_str,
+                    "error": e.to_string(),
+                    "hint": "user_id must be a valid integer"
+                })),
+            )
+        })
+    }
     pub async fn chat_with_agent(
         &self,
         params: Parameters<ChatWithAgentRequest>,
     ) -> std::result::Result<CallToolResult, McpError> {
         let params = params.0;
-        info!(user_id = params.user_id, agent_id = ?params.agent_id, "Sending message to agent");
+        let user_id = Self::parse_user_id(&params.user_id)?;
+        info!(user_id = user_id, agent_id = ?params.agent_id, "Sending message to agent");
         debug!(message = %params.message, "Message content");
 
         match self
-            .chat_with_agent_internal(
-                UserId(params.user_id),
-                &params.message,
-                params.agent_id.as_deref(),
-            )
+            .chat_with_agent_internal(UserId(user_id), &params.message, params.agent_id.as_deref())
             .await
         {
             Ok(response) => {
@@ -63,10 +73,11 @@ impl CoreTools {
         params: Parameters<GetAgentMemoryRequest>,
     ) -> std::result::Result<CallToolResult, McpError> {
         let params = params.0;
-        info!(user_id = params.user_id, agent_id = ?params.agent_id, "Getting agent memory");
+        let user_id = Self::parse_user_id(&params.user_id)?;
+        info!(user_id = user_id, agent_id = ?params.agent_id, "Getting agent memory");
 
         match self
-            .get_agent_memory_internal(UserId(params.user_id), params.agent_id.as_deref())
+            .get_agent_memory_internal(UserId(user_id), params.agent_id.as_deref())
             .await
         {
             Ok(memory) => {
@@ -95,7 +106,8 @@ impl CoreTools {
         params: Parameters<UpdateAgentMemoryRequest>,
     ) -> std::result::Result<CallToolResult, McpError> {
         let params = params.0;
-        info!(user_id = params.user_id, agent_id = ?params.agent_id, "Updating agent memory");
+        let user_id = Self::parse_user_id(&params.user_id)?;
+        info!(user_id = user_id, agent_id = ?params.agent_id, "Updating agent memory");
 
         let updates: serde_json::Value = match serde_json::from_str(&params.memory_json) {
             Ok(json) => json,
@@ -115,11 +127,7 @@ impl CoreTools {
         };
 
         match self
-            .update_agent_memory_internal(
-                UserId(params.user_id),
-                params.agent_id.as_deref(),
-                &updates,
-            )
+            .update_agent_memory_internal(UserId(user_id), params.agent_id.as_deref(), &updates)
             .await
         {
             Ok(()) => {
@@ -148,8 +156,9 @@ impl CoreTools {
         params: Parameters<UpdateAgentModelRequest>,
     ) -> std::result::Result<CallToolResult, McpError> {
         let params = params.0;
+        let user_id = Self::parse_user_id(&params.user_id)?;
         info!(
-            user_id = params.user_id,
+            user_id = user_id,
             agent_id = %params.agent_id,
             capability = ?params.capability,
             "Updating agent model capability"
@@ -174,7 +183,7 @@ impl CoreTools {
 
         match self
             .multi_agent_system
-            .update_agent_model_capability(UserId(params.user_id), &agent_id, params.capability)
+            .update_agent_model_capability(UserId(user_id), &agent_id, params.capability)
             .await
         {
             Ok(()) => {
@@ -205,30 +214,276 @@ impl CoreTools {
         params: Parameters<ScheduleEventRequest>,
     ) -> std::result::Result<CallToolResult, McpError> {
         let params = params.0;
+
+        // Log all incoming parameters
         info!(
-            user_id = params.user_id,
-            title = params.title,
-            "Scheduling event"
+            "schedule_event called with params: user_id='{}', title='{}', start_time='{}', end_time='{}', description={:?}, location={:?}",
+            params.user_id, params.title, params.start_time, params.end_time, params.description, params.location
         );
 
-        // TODO: Implement event scheduling
-        Ok(CallToolResult::success(vec![Content::text(
-            "Event scheduling not yet implemented",
-        )]))
+        let user_id = match Self::parse_user_id(&params.user_id) {
+            Ok(id) => {
+                info!(
+                    "Successfully parsed user_id: '{}' -> {}",
+                    params.user_id, id
+                );
+                id
+            }
+            Err(e) => {
+                error!("Failed to parse user_id '{}': {:?}", params.user_id, e);
+                return Err(e);
+            }
+        };
+
+        info!(user_id = user_id, title = params.title, "Scheduling event");
+
+        // Helper function to parse relative time expressions
+        fn parse_time_expression(time_expr: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+            let time_expr_lower = time_expr.to_lowercase();
+            let now = chrono::Utc::now();
+
+            // Try to parse as RFC3339 first
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(time_expr) {
+                return Some(dt.with_timezone(&chrono::Utc));
+            }
+
+            // Handle relative time expressions
+            if time_expr_lower.contains("in ") {
+                // Extract number and unit from patterns like "in 10 minutes", "in 5 min", etc.
+                let parts: Vec<&str> = time_expr_lower.split_whitespace().collect();
+                if parts.len() >= 3 && parts[0] == "in" {
+                    if let Ok(amount) = parts[1].parse::<i64>() {
+                        let unit = parts[2..].join(" ");
+                        match unit.as_str() {
+                            "minute" | "minutes" | "min" | "mins" => {
+                                return Some(now + chrono::Duration::minutes(amount));
+                            }
+                            "hour" | "hours" | "hr" | "hrs" => {
+                                return Some(now + chrono::Duration::hours(amount));
+                            }
+                            "day" | "days" => {
+                                return Some(now + chrono::Duration::days(amount));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            None
+        }
+
+        // Parse the start and end times
+        let start_time = match parse_time_expression(&params.start_time) {
+            Some(dt) => {
+                info!(
+                    "Parsed start_time '{}' as {}",
+                    params.start_time,
+                    dt.to_rfc3339()
+                );
+                dt
+            }
+            None => {
+                error!("Unable to parse start_time: '{}'", params.start_time);
+                return Err(McpError::invalid_params(
+                    "Invalid start_time format. Use RFC3339 format (e.g., 2024-01-15T14:30:00Z) or relative time (e.g., 'in 10 minutes')",
+                    Some(json!({
+                        "parameter": "start_time",
+                        "value": params.start_time,
+                        "error_type": "datetime_parse_error",
+                        "examples": ["2024-01-15T14:30:00Z", "in 10 minutes", "in 1 hour"]
+                    })),
+                ));
+            }
+        };
+
+        let end_time = match parse_time_expression(&params.end_time) {
+            Some(dt) => {
+                info!(
+                    "Parsed end_time '{}' as {}",
+                    params.end_time,
+                    dt.to_rfc3339()
+                );
+                dt
+            }
+            None => {
+                error!("Unable to parse end_time: '{}'", params.end_time);
+                return Err(McpError::invalid_params(
+                    "Invalid end_time format. Use RFC3339 format (e.g., 2024-01-15T15:30:00Z) or relative time (e.g., 'in 10 minutes')",
+                    Some(json!({
+                        "parameter": "end_time",
+                        "value": params.end_time,
+                        "error_type": "datetime_parse_error",
+                        "examples": ["2024-01-15T15:30:00Z", "in 10 minutes", "in 1 hour"]
+                    })),
+                ));
+            }
+        };
+
+        // Validate that end time is after start time
+        if end_time <= start_time {
+            return Err(McpError::invalid_params(
+                "End time must be after start time",
+                Some(json!({
+                    "start_time": params.start_time,
+                    "end_time": params.end_time,
+                    "error_type": "invalid_time_range"
+                })),
+            ));
+        }
+
+        // Get database handle from multi_agent_system
+        let db = self.multi_agent_system.db();
+
+        // Create the event in the database
+        match db
+            .create_event(
+                user_id,
+                params.title.clone(),
+                params.description.clone(),
+                start_time,
+                end_time,
+                params.location.clone(),
+            )
+            .await
+        {
+            Ok(event_id) => {
+                info!("Event created successfully with ID {}", event_id);
+
+                // If agents are initialized, update Pattern's context
+                if let Ok(true) = self
+                    .multi_agent_system
+                    .is_user_initialized(UserId(user_id))
+                    .await
+                {
+                    let event_context = format!(
+                        "New event scheduled: {} from {} to {}",
+                        params.title, params.start_time, params.end_time
+                    );
+
+                    // Update active context memory
+                    let _ = self
+                        .multi_agent_system
+                        .update_shared_memory(UserId(user_id), "active_context", &event_context)
+                        .await;
+                }
+
+                // Calculate duration for ADHD time estimation
+                let duration = end_time - start_time;
+                let duration_minutes = duration.num_minutes();
+
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Event '{}' scheduled successfully!\nID: {}\nStart: {}\nEnd: {}\nDuration: {} minutes{}",
+                    params.title,
+                    event_id,
+                    params.start_time,
+                    params.end_time,
+                    duration_minutes,
+                    if let Some(loc) = params.location {
+                        format!("\nLocation: {}", loc)
+                    } else {
+                        String::new()
+                    }
+                ))]))
+            }
+            Err(e) => {
+                error!("Failed to create event: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to create event",
+                    Some(json!({
+                        "user_id": params.user_id,
+                        "title": params.title,
+                        "error_type": "database_error",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
     }
 
     pub async fn check_activity_state(&self) -> std::result::Result<CallToolResult, McpError> {
         info!("Checking activity state");
 
-        // TODO: Implement activity monitoring
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json!({
-                "interruptible": true,
-                "current_focus": null,
-                "last_activity": "idle"
-            }))
-            .unwrap_or_else(|_| "Error".to_string()),
-        )]))
+        // For now, we'll check the latest energy state from the database
+        // In the future, this could integrate with system activity monitors
+
+        // Get the current user context from environment or default
+        // TODO: This should be passed as a parameter or determined from context
+        let default_user_id = 1; // Default user for now
+
+        let db = self.multi_agent_system.db();
+
+        match db.get_latest_energy_state(default_user_id).await {
+            Ok(Some(energy_state)) => {
+                // Parse the created_at timestamp
+                let created_at = chrono::DateTime::parse_from_rfc3339(&energy_state.created_at)
+                    .unwrap_or_else(|_| chrono::Utc::now().into());
+
+                let minutes_since_update = chrono::Utc::now()
+                    .signed_duration_since(created_at.with_timezone(&chrono::Utc))
+                    .num_minutes();
+
+                // Determine interruptibility based on attention state and energy level
+                let interruptible = match energy_state.attention_state.as_str() {
+                    "hyperfocus" => false,                       // Never interrupt hyperfocus
+                    "focused" => energy_state.energy_level <= 3, // Only if low energy
+                    "scattered" => true, // Always interruptible when scattered
+                    _ => true,           // Default to interruptible
+                };
+
+                // Determine if user needs a break
+                let needs_break = energy_state
+                    .last_break_minutes
+                    .map(|mins| mins > 90) // Need break after 90 minutes
+                    .unwrap_or(false);
+
+                let activity_data = json!({
+                    "interruptible": interruptible,
+                    "current_focus": energy_state.attention_state,
+                    "energy_level": energy_state.energy_level,
+                    "mood": energy_state.mood,
+                    "last_break_minutes": energy_state.last_break_minutes,
+                    "minutes_since_update": minutes_since_update,
+                    "needs_break": needs_break,
+                    "notes": energy_state.notes
+                });
+
+                info!("Activity state retrieved: {:?}", activity_data);
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&activity_data)
+                        .unwrap_or_else(|_| "Error".to_string()),
+                )]))
+            }
+            Ok(None) => {
+                // No energy state recorded yet
+                let default_state = json!({
+                    "interruptible": true,
+                    "current_focus": "unknown",
+                    "energy_level": 5,
+                    "mood": null,
+                    "last_break_minutes": null,
+                    "minutes_since_update": null,
+                    "needs_break": false,
+                    "notes": "No activity state recorded yet"
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&default_state)
+                        .unwrap_or_else(|_| "Error".to_string()),
+                )]))
+            }
+            Err(e) => {
+                error!("Failed to get activity state: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to retrieve activity state",
+                    Some(json!({
+                        "error_type": "database_error",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
     }
 
     #[rmcp::tool(description = "Send a message to a group of agents")]
@@ -237,8 +492,9 @@ impl CoreTools {
         params: Parameters<SendGroupMessageRequest>,
     ) -> std::result::Result<CallToolResult, McpError> {
         let params = params.0;
+        let user_id = Self::parse_user_id(&params.user_id)?;
         info!(
-            user_id = params.user_id,
+            user_id = user_id,
             group_name = params.group_name,
             "Sending message to group"
         );
@@ -246,7 +502,7 @@ impl CoreTools {
 
         match self
             .multi_agent_system
-            .send_message_to_group(UserId(params.user_id), &params.group_name, &params.message)
+            .send_message_to_group(UserId(user_id), &params.group_name, &params.message)
             .await
         {
             Ok(response) => {
@@ -279,6 +535,115 @@ impl CoreTools {
                         "group_name": params.group_name,
                         "user_id": params.user_id,
                         "error_type": "group_communication_failure",
+                        "details": e.to_string()
+                    })),
+                ))
+            }
+        }
+    }
+
+    pub async fn record_energy_state(
+        &self,
+        params: Parameters<RecordEnergyStateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = params.0;
+        let user_id = Self::parse_user_id(&params.user_id)?;
+        info!(
+            user_id = user_id,
+            energy_level = params.energy_level,
+            attention_state = params.attention_state,
+            "Recording energy state"
+        );
+
+        // Validate energy level
+        if params.energy_level < 1 || params.energy_level > 10 {
+            return Err(McpError::invalid_params(
+                "Energy level must be between 1 and 10",
+                Some(json!({
+                    "parameter": "energy_level",
+                    "value": params.energy_level,
+                    "error_type": "out_of_range"
+                })),
+            ));
+        }
+
+        // Validate attention state
+        let valid_states = [
+            "focused",
+            "scattered",
+            "hyperfocus",
+            "distracted",
+            "flowing",
+            "stuck",
+        ];
+        if !valid_states.contains(&params.attention_state.as_str()) {
+            return Err(McpError::invalid_params(
+                "Invalid attention state",
+                Some(json!({
+                    "parameter": "attention_state",
+                    "value": params.attention_state,
+                    "valid_values": valid_states,
+                    "error_type": "invalid_value"
+                })),
+            ));
+        }
+
+        let db = self.multi_agent_system.db();
+
+        match db
+            .record_energy_state(
+                user_id,
+                params.energy_level,
+                params.attention_state.clone(),
+                params.mood.clone(),
+                params.last_break_minutes,
+                params.notes.clone(),
+            )
+            .await
+        {
+            Ok(state_id) => {
+                info!("Energy state recorded successfully with ID {}", state_id);
+
+                // If agents are initialized, update Momentum agent's context
+                if let Ok(true) = self
+                    .multi_agent_system
+                    .is_user_initialized(UserId(user_id))
+                    .await
+                {
+                    let energy_context = format!(
+                        "Energy update: Level {}/10, State: {}, Mood: {}",
+                        params.energy_level,
+                        params.attention_state,
+                        params.mood.as_deref().unwrap_or("unspecified")
+                    );
+
+                    // Update active context memory
+                    let _ = self
+                        .multi_agent_system
+                        .update_shared_memory(UserId(user_id), "active_context", &energy_context)
+                        .await;
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Energy state recorded successfully!\nID: {}\nEnergy: {}/10\nAttention: {}\nMood: {}{}",
+                    state_id,
+                    params.energy_level,
+                    params.attention_state,
+                    params.mood.as_deref().unwrap_or("not specified"),
+                    if let Some(notes) = params.notes {
+                        format!("\nNotes: {}", notes)
+                    } else {
+                        String::new()
+                    }
+                ))]))
+            }
+            Err(e) => {
+                error!("Failed to record energy state: {}", e);
+                Err(McpError::internal_error(
+                    "Failed to record energy state",
+                    Some(json!({
+                        "user_id": params.user_id,
+                        "error_type": "database_error",
                         "details": e.to_string()
                     })),
                 ))

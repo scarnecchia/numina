@@ -87,8 +87,50 @@ impl Database {
         self.get_user_by_id(id).await
     }
 
+    /// Get or create a user by Discord ID
+    pub async fn get_or_create_user_by_discord_id(
+        &self,
+        discord_id: u64,
+        username: &str,
+    ) -> Result<User> {
+        let discord_id_str = discord_id.to_string();
+
+        // Try to get existing user by discord_id
+        let existing = sqlx::query_as::<_, User>(
+            "SELECT id, name, discord_id, created_at FROM users WHERE discord_id = ?1",
+        )
+        .bind(&discord_id_str)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::QueryFailed {
+            context: format!("Failed to fetch user by discord_id '{}'", discord_id_str),
+            source: e,
+        })?;
+
+        if let Some(user) = existing {
+            return Ok(user);
+        }
+
+        // Create new user with discord_id
+        let id = sqlx::query("INSERT INTO users (name, discord_id) VALUES (?1, ?2)")
+            .bind(username)
+            .bind(&discord_id_str)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed {
+                context: format!(
+                    "Failed to create user '{}' with discord_id '{}'",
+                    username, discord_id_str
+                ),
+                source: e,
+            })?
+            .last_insert_rowid();
+
+        self.get_user_by_id(id).await
+    }
+
     /// Get user by ID
-    async fn get_user_by_id(&self, id: i64) -> Result<User> {
+    pub async fn get_user_by_id(&self, id: i64) -> Result<User> {
         sqlx::query_as::<_, User>(
             "SELECT id, name, discord_id, created_at FROM users WHERE id = ?1",
         )
@@ -176,7 +218,7 @@ impl Database {
     /// Get shared memory blocks for a user
     pub async fn get_shared_memory(&self, user_id: i64) -> Result<Vec<SharedMemory>> {
         sqlx::query_as::<_, SharedMemory>(
-            "SELECT id, user_id, block_name, block_value, max_length, created_at, updated_at
+            "SELECT id, user_id, block_name, block_value, max_length, letta_block_id, created_at, updated_at
              FROM shared_memory WHERE user_id = ?1",
         )
         .bind(user_id)
@@ -198,7 +240,7 @@ impl Database {
         block_name: &str,
     ) -> Result<Option<SharedMemory>> {
         sqlx::query_as::<_, SharedMemory>(
-            "SELECT id, user_id, block_name, block_value, max_length, created_at, updated_at
+            "SELECT id, user_id, block_name, block_value, max_length, letta_block_id, created_at, updated_at
              FROM shared_memory WHERE user_id = ?1 AND block_name = ?2",
         )
         .bind(user_id)
@@ -222,17 +264,32 @@ impl Database {
         block_value: &str,
         max_length: i32,
     ) -> Result<()> {
+        self.upsert_shared_memory_with_letta(user_id, block_name, block_value, max_length, None)
+            .await
+    }
+
+    /// Upsert a shared memory block with optional Letta block ID
+    pub async fn upsert_shared_memory_with_letta(
+        &self,
+        user_id: i64,
+        block_name: &str,
+        block_value: &str,
+        max_length: i32,
+        letta_block_id: Option<&str>,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO shared_memory (user_id, block_name, block_value, max_length)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO shared_memory (user_id, block_name, block_value, max_length, letta_block_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(user_id, block_name) DO UPDATE SET
                 block_value = excluded.block_value,
+                letta_block_id = excluded.letta_block_id,
                 updated_at = CURRENT_TIMESTAMP",
         )
         .bind(user_id)
         .bind(block_name)
         .bind(block_value)
         .bind(max_length)
+        .bind(letta_block_id)
         .execute(&self.pool)
         .await
         .map_err(|e| DatabaseError::QueryFailed {
@@ -253,11 +310,34 @@ impl Database {
         manager_config: Option<&str>,
         shared_block_ids: Option<&[String]>,
     ) -> Result<Group> {
+        self.create_group_with_cache(
+            user_id,
+            group_id,
+            name,
+            manager_type,
+            manager_config,
+            shared_block_ids,
+            None,
+        )
+        .await
+    }
+
+    /// Create a new group with cached Letta Group data
+    pub async fn create_group_with_cache(
+        &self,
+        user_id: i64,
+        group_id: &str,
+        name: &str,
+        manager_type: GroupManagerType,
+        manager_config: Option<&str>,
+        shared_block_ids: Option<&[String]>,
+        group_data: Option<&str>,
+    ) -> Result<Group> {
         let shared_block_ids_json = shared_block_ids.map(|ids| serde_json::to_string(ids).unwrap());
 
         let _id = sqlx::query(
-            "INSERT INTO groups (user_id, group_id, name, manager_type, manager_config, shared_block_ids)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO groups (user_id, group_id, name, manager_type, manager_config, shared_block_ids, group_data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(user_id)
         .bind(group_id)
@@ -265,6 +345,7 @@ impl Database {
         .bind(manager_type.as_i32())
         .bind(manager_config)
         .bind(shared_block_ids_json.as_deref())
+        .bind(group_data)
         .execute(&self.pool)
         .await
         .map_err(|e| DatabaseError::QueryFailed {
@@ -286,7 +367,7 @@ impl Database {
     /// Get a group by user_id and group_id
     pub async fn get_group(&self, user_id: i64, group_id: &str) -> Result<Option<Group>> {
         sqlx::query_as::<_, Group>(
-            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, created_at, updated_at
+            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, group_data, created_at, updated_at
              FROM groups WHERE user_id = ?1 AND group_id = ?2",
         )
         .bind(user_id)
@@ -302,10 +383,29 @@ impl Database {
         })
     }
 
+    /// Get a group by user_id and group name
+    pub async fn get_group_by_name(&self, user_id: i64, name: &str) -> Result<Option<Group>> {
+        sqlx::query_as::<_, Group>(
+            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, group_data, created_at, updated_at
+             FROM groups WHERE user_id = ?1 AND name = ?2",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: format!("Failed to fetch group with name '{}'", name),
+                source: e,
+            }
+            .into()
+        })
+    }
+
     /// List all groups for a user
     pub async fn list_user_groups(&self, user_id: i64) -> Result<Vec<Group>> {
         sqlx::query_as::<_, Group>(
-            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, created_at, updated_at
+            "SELECT id, user_id, group_id, name, manager_type, manager_config, shared_block_ids, group_data, created_at, updated_at
              FROM groups WHERE user_id = ?1 ORDER BY created_at DESC",
         )
         .bind(user_id)
@@ -343,6 +443,20 @@ impl Database {
         Ok(())
     }
 
+    /// Get Discord ID for a database user
+    pub async fn get_discord_id_for_user(&self, user_id: i64) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT discord_id FROM users WHERE id = ?1")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed {
+                context: format!("Failed to fetch Discord ID for user {}", user_id),
+                source: e,
+            })?;
+
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("discord_id")))
+    }
+
     /// Update a group's configuration
     pub async fn update_group_config(
         &self,
@@ -377,6 +491,121 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    // Event management methods
+    pub async fn create_event(
+        &self,
+        user_id: i64,
+        title: String,
+        description: Option<String>,
+        start_time: chrono::DateTime<chrono::Utc>,
+        end_time: chrono::DateTime<chrono::Utc>,
+        location: Option<String>,
+    ) -> Result<i64> {
+        let start_time_str = start_time.to_rfc3339();
+        let end_time_str = end_time.to_rfc3339();
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO events (user_id, title, description, start_time, end_time, location)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )
+        .bind(user_id)
+        .bind(title)
+        .bind(description)
+        .bind(start_time_str)
+        .bind(end_time_str)
+        .bind(location)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::QueryFailed {
+            context: "Failed to create event".into(),
+            source: e,
+        })?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_upcoming_events(&self, user_id: i64, limit: i64) -> Result<Vec<Event>> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query_as::<_, Event>(
+            r#"
+            SELECT id, user_id, title, description, start_time, end_time, location, created_at, updated_at
+            FROM events
+            WHERE user_id = ?1 AND start_time > ?2
+            ORDER BY start_time ASC
+            LIMIT ?3
+            "#,
+        )
+        .bind(user_id)
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: "Failed to get upcoming events".into(),
+                source: e,
+            }
+        }.into())
+    }
+
+    // Energy state tracking for activity monitoring
+    pub async fn record_energy_state(
+        &self,
+        user_id: i64,
+        energy_level: i32,
+        attention_state: String,
+        mood: Option<String>,
+        last_break_minutes: Option<i32>,
+        notes: Option<String>,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO energy_states (user_id, energy_level, attention_state, mood, last_break_minutes, notes)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )
+        .bind(user_id)
+        .bind(energy_level)
+        .bind(attention_state)
+        .bind(mood)
+        .bind(last_break_minutes)
+        .bind(notes)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: "Failed to record energy state".into(),
+                source: e,
+            }
+        })?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_latest_energy_state(&self, user_id: i64) -> Result<Option<EnergyState>> {
+        sqlx::query_as::<_, EnergyState>(
+            r#"
+            SELECT id, user_id, energy_level, attention_state, mood, last_break_minutes, notes, created_at
+            FROM energy_states
+            WHERE user_id = ?1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            DatabaseError::QueryFailed {
+                context: "Failed to get latest energy state".into(),
+                source: e,
+            }
+        }.into())
     }
 }
 
@@ -505,6 +734,7 @@ pub struct SharedMemory {
     pub block_name: String,
     pub block_value: String,
     pub max_length: i32,
+    pub letta_block_id: Option<String>,
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
 }
@@ -573,8 +803,22 @@ pub struct Group {
     pub manager_type: i32,
     pub manager_config: Option<String>,
     pub shared_block_ids: Option<String>,
+    pub group_data: Option<String>, // Cached Letta Group struct as JSON
     pub created_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
     pub updated_at: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+}
+
+/// Energy state entity
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
+pub struct EnergyState {
+    pub id: i64,
+    pub user_id: i64,
+    pub energy_level: i32,
+    pub attention_state: String,
+    pub mood: Option<String>,
+    pub last_break_minutes: Option<i32>,
+    pub notes: Option<String>,
+    pub created_at: String, // RFC3339 formatted for compatibility
 }
 
 impl Group {

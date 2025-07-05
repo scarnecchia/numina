@@ -65,6 +65,7 @@ impl Default for DiscordConfig {
 #[derive(Clone)]
 pub struct BotState {
     pub multi_agent_system: Arc<MultiAgentSystem>,
+    pub db: Arc<crate::db::Database>,
 }
 
 /// Discord bot handler
@@ -73,9 +74,12 @@ pub struct PatternDiscordBot {
 }
 
 impl PatternDiscordBot {
-    pub fn new(multi_agent_system: Arc<MultiAgentSystem>) -> Self {
+    pub fn new(multi_agent_system: Arc<MultiAgentSystem>, db: Arc<crate::db::Database>) -> Self {
         Self {
-            state: Arc::new(RwLock::new(BotState { multi_agent_system })),
+            state: Arc::new(RwLock::new(BotState {
+                multi_agent_system,
+                db,
+            })),
         }
     }
 }
@@ -208,11 +212,26 @@ impl PatternDiscordBot {
     async fn process_message(&self, _ctx: &Context, msg: &Message) -> Result<String> {
         let state = self.state.read().await;
 
-        // Convert Discord user ID to our UserId
-        let user_id = UserId(msg.author.id.get() as i64);
+        // Get or create database user by Discord ID
+        let db_user = state
+            .db
+            .get_or_create_user_by_discord_id(msg.author.id.get(), &msg.author.name)
+            .await?;
 
-        // Initialize user if needed
-        state.multi_agent_system.initialize_user(user_id).await?;
+        let user_id = UserId(db_user.id);
+
+        // Fast path: only initialize if user hasn't been initialized yet
+        if !state
+            .multi_agent_system
+            .is_user_initialized(user_id)
+            .await?
+        {
+            info!(
+                "First interaction for user {}, initializing constellation",
+                user_id.0
+            );
+            state.multi_agent_system.initialize_user(user_id).await?;
+        }
 
         // Parse message for agent routing
         let (target_agent, actual_message) = self.parse_agent_routing(&msg.content).await;
@@ -330,11 +349,30 @@ impl PatternDiscordBot {
             .find(|opt| opt.name == "agent")
             .and_then(|opt| opt.value.as_str());
 
-        // Process with agents
-        let user_id = UserId(command.user.id.get() as i64);
-
         // Send to agents
         let state = self.state.read().await;
+
+        // Get or create database user by Discord ID
+        let db_user = match state
+            .db
+            .get_or_create_user_by_discord_id(command.user.id.get(), &command.user.name)
+            .await
+        {
+            Ok(user) => user,
+            Err(e) => {
+                error!("Failed to get/create user: {:?}", e);
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new()
+                            .content("Sorry, I couldn't initialize your user profile."),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let user_id = UserId(db_user.id);
 
         // Initialize user if needed (ensures all agents are created)
         if let Err(e) = state.multi_agent_system.initialize_user(user_id).await {
@@ -416,7 +454,30 @@ impl PatternDiscordBot {
 
     async fn handle_vibe_command(&self, ctx: &Context, command: &CommandInteraction) {
         let state = self.state.read().await;
-        let user_id = UserId(command.user.id.get() as i64);
+
+        // Get or create database user by Discord ID
+        let db_user = match state
+            .db
+            .get_or_create_user_by_discord_id(command.user.id.get(), &command.user.name)
+            .await
+        {
+            Ok(user) => user,
+            Err(e) => {
+                error!("Failed to get/create user: {:?}", e);
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Sorry, I couldn't access your profile."),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let user_id = UserId(db_user.id);
 
         // Defer response
         if let Err(why) = command
@@ -475,7 +536,30 @@ impl PatternDiscordBot {
 
     async fn handle_memory_command(&self, ctx: &Context, command: &CommandInteraction) {
         let state = self.state.read().await;
-        let user_id = UserId(command.user.id.get() as i64);
+
+        // Get or create database user by Discord ID
+        let db_user = match state
+            .db
+            .get_or_create_user_by_discord_id(command.user.id.get(), &command.user.name)
+            .await
+        {
+            Ok(user) => user,
+            Err(e) => {
+                error!("Failed to get/create user: {:?}", e);
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Sorry, I couldn't access your profile."),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let user_id = UserId(db_user.id);
 
         // Defer response
         if let Err(why) = command
@@ -552,11 +636,32 @@ impl PatternDiscordBot {
             return;
         }
 
-        // Get user ID
-        let user_id = UserId(command.user.id.get() as i64);
+        // Get state and database user
+        let state = self.state.read().await;
+
+        // Get or create database user by Discord ID
+        let db_user = match state
+            .db
+            .get_or_create_user_by_discord_id(command.user.id.get(), &command.user.name)
+            .await
+        {
+            Ok(user) => user,
+            Err(e) => {
+                error!("Failed to get/create user: {:?}", e);
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new()
+                            .content("Sorry, I couldn't access your profile."),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let user_id = UserId(db_user.id);
 
         // Log agent histories
-        let state = self.state.read().await;
         let log_dir = "logs/agent_histories";
 
         match state
@@ -738,24 +843,39 @@ impl PatternDiscordBot {
 
 /// Split a message into chunks that fit Discord's message length limit
 fn split_message(content: &str, max_length: usize) -> Vec<String> {
-    if content.len() <= max_length {
-        return vec![content.to_string()];
+    // First, clean up excessive whitespace
+    let cleaned = content
+        .lines()
+        .filter(|line| !line.trim().is_empty()) // Remove empty lines
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // If the cleaned content is empty, return a fallback message
+    if cleaned.trim().is_empty() {
+        return vec!["(Agent sent an empty message)".to_string()];
+    }
+
+    if cleaned.len() <= max_length {
+        return vec![cleaned];
     }
 
     let mut chunks = Vec::new();
     let mut current = String::new();
 
-    for line in content.lines() {
+    for line in cleaned.lines() {
         if current.len() + line.len() + 1 > max_length {
             if !current.is_empty() {
-                chunks.push(current);
+                chunks.push(current.trim().to_string());
                 current = String::new();
             }
 
             // If a single line is too long, split it
             if line.len() > max_length {
                 for chunk in line.chars().collect::<Vec<_>>().chunks(max_length) {
-                    chunks.push(chunk.iter().collect());
+                    let chunk_str: String = chunk.iter().collect();
+                    if !chunk_str.trim().is_empty() {
+                        chunks.push(chunk_str);
+                    }
                 }
             } else {
                 current = line.to_string();
@@ -769,7 +889,7 @@ fn split_message(content: &str, max_length: usize) -> Vec<String> {
     }
 
     if !current.is_empty() {
-        chunks.push(current);
+        chunks.push(current.trim().to_string());
     }
 
     chunks
@@ -779,8 +899,9 @@ fn split_message(content: &str, max_length: usize) -> Vec<String> {
 pub async fn create_discord_client(
     config: &DiscordConfig,
     multi_agent_system: Arc<MultiAgentSystem>,
+    db: Arc<crate::db::Database>,
 ) -> Result<serenity::Client> {
-    let handler = PatternDiscordBot::new(multi_agent_system);
+    let handler = PatternDiscordBot::new(multi_agent_system, db);
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
@@ -801,8 +922,9 @@ pub async fn create_discord_client(
 pub async fn run_discord_bot(
     config: DiscordConfig,
     multi_agent_system: Arc<MultiAgentSystem>,
+    db: Arc<crate::db::Database>,
 ) -> Result<()> {
-    let mut client = create_discord_client(&config, multi_agent_system).await?;
+    let mut client = create_discord_client(&config, multi_agent_system, db).await?;
 
     info!("Starting Discord bot...");
     client.start().await.into_diagnostic()?;
