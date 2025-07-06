@@ -42,9 +42,9 @@ pub mod config {
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        config::DiscordConfig, Command, CommandHandler, DiscordBot, DiscordBotBuilder,
-        DiscordContext, DiscordError, MessageContext, MessageRouter, Result, RoutingStrategy,
-        SlashCommand, UserContext,
+        Command, CommandHandler, DiscordBot, DiscordBotBuilder, DiscordContext, DiscordError,
+        MessageContext, MessageRouter, Result, RoutingStrategy, SlashCommand, UserContext,
+        config::DiscordConfig,
     };
 }
 

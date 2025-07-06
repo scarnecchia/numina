@@ -5,6 +5,7 @@
 //! cognitive support system.
 
 pub mod agent;
+pub mod context;
 pub mod coordination;
 pub mod db;
 pub mod error;
@@ -12,20 +13,21 @@ pub mod memory;
 pub mod model;
 pub mod realtime;
 pub mod tool;
+pub mod utils;
 
 pub use agent::{Agent, AgentBuilder, AgentId, AgentType};
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use memory::{Memory, MemoryBlock, MemoryStore};
 pub use model::{ModelCapability, ModelProvider};
-pub use tool::{Tool, ToolRegistry, ToolResult};
+pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        Agent, AgentBuilder, AgentId, AgentType, Constellation, CoordinationPattern, CoreError,
-        Memory, MemoryBlock, ModelCapability, ModelProvider, Result, Tool, ToolRegistry,
-        ToolResult,
+        Agent, AgentBuilder, AgentId, AgentType, AiTool, Constellation, CoordinationPattern,
+        CoreError, DynamicTool, Memory, MemoryBlock, ModelCapability, ModelProvider, Result,
+        ToolRegistry, ToolResult,
     };
 }
 

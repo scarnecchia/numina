@@ -5,7 +5,7 @@ use thiserror::Error;
 pub enum CoreError {
     #[error("Agent not found")]
     #[diagnostic(
-        code(pattern::core::agent_not_found),
+        code(pattern_core::agent_not_found),
         help("Check that the agent ID is correct and the agent has been created")
     )]
     AgentNotFound {
@@ -18,7 +18,7 @@ pub enum CoreError {
 
     #[error("Agent initialization failed")]
     #[diagnostic(
-        code(pattern::core::agent_init_failed),
+        code(pattern_core::agent_init_failed),
         help("Check the agent configuration and ensure all required fields are provided")
     )]
     AgentInitFailed {
@@ -29,7 +29,7 @@ pub enum CoreError {
 
     #[error("Memory block not found")]
     #[diagnostic(
-        code(pattern::core::memory_not_found),
+        code(pattern_core::memory_not_found),
         help("The requested memory block doesn't exist for this agent")
     )]
     MemoryNotFound {
@@ -40,7 +40,7 @@ pub enum CoreError {
 
     #[error("Memory operation failed")]
     #[diagnostic(
-        code(pattern::core::memory_operation_failed),
+        code(pattern_core::memory_operation_failed),
         help("Check database connectivity and permissions")
     )]
     MemoryOperationFailed {
@@ -52,7 +52,7 @@ pub enum CoreError {
 
     #[error("Tool not found")]
     #[diagnostic(
-        code(pattern::core::tool_not_found),
+        code(pattern_core::tool_not_found),
         help("Available tools: {}", available_tools.join(", "))
     )]
     ToolNotFound {
@@ -66,7 +66,7 @@ pub enum CoreError {
 
     #[error("Tool execution failed")]
     #[diagnostic(
-        code(pattern::core::tool_execution_failed),
+        code(pattern_core::tool_execution_failed),
         help("Check tool parameters and ensure they match the expected schema")
     )]
     ToolExecutionFailed {
@@ -78,7 +78,7 @@ pub enum CoreError {
 
     #[error("Invalid tool parameters")]
     #[diagnostic(
-        code(pattern::core::invalid_tool_params),
+        code(pattern_core::invalid_tool_params),
         help("Expected schema: {expected_schema}")
     )]
     InvalidToolParameters {
@@ -90,7 +90,7 @@ pub enum CoreError {
 
     #[error("Model provider error")]
     #[diagnostic(
-        code(pattern::core::model_provider_error),
+        code(pattern_core::model_provider_error),
         help("Check API credentials and rate limits for {provider}")
     )]
     ModelProviderError {
@@ -102,8 +102,10 @@ pub enum CoreError {
 
     #[error("Model capability mismatch")]
     #[diagnostic(
-        code(pattern::core::model_capability_mismatch),
-        help("Model '{model}' doesn't support {required_capability}. Consider using a model with {required_capability} capability")
+        code(pattern_core::model_capability_mismatch),
+        help(
+            "Model '{model}' doesn't support {required_capability}. Consider using a model with {required_capability} capability"
+        )
     )]
     ModelCapabilityMismatch {
         model: String,
@@ -113,7 +115,7 @@ pub enum CoreError {
 
     #[error("Database connection failed")]
     #[diagnostic(
-        code(pattern::core::database_connection_failed),
+        code(pattern_core::database_connection_failed),
         help("Ensure SurrealDB is running at {connection_string}")
     )]
     DatabaseConnectionFailed {
@@ -123,7 +125,7 @@ pub enum CoreError {
     },
 
     #[error("Database query failed")]
-    #[diagnostic(code(pattern::core::database_query_failed), help("Query: {query}"))]
+    #[diagnostic(code(pattern_core::database_query_failed), help("Query: {query}"))]
     DatabaseQueryFailed {
         query: String,
         table: String,
@@ -133,7 +135,7 @@ pub enum CoreError {
 
     #[error("Serialization error")]
     #[diagnostic(
-        code(pattern::core::serialization_error),
+        code(pattern_core::serialization_error),
         help("Failed to serialize/deserialize {data_type}")
     )]
     SerializationError {
@@ -144,7 +146,7 @@ pub enum CoreError {
 
     #[error("Configuration error")]
     #[diagnostic(
-        code(pattern::core::configuration_error),
+        code(pattern_core::configuration_error),
         help("Check configuration file at {config_path}")
     )]
     ConfigurationError {
@@ -157,7 +159,7 @@ pub enum CoreError {
 
     #[error("Agent coordination failed")]
     #[diagnostic(
-        code(pattern::core::coordination_failed),
+        code(pattern_core::coordination_failed),
         help("Coordination pattern '{pattern}' failed for group '{group}'")
     )]
     CoordinationFailed {
@@ -170,7 +172,7 @@ pub enum CoreError {
 
     #[error("Constellation not found")]
     #[diagnostic(
-        code(pattern::core::constellation_not_found),
+        code(pattern_core::constellation_not_found),
         help("No constellation found for user {user_id}")
     )]
     ConstellationNotFound {
@@ -180,8 +182,10 @@ pub enum CoreError {
 
     #[error("Invalid agent state")]
     #[diagnostic(
-        code(pattern::core::invalid_agent_state),
-        help("Agent {agent_id} is in state '{current_state}' but operation requires state '{required_state}'")
+        code(pattern_core::invalid_agent_state),
+        help(
+            "Agent {agent_id} is in state '{current_state}' but operation requires state '{required_state}'"
+        )
     )]
     InvalidAgentState {
         agent_id: String,
@@ -192,7 +196,7 @@ pub enum CoreError {
 
     #[error("Context window exceeded")]
     #[diagnostic(
-        code(pattern::core::context_window_exceeded),
+        code(pattern_core::context_window_exceeded),
         help(
             "Message history exceeds model's context window. Consider summarizing older messages"
         )
@@ -206,7 +210,7 @@ pub enum CoreError {
 
     #[error("Real-time subscription failed")]
     #[diagnostic(
-        code(pattern::core::realtime_subscription_failed),
+        code(pattern_core::realtime_subscription_failed),
         help("Failed to establish LIVE query subscription")
     )]
     RealtimeSubscriptionFailed {
@@ -217,7 +221,7 @@ pub enum CoreError {
 
     #[error("Vector search failed")]
     #[diagnostic(
-        code(pattern::core::vector_search_failed),
+        code(pattern_core::vector_search_failed),
         help("Failed to perform semantic search on {collection}")
     )]
     VectorSearchFailed {
@@ -229,7 +233,7 @@ pub enum CoreError {
 
     #[error("Agent group error")]
     #[diagnostic(
-        code(pattern::core::agent_group_error),
+        code(pattern_core::agent_group_error),
         help("Operation failed for agent group '{group_name}'")
     )]
     AgentGroupError {
@@ -241,7 +245,7 @@ pub enum CoreError {
 
     #[error("Permission denied")]
     #[diagnostic(
-        code(pattern::core::permission_denied),
+        code(pattern_core::permission_denied),
         help("User {user_id} doesn't have permission to {action} on {resource}")
     )]
     PermissionDenied {
@@ -253,7 +257,7 @@ pub enum CoreError {
 
     #[error("Rate limit exceeded")]
     #[diagnostic(
-        code(pattern::core::rate_limit_exceeded),
+        code(pattern_core::rate_limit_exceeded),
         help("Wait {retry_after_seconds} seconds before retrying")
     )]
     RateLimitExceeded {
@@ -265,8 +269,10 @@ pub enum CoreError {
 
     #[error("Resource exhausted")]
     #[diagnostic(
-        code(pattern::core::resource_exhausted),
-        help("System resource '{resource}' is exhausted. Current usage: {current_usage}, limit: {limit}")
+        code(pattern_core::resource_exhausted),
+        help(
+            "System resource '{resource}' is exhausted. Current usage: {current_usage}, limit: {limit}"
+        )
     )]
     ResourceExhausted {
         resource: String,
@@ -343,6 +349,28 @@ impl CoreError {
             token_count,
             max_tokens,
             message_count,
+        }
+    }
+
+    pub fn tool_validation_error(tool_name: impl Into<String>, error: impl Into<String>) -> Self {
+        let tool_name = tool_name.into();
+        Self::InvalidToolParameters {
+            tool_name,
+            expected_schema: serde_json::Value::Null,
+            provided_params: serde_json::Value::Null,
+            validation_errors: vec![error.into()],
+        }
+    }
+
+    pub fn tool_execution_error(tool_name: impl Into<String>, error: impl Into<String>) -> Self {
+        #[derive(Debug, Error)]
+        #[error("{0}")]
+        struct StringError(String);
+
+        Self::ToolExecutionFailed {
+            tool_name: tool_name.into(),
+            cause: Box::new(StringError(error.into())),
+            parameters: serde_json::Value::Null,
         }
     }
 }

@@ -24,8 +24,8 @@ pub mod agent_types {
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        agent_types, ADHDAgent, ADHDTool, AgentPersonality, EnergyState, SleeptimeMonitor,
-        SleeptimeTrigger, TaskBreakdown,
+        ADHDAgent, ADHDTool, AgentPersonality, EnergyState, SleeptimeMonitor, SleeptimeTrigger,
+        TaskBreakdown, agent_types,
     };
 }
 

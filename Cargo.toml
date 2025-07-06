@@ -5,8 +5,8 @@ members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-authors = ["Orual"]
+edition = "2024"
+authors = ["Orual <orual@nonbinary.computer>"]
 license = "AGPL-3.0"
 repository = "https://github.com/orual/pattern"
 homepage = "https://github.com/orual/pattern"
@@ -33,10 +33,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Database
 surrealdb = { version = "2.1", features = [
+    "kv-surrealkv",
     "kv-mem",
     "protocol-ws",
     "protocol-http",
     "rustls",
+    "jwks",
 ] }
 
 # AI/LLM

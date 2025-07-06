@@ -45,7 +45,9 @@ pub enum McpError {
     #[error("Protocol version mismatch")]
     #[diagnostic(
         code(pattern::mcp::protocol_version_mismatch),
-        help("Client expects protocol version {client_version}, but server supports {server_version}")
+        help(
+            "Client expects protocol version {client_version}, but server supports {server_version}"
+        )
     )]
     ProtocolVersionMismatch {
         client_version: String,

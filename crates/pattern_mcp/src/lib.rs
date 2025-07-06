@@ -16,8 +16,8 @@ pub use transport::{Transport, TransportType};
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        error::{McpError, Result},
         McpServer, McpServerBuilder, ToolRegistry, ToolRegistryBuilder, Transport, TransportType,
+        error::{McpError, Result},
     };
 }
 

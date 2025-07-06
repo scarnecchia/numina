@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::{Memory, Result, Tool};
+use crate::{Memory, Result, tool::DynamicTool};
 
 /// Unique identifier for an agent
 pub type AgentId = String;
@@ -215,7 +215,7 @@ pub struct AgentBuilder {
     name: Option<String>,
     agent_type: AgentType,
     system_prompt: Option<String>,
-    tools: Vec<Arc<dyn Tool>>,
+    tools: Vec<Arc<dyn DynamicTool>>,
     memory_blocks: Vec<(String, Memory)>,
 }
 
@@ -246,7 +246,7 @@ impl AgentBuilder {
         self
     }
 
-    pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
+    pub fn with_tool(mut self, tool: Arc<dyn DynamicTool>) -> Self {
         self.tools.push(tool);
         self
     }

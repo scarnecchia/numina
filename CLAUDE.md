@@ -48,6 +48,18 @@ When finishing work, update this list with any changes.
 - ALWAYS fix compile errors before moving on.
 - **ALWAYS ENSURE that tests will fail (via assert or panic with descriptive message) on any error condition**
 - Use the web or context7 to help find docs, in addition to any other reference material
+- **AVOID C dependencies** - Prefer pure Rust implementations to avoid build complexity
+
+## Workspace Structure
+
+The project is now organized as a Rust workspace with the following crates:
+- `crates/pattern_core` - Core agent framework and memory system
+- `crates/pattern_nd` - Neurodivergent support tools and ADHD agents
+- `crates/pattern_mcp` - MCP server implementation
+- `crates/pattern_discord` - Discord bot integration
+- `crates/pattern_main` - Main orchestrator that ties everything together
+
+**Note**: Crate directories use underscores but package names use hyphens (e.g., directory `pattern_core` contains package `pattern-core`).
 
 ## MCP Tools & Documentation
 
@@ -215,6 +227,9 @@ just pre-commit-all
 ## Current TODOs
 
 ### High Priority
+- Implement core agent framework in pattern-core (Agent trait, memory system, tool execution)
+- Set up SurrealDB integration for persistence
+- Migrate existing agent logic from Letta to pattern-core
 - Add task CRUD operations to database module
 - Create task manager with ADHD-aware task breakdown
 - Add contract/client tracking (time, invoices, follow-ups)
@@ -257,10 +272,18 @@ just pre-commit-all
 - [x] Refactor caching from SQLite KV store to foyer library (disk-backed async cache) (2025-01-07)
 - [x] Fixed MCP tool schema issues - removed references, enums, nested structs, unsigned ints (2025-01-07)
 - [x] Implemented custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-01-08)
+- [x] Refactored to multi-crate workspace structure (2025-01-13)
+- [x] Created pattern-core with agent framework, memory system, and tool registry
+- [x] Created pattern-nd with ADHD-specific tools and agent personalities
+- [x] Created pattern-mcp with MCP server implementation
+- [x] Created pattern-discord with Discord bot functionality
+- [x] Implemented rich error types using miette for all crates
+- [x] Removed C dependencies (using SurrealDB without rocksdb, rustls instead of native TLS)
+- [x] Set up proper Nix flake for workspace builds
 
 ## Current Status
 
-**Last Updated**: 2025-01-08
+**Last Updated**: 2025-01-13
 
 ### System Architecture ✅
 - **Unified binary** with feature flags (`discord`, `mcp`, `binary`, `full`)
@@ -270,7 +293,7 @@ just pre-commit-all
 - **Three-tier memory**: Core blocks, Letta sources, archival storage
 - **Custom sleeptime monitor**: Two-tier ADHD monitoring (lightweight checks + Pattern intervention)
 
-### Recent Achievements (2025-01-04 to 2025-01-08)
+### Recent Achievements (2025-01-04 to 2025-01-13)
 - **Caching migration**: SQLite KV store → Foyer library with automatic tiering
 - **MCP schema fixes**: Removed unsupported references, enums, nested structs
 - **Partner threading**: Agents receive actual partner names and Discord IDs
@@ -280,6 +303,10 @@ just pre-commit-all
 - **Group management**: Proper caching prevents constant recreation
 - **Agent configuration**: External TOML files for prompts and model mappings
 - **Sleeptime monitoring**: Automatic ADHD support with hyperfocus detection, break reminders
+- **Workspace refactor**: ✅ Migrated from monolithic to multi-crate workspace structure
+- **Removed Letta dependency**: ✅ Building our own agent framework with SurrealDB
+- **Rich error types**: ✅ All errors now use miette for detailed diagnostics
+- **Pure Rust dependencies**: ✅ Removed C dependencies (no rocksdb, using rustls)
 
 ### Key Features Implemented
 
@@ -391,20 +418,35 @@ This architecture ensures:
 
 ## Module Organization
 
-**Current Structure:**
+**Workspace Structure:**
 ```
-src/
-├── agent/                 # Agent types, constellation, coordination
-├── mcp/                   # MCP server & tools
-├── discord/               # Discord bot
-├── service.rs            # PatternService orchestrator
-├── config.rs             # Configuration management
-├── db.rs                 # Database module with SQLite
-├── error.rs              # Error types and handling
-└── lib.rs                # Library entry point
+pattern/
+├── Cargo.toml            # Workspace root
+├── crates/
+│   ├── pattern_core/     # Core agent framework
+│   ├── pattern_nd/       # Neurodivergent tools
+│   ├── pattern_mcp/      # MCP server
+│   ├── pattern_discord/  # Discord bot
+│   └── pattern_main/     # Main orchestrator
+├── migrations/           # Database migrations
+├── docs/                 # Documentation
+└── nix/                  # Nix flake configuration
 ```
 
+Each crate has its own dependencies and can be developed/tested independently.
+
 ## Next Steps
+
+### Workspace Refactor ✅
+- **Multi-crate workspace structure implemented**:
+  - `pattern-core`: Agent framework, memory, tools (no Letta dependency)
+  - `pattern-nd`: ADHD-specific tools and agent personalities
+  - `pattern-mcp`: MCP server with multiple transports
+  - `pattern-discord`: Discord bot integration
+  - `pattern-main`: Main orchestrator
+  - All crates use miette for rich error diagnostics
+  - Pure Rust dependencies (no C deps)
+  - Nix flake properly configured for workspace builds
 
 ### Custom Sleeptime Implementation ✅
 - **Two-tier monitoring system implemented**:
@@ -413,7 +455,7 @@ src/
   - Monitors: hyperfocus duration, sedentary time, hydration, energy levels
   - MCP tools: `trigger_sleeptime_check`, `update_sleeptime_state`
   - Automatic monitoring for all users with Discord IDs
-  - See implementation in `src/sleeptime.rs`
+  - Currently in `pattern_main/src/sleeptime.rs` (to be migrated to pattern-nd)
 
 ### Task Management (High Priority)
 1. **Extend database module** with task operations

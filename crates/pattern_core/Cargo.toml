@@ -28,6 +28,9 @@ surrealdb = { workspace = true }
 # AI/LLM
 genai = { workspace = true }
 
+# Schema generation
+schemars = { workspace = true }
+
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
 
