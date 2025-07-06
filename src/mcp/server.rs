@@ -18,7 +18,7 @@ use rmcp::{
     Error as McpError, ServerHandler,
 };
 use serde_json::json;
-use std::{future::Future, sync::Arc};
+use std::{future::Future, str::FromStr, sync::Arc};
 use tracing::{debug, error, info};
 
 use super::{core_tools::CoreTools, discord_tools::DiscordTools, SendMessageRequest};
@@ -322,7 +322,20 @@ impl PatternMcpServer {
             "Sending message"
         );
 
-        match params.destination_type {
+        // Parse the destination type from string
+        let dest_type =
+            MessageDestinationType::from_str(&params.destination_type).map_err(|e| {
+                McpError::invalid_params(
+                    "Invalid destination type",
+                    Some(json!({
+                        "provided": params.destination_type,
+                        "error": e,
+                        "valid_types": ["agent", "group", "discord_channel", "discord_dm"]
+                    })),
+                )
+            })?;
+
+        match dest_type {
             MessageDestinationType::Agent => {
                 let agent_id = if params.destination.is_empty() {
                     None
@@ -387,7 +400,7 @@ impl PatternMcpServer {
 
                 self.discord_tools
                     .send_discord_dm(SendDiscordDmRequest {
-                        user_id: u64::from_str_radix(&discord_user_id, 10).unwrap(),
+                        user_id: i64::from_str_radix(&discord_user_id, 10).unwrap(),
                         message: params.message,
                         request_heartbeat: params.request_heartbeat,
                     })

@@ -4,7 +4,7 @@ use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 use std::path::Path;
 use std::str::FromStr;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Database connection pool wrapper
 #[derive(Clone, Debug)]
@@ -588,7 +588,7 @@ impl Database {
     }
 
     pub async fn get_latest_energy_state(&self, user_id: i64) -> Result<Option<EnergyState>> {
-        sqlx::query_as::<_, EnergyState>(
+        Ok(sqlx::query_as::<_, EnergyState>(
             r#"
             SELECT id, user_id, energy_level, attention_state, mood, last_break_minutes, notes, created_at
             FROM energy_states
@@ -601,11 +601,26 @@ impl Database {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| {
-            DatabaseError::QueryFailed {
-                context: "Failed to get latest energy state".into(),
-                source: e,
-            }
-        }.into())
+            error!("Failed to get latest energy state: {:?}", e);
+            DatabaseError::Other(e)
+        })?)
+    }
+
+    /// List all users in the database
+    pub async fn list_all_users(&self) -> Result<Vec<User>> {
+        Ok(sqlx::query_as::<_, User>(
+            r#"
+            SELECT id, name, discord_id, email, created_at, updated_at
+            FROM users
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            error!("Failed to list all users: {:?}", e);
+            DatabaseError::Other(e)
+        })?)
     }
 }
 

@@ -1,6 +1,6 @@
 # CLAUDE.md - Pattern ADHD Cognitive Support System
 
-Pattern is a multi-agent cognitive support system designed specifically for ADHD brains. It uses Letta's multi-agent architecture with shared memory to provide external executive function through specialized cognitive agents inspired by Brandon Sanderson's Stormlight Archive.
+Pattern is a multi-agent ADHD support system using Letta's architecture to provide external executive function through specialized cognitive agents.
 
 ## TODO Management
 
@@ -133,74 +133,61 @@ just pre-commit-all
 - [Discord Issues](./docs/troubleshooting/DISCORD_ISSUES.md) - Known Discord integration issues
 - [MCP HTTP Setup](./docs/guides/MCP_HTTP_SETUP.md) - MCP transport configuration
 
-## Quick Overview
-
-Pattern is a multi-agent ADHD cognitive support system using Letta. See documentation above for details.
-
-
 
 
 ## Build Priority Breakdown
 
-### Phase 1: Core Foundation (Must Have First) ✅
-1. **Multi-Agent Architecture Design** ✅
-   - Pattern orchestrator + 5 specialist agents
-   - Three-tier memory hierarchy
-   - Letta groups for communication patterns
-   - **Status**: Architecture defined, see [Memory and Groups doc](./docs/architecture/MEMORY_AND_GROUPS.md)
+### Phase 1: Core Foundation (In Progress)
+1. **Letta Groups Integration** 🚧
+   - Test different manager types (dynamic, supervisor, sleeptime)
+   - Document group patterns and best practices
+   - **Status**: Groups implemented, need testing and documentation
 
-2. **Letta Groups Integration** 🚧
-   - Replace custom routing with native groups API
-   - Implement overlapping group configurations
-   - Shared memory blocks via groups
-   - **Why now**: Simplifies everything, native multi-agent support
-
-3. **Custom Sleeptime Architecture** 🚧
+2. **Custom Sleeptime Architecture** ✅
    - Two-tier monitoring (cheap rules + expensive intervention)
    - Conditional Pattern awakening
    - Cost-optimized background processing
-   - **Why now**: Core ADHD support without breaking the bank
+   - **Status**: Implemented with configurable intervals and ADHD-aware triggers
 
 ### Phase 2: Core Features (MVP)
-4. **Shared Agent Tools**
-   - Implement check_vibe, context_snapshot, find_pattern, suggest_pivot
-   - Create tool registry for agent access
-   - **Why**: Agents need common capabilities
+1. **Task Management System**
+   - Add task CRUD operations to database module
+   - Create task manager with ADHD-aware task breakdown
+   - Hidden complexity detection and atomic task creation
+   - Add task-related MCP tools
+   - **Why**: Task paralysis is core ADHD challenge
 
-5. **Pattern Sleeptime Agent**
+2. **Pattern Sleeptime Agent**
    - Implement 20-30min background checks
    - Hyperfocus detection, physical needs monitoring
    - **Why**: Core ADHD support mechanism
 
-6. **Entropy Agent (Tasks)**
-   - Task breakdown into atoms
-   - Hidden complexity detection
-   - **Why**: Task paralysis is core ADHD challenge
+3. **Shared Agent Tools**
+   - Implement check_vibe, context_snapshot, find_pattern, suggest_pivot
+   - Create tool registry for agent access
+   - **Why**: Agents need common capabilities
 
-### Phase 3: Specialist Agents
-7. **Flux Agent (Time)**
-   - ADHD time translation (5min = 30min)
-   - Auto-buffering with multipliers
-   - Time blindness compensation
+### Phase 3: Specialist Agent Features
+1. **Contract & Client Tracking**
+   - Time entry tracking with billable hours
+   - Invoice aging alerts (30/60/90 days)
+   - Follow-up reminders
 
-8. **Momentum Agent (Energy)**
-   - Energy state tracking
-   - Flow vs burnout detection
-   - Task/energy alignment
+2. **Social Memory**
+   - Birthday/anniversary tracking with reminders
+   - Conversation context storage
+   - Follow-up suggestions
+   - Energy cost tracking for social interactions
 
-9. **Archive Agent (Memory)**
-   - External memory bank
-   - Context recovery ("what was I doing?")
-   - Pattern detection across thoughts
-
-10. **Anchor Agent (Habits)**
-    - Basic needs tracking (meds, water, food)
-    - Minimum viable human protocols
-    - Routine adaptation to capacity
+3. **Time & Energy Monitoring**
+   - ADHD time multipliers (Flux agent)
+   - Energy/attention state monitoring (Momentum agent)
+   - Activity monitoring for interruption detection
 
 ### Phase 4: Integration & Polish
-11. **Discord Bot Integration**
-    - Slash commands for agent interaction
+1. **Discord Enhancements**
+    - Discord context tools to MCP (channel history, user info)
+    - `/reload_config` command for hot-reload
     - Proactive notifications from Pattern
     - Multi-modal conversations
 
@@ -212,97 +199,37 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 
 
 
-## Groups Refactoring Plan (2025-01-04)
+## Groups Implementation Status
 
-### Phase 1: Add Groups Support to MultiAgentSystem ⚡
-1. **Add group management methods**:
-   - `create_group()` - Create a new group with specified agents and manager
-   - `get_or_create_group()` - Get existing or create new group
-   - `list_user_groups()` - List all groups for a user
-   - `delete_group()` - Remove a group
+✅ **Completed**: Native Letta groups with dynamic, supervisor, round-robin, and sleeptime managers
+- Database schema and caching with Foyer
+- Default groups created on user init: main, crisis, planning, memory
+- Discord bot routes to groups based on message content
+- Unified `send_message` tool handles all routing
 
-2. **Database schema for groups**:
-   - Add `groups` table with columns: id, user_id, group_id, name, config
-   - Similar caching strategy as agents
-   - Store manager type and configuration
-
-3. **Default group creation**:
-   - Create "main" group on user initialization
-   - All agents as members, dynamic manager
-   - Keep individual agent support for backwards compatibility
-
-### Phase 2: Flexible Group Creation
-1. **Configurable group types**:
-   - Support all manager types: dynamic, supervisor, round_robin, sleeptime
-   - Allow custom shared memory blocks per group
-   - Max turns, termination tokens, etc.
-
-2. **Overlapping groups**:
-   - Same agents can be in multiple groups
-   - Different coordination patterns for different contexts
-   - Store group metadata (purpose, context triggers)
-
-### Phase 3: Update Message Routing
-1. **Discord bot changes**:
-   - Add group detection logic (keywords, context)
-   - Route to appropriate group based on message content
-   - Fallback to individual agents for specific requests
-
-2. **MCP tool updates**:
-   - Add `chat_with_group` tool
-   - Add `create_custom_group` tool
-   - Update existing tools to support group_id parameter
-
-3. **Group selection logic**:
-   ```rust
-   fn select_group(message: &str, user_state: &UserState) -> Option<GroupId> {
-       // Crisis detection → crisis group
-       // Planning keywords → planning group
-       // Memory questions → archive-led group
-       // Default → main conversational group
-   }
-   ```
-
-### Phase 4: Example Patterns
-1. **Main group** - Dynamic routing for natural conversation
-2. **Sleeptime group** - Archive + Pattern for memory work
-3. **Custom groups** - User-definable via config or API
-
-### Implementation Order
-1. ✅ Research Letta groups API
-2. ✅ Add groups table to database schema
-3. ✅ Add group CRUD methods to MultiAgentSystem
-4. ✅ Create default "main" group on user init
-5. ✅ Update Discord bot to use groups
-6. ✅ Add MCP tools for groups
-7. ⚡ Test different manager types
-8. ⚡ Document group patterns
+🚧 **Remaining**:
+- Test different manager types in production
+- Document group patterns and best practices
+- Add configurable custom groups via API/config
 
 ## Current TODOs
 
 ### High Priority
-- [x] Add MCP tools for group messaging (send_group_message, list_groups, create_group, delete_group)
-- [x] Unified messaging interface - single send_message tool with routing (2025-01-04)
-- [x] Create default groups from architecture (main, crisis, planning, memory) (2025-01-04)
-- [x] Add group selection logic to Discord bot based on message content (2025-01-04)
-- [ ] Build custom tiered sleeptime monitor (rules-based + Pattern intervention)
-- [x] Implement passive knowledge sharing via Letta sources (2025-01-04)
-- [ ] Add task CRUD operations to database module
-- [ ] Create task manager with ADHD-aware task breakdown
-- [ ] Add contract/client tracking (time, invoices, follow-ups)
-- [ ] Implement social memory (birthdays, follow-ups, conversation context)
+- Add task CRUD operations to database module
+- Create task manager with ADHD-aware task breakdown
+- Add contract/client tracking (time, invoices, follow-ups)
+- Implement social memory (birthdays, follow-ups, conversation context)
 
 ### Medium Priority
-- [ ] Add Discord context tools to MCP (channel history, user info)
-- [ ] Add task-related MCP tools
-- [ ] Implement time tracking with ADHD multipliers (Flux agent)
-- [ ] Add energy/attention monitoring (Momentum agent)
-- [ ] Add `/reload_config` Discord command to hot-reload model mappings and agent configs
+- Add Discord context tools to MCP (channel history, user info)
+- Add task-related MCP tools
+- Implement time tracking with ADHD multipliers (Flux agent)
+- Add energy/attention monitoring (Momentum agent)
+- Add `/reload_config` Discord command to hot-reload model mappings and agent configs
 
 ### Low Priority
-- [ ] Add activity monitoring for interruption detection
-- [ ] Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
-- [ ] Refactor caching from SQLite KV store to foyer library (disk-backed async cache)
+- Add activity monitoring for interruption detection
+- Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
 
 ### Completed
 - [x] Letta integration layer with agent management
@@ -327,182 +254,64 @@ Pattern is a multi-agent ADHD cognitive support system using Letta. See document
 - [x] Implement schedule_event MCP tool with database storage (2025-01-07)
 - [x] Implement check_activity_state MCP tool with energy state tracking (2025-01-07)
 - [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-01-07)
+- [x] Refactor caching from SQLite KV store to foyer library (disk-backed async cache) (2025-01-07)
+- [x] Fixed MCP tool schema issues - removed references, enums, nested structs, unsigned ints (2025-01-07)
+- [x] Implemented custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-01-08)
 
-## Current Status (2025-01-07)
+## Current Status
 
-**Recent Changes**:
-- **Implemented MCP tools for events and activity tracking**:
-  - `schedule_event` - Creates events in database with ADHD-aware time tracking
-  - `check_activity_state` - Checks latest energy state to determine interruptibility
-  - `record_energy_state` - Records energy level (1-10), attention state, mood, and break time
-- **Added database operations**:
-  - `create_event()` and `get_upcoming_events()` for event management
-  - `record_energy_state()` and `get_latest_energy_state()` for activity tracking
-  - Added Event and EnergyState structs with proper serialization
-- **ADHD-aware features**:
-  - Interruptibility logic based on attention state (never interrupt hyperfocus)
-  - Break reminders after 90 minutes of work
-  - Energy level tracking for task/capacity alignment
-- **Implemented automatic MCP tool attachment**:
-  - Added `attach_mcp_tools_to_agent()` method to attach tools after agent creation
-  - Moved tool attachment methods from memory.rs to agents.rs in letta-rs
-  - Tools are now automatically attached when agents are created
+**Last Updated**: 2025-01-08
 
-**Known Issues with MCP Tools**:
-- **Tool call errors**: Agents are experiencing errors when trying to use newly attached MCP tools
-- **Context contamination**: Some tool call errors seem to contaminate the agent's context, causing them to stop responding
-- **Specific errors from logs**: [TODO: Add specific error messages from logs]
-  - Archive agent tried to use `schedule_event` but got a tool call error
-  - Error seems to persist in context, preventing further responses
-- **Possible causes**:
-  - Tools may not be properly registered with Letta server
-  - Tool parameter formats might not match what agents expect
-  - MCP server might not be running when tools are attached
-  - Tool IDs might not be resolved correctly
+### System Architecture ✅
+- **Unified binary** with feature flags (`discord`, `mcp`, `binary`, `full`)
+- **Foyer caching layer**: Hybrid memory/disk caching for agents, groups, memory blocks
+- **Multi-agent constellation**: Pattern orchestrator + 5 specialist agents (Entropy, Flux, Archive, Momentum, Anchor)
+- **Native Letta groups**: Main (dynamic), crisis (round-robin), planning (supervisor), memory (sleeptime)
+- **Three-tier memory**: Core blocks, Letta sources, archival storage
+- **Custom sleeptime monitor**: Two-tier ADHD monitoring (lightweight checks + Pattern intervention)
 
-## Current Status (2025-01-06)
+### Recent Achievements (2025-01-04 to 2025-01-08)
+- **Caching migration**: SQLite KV store → Foyer library with automatic tiering
+- **MCP schema fixes**: Removed unsupported references, enums, nested structs
+- **Partner threading**: Agents receive actual partner names and Discord IDs
+- **Unified messaging**: Single `send_message` tool routes to agents/groups/Discord
+- **ADHD tools**: Energy tracking, event scheduling, interruptibility detection
+- **Auto tool attachment**: MCP tools automatically attached to agents on creation
+- **Group management**: Proper caching prevents constant recreation
+- **Agent configuration**: External TOML files for prompts and model mappings
+- **Sleeptime monitoring**: Automatic ADHD support with hyperfocus detection, break reminders
 
-**Recent Changes**:
-- **Optimized group caching**: Added group_data column to cache full Letta Group structs
-  - Added migration 20240107000000_add_group_data.sql
-  - create_group_with_cache() method stores serialized Group JSON
-  - get_or_create_group() deserializes cached data, avoiding API calls
-  - SQLite being used as key-value store (future: migrate to foyer library)
-- **Added missing methods**:
-  - initialize_partner() - Initialize constellation by Discord ID
-  - is_user_initialized() - Check if user has agents in database
-  - get_agent_cached() - Get agent ID from DB cache only
-  - get_agents_cached() - Get multiple agent IDs from DB cache
-  - get_group_cached() - Get group ID from DB cache only
+### Key Features Implemented
 
-## Current Status (2025-01-05)
+**Database**: SQLite with migrations, Foyer caching layer
+- Users, agents, groups, tasks, events, energy states tables
+- Contract/client and social memory schemas ready
+- Unique constraints prevent duplicate agents/groups
 
-**Recent Changes**:
-- **Fixed partner info threading**: Agents now receive actual partner names and Discord IDs instead of "Unknown"
-  - `get_user_by_id` made public in db.rs
-  - `initialize_user` fetches user info and passes to agent creation
-  - `create_or_get_agent_with_list` accepts partner_name and discord_id parameters
-  - Human blocks show "Partner: Orual (Discord ID: 549170854458687509)"
-- **Fixed group caching**: Groups won't be recreated constantly
-  - Added `get_group_by_name` to database module
-  - `get_or_create_group` now properly checks by name instead of UUID
-- **Simplified MCP tools**:
-  - Disabled Letta's built-in multi-agent tools (`include_multi_agent_tools(false)`)
-  - Removed duplicate `chat_with_agent` and `send_group_message` tools
-  - Unified everything under single `send_message` tool that handles:
-    - Agent-to-agent: `destination_type: "agent", destination: "pattern"`
-    - Groups: `destination_type: "group", destination: "main"`
-    - Discord: `destination_type: "discord_channel"` or `"discord_dm"`
-- **Updated agent instructions**:
-  - Added explicit instruction to use send_message tool after reasoning
-  - Clarified how to use send_message for different communication types
-  - Agents respond to users via Discord (not direct response)
+**Testing**: 27+ tests that validate actual behavior (not mocks)
 
-## Current Status (2025-01-04)
-
-**Architecture**: Unified binary with feature flags
-- Single `pattern` binary can run Discord bot, MCP server, and background tasks
-- Feature flags: `discord`, `mcp`, `binary`, `full`
-- Modular service architecture via PatternService
-
-**Database** ✅:
-- SQLite with migrations
-- Users table now has `name` field (+ optional `discord_id`)
-- Shared memory, agents, tasks, events, time tracking
-- Contract/client tracking schema ready
-- Social memory schema ready
-- **NEW**: Agent caching table with multi-agent support
-- **NEW**: Unique constraint on (user_id, agent_type) for proper caching
-
-**Testing** ✅:
-- Comprehensive test suite that validates actual behavior
-- Tests that can actually fail (not just string checks)
-- Coverage across all modules: agent, db, mcp, discord, service
-- All 27 tests passing after module reorganization
-
-**Multi-Agent System** ✅:
-- Generic, flexible architecture with configurable agents
-- Three-tier memory hierarchy:
-  - Core memory blocks (immediate access)
-  - Letta sources (searchable knowledge)
-  - Archival memory (deep storage)
-- **Native Letta groups for agent coordination** ✅:
-  - Main group: Dynamic manager for natural conversation (all agents)
-  - Crisis group: Round-robin for quick intervention (Pattern, Momentum, Anchor)
-  - Planning group: Supervisor mode with Entropy leading (Entropy, Flux, Pattern)
-  - Memory group: Sleeptime manager with Archive leading (Pattern, Archive)
-  - Groups created automatically on user initialization (2025-01-04)
-- Background sleeptime via Letta's sleeptime manager
-- Dynamic agent routing in Discord - no hardcoded names
-- **NEW**: Smart group selection based on message content (crisis, planning, memory keywords)
-- Full Letta integration with message routing
-- Pattern is primary conversant/interface, delegates to specialists
-- Database caching eliminates API calls for existing agents
-- See [Memory and Groups Architecture](./docs/architecture/MEMORY_AND_GROUPS.md)
-
-**Agent Coordination** ✅:
-- agent/coordination.rs module with message tagging system
-- MessageSource enum to distinguish User/Agent/System/Tool messages
-- Inter-agent communication rules in all system prompts
-- Prevents infinite loops from tool confirmations
-- cleanup_agents.sh script supports both local and Letta Cloud
-- **NEW**: Added no-emoji rule to system prompts to prevent emoji explosions
-- **NEW**: AgentCoordinator replaces non-existent AgentManager
-- **NEW**: Both system prompt (unchangeable) and persona (evolvable) blocks configured
-- **NEW**: External agent configuration file support (TOML format)
-- **NEW**: Environment variable `AGENT_CONFIG_PATH` for config file location
-
-**Discord Bot** ✅:
+**Discord Bot**:
 - Natural language chat with slash commands
-- DM support with agent routing (@agent, agent:, /agent)
-- Configurable agent detection
-- Message chunking for long responses
-- Channel name resolution ("Server/channel" format)
-- Fixed ephemeral messages, timeouts, and initialization issues
-- **NEW**: `/debug_agents` command to log agent chat histories to disk for debugging
+- Smart group routing based on message content
+- DM support with agent detection patterns
+- `/debug_agents` command for troubleshooting
 
-**MCP Server** ✅:
-- Core tools: chat_with_agent, get/update_agent_memory, schedule_event, check_activity_state, update_agent_model
-- Group tools: send_group_message
-- **NEW**: Unified send_message tool with routing to agents, groups, or Discord (2025-01-04)
-- **REMOVED**: Individual messaging tools and group management tools per user request
-- Discord channel resolution accepts both IDs and "guild/channel" names
-- **NEW**: Model capability abstraction in update_agent_model tool:
-  - `routine` - Everyday tasks, quick checks (default: groq/llama-3.1-8b-instant)
-  - `interactive` - Normal conversations (default: groq/llama-3.3-70b-versatile)
-  - `investigative` - Research, debugging, analysis (default: openai/gpt-4o)
-  - `critical` - High-stakes decisions (default: anthropic/claude-3-opus-20240229)
-  - Temperature is now configured in pattern.toml, not exposed in the MCP tool
-- **NEW**: Configurable model mappings in pattern.toml:
-  - Global defaults under `[models.default]`
-  - Per-agent overrides under `[models.agents.{agent_id}]`
-  - Temperature settings can be configured globally or per-agent
-- **Transports implemented**:
-  - Stdio transport for local development
-  - Streamable HTTP (has issues with Letta's Python client)
-  - SSE transport (recommended for Letta compatibility)
-- **SSE configuration**: Set `mcp.transport = "sse"` and `mcp.port = 8081`
-- Uses official modelcontextprotocol/rust-sdk from git
-- Proper tool definitions with `#[rmcp::tool]` attribute
-- Integrated with multi-agent system
+**MCP Server**:
+- Unified `send_message` tool for all communication
+- ADHD-aware tools: energy tracking, event scheduling
+- Model capability abstraction (routine/interactive/investigative/critical)
+- SSE transport recommended (`mcp.transport = "sse"`)
 
-**Debug Features** ✅:
-- Agent history logging to disk with `log_agent_histories()` method
-- Logs all message types: user, assistant, system, tool calls, reasoning
-- Accessible via `/debug_agents` Discord command
-- Files saved to `logs/agent_histories/` with timestamps
-- Uses async file I/O to avoid blocking the runtime
+**Configuration**:
+- `pattern.toml` for models, agents, MCP settings
+- External agent config via `AGENT_CONFIG_PATH`
+- Per-agent model overrides supported
 
-**Running Pattern**:
+### Running Pattern
 ```bash
-# Full mode (Discord + MCP + background tasks)
-cargo run --features full
-
-# Just Discord
-cargo run --features binary,discord
-
-# Just MCP
-cargo run --features binary,mcp
+cargo run --features full          # Discord + MCP + background
+cargo run --features binary,discord # Just Discord
+cargo run --features binary,mcp     # Just MCP
 ```
 
 ## Partner/Conversant Architecture (2025-01-03)
@@ -580,63 +389,31 @@ This architecture ensures:
 - Efficient resource usage through shared infrastructure
 - Flexibility for future multi-tenant scenarios
 
-## Module Organization (Completed 2025-01-04)
-
-The module structure has been reorganized for better clarity and maintainability:
+## Module Organization
 
 **Current Structure:**
 ```
 src/
-├── agent/                  # All agent-related code
-│   ├── mod.rs             # Shared agent types (AgentId, MemoryBlockId, StandardAgent, etc.)
-│   ├── constellation.rs   # Multi-agent system (MultiAgentSystem, AgentConfig)
-│   ├── builder.rs         # MultiAgentSystemBuilder for easier configuration
-│   ├── coordination.rs    # Message routing and AgentCoordinator
-│   └── human.rs           # UserId type, future Partner/Conversant types
+├── agent/                 # Agent types, constellation, coordination
 ├── mcp/                   # MCP server & tools
-│   ├── mod.rs            # MCP request/response types
-│   ├── server.rs         # MCP server implementation
-│   ├── core_tools.rs     # Core MCP tools (chat, memory, events)
-│   └── discord_tools.rs  # Discord-specific MCP tools
-├── discord/              # Discord bot
-│   └── mod.rs           # Discord bot implementation with slash commands
-├── service.rs           # PatternService orchestrator
-├── config.rs            # Configuration management
-├── db.rs                # Database module with SQLite
-├── error.rs             # Error types and handling
-└── lib.rs               # Library entry point
+├── discord/               # Discord bot
+├── service.rs            # PatternService orchestrator
+├── config.rs             # Configuration management
+├── db.rs                 # Database module with SQLite
+├── error.rs              # Error types and handling
+└── lib.rs                # Library entry point
 ```
-
-**Key Changes from Refactor:**
-- ✅ Consolidated all agent types in `agent/mod.rs`
-- ✅ Replaced non-existent `AgentManager` with `AgentCoordinator`
-- ✅ Fixed method name: `get_agent_memory` → `get_shared_memory`
-- ✅ Removed `types.rs` - types now live in their respective modules
-- ✅ All imports updated to new paths
-- ✅ All 27 tests passing
-
-**Import Path Changes:**
-- `use crate::agents::` → `use crate::agent::constellation::`
-- `use crate::server::` → `use crate::mcp::server::`
-- `use crate::mcp_tools::` → `use crate::mcp::discord_tools::`
-- `use crate::types::` → `use crate::agent::` (for agent types)
 
 ## Next Steps
 
-### Implement Letta Groups Architecture (Immediate)
-1. **Refactor to use native Letta groups**
-   - Replace custom message routing with groups API
-   - Experiment with different group configurations
-   - Create groups dynamically based on context
-   - Test different manager types (dynamic, supervisor, sleeptime)
-   - See [Memory and Groups Architecture](./docs/architecture/MEMORY_AND_GROUPS.md)
-
-### Custom Sleeptime Implementation
-1. **Build tiered monitoring system**
-   - Tier 1: Lightweight monitor (every 20min, rules-based)
-   - Tier 2: Pattern intervention (triggered by concerning patterns)
-   - Cost-optimized with conditional awakening
-   - See sleeptime architecture in [Memory and Groups doc](./docs/architecture/MEMORY_AND_GROUPS.md#custom-tiered-sleeptime-architecture)
+### Custom Sleeptime Implementation ✅
+- **Two-tier monitoring system implemented**:
+  - Tier 1: Lightweight rules-based checks every 20 minutes
+  - Tier 2: Pattern agent intervention for concerning patterns
+  - Monitors: hyperfocus duration, sedentary time, hydration, energy levels
+  - MCP tools: `trigger_sleeptime_check`, `update_sleeptime_state`
+  - Automatic monitoring for all users with Discord IDs
+  - See implementation in `src/sleeptime.rs`
 
 ### Task Management (High Priority)
 1. **Extend database module** with task operations

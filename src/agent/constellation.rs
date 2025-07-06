@@ -775,6 +775,16 @@ impl MultiAgentSystem {
             })?;
 
         info!("Successfully updated agent {}", letta_agent_id);
+
+        // Invalidate cache if available
+        if let Some(_cache) = &self.cache {
+            // We need to get the user_id for this agent
+            // For now, we'll just log a warning - in a real implementation
+            // we'd need to pass user_id to this method or look it up
+            warn!("Cache invalidation for agent updates not fully implemented - need user_id");
+            // TODO: cache.remove_agent(user_id, agent_id.as_str()).await?;
+        }
+
         Ok(())
     }
 
@@ -938,7 +948,7 @@ impl MultiAgentSystem {
             .system(&system_prompt)
             .agent_type(letta::types::AgentType::MemGPTv2)
             .enable_sleeptime(config.is_sleeptime)
-            .include_multi_agent_tools(true)
+            .enable_reasoner(true)
             .tags(tags)
             .tools(vec![
                 // Don't include send_message - use Discord tools instead
@@ -1014,16 +1024,28 @@ impl MultiAgentSystem {
                             self.update_agent(&agent.id, agent_id, config).await?;
                         }
 
-                        // Check if MCP tools need to be attached
+                        // Check if MCP tools need to be attached - but check ALL tool names
+                        // to avoid false positives that trigger unnecessary attachments
                         let needs_tools = match self.letta.agents().list_tools(&agent.id).await {
                             Ok(tools) => {
-                                // Check if any MCP tools are missing
-                                let has_mcp_tools = tools.iter().any(|t| {
-                                    t.name.contains("send_message")
-                                        || t.name.contains("agent_memory")
-                                        || t.name.contains("agent_knowledge")
-                                });
-                                !has_mcp_tools
+                                // Get expected tools from central location
+                                let expected_tools = Self::expected_mcp_tools();
+
+                                // Check if any expected tools are missing
+                                let tool_names: std::collections::HashSet<_> =
+                                    tools.iter().map(|t| t.name.as_str()).collect();
+
+                                let missing_any = expected_tools
+                                    .iter()
+                                    .any(|expected| !tool_names.contains(expected));
+
+                                if missing_any {
+                                    debug!(
+                                        "Some MCP tools missing for agent {}, will attach",
+                                        agent_name
+                                    );
+                                }
+                                missing_any
                             }
                             Err(_) => true, // If we can't check, assume we need tools
                         };
@@ -1037,7 +1059,7 @@ impl MultiAgentSystem {
                                 );
                             }
                         } else {
-                            debug!("Agent {} already has MCP tools attached", agent_name);
+                            debug!("Agent {} already has all MCP tools attached", agent_name);
                         }
 
                         return Ok(agent.id);
@@ -1171,6 +1193,23 @@ impl MultiAgentSystem {
             )
             .await?;
 
+        // Store in foyer cache if available
+        if let Some(cache) = &self.cache {
+            let system_prompt_hash = crate::cache::hash_string(&system_prompt);
+            if let Err(e) = cache
+                .insert_agent(
+                    user.id,
+                    agent_id.as_str(),
+                    agent.id.to_string(),
+                    system_prompt_hash,
+                )
+                .await
+            {
+                warn!("Failed to cache agent {}: {:?}", agent_name, e);
+                // Don't fail agent creation if caching fails
+            }
+        }
+
         // Attach MCP tools to the newly created agent
         if let Err(e) = self.attach_mcp_tools_to_agent(&agent.id).await {
             warn!(
@@ -1183,11 +1222,9 @@ impl MultiAgentSystem {
         Ok(agent.id)
     }
 
-    /// Register all MCP tools with Letta (call once after server starts)
-    async fn register_all_mcp_tools(&self) -> Result<()> {
-        info!("Registering all MCP tools with Letta...");
-
-        let mcp_tools = vec![
+    /// Get the list of expected MCP tools
+    fn expected_mcp_tools() -> &'static [&'static str] {
+        &[
             "get_agent_memory",
             "update_agent_memory",
             "update_agent_model",
@@ -1199,12 +1236,19 @@ impl MultiAgentSystem {
             "read_agent_knowledge",
             "list_knowledge_files",
             "sync_knowledge_to_letta",
-        ];
+        ]
+    }
+
+    /// Register all MCP tools with Letta (call once after server starts)
+    async fn register_all_mcp_tools(&self) -> Result<()> {
+        info!("Registering all MCP tools with Letta...");
+
+        let mcp_tools = Self::expected_mcp_tools();
 
         let server_name = "pattern_mcp";
         let mut registered_count = 0;
 
-        for tool_name in &mcp_tools {
+        for tool_name in mcp_tools {
             match self
                 .letta
                 .tools()
@@ -1236,20 +1280,8 @@ impl MultiAgentSystem {
     pub async fn attach_mcp_tools_to_agent(&self, agent_id: &letta::LettaId) -> Result<()> {
         debug!("Attaching MCP tools to agent {}", agent_id);
 
-        // List of MCP tool names that should be attached to all agents
-        let mcp_tools = vec![
-            "get_agent_memory",
-            "update_agent_memory",
-            "update_agent_model",
-            "schedule_event",
-            "check_activity_state",
-            "record_energy_state",
-            "send_message",
-            "write_agent_knowledge",
-            "read_agent_knowledge",
-            "list_knowledge_files",
-            "sync_knowledge_to_letta",
-        ];
+        // Get expected tools from central location
+        let mcp_tools = Self::expected_mcp_tools();
 
         // Get all available tools from Letta
         let available_tools = self.letta.tools().list(None).await.map_err(|e| {
@@ -1261,7 +1293,7 @@ impl MultiAgentSystem {
         let mut attached_count = 0;
         for tool_name in mcp_tools {
             // Find the tool ID by name
-            let tool = available_tools.iter().find(|t| t.name == tool_name);
+            let tool = available_tools.iter().find(|t| t.name == *tool_name);
 
             if let Some(tool) = tool {
                 if let Some(tool_id) = &tool.id {
@@ -1351,6 +1383,17 @@ impl MultiAgentSystem {
             .upsert_shared_memory(user.id, block_name, block_value, config.max_length as i32)
             .await?;
 
+        // Update Foyer cache if available (write-through cache)
+        if let Some(cache) = &self.cache {
+            if let Err(e) = cache
+                .update_memory_block_value(user.id, block_name, block_value.to_string())
+                .await
+            {
+                warn!("Failed to update memory block in Foyer cache: {:?}", e);
+                // Don't fail the update if cache update fails
+            }
+        }
+
         // TODO: Sync to agents via Letta blocks API
         // For now, agents will get updated memory on next interaction
         // In the future, we could update agent memory blocks directly
@@ -1360,6 +1403,13 @@ impl MultiAgentSystem {
 
     /// Get current state from shared memory
     pub async fn get_shared_memory(&self, user_id: UserId, block_name: &str) -> Result<String> {
+        // Check Foyer cache first if available
+        if let Some(cache) = &self.cache {
+            if let Some(cached_value) = cache.get_memory_block(user_id.0, block_name).await? {
+                return Ok((*cached_value).clone());
+            }
+        }
+
         let user = self
             .db
             .get_or_create_user(&format!("user_{}", user_id.0))
@@ -1372,6 +1422,16 @@ impl MultiAgentSystem {
                 user_id: user.id,
                 block: block_name.to_string(),
             })?;
+
+        // Store in Foyer cache for next time
+        if let Some(cache) = &self.cache {
+            if let Err(e) = cache
+                .insert_memory_block(user_id.0, block_name, block.block_value.clone())
+                .await
+            {
+                warn!("Failed to insert memory block into Foyer cache: {:?}", e);
+            }
+        }
 
         Ok(block.block_value)
     }
@@ -1617,6 +1677,17 @@ impl MultiAgentSystem {
             )
             .await?;
 
+        // Insert into Foyer cache if available
+        if let Some(cache) = &self.cache {
+            if let Err(e) = cache
+                .insert_group(user_id.0, group_name, group.clone())
+                .await
+            {
+                warn!("Failed to insert new group into Foyer cache: {:?}", e);
+                // Don't fail group creation if caching fails
+            }
+        }
+
         Ok(group)
     }
 
@@ -1629,13 +1700,32 @@ impl MultiAgentSystem {
         manager_type: crate::db::GroupManagerType,
         manager_config: Option<serde_json::Value>,
     ) -> Result<letta::types::Group> {
-        // Check database first
+        // Check Foyer cache first if available
+        if let Some(cache) = &self.cache {
+            if let Some(cached_group) = cache.get_group(user_id.0, group_name).await? {
+                info!("Retrieved group '{}' from Foyer cache", group_name);
+                return Ok((*cached_group).clone());
+            }
+        }
+
+        // Check database second
         if let Some(cached_group) = self.db.get_group_by_name(user_id.0, group_name).await? {
             // Try to use cached group data first
             if let Some(group_data) = cached_group.group_data {
                 match serde_json::from_str::<letta::types::Group>(&group_data) {
                     Ok(group) => {
                         info!("Using cached group '{}' with ID: {}", group_name, group.id);
+
+                        // Store in Foyer cache for next time
+                        if let Some(cache) = &self.cache {
+                            if let Err(e) = cache
+                                .insert_group(user_id.0, group_name, group.clone())
+                                .await
+                            {
+                                warn!("Failed to insert group into Foyer cache: {:?}", e);
+                            }
+                        }
+
                         return Ok(group);
                     }
                     Err(e) => {
@@ -1653,6 +1743,17 @@ impl MultiAgentSystem {
             match self.letta.groups().get(&group_id).await {
                 Ok(group) => {
                     info!("Retrieved group '{}' from Letta API", group_name);
+
+                    // Store in Foyer cache for next time
+                    if let Some(cache) = &self.cache {
+                        if let Err(e) = cache
+                            .insert_group(user_id.0, group_name, group.clone())
+                            .await
+                        {
+                            warn!("Failed to insert group into Foyer cache: {:?}", e);
+                        }
+                    }
+
                     return Ok(group);
                 }
                 Err(e) => {
@@ -1722,6 +1823,14 @@ impl MultiAgentSystem {
 
             // Delete from database
             self.db.delete_group(user_id.0, group_name).await?;
+
+            // Remove from Foyer cache if available
+            if let Some(cache) = &self.cache {
+                if let Err(e) = cache.remove_group(user_id.0, group_name).await {
+                    warn!("Failed to remove group from Foyer cache: {:?}", e);
+                    // Don't fail group deletion if cache removal fails
+                }
+            }
         }
 
         Ok(())

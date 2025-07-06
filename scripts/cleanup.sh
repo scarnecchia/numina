@@ -16,7 +16,7 @@ echo "✓ Log files removed"
 
 # 3. Remove any cache directories
 echo "Removing cache directories..."
-rm -rf .cache cache
+rm -rf .pattern_cache cache
 echo "✓ Cache directories removed"
 
 # 4. Instructions for Letta cleanup

@@ -143,16 +143,16 @@ fn message_history_key(agent_id: &str) -> String {
 4. ❌ Add cache initialization to `PatternService` (next phase)
 5. ❌ Add feature flag `foyer-cache` for gradual rollout (decided not needed)
 
-### Phase 2: Agent Cache Migration (NEXT)
-1. Add `cache: Arc<PatternCache>` to `MultiAgentSystem`
-2. Initialize cache in `MultiAgentSystemBuilder::build()`
-3. Update `create_or_get_agent_with_list()` to:
+### Phase 2: Agent Cache Migration ✅
+1. ✅ Add `cache: Arc<PatternCache>` to `MultiAgentSystem`
+2. ✅ Add cache methods to builder and MultiAgentSystem
+3. ✅ Update `create_or_get_agent_with_list()` to:
    - Check cache first using `cache.get_agent()`
    - Verify system prompt hash matches
    - Update cache on miss with `cache.insert_agent()`
-   - Store agent in DB only if not cached
-4. Update `update_agent()` to invalidate cache
-5. Add `cache.hash_string()` usage for system prompt comparison
+   - Store agent in DB and cache after creation
+4. ✅ Update `update_agent()` to invalidate cache (partial - needs user_id)
+5. ✅ Add `cache.hash_string()` usage for system prompt comparison
 
 ### Phase 3: Group Cache Migration
 1. Update `get_or_create_group()`:

@@ -3,12 +3,13 @@ use crate::{
         self,
         builder::MultiAgentSystemBuilder,
         constellation::{AgentConfig, MemoryBlockConfig, MultiAgentSystem},
-        StandardMemoryBlock, UserId,
+        UserId,
     },
     config::{Config, PartnersConfig},
     db::Database,
     error::{PatternError, Result},
     mcp::McpTransport,
+    sleeptime::SleeptimeMonitor,
 };
 use std::sync::Arc;
 use tracing::{error, info};
@@ -67,34 +68,29 @@ impl PatternService {
 
     /// Create Letta client based on configuration
     async fn create_letta_client(config: &Config) -> Result<letta::LettaClient> {
-        if let Some(api_key) = &config.letta.api_key {
-            info!("Connecting to Letta cloud");
-            // Use builder to set longer timeout for cloud operations
-            let client = letta::LettaClient::builder()
-                .base_url("https://api.letta.com")
-                .auth(letta::auth::AuthConfig::bearer(api_key))
-                .timeout(std::time::Duration::from_secs(120)) // 2 minute timeout for cloud
-                .build()
-                .map_err(|e| crate::error::AgentError::LettaConnectionFailed {
-                    url: "cloud".to_string(),
-                    source: e,
-                })?;
-            Ok(client)
-        } else {
-            info!("Connecting to Letta at {}", config.letta.base_url);
+        info!("Connecting to Letta at {}", config.letta.base_url);
 
-            // Use builder to set a longer timeout for slow Letta operations
-            let client = letta::LettaClient::builder()
-                .base_url(&config.letta.base_url)
-                .auth(letta::auth::AuthConfig::none())
-                .timeout(std::time::Duration::from_secs(60)) // 60 second timeout
-                .build()
-                .map_err(|e| crate::error::AgentError::LettaConnectionFailed {
-                    url: config.letta.base_url.clone(),
-                    source: e,
-                })?;
-            Ok(client)
-        }
+        // Create auth config based on whether API key is present
+        let auth_config = if let Some(api_key) = &config.letta.api_key {
+            info!("Using API key authentication");
+            letta::auth::AuthConfig::bearer(api_key)
+        } else {
+            info!("Using no authentication");
+            letta::auth::AuthConfig::none()
+        };
+
+        // Use configured base URL whether using API key or not
+        // This allows using local server with API keys (e.g. for Gemini)
+        let client = letta::LettaClient::builder()
+            .base_url(&config.letta.base_url)
+            .auth(auth_config)
+            .timeout(std::time::Duration::from_secs(120)) // 2 minute timeout
+            .build()
+            .map_err(|e| crate::error::AgentError::LettaConnectionFailed {
+                url: config.letta.base_url.clone(),
+                source: e,
+            })?;
+        Ok(client)
     }
 
     /// Create multi-agent system with standard agents
@@ -104,6 +100,22 @@ impl PatternService {
         config: &Config,
     ) -> Result<MultiAgentSystem> {
         let mut builder = MultiAgentSystemBuilder::new(letta_client, db);
+
+        // Initialize cache if configured
+        let cache_dir = std::path::Path::new(&config.cache.directory);
+        match crate::cache::PatternCache::new(cache_dir).await {
+            Ok(cache) => {
+                info!("Cache initialized at {:?}", cache_dir);
+                builder = builder.with_cache(Arc::new(cache));
+            }
+            Err(e) => {
+                error!(
+                    "Failed to initialize cache: {:?}. Continuing without cache.",
+                    e
+                );
+                // Continue without cache - it's optional
+            }
+        }
 
         // Check if we should load from external config file
         if let Some(config_path) = &config.agent_config_path {
@@ -192,11 +204,16 @@ impl PatternService {
 
     /// Start all configured services
     pub async fn start(self) -> Result<()> {
+        // Start background monitors first
+        let monitors = self.create_sleeptime_monitors().await?;
+
         // Convert to Arc for sharing between services
         let service = Arc::new(self);
 
-        // Start background tasks
-        service.start_background_tasks().await?;
+        // Start background monitoring tasks
+        for monitor in monitors {
+            monitor.start().await?;
+        }
 
         // Collect service handles
         #[allow(unused_mut)]
@@ -251,50 +268,51 @@ impl PatternService {
         Ok(())
     }
 
-    /// Start background tasks (sleeptime orchestrator)
-    async fn start_background_tasks(&self) -> Result<()> {
-        let orchestrator = self
-            .multi_agent_system
-            .agent_configs()
-            .values()
-            .find(|config| config.is_sleeptime);
+    /// Create sleeptime monitors for all users
+    async fn create_sleeptime_monitors(&self) -> Result<Vec<Arc<SleeptimeMonitor>>> {
+        let mut monitors = Vec::new();
 
-        if let Some(config) = orchestrator {
-            let interval_secs = config.sleeptime_interval.unwrap_or(1800);
-            info!(
-                "Starting sleeptime orchestrator '{}' with {}s interval",
-                config.name, interval_secs
-            );
-
-            let system = self.multi_agent_system.clone();
-            tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
-
-                loop {
-                    interval.tick().await;
-
-                    // TODO: Implement actual sleeptime checks
-                    info!("Sleeptime check triggered");
-
-                    if let Err(e) = system
-                        .update_shared_memory(
-                            UserId(0), // System user
-                            StandardMemoryBlock::CurrentState.id().as_str(),
-                            &format!(
-                                "vibing. last check: {}",
-                                sqlx::types::chrono::Local::now().format("%H:%M")
-                            ),
-                        )
-                        .await
-                    {
-                        error!("Failed to update sleeptime state: {:?}", e);
-                    }
-                }
-            });
+        // Only create monitors if background tasks are enabled
+        if !self.config.background.enabled {
+            return Ok(monitors);
         }
 
-        Ok(())
+        // Get all users to monitor
+        let users = self.db.list_all_users().await?;
+
+        // Create monitor for each user
+        for user in users {
+            if let Some(discord_id) = user.discord_id {
+                let user_id = UserId(user.id);
+
+                // Create sleeptime config from service configuration
+                let sleeptime_config = crate::sleeptime::SleeptimeConfig {
+                    tier1_interval_secs: self.config.background.sleeptime_interval_secs,
+                    max_hyperfocus_minutes: 90,
+                    max_sedentary_minutes: 120,
+                    max_water_gap_minutes: 120,
+                    min_energy_level: 4,
+                    use_expensive_models: true,
+                };
+
+                // Create monitor
+                let monitor = Arc::new(SleeptimeMonitor::new(
+                    sleeptime_config,
+                    self.db.clone(),
+                    self.multi_agent_system.clone(),
+                    user_id,
+                ));
+
+                monitors.push(monitor);
+
+                info!(
+                    "Created sleeptime monitor for user {} (Discord: {})",
+                    user.name, discord_id
+                );
+            }
+        }
+
+        Ok(monitors)
     }
 
     /// Start Discord bot if configured

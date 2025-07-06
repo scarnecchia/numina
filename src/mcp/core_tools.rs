@@ -1,13 +1,13 @@
 //! Core MCP tools for agent interactions
 
-use crate::agent::{constellation::MultiAgentSystem, UserId};
+use crate::agent::{constellation::MultiAgentSystem, ModelCapability, UserId};
 use rmcp::{
     handler::server::tool::Parameters,
     model::{CallToolResult, Content},
     Error as McpError,
 };
 use serde_json::json;
-use std::{future::Future, sync::Arc};
+use std::{future::Future, str::FromStr, sync::Arc};
 use tracing::{debug, error, info};
 
 use super::{
@@ -181,9 +181,21 @@ impl CoreTools {
             }
         };
 
+        // Parse capability from string
+        let capability = ModelCapability::from_str(&params.capability).map_err(|e| {
+            McpError::invalid_params(
+                "Invalid capability level",
+                Some(json!({
+                    "provided": params.capability,
+                    "error": e.to_string(),
+                    "valid_levels": ["routine", "interactive", "investigative", "critical"]
+                })),
+            )
+        })?;
+
         match self
             .multi_agent_system
-            .update_agent_model_capability(UserId(user_id), &agent_id, params.capability)
+            .update_agent_model_capability(UserId(user_id), &agent_id, capability)
             .await
         {
             Ok(()) => {

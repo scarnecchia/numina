@@ -8,6 +8,7 @@ pub mod core_tools;
 pub mod discord_tools;
 pub mod knowledge_tools;
 pub mod server;
+pub mod sleeptime_tools;
 
 /// MCP transport type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +90,8 @@ pub struct ScheduleEventRequest {
 pub struct UpdateAgentModelRequest {
     pub user_id: String,
     pub agent_id: String,
-    pub capability: crate::agent::ModelCapability,
+    /// Model capability level: "routine", "interactive", "investigative", or "critical"
+    pub capability: String,
     /// Whether to request another agent turn after this tool completes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_heartbeat: Option<bool>,
@@ -134,32 +136,38 @@ pub enum MessageDestinationType {
     DiscordDm,
 }
 
+impl FromStr for MessageDestinationType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "agent" => Ok(MessageDestinationType::Agent),
+            "group" => Ok(MessageDestinationType::Group),
+            #[cfg(feature = "discord")]
+            "discord_channel" => Ok(MessageDestinationType::DiscordChannel),
+            #[cfg(feature = "discord")]
+            "discord_dm" => Ok(MessageDestinationType::DiscordDm),
+            _ => Err(format!("Unknown destination type: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SendMessageRequest {
     pub user_id: String,
-    pub destination_type: MessageDestinationType,
+    /// Destination type: "agent", "group", "discord_channel", or "discord_dm"
+    pub destination_type: String,
     pub destination: String,
     pub message: String,
     // Optional fields for Discord embeds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub embed_color: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embed_fields: Option<Vec<discord_tools::EmbedField>>,
+    pub embed_color: Option<i64>,
+    // Note: embed_fields removed to avoid JSON Schema $ref issues with Gemini
     /// Whether to request another agent turn after this tool completes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_heartbeat: Option<bool>,
-}
-
-/// Schema helper for u32 fields that need explicit int32 format
-pub fn schema_u32(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
-
-    let mut schema = SchemaObject::default();
-    schema.instance_type = Some(SingleOrVec::Single(Box::new(InstanceType::Integer)));
-    schema.format = Some("int32".to_string());
-    Schema::Object(schema)
 }
 
 /// Empty request type for tools that don't take parameters

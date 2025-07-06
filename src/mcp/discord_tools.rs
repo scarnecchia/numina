@@ -25,7 +25,7 @@ pub struct SendDiscordEmbedRequest {
     pub channel: String,
     pub title: String,
     pub description: String,
-    pub color: Option<u32>,
+    pub color: Option<i64>,
     pub fields: Option<Vec<EmbedField>>,
     /// Whether to request another agent turn after this tool completes
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,7 +50,7 @@ pub struct GetDiscordChannelInfoRequest {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SendDiscordDmRequest {
-    pub user_id: u64,
+    pub user_id: i64,
     pub message: String,
     /// Whether to request another agent turn after this tool completes
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,7 +95,7 @@ impl DiscordTools {
             .description(&params.description);
 
         if let Some(color) = params.color {
-            embed = embed.color(color);
+            embed = embed.color(color as u32);
         }
 
         if let Some(fields) = params.fields {

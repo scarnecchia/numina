@@ -32,6 +32,12 @@ pub struct Config {
     /// Cache configuration
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Background tasks configuration
+    #[serde(default)]
+    pub background: BackgroundConfig,
+    /// Test mode flag
+    #[serde(default)]
+    pub test_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +90,23 @@ pub struct McpConfig {
     pub transport: McpTransport,
     /// Port for HTTP/SSE transports
     pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundConfig {
+    /// Whether background tasks are enabled
+    pub enabled: bool,
+    /// Sleeptime check interval in seconds
+    pub sleeptime_interval_secs: u64,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sleeptime_interval_secs: 1200, // 20 minutes
+        }
+    }
 }
 
 /// Model capability configuration
@@ -179,6 +202,8 @@ impl Default for Config {
             models: ModelConfig::default(),
             partners: None,
             cache: CacheConfig::default(),
+            background: BackgroundConfig::default(),
+            test_mode: false,
         }
     }
 }
@@ -282,6 +307,16 @@ impl Config {
         // Model configs are loaded from file only, not env vars
         config.models = ModelConfig::default();
 
+        // Background
+        if let Ok(enabled) = env::var("BACKGROUND_ENABLED") {
+            config.background.enabled = enabled.to_lowercase() == "true";
+        }
+
+        // Test mode
+        if let Ok(test_mode) = env::var("TEST_MODE") {
+            config.test_mode = test_mode.to_lowercase() == "true";
+        }
+
         config
     }
 
@@ -333,6 +368,16 @@ impl Config {
         // Agent config path
         if let Ok(path) = env::var("AGENT_CONFIG_PATH") {
             self.agent_config_path = Some(path);
+        }
+
+        // Background
+        if let Ok(enabled) = env::var("BACKGROUND_ENABLED") {
+            self.background.enabled = enabled.to_lowercase() == "true";
+        }
+
+        // Test mode
+        if let Ok(test_mode) = env::var("TEST_MODE") {
+            self.test_mode = test_mode.to_lowercase() == "true";
         }
 
         self
