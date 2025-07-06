@@ -13,7 +13,7 @@ channel_id = 1327007975960740004
 
 [letta]
 # For local server (default):
-base_url = "http://localhost:8000"
+base_url = "http://localhost:8283"
 # For Letta Cloud:
 # api_key = ""
 # base_url = "https://api.letta.com"

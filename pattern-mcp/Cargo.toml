@@ -1,0 +1,50 @@
+[package]
+name = "pattern-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Model Context Protocol (MCP) server implementation for Pattern"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+
+# MCP SDK
+mcp-rs = { workspace = true }
+
+# HTTP Server
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Core framework
+pattern-core = { path = "../pattern-core" }
+
+# SSE support
+tokio-stream = "0.1"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+pretty_assertions = { workspace = true }
+mockall = { workspace = true }
+hyper = "1.5"
+tower = { version = "0.5", features = ["util"] }
+
+[features]
+default = ["http", "stdio", "sse"]
+http = []
+stdio = []
+sse = []

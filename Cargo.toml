@@ -1,101 +1,81 @@
-[package]
-authors = ["Orual <orual@nonbinary.computer>"]
-edition = "2021"
-# If you change the name here, you must also do it in flake.nix (and run `cargo generate-lockfile` afterwards)
-name = "pattern"
-description = "Multi-agent cognitive support system for the neurodivergent"
+[workspace]
+members = [
+    "pattern-core",
+    "pattern-nd",
+    "pattern-mcp",
+    "pattern-discord",
+    "pattern-main",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
+edition = "2021"
+authors = ["Pattern Contributors"]
 license = "AGPL-3.0"
-default-run = "pattern"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+repository = "https://github.com/yourusername/pattern"
+homepage = "https://github.com/yourusername/pattern"
+readme = "README.md"
 
-[lib]
-name = "pattern"
-path = "src/lib.rs"
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
 
-[dependencies]
-# Core dependencies
-dotenv = "0.15"
-# TODO: Once published, change to:
-# letta = { version = "0.1", features = ["full"] }
-# or for git:
-# letta = { git = "https://github.com/yourusername/letta-rs", branch = "main" }
-letta = { path = "../letta-rs" }
-miette = { version = "7.6.0", features = ["fancy"] }
-serde = { version = "1.0.219", features = ["derive"] }
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
-sled = "0.34.7"
-sqlx = { version = "0.8.6", features = [
-    "runtime-tokio",
-    "sqlite",
-    "uuid",
-    "chrono",
-    "migrate",
-] }
-tokio = { version = "1.45.1", features = ["full"] }
-tokio-stream = "0.1.17"
 toml = "0.8"
-tracing = "0.1.41"
-foyer = { version = "0.17", features = ["serde"] }
 
-# Optional dependencies
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = [
-    "transport-streamable-http-server-session",
-    "transport-streamable-http-server",
-    "transport-worker",
-    "transport-sse-server",
-], optional = true }
-hyper = { version = "1.5", features = ["server", "http1"], optional = true }
-hyper-util = { version = "0.1", features = [
-    "service",
-    "tokio",
-    "server",
-    "server-auto",
-], optional = true }
-tower = { version = "0.5", optional = true }
-tokio-util = { version = "0.7", optional = true }
-serenity = { version = "0.12.4", optional = true }
-async-trait = { version = "0.1.83", optional = true }
-clap = { version = "4.5.0", features = ["derive"], optional = true }
-tracing-subscriber = { version = "0.3.19", features = [
-    "env-filter",
-    "fmt",
-], optional = true }
-tracing-appender = { version = "0.2", optional = true }
-chrono = { version = "0.4.39", optional = true, features = ["serde"] }
-futures = { version = "0.3", optional = true }
-schemars = "0.8.22"
+# Error handling
+miette = { version = "7.2", features = ["fancy"] }
+thiserror = "1.0"
+anyhow = "1.0"
 
-[dev-dependencies]
-tempfile = "3.0"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-[features]
-default = ["full"]
-# Enable Discord bot functionality
-discord = ["dep:serenity"]
-# Enable MCP server functionality
-mcp = [
-    "dep:rmcp",
-    "dep:async-trait",
-    "dep:hyper",
-    "dep:hyper-util",
-    "dep:tower",
-]
-# Enable SSE transport for MCP server
-mcp-sse = ["mcp", "dep:tokio-util"]
-# Binary support (logging, CLI args)
-binary = [
-    "dep:clap",
-    "dep:tracing-subscriber",
-    "dep:tracing-appender",
-    "dep:chrono",
-    "dep:futures",
-]
-# Full binary with all features
-full = ["discord", "mcp", "binary", "mcp-sse"]
+# Database
+surrealdb = { version = "2.1", features = ["kv-mem", "kv-rocksdb", "protocol-ws", "protocol-http", "rustls"] }
 
-[[bin]]
-name = "pattern"
-path = "src/main.rs"
-required-features = ["binary"]
+# AI/LLM
+genai = "0.1"
+
+# Utilities
+uuid = { version = "1.10", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+futures = "0.3"
+once_cell = "1.20"
+parking_lot = "0.12"
+
+# HTTP/Web
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Discord
+serenity = { version = "0.12", default-features = false, features = [
+    "client",
+    "gateway",
+    "rustls_backend",
+    "model",
+    "framework",
+    "standard_framework",
+] }
+
+# MCP
+mcp-rs = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", features = ["transport-stdio", "transport-http", "transport-sse"] }
+
+# Testing
+mockall = "0.13"
+pretty_assertions = "1.4"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

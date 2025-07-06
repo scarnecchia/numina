@@ -1,0 +1,41 @@
+[package]
+name = "pattern-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core agent framework and memory system for Pattern"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# Database
+surrealdb = { workspace = true }
+
+# AI/LLM
+genai = { workspace = true }
+
+# Local crates (to be added later)
+# pattern-nd = { path = "../pattern-nd", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+pretty_assertions = { workspace = true }
+mockall = { workspace = true }
+
+[features]
+default = []
+nd = []      # Enable neurodivergent features when pattern-nd is ready

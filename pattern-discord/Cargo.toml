@@ -1,0 +1,45 @@
+[package]
+name = "pattern-discord"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Discord bot integration for Pattern"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# Discord
+serenity = { workspace = true }
+
+# Core framework
+pattern-core = { path = "../pattern-core" }
+
+# Optional neurodivergent features
+pattern-nd = { path = "../pattern-nd", optional = true }
+
+# For parsing Discord mentions and commands
+regex = "1.11"
+lazy_static = "1.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+pretty_assertions = { workspace = true }
+mockall = { workspace = true }
+
+[features]
+default = ["nd"]
+nd = ["dep:pattern-nd"]
