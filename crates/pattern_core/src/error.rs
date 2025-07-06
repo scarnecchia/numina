@@ -310,7 +310,7 @@ impl CoreError {
         let name = name.into();
         Self::ToolNotFound {
             tool_name: name.clone(),
-            available_tools: available,
+            available_tools: available.to_vec(),
             src: format!("tool: {}", name),
             span: (6, 6 + name.len()),
         }
@@ -378,7 +378,7 @@ impl CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miette::{IntoDiagnostic, Report};
+    use miette::Report;
 
     #[test]
     fn test_agent_not_found_error() {

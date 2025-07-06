@@ -1,8 +1,9 @@
 use async_trait::async_trait;
+use compact_str::{CompactString, ToCompactString};
 use schemars::{JsonSchema, r#gen::SchemaGenerator, r#gen::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use crate::Result;
 
@@ -76,6 +77,9 @@ pub trait AiTool: Send + Sync + Debug {
 /// Type-erased version of AiTool for dynamic dispatch
 #[async_trait]
 pub trait DynamicTool: Send + Sync + Debug {
+    /// Clone the tool into a boxed trait object
+    fn clone_box(&self) -> Box<dyn DynamicTool>;
+
     /// Get the name of this tool
     fn name(&self) -> &str;
 
@@ -109,7 +113,15 @@ pub trait DynamicTool: Send + Sync + Debug {
     }
 }
 
+/// Implement Clone for Box<dyn DynamicTool>
+impl Clone for Box<dyn DynamicTool> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 /// Adapter to convert a typed AiTool into a DynamicTool
+#[derive(Clone)]
 pub struct DynamicToolAdapter<T: AiTool> {
     inner: T,
 }
@@ -131,8 +143,12 @@ impl<T: AiTool> Debug for DynamicToolAdapter<T> {
 #[async_trait]
 impl<T> DynamicTool for DynamicToolAdapter<T>
 where
-    T: AiTool + 'static,
+    T: AiTool + Clone + 'static,
 {
+    fn clone_box(&self) -> Box<dyn DynamicTool> {
+        Box::new(self.clone())
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -182,6 +198,7 @@ where
 pub struct ToolExample<I, O> {
     pub description: String,
     pub parameters: I,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_output: Option<O>,
 }
 
@@ -190,52 +207,62 @@ pub struct ToolExample<I, O> {
 pub struct DynamicToolExample {
     pub description: String,
     pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_output: Option<Value>,
 }
 
 /// A registry for managing available tools
 #[derive(Debug, Clone)]
 pub struct ToolRegistry {
-    tools: std::collections::HashMap<String, std::sync::Arc<dyn DynamicTool>>,
+    tools: dashmap::DashMap<CompactString, Box<dyn DynamicTool>>,
 }
 
 impl ToolRegistry {
     /// Create a new empty tool registry
     pub fn new() -> Self {
         Self {
-            tools: std::collections::HashMap::new(),
+            tools: dashmap::DashMap::new(),
         }
     }
 
     /// Register a typed tool
-    pub fn register<T: AiTool + 'static>(&mut self, tool: T) {
+    pub fn register<T: AiTool + Clone + 'static>(&self, tool: T) {
         let dynamic_tool = DynamicToolAdapter::new(tool);
         self.tools.insert(
-            dynamic_tool.name().to_string(),
-            std::sync::Arc::new(dynamic_tool),
+            dynamic_tool.name().to_compact_string(),
+            Box::new(dynamic_tool),
         );
     }
 
     /// Register a dynamic tool directly
-    pub fn register_dynamic(&mut self, tool: std::sync::Arc<dyn DynamicTool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    pub fn register_dynamic(&self, tool: Box<dyn DynamicTool>) {
+        self.tools.insert(tool.name().to_compact_string(), tool);
     }
 
     /// Get a tool by name
-    pub fn get(&self, name: &str) -> Option<&std::sync::Arc<dyn DynamicTool>> {
+    pub fn get(
+        &self,
+        name: &str,
+    ) -> Option<dashmap::mapref::one::Ref<CompactString, Box<dyn DynamicTool>>> {
         self.tools.get(name)
     }
 
     /// Get all tool names
-    pub fn list_tools(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+    pub fn list_tools(&self) -> Arc<[CompactString]> {
+        self.tools.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Execute a tool by name
     pub async fn execute(&self, tool_name: &str, params: Value) -> Result<Value> {
-        let tool = self
-            .get(tool_name)
-            .ok_or_else(|| crate::CoreError::tool_not_found(tool_name, self.list_tools()))?;
+        let tool = self.get(tool_name).ok_or_else(|| {
+            crate::CoreError::tool_not_found(
+                tool_name,
+                self.list_tools()
+                    .iter()
+                    .map(CompactString::to_string)
+                    .collect(),
+            )
+        })?;
 
         tool.execute(params).await
     }
@@ -243,8 +270,8 @@ impl ToolRegistry {
     /// Get all tools as genai tools
     pub fn to_genai_tools(&self) -> Vec<genai::chat::Tool> {
         self.tools
-            .values()
-            .map(|tool| tool.to_genai_tool())
+            .iter()
+            .map(|entry| entry.value().to_genai_tool())
             .collect()
     }
 }
@@ -259,7 +286,9 @@ impl Default for ToolRegistry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult<T> {
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub metadata: ToolResultMetadata,
 }
@@ -362,7 +391,7 @@ mod tests {
         processed_count: u32,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct TestTool;
 
     #[async_trait]
@@ -418,10 +447,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_registry() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(TestTool);
 
-        assert_eq!(registry.list_tools(), vec!["test_tool".to_string()]);
+        assert_eq!(
+            registry.list_tools(),
+            Arc::from(vec!["test_tool".to_compact_string()])
+        );
 
         let result = registry
             .execute(

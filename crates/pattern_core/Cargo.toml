@@ -30,6 +30,10 @@ genai = { workspace = true }
 
 # Schema generation
 schemars = { workspace = true }
+compact_str = { version = "0.9.0", features = ["serde", "markup", "smallvec"] }
+smallvec = { version = "1.15.1", features = ["serde"] }
+dashmap = { version = "6.1.0", features = ["serde"] }
+
 
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }

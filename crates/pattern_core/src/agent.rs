@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -104,7 +105,7 @@ pub enum AgentState {
     Processing,
 
     /// Agent is in a cooldown period
-    Cooldown { until: std::time::SystemTime },
+    Cooldown { until: chrono::DateTime<Utc> },
 
     /// Agent is suspended
     Suspended,
@@ -135,12 +136,19 @@ pub enum MessageRole {
 /// Metadata associated with a message
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MessageMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub guild_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(flatten)]
     pub custom: serde_json::Value,
 }
 
@@ -149,6 +157,7 @@ pub struct MessageMetadata {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
+    #[serde(flatten)]
     pub parameters: serde_json::Value,
 }
 
@@ -157,9 +166,12 @@ pub struct ToolCall {
 pub struct Attachment {
     pub id: String,
     pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     pub size_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Vec<u8>>,
 }
 
@@ -176,9 +188,13 @@ pub struct Response {
 /// Metadata for a response
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResponseMetadata {
-    pub processing_time: Option<std::time::Duration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_time: Option<chrono::Duration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_used: Option<TokenUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_used: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
     pub custom: serde_json::Value,
 }
@@ -215,7 +231,7 @@ pub struct AgentBuilder {
     name: Option<String>,
     agent_type: AgentType,
     system_prompt: Option<String>,
-    tools: Vec<Arc<dyn DynamicTool>>,
+    tools: Vec<Box<dyn DynamicTool>>,
     memory_blocks: Vec<(String, Memory)>,
 }
 
@@ -246,7 +262,7 @@ impl AgentBuilder {
         self
     }
 
-    pub fn with_tool(mut self, tool: Arc<dyn DynamicTool>) -> Self {
+    pub fn with_tool(mut self, tool: Box<dyn DynamicTool>) -> Self {
         self.tools.push(tool);
         self
     }

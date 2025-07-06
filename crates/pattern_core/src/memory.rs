@@ -1,274 +1,135 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
 
 use crate::Result;
 
-/// A memory block that can be stored and retrieved
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Memory {
-    pub content: String,
-    pub metadata: MemoryMetadata,
-    pub embedding: Option<Vec<f32>>,
-}
-
-/// Metadata associated with a memory block
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MemoryMetadata {
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub access_count: usize,
-    pub last_accessed: Option<chrono::DateTime<chrono::Utc>>,
-    pub tags: Vec<String>,
-    pub source: Option<String>,
-    pub confidence: Option<f32>,
-    pub custom: serde_json::Value,
-}
-
-/// A single memory block with versioning
+/// A memory block following the MemGPT pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlock {
-    pub key: String,
-    pub current: Memory,
-    pub history: Vec<MemoryVersion>,
-    pub max_versions: usize,
+    /// Label/name of the memory block (e.g., "persona", "human")
+    pub label: String,
+
+    /// The actual content of the memory block
+    pub value: String,
+
+    /// Optional description of what this block is for
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// When this block was last modified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<DateTime<Utc>>,
 }
 
-/// A historical version of a memory
+/// Core memory system for agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryVersion {
-    pub version: usize,
-    pub memory: Memory,
-    pub changed_at: chrono::DateTime<chrono::Utc>,
-    pub changed_by: Option<String>,
-}
-
-/// A store for managing agent memories
-#[derive(Debug, Clone)]
-pub struct MemoryStore {
+pub struct Memory {
+    /// Memory blocks by label
     blocks: HashMap<String, MemoryBlock>,
-    capacity: Option<usize>,
-    eviction_policy: EvictionPolicy,
-}
 
-/// Policy for evicting memories when capacity is reached
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EvictionPolicy {
-    /// Least Recently Used
-    LRU,
-    /// Least Frequently Used
-    LFU,
-    /// First In First Out
-    FIFO,
-    /// Keep high confidence memories
-    ConfidenceBased,
+    /// Maximum characters per block (soft limit)
+    char_limit: usize,
 }
 
 impl Memory {
-    pub fn new(content: impl Into<String>) -> Self {
-        let now = chrono::Utc::now();
+    /// Create a new memory system
+    pub fn new() -> Self {
         Self {
-            content: content.into(),
-            metadata: MemoryMetadata {
-                created_at: now,
-                updated_at: now,
-                ..Default::default()
-            },
-            embedding: None,
+            blocks: HashMap::new(),
+            char_limit: 5000,
         }
     }
 
-    pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
-        self.embedding = Some(embedding);
+    /// Create with a specific character limit
+    pub fn with_char_limit(mut self, limit: usize) -> Self {
+        self.char_limit = limit;
         self
     }
 
-    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
-        self.metadata.tags = tags;
-        self
+    /// Create a new memory block
+    pub fn create_block(
+        &mut self,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<()> {
+        let label = label.into();
+        let value = value.into();
+
+        let block = MemoryBlock {
+            label: label.clone(),
+            value,
+            description: None,
+            last_modified: Some(Utc::now()),
+        };
+
+        self.blocks.insert(label, block);
+        Ok(())
     }
 
-    pub fn with_source(mut self, source: impl Into<String>) -> Self {
-        self.metadata.source = Some(source.into());
-        self
+    /// Get a memory block by label
+    pub fn get_block(&self, label: &str) -> Option<&MemoryBlock> {
+        self.blocks.get(label)
     }
 
-    pub fn with_confidence(mut self, confidence: f32) -> Self {
-        self.metadata.confidence = Some(confidence);
-        self
+    /// Get a mutable reference to a memory block
+    pub fn get_block_mut(&mut self, label: &str) -> Option<&mut MemoryBlock> {
+        self.blocks.get_mut(label)
+    }
+
+    /// Update the value of a memory block
+    pub fn update_block_value(&mut self, label: &str, value: impl Into<String>) -> Result<()> {
+        if let Some(block) = self.blocks.get_mut(label) {
+            block.value = value.into();
+            block.last_modified = Some(Utc::now());
+            Ok(())
+        } else {
+            Err(crate::CoreError::MemoryNotFound {
+                agent_id: "unknown".to_string(),
+                block_name: label.to_string(),
+                available_blocks: self.list_blocks(),
+            })
+        }
+    }
+
+    /// Get all memory blocks
+    pub fn get_all_blocks(&self) -> Vec<MemoryBlock> {
+        self.blocks.values().cloned().collect()
+    }
+
+    /// List all block labels
+    pub fn list_blocks(&self) -> Vec<String> {
+        self.blocks.keys().cloned().collect()
+    }
+
+    /// Remove a memory block
+    pub fn remove_block(&mut self, label: &str) -> Option<MemoryBlock> {
+        self.blocks.remove(label)
+    }
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl MemoryBlock {
-    pub fn new(key: impl Into<String>, memory: Memory) -> Self {
+    /// Create a new memory block
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
-            key: key.into(),
-            current: memory,
-            history: Vec::new(),
-            max_versions: 10,
+            label: label.into(),
+            value: value.into(),
+            description: None,
+            last_modified: Some(Utc::now()),
         }
     }
 
-    pub fn update(&mut self, new_memory: Memory, changed_by: Option<String>) {
-        // Move current to history
-        let version = MemoryVersion {
-            version: self.history.len() + 1,
-            memory: self.current.clone(),
-            changed_at: chrono::Utc::now(),
-            changed_by,
-        };
-
-        self.history.push(version);
-
-        // Trim history if needed
-        if self.history.len() > self.max_versions {
-            self.history.remove(0);
-        }
-
-        self.current = new_memory;
-    }
-
-    pub fn get_version(&self, version: usize) -> Option<&Memory> {
-        if version == 0 {
-            Some(&self.current)
-        } else {
-            self.history
-                .iter()
-                .find(|v| v.version == version)
-                .map(|v| &v.memory)
-        }
-    }
-}
-
-impl MemoryStore {
-    pub fn new() -> Self {
-        Self {
-            blocks: HashMap::new(),
-            capacity: None,
-            eviction_policy: EvictionPolicy::LRU,
-        }
-    }
-
-    pub fn with_capacity(mut self, capacity: usize) -> Self {
-        self.capacity = Some(capacity);
+    /// Set the description
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
-    }
-
-    pub fn with_eviction_policy(mut self, policy: EvictionPolicy) -> Self {
-        self.eviction_policy = policy;
-        self
-    }
-
-    pub fn get(&mut self, key: &str) -> Option<&Memory> {
-        self.blocks.get_mut(key).map(|block| {
-            block.current.metadata.access_count += 1;
-            block.current.metadata.last_accessed = Some(chrono::Utc::now());
-            &block.current
-        })
-    }
-
-    pub fn set(&mut self, key: impl Into<String>, memory: Memory) -> Result<()> {
-        let key = key.into();
-
-        // Check capacity and evict if needed
-        if let Some(capacity) = self.capacity {
-            if self.blocks.len() >= capacity && !self.blocks.contains_key(&key) {
-                self.evict()?;
-            }
-        }
-
-        if let Some(block) = self.blocks.get_mut(&key) {
-            block.update(memory, None);
-        } else {
-            self.blocks
-                .insert(key.clone(), MemoryBlock::new(key, memory));
-        }
-
-        Ok(())
-    }
-
-    pub fn remove(&mut self, key: &str) -> Option<MemoryBlock> {
-        self.blocks.remove(key)
-    }
-
-    pub fn keys(&self) -> Vec<&String> {
-        self.blocks.keys().collect()
-    }
-
-    pub fn len(&self) -> usize {
-        self.blocks.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-
-    fn evict(&mut self) -> Result<()> {
-        match self.eviction_policy {
-            EvictionPolicy::LRU => {
-                // Find least recently accessed
-                let key_to_remove = self
-                    .blocks
-                    .iter()
-                    .min_by_key(|(_, block)| block.current.metadata.last_accessed)
-                    .map(|(k, _)| k.clone());
-
-                if let Some(key) = key_to_remove {
-                    self.blocks.remove(&key);
-                }
-            }
-            EvictionPolicy::LFU => {
-                // Find least frequently accessed
-                let key_to_remove = self
-                    .blocks
-                    .iter()
-                    .min_by_key(|(_, block)| block.current.metadata.access_count)
-                    .map(|(k, _)| k.clone());
-
-                if let Some(key) = key_to_remove {
-                    self.blocks.remove(&key);
-                }
-            }
-            EvictionPolicy::FIFO => {
-                // Find oldest
-                let key_to_remove = self
-                    .blocks
-                    .iter()
-                    .min_by_key(|(_, block)| block.current.metadata.created_at)
-                    .map(|(k, _)| k.clone());
-
-                if let Some(key) = key_to_remove {
-                    self.blocks.remove(&key);
-                }
-            }
-            EvictionPolicy::ConfidenceBased => {
-                // Remove lowest confidence
-                let key_to_remove = self
-                    .blocks
-                    .iter()
-                    .filter(|(_, block)| block.current.metadata.confidence.is_some())
-                    .min_by(|(_, a), (_, b)| {
-                        a.current
-                            .metadata
-                            .confidence
-                            .partial_cmp(&b.current.metadata.confidence)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(k, _)| k.clone());
-
-                if let Some(key) = key_to_remove {
-                    self.blocks.remove(&key);
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -278,39 +139,40 @@ mod tests {
 
     #[test]
     fn test_memory_creation() {
-        let memory = Memory::new("test content")
-            .with_tags(vec!["test".to_string(), "example".to_string()])
-            .with_confidence(0.9);
+        let mut memory = Memory::new();
+        assert_eq!(memory.list_blocks().len(), 0);
 
-        assert_eq!(memory.content, "test content");
-        assert_eq!(memory.metadata.tags, vec!["test", "example"]);
-        assert_eq!(memory.metadata.confidence, Some(0.9));
+        memory.create_block("test", "test content").unwrap();
+        assert_eq!(memory.list_blocks().len(), 1);
+
+        let block = memory.get_block("test").unwrap();
+        assert_eq!(block.value, "test content");
     }
 
     #[test]
     fn test_memory_block_versioning() {
-        let memory1 = Memory::new("version 1");
-        let mut block = MemoryBlock::new("test_key", memory1);
+        let mut memory = Memory::new();
+        memory.create_block("persona", "I am a helpful AI").unwrap();
+        memory
+            .create_block("human", "The user's name is Alice")
+            .unwrap();
 
-        let memory2 = Memory::new("version 2");
-        block.update(memory2.clone(), Some("test_user".to_string()));
+        assert_eq!(memory.list_blocks().len(), 2);
 
-        assert_eq!(block.current.content, "version 2");
-        assert_eq!(block.history.len(), 1);
-        assert_eq!(block.history[0].memory.content, "version 1");
+        memory
+            .update_block_value("persona", "I am a very helpful AI assistant")
+            .unwrap();
+
+        let persona_block = memory.get_block("persona").unwrap();
+        assert_eq!(persona_block.value, "I am a very helpful AI assistant");
     }
 
     #[test]
-    fn test_memory_store() {
-        let mut store = MemoryStore::new().with_capacity(2);
+    fn test_memory_block_with_description() {
+        let block = MemoryBlock::new("test", "content").with_description("Test block");
 
-        store.set("key1", Memory::new("content 1")).unwrap();
-        store.set("key2", Memory::new("content 2")).unwrap();
-
-        assert_eq!(store.len(), 2);
-
-        // This should trigger eviction
-        store.set("key3", Memory::new("content 3")).unwrap();
-        assert_eq!(store.len(), 2);
+        assert_eq!(block.label, "test");
+        assert_eq!(block.value, "content");
+        assert_eq!(block.description, Some("Test block".to_string()));
     }
 }

@@ -49,6 +49,7 @@ When finishing work, update this list with any changes.
 - **ALWAYS ENSURE that tests will fail (via assert or panic with descriptive message) on any error condition**
 - Use the web or context7 to help find docs, in addition to any other reference material
 - **AVOID C dependencies** - Prefer pure Rust implementations to avoid build complexity
+- **Use `#[serde(skip_serializing_if = "Option::is_none")]`** on all `Option<T>` fields in serializable types to reduce JSON payload size
 
 ## Workspace Structure
 
@@ -60,6 +61,17 @@ The project is now organized as a Rust workspace with the following crates:
 - `crates/pattern_main` - Main orchestrator that ties everything together
 
 **Note**: Crate directories use underscores but package names use hyphens (e.g., directory `pattern_core` contains package `pattern-core`).
+
+### Crate-Specific Documentation
+
+Each crate has its own `CLAUDE.md` file with detailed implementation guidelines:
+- [`pattern_core/CLAUDE.md`](./crates/pattern_core/CLAUDE.md) - Agent framework, memory, tools, context building
+- [`pattern_nd/CLAUDE.md`](./crates/pattern_nd/CLAUDE.md) - ADHD tools, agent personalities, support patterns
+- [`pattern_mcp/CLAUDE.md`](./crates/pattern_mcp/CLAUDE.md) - MCP server, transport layers, tool schemas
+- [`pattern_discord/CLAUDE.md`](./crates/pattern_discord/CLAUDE.md) - Discord bot, routing, privacy
+- [`pattern_main/CLAUDE.md`](./crates/pattern_main/CLAUDE.md) - Integration, configuration, lifecycle
+
+**When working on a specific crate, always check its CLAUDE.md first for crate-specific patterns and guidelines.**
 
 ## MCP Tools & Documentation
 
@@ -307,6 +319,8 @@ just pre-commit-all
 - **Removed Letta dependency**: ✅ Building our own agent framework with SurrealDB
 - **Rich error types**: ✅ All errors now use miette for detailed diagnostics
 - **Pure Rust dependencies**: ✅ Removed C dependencies (no rocksdb, using rustls)
+- **Tool registry optimization**: ✅ DashMap for concurrent access, CompactString for memory efficiency
+- **JSON payload optimization**: ✅ Added `skip_serializing_if` to all Option fields
 
 ### Key Features Implemented
 

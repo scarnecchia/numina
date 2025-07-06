@@ -1,7 +1,6 @@
 //! Example of implementing a type-safe tool using the new AiTool trait
 
 use async_trait::async_trait;
-use pattern_core::prelude::*;
 use pattern_core::tool::{AiTool, ToolExample, ToolRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -46,7 +45,7 @@ struct WeatherOutput {
 }
 
 /// A weather lookup tool with type-safe input/output
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WeatherTool;
 
 #[async_trait]
@@ -164,7 +163,7 @@ enum TaskStatus {
     Cancelled,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CreateTaskTool;
 
 #[async_trait]
@@ -196,7 +195,7 @@ impl AiTool for CreateTaskTool {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Create a tool registry
-    let mut registry = ToolRegistry::new();
+    let registry = ToolRegistry::new();
 
     // Register our typed tools
     registry.register(WeatherTool);

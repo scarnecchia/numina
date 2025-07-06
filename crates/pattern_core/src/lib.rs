@@ -16,24 +16,28 @@ pub mod tool;
 pub mod utils;
 
 pub use agent::{Agent, AgentBuilder, AgentId, AgentType};
+pub use context::{
+    AgentContext, AgentState, AgentStateBuilder, CompressionStrategy, ContextBuilder,
+    ContextConfig, MessageCompressor,
+};
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
-pub use memory::{Memory, MemoryBlock, MemoryStore};
+pub use memory::{Memory, MemoryBlock};
 pub use model::{ModelCapability, ModelProvider};
 pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        Agent, AgentBuilder, AgentId, AgentType, AiTool, Constellation, CoordinationPattern,
-        CoreError, DynamicTool, Memory, MemoryBlock, ModelCapability, ModelProvider, Result,
-        ToolRegistry, ToolResult,
+        Agent, AgentBuilder, AgentContext, AgentId, AgentState, AgentStateBuilder, AgentType,
+        AiTool, CompressionStrategy, Constellation, ContextBuilder, ContextConfig,
+        CoordinationPattern, CoreError, DynamicTool, Memory, MemoryBlock, MessageCompressor,
+        ModelCapability, ModelProvider, Result, ToolRegistry, ToolResult,
     };
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn it_works() {

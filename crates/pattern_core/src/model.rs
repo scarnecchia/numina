@@ -31,8 +31,11 @@ pub struct ModelInfo {
     pub provider: String,
     pub capabilities: Vec<ModelCapability>,
     pub context_window: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_1k_prompt_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_1k_completion_tokens: Option<f64>,
 }
 
@@ -78,13 +81,20 @@ pub enum ModelCapability {
 pub struct CompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
 }
 
@@ -93,6 +103,7 @@ pub struct CompletionRequest {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: MessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
@@ -139,6 +150,7 @@ pub enum ContentPart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageUrl {
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<ImageDetail>,
 }
 
@@ -192,6 +204,7 @@ pub struct CompletionResponse {
 pub struct CompletionChoice {
     pub index: usize,
     pub message: ChatMessage,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
 }
 
