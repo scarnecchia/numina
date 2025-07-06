@@ -94,14 +94,9 @@ impl<T: IdType> Id<T> {
         T::PREFIX
     }
 
-    /// Convert to a string representation
-    pub fn to_string(&self) -> String {
-        format!("{}-{}", T::PREFIX, self.uuid)
-    }
-
     /// Convert to a compact string representation
     pub fn to_compact_string(&self) -> CompactString {
-        CompactString::from(format!("{}-{}", T::PREFIX, self.uuid))
+        compact_str::format_compact!("{}-{}", T::PREFIX, self.uuid)
     }
 
     /// Create a nil/empty ID (all zeros)
@@ -171,7 +166,7 @@ impl IdType for AgentIdType {
 pub type AgentId = Id<AgentIdType>;
 
 /// Marker type for User IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct UserIdType;
 
 impl IdType for UserIdType {
@@ -182,7 +177,7 @@ impl IdType for UserIdType {
 pub type UserId = Id<UserIdType>;
 
 /// Marker type for Conversation IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ConversationIdType;
 
 impl IdType for ConversationIdType {
@@ -193,7 +188,7 @@ impl IdType for ConversationIdType {
 pub type ConversationId = Id<ConversationIdType>;
 
 /// Marker type for Task IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct TaskIdType;
 
 impl IdType for TaskIdType {
@@ -204,7 +199,7 @@ impl IdType for TaskIdType {
 pub type TaskId = Id<TaskIdType>;
 
 /// Marker type for Tool Call IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ToolCallIdType;
 
 impl IdType for ToolCallIdType {
@@ -215,7 +210,7 @@ impl IdType for ToolCallIdType {
 pub type ToolCallId = Id<ToolCallIdType>;
 
 /// Marker type for Message IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct MessageIdType;
 
 impl IdType for MessageIdType {
@@ -226,7 +221,7 @@ impl IdType for MessageIdType {
 pub type MessageId = Id<MessageIdType>;
 
 /// Marker type for Memory Block IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct MemoryIdType;
 
 impl IdType for MemoryIdType {
@@ -237,7 +232,7 @@ impl IdType for MemoryIdType {
 pub type MemoryId = Id<MemoryIdType>;
 
 /// Marker type for Session IDs
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct SessionIdType;
 
 impl IdType for SessionIdType {
@@ -261,7 +256,7 @@ mod tests {
 
         // IDs should have correct prefix
         assert_eq!(id1.prefix(), "agent");
-        assert!(id1.to_string().starts_with("agent-"));
+        assert!(id2.to_string().starts_with("agent-"));
     }
 
     #[test]
@@ -278,7 +273,8 @@ mod tests {
 
         // Should fail with invalid format
         assert!(AgentId::parse("invalid").is_err());
-        assert!(AgentId::parse("agent_wrong_separator").is_err());
+        let uuid = uuid::Uuid::new_v4();
+        assert!(AgentId::parse(&format!("agent_{uuid}")).is_err());
         assert!(AgentId::parse("agent-not-a-uuid").is_err());
     }
 
