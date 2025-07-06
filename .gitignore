@@ -3,11 +3,9 @@
 /result-lib
 .direnv
 **.env
-.pattern_cache
 .claude/settings.local.json
 /.pre-commit-config.yaml
 .mcp.json
-pattern.toml
 CLAUDE.md.local
 mcp-wrapper.sh
 /logs
