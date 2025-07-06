@@ -64,6 +64,13 @@ pub trait AiTool: Send + Sync + Debug {
             })
         })
     }
+
+    /// Convert to a genai Tool
+    fn to_genai_tool(&self) -> genai::chat::Tool {
+        genai::chat::Tool::new(self.name())
+            .with_description(self.description())
+            .with_schema(self.parameters_schema())
+    }
 }
 
 /// Type-erased version of AiTool for dynamic dispatch
@@ -83,6 +90,13 @@ pub trait DynamicTool: Send + Sync + Debug {
 
     /// Execute the tool with the given parameters
     async fn execute(&self, params: Value) -> Result<Value>;
+
+    /// Validate the parameters against the schema
+    fn validate_params(&self, _params: &Value) -> Result<()> {
+        // Default implementation that just passes validation
+        // In a real implementation, this would validate against the schema
+        Ok(())
+    }
 
     /// Get usage examples for this tool
     fn examples(&self) -> Vec<DynamicToolExample>;
