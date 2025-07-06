@@ -1,6 +1,6 @@
 [package]
 name = "pattern-nd"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -21,7 +21,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 # Core framework
-pattern-core = { path = "../pattern-core" }
+pattern-core = { path = "../pattern_core" }
 
 # For ADHD-specific time calculations
 chrono-tz = "0.10"
@@ -29,7 +29,11 @@ humantime = "2.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
-pretty_assertions = { workspace = true }
+pretty_assertions = "1.4"
 
 [features]
 default = []
+
+
+[lints]
+workspace = true

@@ -18,6 +18,8 @@
           nixd # Nix language server
           bacon
           rust-analyzer
+          clang
+          pkg-config
         ];
       };
     };
