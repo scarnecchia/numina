@@ -323,9 +323,9 @@ pub struct AgentStateBuilder {
 
 impl AgentStateBuilder {
     /// Create a new agent state builder
-    pub fn new(agent_id: impl Into<AgentId>, agent_type: AgentType) -> Self {
+    pub fn new(agent_id: AgentId, agent_type: AgentType) -> Self {
         Self {
-            agent_id: agent_id.into(),
+            agent_id,
             agent_type,
             memory_blocks: Vec::new(),
             tools: None,
@@ -419,7 +419,8 @@ mod tests {
 
     #[test]
     fn test_agent_state_builder() {
-        let state = AgentStateBuilder::new("test_agent", AgentType::Generic)
+        let id = AgentId::generate();
+        let state = AgentStateBuilder::new(id.clone(), AgentType::Generic)
             .with_memory_block(
                 "persona",
                 "I am a helpful AI assistant",
@@ -429,14 +430,14 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(state.agent_id, "test_agent");
+        assert_eq!(state.agent_id, id);
         assert_eq!(state.memory.list_blocks().len(), 2);
         assert!(state.memory.get_block("persona").is_some());
     }
 
     #[test]
     fn test_message_search() {
-        let mut state = AgentStateBuilder::new("test", AgentType::Generic)
+        let mut state = AgentStateBuilder::new(AgentId::generate(), AgentType::Generic)
             .build()
             .unwrap();
 

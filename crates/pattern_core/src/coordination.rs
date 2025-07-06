@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,8 +13,8 @@ use crate::{Agent, AgentId, Result};
 pub struct Constellation {
     pub id: String,
     pub owner_id: String,
-    pub agents: HashMap<AgentId, Arc<dyn Agent>>,
-    pub groups: HashMap<String, AgentGroup>,
+    pub agents: DashMap<AgentId, Box<dyn Agent>>,
+    pub groups: DashMap<String, AgentGroup>,
 }
 
 /// A group of agents that coordinate together
@@ -142,13 +142,13 @@ impl Constellation {
         Self {
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.into(),
-            agents: HashMap::new(),
-            groups: HashMap::new(),
+            agents: DashMap::new(),
+            groups: DashMap::new(),
         }
     }
 
     /// Add an agent to the constellation
-    pub fn add_agent(&mut self, agent_id: AgentId, agent: Arc<dyn Agent>) {
+    pub fn add_agent(&mut self, agent_id: AgentId, agent: Box<dyn Agent>) {
         self.agents.insert(agent_id, agent);
     }
 

@@ -1,3 +1,4 @@
+use crate::AgentId;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -295,12 +296,12 @@ impl CoreError {
     }
 
     pub fn memory_not_found(
-        agent_id: impl Into<String>,
+        agent_id: &AgentId,
         block_name: impl Into<String>,
         available_blocks: Vec<String>,
     ) -> Self {
         Self::MemoryNotFound {
-            agent_id: agent_id.into(),
+            agent_id: agent_id.to_string(),
             block_name: block_name.into(),
             available_blocks,
         }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
-    agent::AgentId,
+    id::AgentId,
     memory::MemoryBlock,
     tool::{DynamicTool, ToolRegistry},
 };
@@ -478,12 +478,13 @@ You can execute multiple tools in sequence when needed."#;
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
     fn test_context_builder_basic() {
         let config = ContextConfig::default();
-        let builder = ContextBuilder::new("test_agent".to_string(), config);
+        let builder = ContextBuilder::new(AgentId::generate(), config);
 
         let context = builder
             .add_memory_block(MemoryBlock {
@@ -510,7 +511,7 @@ mod tests {
             ..Default::default()
         };
 
-        let builder = ContextBuilder::new("test_agent".to_string(), config);
+        let builder = ContextBuilder::new(AgentId::generate(), config);
         let long_text = "a".repeat(150);
 
         let context = builder

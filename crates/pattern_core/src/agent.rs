@@ -4,16 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::{Memory, Result, tool::DynamicTool};
-
-/// Unique identifier for an agent
-pub type AgentId = String;
+use crate::{AgentId, Memory, Result, tool::DynamicTool};
 
 /// The base trait that all agents must implement
 #[async_trait]
 pub trait Agent: Send + Sync + Debug {
     /// Get the agent's unique identifier
-    fn id(&self) -> &AgentId;
+    fn id(&self) -> AgentId;
 
     /// Get the agent's name
     fn name(&self) -> &str;
@@ -247,8 +244,8 @@ impl AgentBuilder {
         }
     }
 
-    pub fn with_id(mut self, id: impl Into<AgentId>) -> Self {
-        self.id = Some(id.into());
+    pub fn with_id(mut self, id: AgentId) -> Self {
+        self.id = Some(id);
         self
     }
 
