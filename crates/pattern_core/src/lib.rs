@@ -8,6 +8,7 @@ pub mod agent;
 pub mod context;
 pub mod coordination;
 pub mod db;
+pub mod embeddings;
 pub mod error;
 pub mod id;
 pub mod memory;
