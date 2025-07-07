@@ -59,10 +59,29 @@ This crate provides the core agent framework, memory management, and tool execut
 - Compression happens automatically when message count exceeds limits
 - Support for XML-style tags or plain text formatting based on model
 
+### Database Backend (`db/`)
+- Trait-based abstraction (`DatabaseBackend`, `VectorStore`) for multiple implementations
+- Pure Rust embedded database using SurrealKV (no RocksDB dependency)
+- Schema migrations with version tracking
+- Vector search support with HNSW indexes
+- Direct operations via functions in `db::ops` (no unnecessary repository pattern)
+
+### Embeddings (`embeddings/`)
+- Provider trait for multiple backends
+- Feature-gated implementations:
+  - ✅ Candle (local) - Pure Rust BERT models
+  - ✅ OpenAI - text-embedding-3-small/large  
+  - ✅ Cohere - embed-english-v3.0
+  - 🚧 Ollama - Stub implementation only
+- Automatic embedding generation for memory blocks
+- Cosine similarity for semantic search
+- Model validation and dimension checking
+
 ### Serialization
 - All `Option<T>` fields use `#[serde(skip_serializing_if = "Option::is_none")]`
 - Duration fields use custom serialization (as milliseconds)
 - Avoid nested structs in types that need MCP-compatible schemas
+- SurrealDB responses wrap data in nested structures - handle accordingly
 
 ## Common Patterns
 
@@ -114,7 +133,12 @@ return Err(CoreError::memory_not_found(
 
 ## Future Considerations
 
-- Vector embeddings for semantic memory search
+- ~~Vector embeddings for semantic memory search~~ ✅ Implemented
 - Streaming response support
 - Multi-modal message content
 - Advanced compression strategies (semantic clustering)
+- Remote SurrealDB support
+- Complete Ollama embedding provider (currently stub)
+- Additional embedding providers (local ONNX, etc.)
+- Batch embedding operations
+- Cross-agent memory sharing

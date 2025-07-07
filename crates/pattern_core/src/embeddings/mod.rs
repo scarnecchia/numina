@@ -159,15 +159,7 @@ pub enum EmbeddingConfig {
         input_type: Option<String>,
     },
     #[cfg(feature = "embed-ollama")]
-    Ollama {
-        model: String,
-        #[serde(default = "default_ollama_url")]
-        url: String,
-    },
-}
-
-fn default_ollama_url() -> String {
-    "http://localhost:11434".to_string()
+    Ollama { model: String, url: String },
 }
 
 impl Default for EmbeddingConfig {
@@ -195,7 +187,7 @@ impl Default for EmbeddingConfig {
         {
             EmbeddingConfig::Ollama {
                 model: "mxbai-embed-large".to_string(),
-                url: default_ollama_url(),
+                url: "http://localhost:11434".to_string(),
             }
         }
         #[cfg(not(any(

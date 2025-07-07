@@ -271,6 +271,8 @@ impl AgentBuilder {
 
     pub async fn build(self) -> Result<Arc<dyn Agent>> {
         // This would create the actual agent implementation
+        // The agent_type field will be used here to create the appropriate agent type
+        let _ = self.agent_type; // TODO: Use this when implementing
         todo!("Implement agent building")
     }
 }

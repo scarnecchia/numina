@@ -2,7 +2,7 @@
 
 use super::{Embedding, EmbeddingError, EmbeddingProvider, Result, validate_input};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// OpenAI embedding provider
 pub struct OpenAIEmbedder {
@@ -39,12 +39,11 @@ impl EmbeddingProvider for OpenAIEmbedder {
             return Err(EmbeddingError::EmptyInput);
         }
 
-        // TODO: Implement actual OpenAI API call
-        // For now, return a dummy embedding
-        let dimensions = self.get_dimensions();
-        let vector = vec![0.1; dimensions];
-
-        Ok(Embedding::new(vector, self.model.clone()))
+        let embeddings = self.embed_batch(&[text.to_string()]).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::GenerationFailed("No embedding returned".into()))
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
@@ -57,11 +56,49 @@ impl EmbeddingProvider for OpenAIEmbedder {
             });
         }
 
-        // TODO: Implement batch embedding with OpenAI API
-        let mut embeddings = Vec::with_capacity(texts.len());
-        for text in texts {
-            embeddings.push(self.embed(text).await?);
+        let client = reqwest::Client::new();
+        let mut request_body = serde_json::json!({
+            "model": self.model,
+            "input": texts,
+        });
+
+        if let Some(dims) = self.dimensions {
+            request_body["dimensions"] = serde_json::json!(dims);
         }
+
+        let response = client
+            .post("https://api.openai.com/v1/embeddings")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| EmbeddingError::ApiError(format!("Request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(EmbeddingError::ApiError(format!(
+                "OpenAI API error: {}",
+                error_text
+            )));
+        }
+
+        let response_data: OpenAIEmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|e| EmbeddingError::ApiError(format!("Failed to parse response: {}", e)))?;
+
+        // Sort by index to ensure correct order
+        let mut indexed_embeddings: Vec<_> = response_data.data.into_iter().collect();
+        indexed_embeddings.sort_by_key(|item| item.index);
+
+        let embeddings = indexed_embeddings
+            .into_iter()
+            .map(|item| Embedding::new(item.embedding, self.model.clone()))
+            .collect();
 
         Ok(embeddings)
     }
@@ -115,12 +152,11 @@ impl EmbeddingProvider for CohereEmbedder {
             return Err(EmbeddingError::EmptyInput);
         }
 
-        // TODO: Implement actual Cohere API call
-        // For now, return a dummy embedding
-        let dimensions = self.get_dimensions();
-        let vector = vec![0.1; dimensions];
-
-        Ok(Embedding::new(vector, self.model.clone()))
+        let embeddings = self.embed_batch(&[text.to_string()]).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::GenerationFailed("No embedding returned".into()))
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
@@ -133,11 +169,46 @@ impl EmbeddingProvider for CohereEmbedder {
             });
         }
 
-        // TODO: Implement batch embedding with Cohere API
-        let mut embeddings = Vec::with_capacity(texts.len());
-        for text in texts {
-            embeddings.push(self.embed(text).await?);
+        let client = reqwest::Client::new();
+        let mut request_body = serde_json::json!({
+            "model": self.model,
+            "texts": texts,
+        });
+
+        if let Some(ref input_type) = self.input_type {
+            request_body["input_type"] = serde_json::json!(input_type);
         }
+
+        let response = client
+            .post("https://api.cohere.ai/v1/embed")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| EmbeddingError::ApiError(format!("Request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(EmbeddingError::ApiError(format!(
+                "Cohere API error: {}",
+                error_text
+            )));
+        }
+
+        let response_data: CohereEmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|e| EmbeddingError::ApiError(format!("Failed to parse response: {}", e)))?;
+
+        let embeddings = response_data
+            .embeddings
+            .into_iter()
+            .map(|embedding| Embedding::new(embedding, self.model.clone()))
+            .collect();
 
         Ok(embeddings)
     }
@@ -156,17 +227,11 @@ impl EmbeddingProvider for CohereEmbedder {
 }
 
 /// Request/response types for API calls
-#[derive(Debug, Serialize)]
-struct OpenAIEmbeddingRequest {
-    input: Vec<String>,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    dimensions: Option<usize>,
-}
 
 #[derive(Debug, Deserialize)]
 struct OpenAIEmbeddingResponse {
     data: Vec<OpenAIEmbeddingData>,
+    #[allow(dead_code)]
     usage: OpenAIUsage,
 }
 
@@ -177,17 +242,10 @@ struct OpenAIEmbeddingData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIUsage {
     prompt_tokens: usize,
     total_tokens: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct CohereEmbeddingRequest {
-    texts: Vec<String>,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,9 +298,9 @@ mod tests {
             "test-key".to_string(),
             None,
         );
-        let result = embedder.embed("test text").await.unwrap();
-        assert_eq!(result.dimensions, 1536);
-        assert_eq!(result.vector.len(), 1536);
+        // Don't actually call the API in tests
+        assert_eq!(embedder.model_id(), "text-embedding-3-small");
+        assert_eq!(embedder.dimensions(), 1536);
     }
 
     #[tokio::test]
@@ -252,8 +310,8 @@ mod tests {
             "test-key".to_string(),
             None,
         );
-        let result = embedder.embed("test text").await.unwrap();
-        assert_eq!(result.dimensions, 1024);
-        assert_eq!(result.vector.len(), 1024);
+        // Don't actually call the API in tests
+        assert_eq!(embedder.model_id(), "embed-english-v3.0");
+        assert_eq!(embedder.dimensions(), 1024);
     }
 }

@@ -65,15 +65,36 @@ impl DatabaseBackend for EmbeddedDatabase {
             .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
 
         // Get the first statement result
-        let data: surrealdb::Value = response
+        let surreal_value: surrealdb::Value = response
             .take(0)
             .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
 
-        let data =
-            serde_json::to_value(&data).map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
+        // Convert to JSON value
+        let mut data = serde_json::to_value(&surreal_value)
+            .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
+
+        // Unwrap the Array wrapper if present
+        if let Some(obj) = data.as_object() {
+            if let Some(array_value) = obj.get("Array") {
+                data = array_value.clone();
+            }
+        }
+
+        // For CREATE operations, SurrealDB returns the created record(s)
+        // For UPDATE/DELETE, it returns affected records
+        // For SELECT, it returns matching records
+        let affected_rows = if query.trim_start().to_uppercase().starts_with("CREATE")
+            || query.trim_start().to_uppercase().starts_with("UPDATE")
+            || query.trim_start().to_uppercase().starts_with("DELETE")
+        {
+            data.as_array().map(|a| a.len()).unwrap_or(0)
+        } else {
+            // For other queries, affected_rows might not make sense
+            0
+        };
 
         Ok(QueryResponse {
-            affected_rows: data.as_array().map(|a| a.len()).unwrap_or(0),
+            affected_rows,
             data,
         })
     }
@@ -91,7 +112,11 @@ impl DatabaseBackend for EmbeddedDatabase {
             .data
             .as_array()
             .and_then(|arr| arr.first())
+            .and_then(|obj| obj.get("Object"))
+            .and_then(|obj| obj.as_object())
             .and_then(|obj| obj.get("schema_version"))
+            .and_then(|v| v.get("Number"))
+            .and_then(|v| v.get("Int"))
             .and_then(|v| v.as_u64())
         {
             Ok(version as u32)
@@ -202,7 +227,7 @@ impl VectorStore for EmbeddedDatabase {
         Ok(())
     }
 
-    async fn vector_index_exists(&self, table: &str, field: &str) -> Result<bool> {
+    async fn vector_index_exists(&self, table: &str, _field: &str) -> Result<bool> {
         let query = format!("INFO FOR TABLE {}", table);
         let response = self.execute(&query, vec![]).await?;
 
@@ -247,12 +272,21 @@ impl Transaction for EmbeddedTransaction {
             .await
             .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
 
-        let data: surrealdb::Value = response
+        // Get the first statement result
+        let surreal_value: surrealdb::Value = response
             .take(0)
             .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
 
-        let data =
-            serde_json::to_value(&data).map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
+        // Convert to JSON value
+        let mut data = serde_json::to_value(&surreal_value)
+            .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?;
+
+        // Unwrap the Array wrapper if present
+        if let Some(obj) = data.as_object() {
+            if let Some(array_value) = obj.get("Array") {
+                data = array_value.clone();
+            }
+        }
 
         Ok(QueryResponse {
             affected_rows: data.as_array().map(|a| a.len()).unwrap_or(0),
@@ -303,10 +337,13 @@ mod tests {
 
         let db = EmbeddedDatabase::connect(config).await.unwrap();
 
-        // Create a table
-        db.execute("DEFINE TABLE test SCHEMAFULL", vec![])
-            .await
-            .unwrap();
+        // Create a table with schema
+        db.execute(
+            "DEFINE TABLE test SCHEMAFULL; DEFINE FIELD name ON test TYPE string;",
+            vec![],
+        )
+        .await
+        .unwrap();
 
         // Insert data
         let result = db
@@ -317,6 +354,12 @@ mod tests {
             .await
             .unwrap();
 
+        // Check that we got a result back
+        assert!(result.data.as_array().is_some(), "Expected array response");
+        let array = result.data.as_array().unwrap();
+        assert_eq!(array.len(), 1, "Expected one record created");
+
+        // For CREATE operations, affected_rows should be the number of created records
         assert_eq!(result.affected_rows, 1);
     }
 }

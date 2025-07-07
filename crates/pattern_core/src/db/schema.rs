@@ -51,7 +51,7 @@ impl Schema {
                 DEFINE FIELD metadata ON users TYPE object;
             "#
             .to_string(),
-            indexes: vec!["CREATE UNIQUE INDEX users_id ON users (id)".to_string()],
+            indexes: vec!["DEFINE INDEX users_id ON users FIELDS id UNIQUE".to_string()],
         }
     }
 
@@ -74,9 +74,10 @@ impl Schema {
             "#
             .to_string(),
             indexes: vec![
-                "CREATE INDEX agents_user ON agents (user_id)".to_string(),
-                "CREATE INDEX agents_type ON agents (agent_type)".to_string(),
-                "CREATE UNIQUE INDEX agents_user_type ON agents (user_id, agent_type)".to_string(),
+                "DEFINE INDEX agents_user ON agents FIELDS user_id".to_string(),
+                "DEFINE INDEX agents_type ON agents FIELDS agent_type".to_string(),
+                "DEFINE INDEX agents_user_type ON agents FIELDS user_id, agent_type UNIQUE"
+                    .to_string(),
             ],
         }
     }
@@ -101,8 +102,8 @@ impl Schema {
             "#
             .to_string(),
             indexes: vec![
-                "CREATE INDEX memory_agent ON memory_blocks (agent_id)".to_string(),
-                "CREATE INDEX memory_label ON memory_blocks (agent_id, label)".to_string(),
+                "DEFINE INDEX memory_agent ON memory_blocks FIELDS agent_id".to_string(),
+                "DEFINE INDEX memory_label ON memory_blocks FIELDS agent_id, label".to_string(),
             ],
         }
     }
@@ -124,9 +125,9 @@ impl Schema {
             "#
             .to_string(),
             indexes: vec![
-                "CREATE INDEX conv_user ON conversations (user_id)".to_string(),
-                "CREATE INDEX conv_agent ON conversations (agent_id)".to_string(),
-                "CREATE INDEX conv_active ON conversations (user_id, ended_at)".to_string(),
+                "DEFINE INDEX conv_user ON conversations FIELDS user_id".to_string(),
+                "DEFINE INDEX conv_agent ON conversations FIELDS agent_id".to_string(),
+                "DEFINE INDEX conv_active ON conversations FIELDS user_id, ended_at".to_string(),
             ],
         }
     }
@@ -149,8 +150,9 @@ impl Schema {
             "#
             .to_string(),
             indexes: vec![
-                "CREATE INDEX msg_conversation ON messages (conversation_id)".to_string(),
-                "CREATE INDEX msg_created ON messages (conversation_id, created_at)".to_string(),
+                "DEFINE INDEX msg_conversation ON messages FIELDS conversation_id".to_string(),
+                "DEFINE INDEX msg_created ON messages FIELDS conversation_id, created_at"
+                    .to_string(),
             ],
         }
     }
@@ -173,9 +175,9 @@ impl Schema {
             "#
             .to_string(),
             indexes: vec![
-                "CREATE INDEX tools_agent ON tool_calls (agent_id)".to_string(),
-                "CREATE INDEX tools_name ON tool_calls (tool_name)".to_string(),
-                "CREATE INDEX tools_conversation ON tool_calls (conversation_id)".to_string(),
+                "DEFINE INDEX tools_agent ON tool_calls FIELDS agent_id".to_string(),
+                "DEFINE INDEX tools_name ON tool_calls FIELDS tool_name".to_string(),
+                "DEFINE INDEX tools_conversation ON tool_calls FIELDS conversation_id".to_string(),
             ],
         }
     }
@@ -209,10 +211,10 @@ impl Schema {
             "#
             .to_string(),
             indexes: vec![
-                "CREATE INDEX tasks_user ON tasks (user_id)".to_string(),
-                "CREATE INDEX tasks_parent ON tasks (parent_id)".to_string(),
-                "CREATE INDEX tasks_status ON tasks (user_id, status)".to_string(),
-                "CREATE INDEX tasks_priority ON tasks (user_id, priority, status)".to_string(),
+                "DEFINE INDEX tasks_user ON tasks FIELDS user_id".to_string(),
+                "DEFINE INDEX tasks_parent ON tasks FIELDS parent_id".to_string(),
+                "DEFINE INDEX tasks_status ON tasks FIELDS user_id, status".to_string(),
+                "DEFINE INDEX tasks_priority ON tasks FIELDS user_id, priority, status".to_string(),
             ],
         }
     }

@@ -19,7 +19,7 @@ Pattern uses Letta's multi-agent system where agents can communicate via the `se
 - **Impact**: Agents respond to their own success confirmations
 
 ### 3. The Pattern Emoji Explosion Incident
-Real incident from 2025-01-03:
+Real incident from 2025-07-03:
 1. User asked Pattern to express itself with emojis
 2. Pattern used `send_discord_message` tool with "🌊✨🎭"
 3. Tool returned "Message sent to channel"

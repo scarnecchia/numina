@@ -2,7 +2,6 @@
 
 use super::{DatabaseError, Result, VectorStore, schema::*};
 use crate::embeddings::EmbeddingProvider;
-use std::sync::Arc;
 
 /// Generate a unique ID with a prefix
 pub fn generate_id(prefix: &str) -> String {

@@ -320,9 +320,9 @@ fn write_to_shared_insights(category: &str, content: &str) {
 
 **sleeptime_observations.md**:
 ```markdown
-[2025-01-04 14:30] Hyperfocus detected: coding session 2.5hrs
-[2025-01-04 14:30] Physical needs: last water 90min ago
-[2025-01-04 14:30] Energy state: flow but approaching burnout risk
+[2025-07-04 14:30] Hyperfocus detected: coding session 2.5hrs
+[2025-07-04 14:30] Physical needs: last water 90min ago
+[2025-07-04 14:30] Energy state: flow but approaching burnout risk
 ```
 
 **task_patterns.md** (by Entropy):

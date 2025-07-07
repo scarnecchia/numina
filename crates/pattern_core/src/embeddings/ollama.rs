@@ -36,11 +36,19 @@ impl OllamaEmbedder {
     async fn health_check_impl(&self) -> Result<()> {
         let health_url = format!("{}/api/tags", self.url);
 
-        self.client
+        let response = self
+            .client
             .get(&health_url)
             .send()
             .await
             .map_err(|e| EmbeddingError::ApiError(format!("Ollama not reachable: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(EmbeddingError::ApiError(format!(
+                "Ollama health check failed with status: {}",
+                response.status()
+            )));
+        }
 
         Ok(())
     }
@@ -53,13 +61,45 @@ impl EmbeddingProvider for OllamaEmbedder {
             return Err(EmbeddingError::EmptyInput);
         }
 
-        // TODO: Implement actual Ollama API call
-        // POST to /api/embeddings with model and prompt
-        // For now, return a dummy embedding
-        let dimensions = self.get_dimensions();
-        let vector = vec![0.1; dimensions];
+        let request_body = serde_json::json!({
+            "model": self.model,
+            "prompt": text,
+        });
 
-        Ok(Embedding::new(vector, self.model.clone()))
+        let response = self
+            .client
+            .post(format!("{}/api/embeddings", self.url))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| EmbeddingError::ApiError(format!("Request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(EmbeddingError::ApiError(format!(
+                "Ollama API error: {}",
+                error_text
+            )));
+        }
+
+        let response_data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| EmbeddingError::ApiError(format!("Failed to parse response: {}", e)))?;
+
+        let embedding = response_data
+            .get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| EmbeddingError::ApiError("Missing embedding field".to_string()))?
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .map(|v| v as f32)
+            .collect();
+
+        Ok(Embedding::new(embedding, self.model.clone()))
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {

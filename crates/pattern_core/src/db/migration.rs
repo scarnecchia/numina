@@ -67,11 +67,37 @@ impl MigrationRunner {
 
     /// Update schema version
     async fn update_schema_version<DB: DatabaseBackend>(db: &Arc<DB>, version: u32) -> Result<()> {
-        db.execute(
-            "UPDATE system_metadata SET schema_version = $version, updated_at = time::now()",
-            vec![("version".to_string(), serde_json::json!(version))],
-        )
-        .await?;
+        // First check if a record exists
+        let response = db
+            .execute("SELECT * FROM system_metadata LIMIT 1", vec![])
+            .await?;
+
+        let has_record = response
+            .data
+            .as_array()
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+
+        if has_record {
+            // Update existing record
+            db.execute(
+                "UPDATE system_metadata SET schema_version = $version, updated_at = time::now()",
+                vec![("version".to_string(), serde_json::json!(version))],
+            )
+            .await?;
+        } else {
+            // Create new record with default values
+            db.execute(
+                "INSERT INTO system_metadata { embedding_model: $embedding_model, embedding_dimensions: $embedding_dimensions, schema_version: $schema_version, created_at: time::now(), updated_at: time::now() }",
+                vec![
+                    ("embedding_model".to_string(), serde_json::json!("none")),
+                    ("embedding_dimensions".to_string(), serde_json::json!(0)),
+                    ("schema_version".to_string(), serde_json::json!(version)),
+                ],
+            )
+            .await?;
+        }
+
         Ok(())
     }
 

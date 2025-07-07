@@ -24,10 +24,10 @@ The database backend is designed with flexibility in mind, supporting both embed
    - Model structs with serde serialization
    - Vector embedding support built-in
 
-4. **Repository Pattern** (`db/repository/`)
-   - Clean separation of data access logic
-   - Type-safe CRUD operations
-   - Specialized repositories for each entity type
+4. **Direct Operations** (`db/ops.rs`)
+   - Simple function-based data access
+   - Type-safe operations without abstraction overhead
+   - No unnecessary repository pattern
 
 5. **Migration System** (`db/migration.rs`)
    - Simple version-based migrations
@@ -92,15 +92,19 @@ The database backend integrates with the embeddings module to provide semantic s
 
 ### Embedding Providers
 
-1. **Candle (Local)**
+1. **Candle (Local)** ✅
    - Pure Rust implementation
    - Supports BERT-based models
    - Default: BAAI/bge-small-en-v1.5 (384 dims)
 
-2. **Cloud Providers**
+2. **Cloud Providers** ✅
    - OpenAI: text-embedding-3-small/large
    - Cohere: embed-english-v3.0
    - API key configuration required
+
+3. **Ollama** 🚧
+   - Stub implementation only
+   - Planned for future release
 
 ### Embedding Storage
 
@@ -112,37 +116,41 @@ The database backend integrates with the embeddings module to provide semantic s
 ### Vector Search
 
 ```rust
-// Semantic memory search
-let results = memory_repo
-    .search_semantic(agent_id, "query text", 10)
-    .await?;
+// Semantic memory search using direct operations
+let results = db::ops::search_memories(
+    &db, 
+    &embeddings,
+    agent_id, 
+    "query text", 
+    10
+).await?;
 
 // Results include similarity scores
-for result in results {
-    println!("{}: {}", result.memory.label, result.score);
+for (memory, score) in results {
+    println!("{}: {}", memory.label, score);
 }
 ```
 
-## Repository Pattern
+## Direct Operations
 
-Each entity type has a dedicated repository with type-safe operations:
+All database operations are exposed as simple functions in `db::ops`:
 
-### UserRepository
-- CRUD operations for users
-- Settings management
-- User-agent relationship queries
+### User Operations
+- `create_user()` - Create a new user
+- `get_user()` - Get user by ID
+- `get_user_with_agents()` - Get user and their agents in one query
 
-### AgentRepository
-- Agent lifecycle management
-- State persistence
-- User-scoped queries
-- Soft deletion (deactivation)
+### Agent Operations
+- `create_agent()` - Create a new agent
+- `get_user_agents()` - Get all agents for a user
+- `update_agent_state()` - Update agent state
 
-### MemoryRepository
-- Memory block management
-- Automatic embedding generation
-- Semantic search capabilities
-- Label-based lookups
+### Memory Operations
+- `create_memory()` - Create memory block with automatic embedding
+- `search_memories()` - Semantic search with embeddings
+- `get_memory_by_label()` - Direct label lookup
+
+This approach keeps the code simple and direct without unnecessary abstraction layers.
 
 ## Configuration
 
@@ -192,17 +200,17 @@ The migration system ensures database schema consistency across versions:
 
 The database backend supports multiple configurations via feature flags:
 
-- `surreal-embedded`: Embedded SurrealDB (default)
-- `surreal-remote`: Remote SurrealDB connection
-- `embed-candle`: Local Candle embeddings (default)
-- `embed-cloud`: Cloud embedding providers (default)
-- `embed-ollama`: Ollama embedding support
+- `surreal-embedded`: Embedded SurrealDB (default) ✅
+- `surreal-remote`: Remote SurrealDB connection 🚧 Not implemented
+- `embed-candle`: Local Candle embeddings (default) ✅
+- `embed-cloud`: Cloud embedding providers (default) ✅
+- `embed-ollama`: Ollama embedding support 🚧 Stub only
 
 ## Testing
 
 The database module includes comprehensive tests:
 
-1. **Unit Tests**: Repository operations
+1. **Unit Tests**: Direct operation functions
 2. **Integration Tests**: Full database workflows
 3. **Migration Tests**: Schema update verification
 4. **Embedding Tests**: Vector operations
@@ -222,7 +230,8 @@ cargo test --features surreal-embedded,embed-candle
 ## Future Enhancements
 
 1. **Remote Database Support**: For distributed deployments
-2. **Additional Embedding Providers**: Ollama, local ONNX
-3. **Vector Index Tuning**: Configurable HNSW parameters
-4. **Query Optimization**: Prepared statements, query plans
-5. **Backup/Restore**: Automated database backups
+2. **Complete Ollama Provider**: Full implementation of stub
+3. **Additional Embedding Providers**: Local ONNX models
+4. **Vector Index Tuning**: Configurable HNSW parameters
+5. **Query Optimization**: Prepared statements, query plans
+6. **Backup/Restore**: Automated database backups

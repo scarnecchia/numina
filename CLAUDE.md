@@ -239,8 +239,8 @@ just pre-commit-all
 ## Current TODOs
 
 ### High Priority
-- Implement core agent framework in pattern-core (Agent trait, memory system, tool execution)
-- Set up SurrealDB integration for persistence
+- Implement core agent framework in pattern-core (Agent trait, memory system, tool execution) 🚧
+- ~~Set up SurrealDB integration for persistence~~ ✅
 - Migrate existing agent logic from Letta to pattern-core
 - Add task CRUD operations to database module
 - Create task manager with ADHD-aware task breakdown
@@ -276,15 +276,15 @@ just pre-commit-all
 - [x] Optimized agent initialization to eliminate API calls for existing agents
 - [x] Model capability abstraction system (Routine/Interactive/Investigative/Critical)
 - [x] Configurable model mappings in pattern.toml (global and per-agent)
-- [x] Implement passive knowledge sharing via Letta sources (2025-01-04)
+- [x] Implement passive knowledge sharing via Letta sources (2025-07-04)
 - [x] Knowledge tools for agents (write_agent_knowledge, read_agent_knowledge, sync_knowledge_to_letta)
-- [x] Implement schedule_event MCP tool with database storage (2025-01-07)
-- [x] Implement check_activity_state MCP tool with energy state tracking (2025-01-07)
-- [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-01-07)
-- [x] Refactor caching from SQLite KV store to foyer library (disk-backed async cache) (2025-01-07)
-- [x] Fixed MCP tool schema issues - removed references, enums, nested structs, unsigned ints (2025-01-07)
-- [x] Implemented custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-01-08)
-- [x] Refactored to multi-crate workspace structure (2025-01-13)
+- [x] Implement schedule_event MCP tool with database storage (2025-07-05)
+- [x] Implement check_activity_state MCP tool with energy state tracking (2025-07-05)
+- [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-07-05)
+- [x] Refactor caching from SQLite KV store to foyer library (disk-backed async cache) (2025-07-05)
+- [x] Fixed MCP tool schema issues - removed references, enums, nested structs, unsigned ints (2025-07-05)
+- [x] Implemented custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-07-06)
+- [x] Refactored to multi-crate workspace structure (2025-07-06)
 - [x] Created pattern-core with agent framework, memory system, and tool registry
 - [x] Created pattern-nd with ADHD-specific tools and agent personalities
 - [x] Created pattern-mcp with MCP server implementation
@@ -295,7 +295,7 @@ just pre-commit-all
 
 ## Current Status
 
-**Last Updated**: 2025-01-13
+**Last Updated**: 2025-07-06
 
 ### System Architecture ✅
 - **Unified binary** with feature flags (`discord`, `mcp`, `binary`, `full`)
@@ -304,8 +304,9 @@ just pre-commit-all
 - **Native Letta groups**: Main (dynamic), crisis (round-robin), planning (supervisor), memory (sleeptime)
 - **Three-tier memory**: Core blocks, Letta sources, archival storage
 - **Custom sleeptime monitor**: Two-tier ADHD monitoring (lightweight checks + Pattern intervention)
+- **Database backend**: Pure Rust SurrealKV with vector search, migrations, and embedding support
 
-### Recent Achievements (2025-01-04 to 2025-01-13)
+### Recent Achievements (2025-07-04 to 2025-07-06)
 - **Caching migration**: SQLite KV store → Foyer library with automatic tiering
 - **MCP schema fixes**: Removed unsupported references, enums, nested structs
 - **Partner threading**: Agents receive actual partner names and Discord IDs
@@ -315,21 +316,35 @@ just pre-commit-all
 - **Group management**: Proper caching prevents constant recreation
 - **Agent configuration**: External TOML files for prompts and model mappings
 - **Sleeptime monitoring**: Automatic ADHD support with hyperfocus detection, break reminders
-- **Workspace refactor**: ✅ Migrated from monolithic to multi-crate workspace structure
+- **Workspace refactor**: ✅ Migrated from monolithic to multi-crate workspace structure (2025-07-06)
 - **Removed Letta dependency**: ✅ Building our own agent framework with SurrealDB
 - **Rich error types**: ✅ All errors now use miette for detailed diagnostics
 - **Pure Rust dependencies**: ✅ Removed C dependencies (no rocksdb, using rustls)
 - **Tool registry optimization**: ✅ DashMap for concurrent access, CompactString for memory efficiency
 - **JSON payload optimization**: ✅ Added `skip_serializing_if` to all Option fields
+- **Database implementation**: ✅ SurrealDB embedded with schema migrations and vector search
+- **Embedding providers**: 🚧 Feature-gated providers - Candle ✅, OpenAI ✅, Cohere ✅, Ollama (stub)
+- **Simplified abstractions**: ✅ Removed Java-esque patterns (repositories, factories) for direct operations
 
 ### Key Features Implemented
 
-**Database**: SQLite with migrations, Foyer caching layer
+**Database**: 
+- SQLite with migrations, Foyer caching layer (pattern-main)
+- SurrealDB with vector search, migrations (pattern-core)
 - Users, agents, groups, tasks, events, energy states tables
+- Memory blocks with embeddings for semantic search
 - Contract/client and social memory schemas ready
 - Unique constraints prevent duplicate agents/groups
 
-**Testing**: 27+ tests that validate actual behavior (not mocks)
+**Embeddings**:
+- ✅ Candle (local) - Pure Rust BERT models
+- ✅ OpenAI - text-embedding-3-small/large
+- ✅ Cohere - embed-english-v3.0
+- 🚧 Ollama - Stub implementation only
+- Automatic embedding generation for memory blocks
+- Semantic search with cosine similarity
+
+**Testing**: 40+ tests that validate actual behavior (not mocks)
 
 **Discord Bot**:
 - Natural language chat with slash commands
@@ -355,7 +370,7 @@ cargo run --features binary,discord # Just Discord
 cargo run --features binary,mcp     # Just MCP
 ```
 
-## Partner/Conversant Architecture (2025-01-03)
+## Partner/Conversant Architecture (2025-07-03)
 
 **Key Distinction**: Pattern uses a partner-centric model to ensure privacy and personalization.
 
@@ -472,11 +487,12 @@ Each crate has its own dependencies and can be developed/tested independently.
   - Currently in `pattern_main/src/sleeptime.rs` (to be migrated to pattern-nd)
 
 ### Task Management (High Priority)
-1. **Extend database module** with task operations
-   - Add CRUD methods for tasks
+1. **Extend database module** with task operations ✅ Schema ready
+   - Add CRUD methods for tasks in `db::ops`
    - Implement task status transitions
    - Add task breakdown storage (parent/child tasks)
    - Track estimated vs actual time
+   - Integrate embeddings for semantic task search
 
 2. **Create task manager module** (`src/tasks.rs`)
    - Task creation with ADHD-aware defaults
@@ -498,7 +514,7 @@ Each crate has its own dependencies and can be developed/tested independently.
      - `energy_patterns.md` (Momentum)
      - `time_patterns.md` (Flux)
      - `routine_patterns.md` (Anchor)
-   - Semantic search across all insights
+   - Semantic search across all insights (✅ embedding infrastructure ready)
 
 ### Contract & Social Features (Medium Priority)
 1. **Contract/Client tracking**
