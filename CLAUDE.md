@@ -236,13 +236,13 @@ just pre-commit-all
 - Document group patterns and best practices
 - Add configurable custom groups via API/config
 
-## Current TODOs
+### Current TODOs
 
 ### High Priority
-- Implement core agent framework in pattern-core (Agent trait, memory system, tool execution) 🚧
-- ~~Set up SurrealDB integration for persistence~~ ✅
-- Migrate existing agent logic from Letta to pattern-core
-- Add task CRUD operations to database module
+- ~~Implement core agent framework in pattern-core (Agent trait, memory system, tool execution)~~ ✅ (2025-07-06)
+- ~~Set up SurrealDB integration for persistence~~ ✅ (2025-07-06)
+- Migrate existing agent logic from Letta to pattern-core 🚧
+- Add task CRUD operations to database module (schema ready, needs implementation)
 - Create task manager with ADHD-aware task breakdown
 - Add contract/client tracking (time, invoices, follow-ups)
 - Implement social memory (birthdays, follow-ups, conversation context)
@@ -253,10 +253,12 @@ just pre-commit-all
 - Implement time tracking with ADHD multipliers (Flux agent)
 - Add energy/attention monitoring (Momentum agent)
 - Add `/reload_config` Discord command to hot-reload model mappings and agent configs
+- Complete Ollama embedding provider implementation
 
 ### Low Priority
 - Add activity monitoring for interruption detection
 - Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
+- Support additional Candle models (BERT dtype issues need fixing)
 
 ### Completed
 - [x] Letta integration layer with agent management
@@ -283,19 +285,22 @@ just pre-commit-all
 - [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-07-05)
 - [x] Refactor caching from SQLite KV store to foyer library (disk-backed async cache) (2025-07-05)
 - [x] Fixed MCP tool schema issues - removed references, enums, nested structs, unsigned ints (2025-07-05)
-- [x] Implemented custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-07-06)
+- [x] Implement custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-07-06)
 - [x] Refactored to multi-crate workspace structure (2025-07-06)
-- [x] Created pattern-core with agent framework, memory system, and tool registry
-- [x] Created pattern-nd with ADHD-specific tools and agent personalities
-- [x] Created pattern-mcp with MCP server implementation
-- [x] Created pattern-discord with Discord bot functionality
-- [x] Implemented rich error types using miette for all crates
-- [x] Removed C dependencies (using SurrealDB without rocksdb, rustls instead of native TLS)
-- [x] Set up proper Nix flake for workspace builds
+- [x] Created pattern-core with agent framework, memory system, and tool registry (2025-07-06)
+- [x] Created pattern-nd with ADHD-specific tools and agent personalities (2025-07-06)
+- [x] Created pattern-mcp with MCP server implementation (2025-07-06)
+- [x] Created pattern-discord with Discord bot functionality (2025-07-06)
+- [x] Implemented rich error types using miette for all crates (2025-07-06)
+- [x] Removed C dependencies (using SurrealDB without rocksdb, rustls instead of native TLS) (2025-07-06)
+- [x] Set up proper Nix flake for workspace builds (2025-07-06)
+- [x] Implemented type-safe database operations with custom ID types (2025-07-06)
+- [x] Fixed SurrealDB value unwrapping for all wrapped types (2025-07-06)
+- [x] Optimized test suite by moving slow tests to integration tests (2025-07-06)
 
 ## Current Status
 
-**Last Updated**: 2025-07-06
+**Last Updated**: 2025-07-06 (Late Night Session)
 
 ### System Architecture ✅
 - **Unified binary** with feature flags (`discord`, `mcp`, `binary`, `full`)
@@ -323,8 +328,11 @@ just pre-commit-all
 - **Tool registry optimization**: ✅ DashMap for concurrent access, CompactString for memory efficiency
 - **JSON payload optimization**: ✅ Added `skip_serializing_if` to all Option fields
 - **Database implementation**: ✅ SurrealDB embedded with schema migrations and vector search
-- **Embedding providers**: ✅ Feature-gated providers - Candle (Jina/BERT), OpenAI, Cohere, Ollama (stub)
+- **Embedding providers**: ✅ Feature-gated providers - Candle (Jina only), OpenAI, Cohere, Ollama (stub)
 - **Simplified abstractions**: ✅ Removed Java-esque patterns (repositories, factories) for direct operations
+- **Type-safe database**: ✅ Custom ID types with strong typing throughout the codebase
+- **SurrealDB integration**: ✅ Proper handling of SurrealDB's nested value format
+- **Test optimization**: ✅ Moved slow Candle tests to integration tests (2+ minutes → <1s for unit tests)
 
 ### Key Features Implemented
 
@@ -335,16 +343,23 @@ just pre-commit-all
 - Memory blocks with embeddings for semantic search
 - Contract/client and social memory schemas ready
 - Unique constraints prevent duplicate agents/groups
+- Type-safe operations with custom ID types (UserId, AgentId, etc.)
+- Automatic handling of SurrealDB's wrapped value format
 
 **Embeddings**:
-- ✅ Candle (local) - Pure Rust embeddings with Jina and BERT models
+- ✅ Candle (local) - Pure Rust embeddings with Jina models (BERT has dtype issues)
 - ✅ OpenAI - text-embedding-3-small/large
 - ✅ Cohere - embed-english-v3.0
 - 🚧 Ollama - Stub implementation only
 - Automatic embedding generation for memory blocks
 - Semantic search with cosine similarity
+- Dummy embeddings (384-dim zeros) when no provider configured
 
-**Testing**: 40+ tests that validate actual behavior (not mocks)
+**Testing**: 
+- 40+ unit tests that validate actual behavior (not mocks)
+- Unit tests run in <1 second
+- Slow integration tests (Candle embeddings) separated out
+- All tests must fail properly - no silent skipping
 
 **Discord Bot**:
 - Natural language chat with slash commands

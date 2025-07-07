@@ -65,6 +65,8 @@ This crate provides the core agent framework, memory management, and tool execut
 - Schema migrations with version tracking
 - Vector search support with HNSW indexes
 - Direct operations via functions in `db::ops` (no unnecessary repository pattern)
+- Type-safe IDs (UserId, AgentId, etc.) throughout the codebase
+- Automatic handling of SurrealDB's nested value format via `unwrap_surreal_value`
 
 ### Embeddings (`embeddings/`)
 - Provider trait for multiple backends
@@ -84,10 +86,12 @@ This crate provides the core agent framework, memory management, and tool execut
 - BERT models (`BAAI/bge-*`) fail with "unsupported dtype F32 for op index-select" error due to Candle's BERT implementation. Use Jina models for local embeddings or cloud providers for production.
 
 ### Serialization
+### Serialization
 - All `Option<T>` fields use `#[serde(skip_serializing_if = "Option::is_none")]`
 - Duration fields use custom serialization (as milliseconds)
 - Avoid nested structs in types that need MCP-compatible schemas
-- SurrealDB responses wrap data in nested structures - handle accordingly
+- SurrealDB responses wrap data in nested structures - use `unwrap_surreal_value` helper
+- Custom serde implementations for enums (e.g., AgentType serializes Custom variants with `custom:` prefix)
 
 ## Common Patterns
 
@@ -129,6 +133,8 @@ return Err(CoreError::memory_not_found(
 - All error paths should be tested
 - Use `tokio_test::block_on` for async tests
 - Prefer integration-style tests over unit tests
+- Keep slow tests (e.g., Candle embeddings) in integration tests, not unit tests
+- Unit test suite should run in <1 second
 
 ## Performance Considerations
 
@@ -145,6 +151,7 @@ return Err(CoreError::memory_not_found(
 - Advanced compression strategies (semantic clustering)
 - Remote SurrealDB support
 - Complete Ollama embedding provider (currently stub)
+- Fix BERT model support in Candle (dtype issues)
 - Additional embedding providers (local ONNX, etc.)
 - Batch embedding operations
 - Cross-agent memory sharing
