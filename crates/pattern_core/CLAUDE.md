@@ -69,13 +69,19 @@ This crate provides the core agent framework, memory management, and tool execut
 ### Embeddings (`embeddings/`)
 - Provider trait for multiple backends
 - Feature-gated implementations:
-  - ✅ Candle (local) - Pure Rust BERT models
+  - ✅ Candle (local) - Pure Rust embeddings with Jina models
   - ✅ OpenAI - text-embedding-3-small/large  
   - ✅ Cohere - embed-english-v3.0
   - 🚧 Ollama - Stub implementation only
 - Automatic embedding generation for memory blocks
 - Cosine similarity for semantic search
 - Model validation and dimension checking
+- Supported Candle models:
+  - `jinaai/jina-embeddings-v2-small-en` (512 dims) ✅
+  - `jinaai/jina-embeddings-v2-base-en` (768 dims) ✅
+
+**Known Issues:**
+- BERT models (`BAAI/bge-*`) fail with "unsupported dtype F32 for op index-select" error due to Candle's BERT implementation. Use Jina models for local embeddings or cloud providers for production.
 
 ### Serialization
 - All `Option<T>` fields use `#[serde(skip_serializing_if = "Option::is_none")]`

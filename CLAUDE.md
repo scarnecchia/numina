@@ -323,7 +323,7 @@ just pre-commit-all
 - **Tool registry optimization**: ✅ DashMap for concurrent access, CompactString for memory efficiency
 - **JSON payload optimization**: ✅ Added `skip_serializing_if` to all Option fields
 - **Database implementation**: ✅ SurrealDB embedded with schema migrations and vector search
-- **Embedding providers**: 🚧 Feature-gated providers - Candle ✅, OpenAI ✅, Cohere ✅, Ollama (stub)
+- **Embedding providers**: ✅ Feature-gated providers - Candle (Jina/BERT), OpenAI, Cohere, Ollama (stub)
 - **Simplified abstractions**: ✅ Removed Java-esque patterns (repositories, factories) for direct operations
 
 ### Key Features Implemented
@@ -337,7 +337,7 @@ just pre-commit-all
 - Unique constraints prevent duplicate agents/groups
 
 **Embeddings**:
-- ✅ Candle (local) - Pure Rust BERT models
+- ✅ Candle (local) - Pure Rust embeddings with Jina and BERT models
 - ✅ OpenAI - text-embedding-3-small/large
 - ✅ Cohere - embed-english-v3.0
 - 🚧 Ollama - Stub implementation only

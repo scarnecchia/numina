@@ -4,13 +4,13 @@ mod embeddings_tests {
 
     #[tokio::test]
     #[cfg(feature = "embed-cloud")]
+    #[ignore = "requires OPENAI_API_KEY environment variable set"]
     async fn test_openai_embeddings() {
         // Skip if no API key
         let api_key = match std::env::var("OPENAI_API_KEY") {
             Ok(key) => key,
             Err(_) => {
-                eprintln!("Skipping OpenAI test - OPENAI_API_KEY not set");
-                return;
+                panic!("OPENAI_API_KEY not set");
             }
         };
 
@@ -43,13 +43,13 @@ mod embeddings_tests {
 
     #[tokio::test]
     #[cfg(feature = "embed-cloud")]
+    #[ignore = "requires COHERE_API_KEY environment variable set"]
     async fn test_cohere_embeddings() {
         // Skip if no API key
         let api_key = match std::env::var("COHERE_API_KEY") {
             Ok(key) => key,
             Err(_) => {
-                eprintln!("Skipping Cohere test - COHERE_API_KEY not set");
-                return;
+                panic!("COHERE_API_KEY not set");
             }
         };
 
@@ -78,9 +78,8 @@ mod embeddings_tests {
 
         let provider = match create_provider(config).await {
             Ok(p) => p,
-            Err(_) => {
-                eprintln!("Skipping Ollama test - Ollama not running");
-                return;
+            Err(e) => {
+                panic!("Failed to create provider: {:?}", e);
             }
         };
 
@@ -102,7 +101,7 @@ mod embeddings_tests {
     async fn test_candle_embeddings() {
         // This test requires downloading model files, so we'll use a small model
         let config = EmbeddingConfig::Candle {
-            model: "sentence-transformers/all-MiniLM-L6-v2".to_string(),
+            model: "jinaai/jina-embeddings-v2-small-en".to_string(),
             cache_dir: Some("./test_cache".to_string()),
         };
 
@@ -115,15 +114,14 @@ mod embeddings_tests {
         let provider = match create_provider(config).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("Skipping Candle test - failed to load model: {}", e);
-                return;
+                panic!("Failed to load model: {}", e);
             }
         };
 
         // Test single embedding
         let embedding = provider.embed("Hello, world!").await.unwrap();
-        assert_eq!(embedding.dimensions, 384);
-        assert_eq!(embedding.vector.len(), 384);
+        assert_eq!(embedding.dimensions, 512);
+        assert_eq!(embedding.vector.len(), 512);
 
         // Test batch embedding
         let texts = vec!["First text".to_string(), "Second text".to_string()];
@@ -148,22 +146,20 @@ mod embeddings_tests {
             #[cfg(feature = "embed-candle")]
             {
                 EmbeddingConfig::Candle {
-                    model: "sentence-transformers/all-MiniLM-L6-v2".to_string(),
+                    model: "jinaai/jina-embeddings-v2-small-en".to_string(),
                     cache_dir: None,
                 }
             }
             #[cfg(not(feature = "embed-candle"))]
             {
-                eprintln!("Skipping similarity test - no embedding provider available");
-                return;
+                panic!("No embedding provider available");
             }
         };
 
         let provider = match create_provider(config).await {
             Ok(p) => p,
-            Err(_) => {
-                eprintln!("Skipping similarity test - failed to create provider");
-                return;
+            Err(e) => {
+                panic!("Failed to create provider: {:?}", e);
             }
         };
 
@@ -189,6 +185,7 @@ mod embeddings_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires OpenAI API key, export OPENAI_API_KEY with a valid key to run"]
     async fn test_empty_input_error() {
         // Try to create a provider, but skip test if it fails
         let config = if std::env::var("OPENAI_API_KEY").is_ok() {
@@ -198,16 +195,13 @@ mod embeddings_tests {
                 dimensions: Some(256),
             }
         } else {
-            // Skip test if no embedding provider is available
-            eprintln!("Skipping empty input test - no embedding provider available");
-            return;
+            panic!("set OPENAI_API_KEY and re-run")
         };
 
         let provider = match create_provider(config).await {
             Ok(p) => p,
-            Err(_) => {
-                eprintln!("Skipping empty input test - failed to create provider");
-                return;
+            Err(e) => {
+                panic!("Failed to create provider {}", e);
             }
         };
 

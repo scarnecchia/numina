@@ -7,9 +7,10 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "embed-candle")]
 use {
-    candle_core::{Device, Tensor},
+    candle_core::{Device, Module, Tensor},
     candle_nn::VarBuilder,
-    candle_transformers::models::bert::{BertModel, Config},
+    candle_transformers::models::bert::{BertModel, Config as BertConfig},
+    candle_transformers::models::jina_bert::{BertModel as JinaBertModel, Config as JinaConfig},
     hf_hub::{Repo, RepoType},
     tokenizers::{PaddingParams, Tokenizer},
 };
@@ -19,11 +20,17 @@ pub struct CandleEmbedder {
     model: String,
     dimensions: usize,
     #[cfg(feature = "embed-candle")]
-    bert_model: Arc<Mutex<BertModel>>,
+    model_type: ModelType,
     #[cfg(feature = "embed-candle")]
     tokenizer: Arc<Mutex<Tokenizer>>,
     #[cfg(feature = "embed-candle")]
     device: Device,
+}
+
+#[cfg(feature = "embed-candle")]
+enum ModelType {
+    Bert(Arc<Mutex<BertModel>>),
+    JinaBert(Arc<Mutex<JinaBertModel>>),
 }
 
 impl CandleEmbedder {
@@ -39,10 +46,12 @@ impl CandleEmbedder {
 
         #[cfg(feature = "embed-candle")]
         {
-            let dimensions = match model {
-                "BAAI/bge-small-en-v1.5" => 384,
-                "BAAI/bge-base-en-v1.5" => 768,
-                "BAAI/bge-large-en-v1.5" => 1024,
+            let (dimensions, is_jina) = match model {
+                "BAAI/bge-small-en-v1.5" => (384, false),
+                "BAAI/bge-base-en-v1.5" => (768, false),
+                "BAAI/bge-large-en-v1.5" => (1024, false),
+                "jinaai/jina-embeddings-v2-small-en" => (512, true),
+                "jinaai/jina-embeddings-v2-base-en" => (768, true),
                 _ => return Err(EmbeddingError::ModelNotFound(model.to_string())),
             };
 
@@ -82,8 +91,6 @@ impl CandleEmbedder {
             // Load config
             let config_str = std::fs::read_to_string(&config_path)
                 .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
-            let config: Config = serde_json::from_str(&config_str)
-                .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
 
             // Load tokenizer
             let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
@@ -96,22 +103,37 @@ impl CandleEmbedder {
             }));
 
             // Load model weights
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(
-                    &[weights_path],
-                    candle_core::DType::F32,
-                    &device,
-                )
-                .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?
-            };
+            let vb = VarBuilder::from_pth(&weights_path, candle_core::DType::F32, &device)
+                .map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to load weights: {}", e).into(),
+                    )
+                })?;
 
-            let bert_model = BertModel::load(vb, &config)
-                .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+            let model_type = if is_jina {
+                let config: JinaConfig = serde_json::from_str(&config_str)
+                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                let jina_model = JinaBertModel::new(vb, &config).map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to load Jina model: {}", e).into(),
+                    )
+                })?;
+                ModelType::JinaBert(Arc::new(Mutex::new(jina_model)))
+            } else {
+                let config: BertConfig = serde_json::from_str(&config_str)
+                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                let bert_model = BertModel::load(vb, &config).map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to load BERT model: {}", e).into(),
+                    )
+                })?;
+                ModelType::Bert(Arc::new(Mutex::new(bert_model)))
+            };
 
             Ok(Self {
                 model: model.to_string(),
                 dimensions,
-                bert_model: Arc::new(Mutex::new(bert_model)),
+                model_type,
                 tokenizer: Arc::new(Mutex::new(tokenizer)),
                 device,
             })
@@ -159,9 +181,9 @@ impl EmbeddingProvider for CandleEmbedder {
         {
             // Tokenize all texts
             let tokenizer = self.tokenizer.lock().await;
-            let encodings = tokenizer
-                .encode_batch(texts.to_vec(), true)
-                .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+            let encodings = tokenizer.encode_batch(texts.to_vec(), true).map_err(|e| {
+                EmbeddingError::GenerationFailed(format!("Tokenization failed: {}", e).into())
+            })?;
 
             let mut all_embeddings = Vec::with_capacity(texts.len());
 
@@ -188,7 +210,11 @@ impl EmbeddingProvider for CandleEmbedder {
 
                 let input_tensor =
                     Tensor::from_vec(padded_ids, &[batch_encodings.len(), max_len], &self.device)
-                        .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                        .map_err(|e| {
+                        EmbeddingError::GenerationFailed(
+                            format!("Failed to create input tensor: {}", e).into(),
+                        )
+                    })?;
 
                 // Create attention mask
                 let attention_mask: Vec<f32> = input_ids
@@ -205,33 +231,72 @@ impl EmbeddingProvider for CandleEmbedder {
                     &[batch_encodings.len(), max_len],
                     &self.device,
                 )
-                .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                .map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to create attention mask: {}", e).into(),
+                    )
+                })?;
 
                 // Forward pass
-                let bert_model = self.bert_model.lock().await;
-                let embeddings = bert_model
-                    .forward(&input_tensor, &mask_tensor, None)
-                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                let embeddings = match &self.model_type {
+                    ModelType::Bert(bert_model) => {
+                        let model = bert_model.lock().await;
+                        model
+                            .forward(&input_tensor, &mask_tensor, None)
+                            .map_err(|e| {
+                                EmbeddingError::GenerationFailed(
+                                    format!("BERT forward pass failed: {}", e).into(),
+                                )
+                            })?
+                    }
+                    ModelType::JinaBert(jina_model) => {
+                        let model = jina_model.lock().await;
+                        model.forward(&input_tensor).map_err(|e| {
+                            EmbeddingError::GenerationFailed(
+                                format!("Jina forward pass failed: {}", e).into(),
+                            )
+                        })?
+                    }
+                };
 
                 // Mean pooling over sequence dimension
-                let embeddings_sum = embeddings
-                    .sum(1)
-                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                let embeddings_sum = embeddings.sum(1).map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to sum embeddings: {}", e).into(),
+                    )
+                })?;
 
-                let mask_sum = mask_tensor
-                    .sum(1)
-                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                let mask_sum = mask_tensor.sum(1).map_err(|e| {
+                    EmbeddingError::GenerationFailed(format!("Failed to sum mask: {}", e).into())
+                })?;
 
-                let pooled = embeddings_sum
-                    .broadcast_div(&mask_sum)
-                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                // Unsqueeze mask_sum to match embeddings dimensions [batch, 1]
+                let mask_sum = mask_sum.unsqueeze(1).map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to unsqueeze mask sum: {}", e).into(),
+                    )
+                })?;
+
+                let pooled = embeddings_sum.broadcast_div(&mask_sum).map_err(|e| {
+                    EmbeddingError::GenerationFailed(
+                        format!("Failed to pool embeddings: {}", e).into(),
+                    )
+                })?;
 
                 // Convert to Vec<f32>
                 let pooled_vec: Vec<f32> = pooled
                     .flatten_all()
-                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?
+                    .map_err(|e| {
+                        EmbeddingError::GenerationFailed(
+                            format!("Failed to flatten tensor: {}", e).into(),
+                        )
+                    })?
                     .to_vec1()
-                    .map_err(|e| EmbeddingError::GenerationFailed(e.into()))?;
+                    .map_err(|e| {
+                        EmbeddingError::GenerationFailed(
+                            format!("Failed to convert tensor to vec: {}", e).into(),
+                        )
+                    })?;
 
                 // Split back into individual embeddings
                 for i in 0..batch_encodings.len() {
@@ -262,10 +327,10 @@ mod tests {
     #[tokio::test]
     async fn test_candle_embedder_creation() {
         // Skip test if we can't create the embedder (e.g., in CI)
-        match CandleEmbedder::new("BAAI/bge-small-en-v1.5", None).await {
+        match CandleEmbedder::new("jinaai/jina-embeddings-v2-small-en", None).await {
             Ok(embedder) => {
-                assert_eq!(embedder.dimensions(), 384);
-                assert_eq!(embedder.model_id(), "BAAI/bge-small-en-v1.5");
+                assert_eq!(embedder.dimensions(), 512);
+                assert_eq!(embedder.model_id(), "jinaai/jina-embeddings-v2-small-en");
             }
             Err(_) => {
                 // Skip test if model loading fails
@@ -277,11 +342,11 @@ mod tests {
     #[tokio::test]
     async fn test_candle_embed() {
         // Skip test if we can't create the embedder (e.g., in CI)
-        match CandleEmbedder::new("BAAI/bge-small-en-v1.5", None).await {
+        match CandleEmbedder::new("jinaai/jina-embeddings-v2-small-en", None).await {
             Ok(embedder) => {
                 let embedding = embedder.embed("test text").await.unwrap();
-                assert_eq!(embedding.dimensions, 384);
-                assert_eq!(embedding.vector.len(), 384);
+                assert_eq!(embedding.dimensions, 512);
+                assert_eq!(embedding.vector.len(), 512);
             }
             Err(_) => {
                 // Skip test if model loading fails
