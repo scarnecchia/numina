@@ -158,8 +158,11 @@ struct TaskOutput {
 #[serde(rename_all = "snake_case")]
 enum TaskStatus {
     Created,
+    #[allow(dead_code)]
     InProgress,
+    #[allow(dead_code)]
     Completed,
+    #[allow(dead_code)]
     Cancelled,
 }
 

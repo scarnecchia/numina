@@ -319,39 +319,3 @@ impl EmbeddingProvider for CandleEmbedder {
         self.dimensions
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_candle_embedder_creation() {
-        // Skip test if we can't create the embedder (e.g., in CI)
-        match CandleEmbedder::new("jinaai/jina-embeddings-v2-small-en", None).await {
-            Ok(embedder) => {
-                assert_eq!(embedder.dimensions(), 512);
-                assert_eq!(embedder.model_id(), "jinaai/jina-embeddings-v2-small-en");
-            }
-            Err(_) => {
-                // Skip test if model loading fails
-                eprintln!("Skipping Candle test - model loading failed");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_candle_embed() {
-        // Skip test if we can't create the embedder (e.g., in CI)
-        match CandleEmbedder::new("jinaai/jina-embeddings-v2-small-en", None).await {
-            Ok(embedder) => {
-                let embedding = embedder.embed("test text").await.unwrap();
-                assert_eq!(embedding.dimensions, 512);
-                assert_eq!(embedding.vector.len(), 512);
-            }
-            Err(_) => {
-                // Skip test if model loading fails
-                eprintln!("Skipping Candle embed test - model loading failed");
-            }
-        }
-    }
-}

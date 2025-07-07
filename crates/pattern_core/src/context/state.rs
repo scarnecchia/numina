@@ -12,14 +12,14 @@ use std::sync::Arc;
 use crate::{AgentId, AgentType, CoreError, Result, memory::Memory, tool::ToolRegistry};
 
 use super::{
-    AgentContext, CompressionResult, CompressionStrategy, ContextBuilder, ContextConfig,
+    CompressionResult, CompressionStrategy, ContextBuilder, ContextConfig, MemoryContext,
     MessageCompressor,
     genai_ext::{ChatMessageExt, ChatRoleExt},
 };
 
 /// Represents the complete state of an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentState {
+pub struct AgentContext {
     /// Unique identifier for this agent
     pub agent_id: AgentId,
 
@@ -50,12 +50,12 @@ pub struct AgentState {
     pub compression_strategy: CompressionStrategy,
 
     /// Metadata about the agent state
-    pub metadata: AgentStateMetadata,
+    pub metadata: AgentContextMetadata,
 }
 
-/// Metadata about the agent's state
+/// Metadata about the agent state
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentStateMetadata {
+pub struct AgentContextMetadata {
     pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
     pub total_messages: usize,
@@ -64,7 +64,7 @@ pub struct AgentStateMetadata {
     pub compression_events: usize,
 }
 
-impl AgentState {
+impl AgentContext {
     /// Create a new agent state
     pub fn new(
         agent_id: AgentId,
@@ -83,7 +83,7 @@ impl AgentState {
             tools,
             context_config,
             compression_strategy: CompressionStrategy::default(),
-            metadata: AgentStateMetadata {
+            metadata: AgentContextMetadata {
                 created_at: Utc::now(),
                 last_active: Utc::now(),
                 total_messages: 0,
@@ -95,7 +95,7 @@ impl AgentState {
     }
 
     /// Build the current context for this agent
-    pub async fn build_context(&mut self) -> Result<AgentContext> {
+    pub async fn build_context(&mut self) -> Result<MemoryContext> {
         self.metadata.last_active = Utc::now();
         self.metadata.context_rebuilds += 1;
 
@@ -307,11 +307,11 @@ pub struct StateCheckpoint {
     pub timestamp: DateTime<Utc>,
     pub messages: Vec<ChatMessage>,
     pub memory_snapshot: Memory,
-    pub metadata: AgentStateMetadata,
+    pub metadata: AgentContextMetadata,
 }
 
 /// Builder for creating agent states
-pub struct AgentStateBuilder {
+pub struct AgentContextBuilder {
     agent_id: AgentId,
     agent_type: AgentType,
     memory_blocks: Vec<(String, String, Option<String>)>,
@@ -321,7 +321,7 @@ pub struct AgentStateBuilder {
     initial_messages: Vec<ChatMessage>,
 }
 
-impl AgentStateBuilder {
+impl AgentContextBuilder {
     /// Create a new agent state builder
     pub fn new(agent_id: AgentId, agent_type: AgentType) -> Self {
         Self {
@@ -372,7 +372,7 @@ impl AgentStateBuilder {
     }
 
     /// Build the agent state
-    pub fn build(self) -> Result<AgentState> {
+    pub fn build(self) -> Result<AgentContext> {
         // Create memory
         let mut memory = Memory::new();
         for (label, value, description) in self.memory_blocks {
@@ -391,7 +391,7 @@ impl AgentStateBuilder {
         let context_config = self.context_config.unwrap_or_default();
 
         // Create state
-        let mut state = AgentState::new(
+        let mut state = AgentContext::new(
             self.agent_id,
             self.agent_type,
             memory,
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn test_agent_state_builder() {
         let id = AgentId::generate();
-        let state = AgentStateBuilder::new(id.clone(), AgentType::Generic)
+        let state = AgentContextBuilder::new(id.clone(), AgentType::Generic)
             .with_memory_block(
                 "persona",
                 "I am a helpful AI assistant",
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_message_search() {
-        let mut state = AgentStateBuilder::new(AgentId::generate(), AgentType::Generic)
+        let mut state = AgentContextBuilder::new(AgentId::generate(), AgentType::Generic)
             .build()
             .unwrap();
 

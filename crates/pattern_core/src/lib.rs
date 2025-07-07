@@ -17,10 +17,10 @@ pub mod realtime;
 pub mod tool;
 pub mod utils;
 
-pub use agent::{Agent, AgentBuilder, AgentType};
+pub use agent::{Agent, AgentBuilder, AgentState, AgentType};
 pub use context::{
-    AgentContext, AgentState, AgentStateBuilder, CompressionStrategy, ContextBuilder,
-    ContextConfig, MessageCompressor,
+    AgentContext, AgentContextBuilder, CompressionStrategy, ContextBuilder, ContextConfig,
+    MemoryContext, MessageCompressor,
 };
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
@@ -34,10 +34,11 @@ pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        Agent, AgentBuilder, AgentContext, AgentId, AgentState, AgentStateBuilder, AgentType,
+        Agent, AgentBuilder, AgentContext, AgentContextBuilder, AgentId, AgentState, AgentType,
         AiTool, CompressionStrategy, Constellation, ContextBuilder, ContextConfig,
         CoordinationPattern, CoreError, DynamicTool, Id, IdType, Memory, MemoryBlock,
-        MessageCompressor, ModelCapability, ModelProvider, Result, ToolRegistry, ToolResult,
+        MemoryContext, MessageCompressor, ModelCapability, ModelProvider, Result, ToolRegistry,
+        ToolResult,
     };
 }
 

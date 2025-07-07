@@ -15,6 +15,13 @@ pub mod embedded;
 pub mod migration;
 pub mod ops;
 pub mod schema;
+pub mod serde_helpers;
+
+// Re-export commonly used types
+pub use schema::{
+    Agent, Conversation, EnergyLevel, MemoryBlock, Message, Task, TaskPriority, TaskStatus,
+    ToolCall, User,
+};
 
 /// Core database error type
 #[derive(Error, Debug, Diagnostic)]

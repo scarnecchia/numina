@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::{AgentId, Memory, Result, tool::DynamicTool};
@@ -48,7 +49,7 @@ pub trait Agent: Send + Sync + Debug {
 }
 
 /// Types of agents in the system
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentType {
     /// Generic agent without specific personality
     Generic,
@@ -71,6 +72,45 @@ pub enum AgentType {
     Custom(String),
 }
 
+impl Serialize for AgentType {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Generic => serializer.serialize_str("generic"),
+            #[cfg(feature = "nd")]
+            Self::Pattern => serializer.serialize_str("pattern"),
+            #[cfg(feature = "nd")]
+            Self::Entropy => serializer.serialize_str("entropy"),
+            #[cfg(feature = "nd")]
+            Self::Flux => serializer.serialize_str("flux"),
+            #[cfg(feature = "nd")]
+            Self::Archive => serializer.serialize_str("archive"),
+            #[cfg(feature = "nd")]
+            Self::Momentum => serializer.serialize_str("momentum"),
+            #[cfg(feature = "nd")]
+            Self::Anchor => serializer.serialize_str("anchor"),
+            Self::Custom(name) => serializer.serialize_str(&format!("custom:{}", name)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        // Check if it starts with custom: prefix
+        if let Some(name) = s.strip_prefix("custom:") {
+            Ok(Self::Custom(name.to_string()))
+        } else {
+            Ok(Self::from_str(&s).unwrap_or_else(|_| Self::Custom(s)))
+        }
+    }
+}
+
 impl AgentType {
     pub fn as_str(&self) -> &str {
         match self {
@@ -87,13 +127,42 @@ impl AgentType {
             Self::Momentum => "momentum",
             #[cfg(feature = "nd")]
             Self::Anchor => "anchor",
-            Self::Custom(name) => name,
+            Self::Custom(name) => name, // Note: this returns the raw name without prefix
+        }
+    }
+}
+
+impl FromStr for AgentType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "generic" => Ok(Self::Generic),
+            #[cfg(feature = "nd")]
+            "pattern" => Ok(Self::Pattern),
+            #[cfg(feature = "nd")]
+            "entropy" => Ok(Self::Entropy),
+            #[cfg(feature = "nd")]
+            "flux" => Ok(Self::Flux),
+            #[cfg(feature = "nd")]
+            "archive" => Ok(Self::Archive),
+            #[cfg(feature = "nd")]
+            "momentum" => Ok(Self::Momentum),
+            #[cfg(feature = "nd")]
+            "anchor" => Ok(Self::Anchor),
+            // Check for custom: prefix
+            other if other.starts_with("custom:") => Ok(Self::Custom(
+                other.strip_prefix("custom:").unwrap().to_string(),
+            )),
+            // For backward compatibility, also accept without prefix
+            other => Ok(Self::Custom(other.to_string())),
         }
     }
 }
 
 /// The current state of an agent
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AgentState {
     /// Agent is ready to process messages
     Ready,
@@ -111,6 +180,38 @@ pub enum AgentState {
     Error,
 }
 
+impl Default for AgentState {
+    fn default() -> Self {
+        Self::Ready
+    }
+}
+
+impl FromStr for AgentState {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "ready" => Ok(Self::Ready),
+            "processing" => Ok(Self::Processing),
+            "suspended" => Ok(Self::Suspended),
+            "error" => Ok(Self::Error),
+            other => {
+                // Try to parse as cooldown with timestamp
+                if other.starts_with("cooldown:") {
+                    let timestamp_str = &other[9..];
+                    chrono::DateTime::parse_from_rfc3339(timestamp_str)
+                        .map(|dt| Self::Cooldown {
+                            until: dt.with_timezone(&Utc),
+                        })
+                        .map_err(|e| format!("Invalid cooldown timestamp: {}", e))
+                } else {
+                    Err(format!("Unknown agent state: {}", other))
+                }
+            }
+        }
+    }
+}
+
 /// A message to be processed by an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -123,6 +224,7 @@ pub struct Message {
 
 /// The role of a message sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     User,
     Assistant,

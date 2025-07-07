@@ -19,7 +19,7 @@ pub mod state;
 
 pub use compression::{CompressionResult, CompressionStrategy, MessageCompressor};
 pub use genai_ext::{ChatMessageExt, ChatRoleExt, MessageContentExt};
-pub use state::{AgentState, AgentStateBuilder, AgentStats, StateCheckpoint};
+pub use state::{AgentContext, AgentContextBuilder, AgentStats, StateCheckpoint};
 
 /// Maximum characters for core memory blocks by default
 const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 5000;
@@ -29,7 +29,7 @@ const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 50;
 
 /// A complete context ready to be sent to an LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentContext {
+pub struct MemoryContext {
     /// System prompt including all instructions and memory
     pub system_prompt: String,
 
@@ -204,7 +204,7 @@ impl ContextBuilder {
     }
 
     /// Build the final context
-    pub fn build(self) -> Result<AgentContext> {
+    pub fn build(self) -> Result<MemoryContext> {
         // Build system prompt
         let system_prompt = self.build_system_prompt()?;
 
@@ -228,7 +228,7 @@ impl ContextBuilder {
             tools_count: self.tools.len(),
         };
 
-        Ok(AgentContext {
+        Ok(MemoryContext {
             system_prompt,
             tools,
             messages,

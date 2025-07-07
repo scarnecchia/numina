@@ -3,6 +3,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::{
+    agent::{AgentState, AgentType},
+    id::{AgentId, ConversationId, MemoryId, MessageId, TaskId, ToolCallId, UserId},
+};
+
+// use super::serde_helpers::{
+//     deserialize_surreal_bool, deserialize_surreal_datetime, deserialize_surreal_datetime_option,
+//     deserialize_surreal_enum, deserialize_surreal_id, deserialize_surreal_id_option,
+//     deserialize_surreal_record_ref, deserialize_surreal_strand,
+// };
+
 /// SQL schema definitions for the database
 pub struct Schema;
 
@@ -62,12 +73,12 @@ impl Schema {
             schema: r#"
                 DEFINE TABLE agents SCHEMAFULL;
                 DEFINE FIELD id ON agents TYPE string;
-                DEFINE FIELD user_id ON agents TYPE string;
+                DEFINE FIELD user_id ON agents TYPE record;
                 DEFINE FIELD agent_type ON agents TYPE string;
                 DEFINE FIELD name ON agents TYPE string;
                 DEFINE FIELD system_prompt ON agents TYPE string;
                 DEFINE FIELD config ON agents TYPE object;
-                DEFINE FIELD state ON agents TYPE object;
+                DEFINE FIELD state ON agents TYPE any;
                 DEFINE FIELD created_at ON agents TYPE datetime;
                 DEFINE FIELD updated_at ON agents TYPE datetime;
                 DEFINE FIELD is_active ON agents TYPE bool DEFAULT true;
@@ -89,7 +100,7 @@ impl Schema {
             schema: r#"
                 DEFINE TABLE memory_blocks SCHEMAFULL;
                 DEFINE FIELD id ON memory_blocks TYPE string;
-                DEFINE FIELD agent_id ON memory_blocks TYPE string;
+                DEFINE FIELD agent_id ON memory_blocks TYPE record;
                 DEFINE FIELD label ON memory_blocks TYPE string;
                 DEFINE FIELD content ON memory_blocks TYPE string;
                 DEFINE FIELD description ON memory_blocks TYPE option<string>;
@@ -115,8 +126,8 @@ impl Schema {
             schema: r#"
                 DEFINE TABLE conversations SCHEMAFULL;
                 DEFINE FIELD id ON conversations TYPE string;
-                DEFINE FIELD user_id ON conversations TYPE string;
-                DEFINE FIELD agent_id ON conversations TYPE string;
+                DEFINE FIELD user_id ON conversations TYPE record;
+                DEFINE FIELD agent_id ON conversations TYPE record;
                 DEFINE FIELD title ON conversations TYPE option<string>;
                 DEFINE FIELD context ON conversations TYPE object;
                 DEFINE FIELD created_at ON conversations TYPE datetime;
@@ -139,7 +150,7 @@ impl Schema {
             schema: r#"
                 DEFINE TABLE messages SCHEMAFULL;
                 DEFINE FIELD id ON messages TYPE string;
-                DEFINE FIELD conversation_id ON messages TYPE string;
+                DEFINE FIELD conversation_id ON messages TYPE record;
                 DEFINE FIELD role ON messages TYPE string;
                 DEFINE FIELD content ON messages TYPE string;
                 DEFINE FIELD embedding ON messages TYPE option<array<float>>;
@@ -164,8 +175,8 @@ impl Schema {
             schema: r#"
                 DEFINE TABLE tool_calls SCHEMAFULL;
                 DEFINE FIELD id ON tool_calls TYPE string;
-                DEFINE FIELD agent_id ON tool_calls TYPE string;
-                DEFINE FIELD conversation_id ON tool_calls TYPE string;
+                DEFINE FIELD agent_id ON tool_calls TYPE record;
+                DEFINE FIELD conversation_id ON tool_calls TYPE record;
                 DEFINE FIELD tool_name ON tool_calls TYPE string;
                 DEFINE FIELD parameters ON tool_calls TYPE object;
                 DEFINE FIELD result ON tool_calls TYPE object;
@@ -189,8 +200,8 @@ impl Schema {
             schema: r#"
                 DEFINE TABLE tasks SCHEMAFULL;
                 DEFINE FIELD id ON tasks TYPE string;
-                DEFINE FIELD user_id ON tasks TYPE string;
-                DEFINE FIELD parent_id ON tasks TYPE option<string>;
+                DEFINE FIELD user_id ON tasks TYPE record;
+                DEFINE FIELD parent_id ON tasks TYPE option<record>;
                 DEFINE FIELD title ON tasks TYPE string;
                 DEFINE FIELD description ON tasks TYPE option<string>;
                 DEFINE FIELD embedding ON tasks TYPE option<array<float>>;
@@ -241,8 +252,11 @@ pub struct TableDefinition {
 /// User model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    pub id: String,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: UserId,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub settings: HashMap<String, serde_json::Value>,
@@ -253,62 +267,87 @@ pub struct User {
 /// Agent model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
-    pub id: String,
-    pub user_id: String,
-    pub agent_type: String,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: AgentId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub user_id: UserId,
+    // #[serde(deserialize_with = "deserialize_surreal_enum")]
+    pub agent_type: AgentType,
+    // #[serde(deserialize_with = "deserialize_surreal_strand")]
     pub name: String,
+    // #[serde(deserialize_with = "deserialize_surreal_strand")]
     pub system_prompt: String,
     #[serde(default)]
     pub config: serde_json::Value,
-    #[serde(default)]
-    pub state: serde_json::Value,
+    // #[serde(deserialize_with = "deserialize_surreal_enum")]
+    pub state: AgentState,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default = "default_true")]
+    // #[serde(deserialize_with = "deserialize_surreal_bool")]
     pub is_active: bool,
 }
 
 /// Memory block model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlock {
-    pub id: String,
-    pub agent_id: String,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: MemoryId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub agent_id: AgentId,
+    // #[serde(deserialize_with = "deserialize_surreal_strand")]
     pub label: String,
+    // #[serde(deserialize_with = "deserialize_surreal_strand")]
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub embedding: Vec<f32>,
+    // #[serde(deserialize_with = "deserialize_surreal_strand")]
     pub embedding_model: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default = "default_true")]
+    // #[serde(deserialize_with = "deserialize_surreal_bool")]
     pub is_active: bool,
 }
 
 /// Conversation model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
-    pub id: String,
-    pub user_id: String,
-    pub agent_id: String,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: ConversationId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub user_id: UserId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub agent_id: AgentId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default)]
     pub context: serde_json::Value,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        // deserialize_with = "deserialize_surreal_datetime_option",
+        default
+    )]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Message model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub id: String,
-    pub conversation_id: String,
-    pub role: String,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: MessageId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub conversation_id: ConversationId,
+    pub role: crate::agent::MessageRole,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
@@ -317,32 +356,73 @@ pub struct Message {
     #[serde(default)]
     pub metadata: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub tool_calls: Option<Vec<crate::agent::ToolCall>>,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Tool call model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    pub id: String,
-    pub agent_id: String,
-    pub conversation_id: String,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: ToolCallId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub agent_id: AgentId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub conversation_id: ConversationId,
     pub tool_name: String,
     pub parameters: serde_json::Value,
     pub result: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub duration_ms: i64,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Task status enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+    Blocked,
+}
+
+/// Task priority enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskPriority {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Energy level required for a task
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnergyLevel {
+    Low,
+    Medium,
+    High,
 }
 
 /// Task model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
-    pub id: String,
-    pub user_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub id: TaskId,
+    // #[serde(deserialize_with = "deserialize_surreal_id")]
+    pub user_id: UserId,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        // deserialize_with = "deserialize_surreal_id_option",
+        default
+    )]
+    pub parent_id: Option<TaskId>,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -351,39 +431,53 @@ pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
     #[serde(default = "default_pending")]
-    pub status: String,
-    #[serde(default = "default_medium")]
-    pub priority: String,
+    pub status: TaskStatus,
+    #[serde(default = "default_medium_priority")]
+    pub priority: TaskPriority,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_minutes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_minutes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complexity_score: Option<f32>,
-    #[serde(default = "default_medium")]
-    pub energy_required: String,
+    #[serde(default = "default_medium_energy")]
+    pub energy_required: EnergyLevel,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        // deserialize_with = "deserialize_surreal_datetime_option",
+        default
+    )]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        // deserialize_with = "deserialize_surreal_datetime_option",
+        default
+    )]
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        // deserialize_with = "deserialize_surreal_datetime_option",
+        default
+    )]
     pub due_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn default_true() -> bool {
-    true
+fn default_pending() -> TaskStatus {
+    TaskStatus::Pending
 }
 
-fn default_pending() -> String {
-    "pending".to_string()
+fn default_medium_priority() -> TaskPriority {
+    TaskPriority::Medium
 }
 
-fn default_medium() -> String {
-    "medium".to_string()
+fn default_medium_energy() -> EnergyLevel {
+    EnergyLevel::Medium
 }
