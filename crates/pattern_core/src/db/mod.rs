@@ -7,35 +7,41 @@
 
 use async_trait::async_trait;
 use miette::Diagnostic;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use thiserror::Error;
 
-pub mod embedded;
+pub mod client;
 pub mod migration;
+pub mod models;
 pub mod ops;
 pub mod schema;
-pub mod serde_helpers;
 
 // Re-export commonly used types
+pub use models::{DbAgent, DbMemoryBlock, DbUser};
 pub use schema::{
-    Agent, Conversation, EnergyLevel, MemoryBlock, Message, Task, TaskPriority, TaskStatus,
-    ToolCall, User,
+    Agent, Conversation, EnergyLevel, MemoryBlock, Task, TaskPriority, TaskStatus, ToolCall, User,
 };
+
+use crate::embeddings::EmbeddingError;
 
 /// Core database error type
 #[derive(Error, Debug, Diagnostic)]
 pub enum DatabaseError {
-    #[error("Connection failed")]
+    #[error("Connection failed {0}")]
     #[diagnostic(help("Check your database configuration and ensure the database is running"))]
-    ConnectionFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+    ConnectionFailed(#[source] surrealdb::Error),
 
-    #[error("Query failed")]
+    #[error("Query failed {0}")]
     #[diagnostic(help("Check the query syntax and table schema"))]
-    QueryFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+    QueryFailed(#[source] surrealdb::Error),
 
-    #[error("Transaction failed")]
-    TransactionFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("Serde problem: {0}")]
+    #[diagnostic(help("Check the query syntax and table schema"))]
+    SerdeProblem(#[from] serde_json::Error),
+
+    #[error("Transaction failed {0}")]
+    TransactionFailed(#[source] surrealdb::Error),
 
     #[error("Embedding model mismatch: database has {db_model}, config specifies {config_model}")]
     #[diagnostic(help(
@@ -45,6 +51,9 @@ pub enum DatabaseError {
         db_model: String,
         config_model: String,
     },
+
+    #[error("Error with embedding: {0}")]
+    EmbeddingError(#[from] EmbeddingError),
 
     #[error("Schema version mismatch: database is at v{db_version}, code expects v{code_version}")]
     #[diagnostic(help("Run migrations to update the database schema"))]
@@ -56,6 +65,9 @@ pub enum DatabaseError {
     #[error("Invalid vector dimensions: expected {expected}, got {actual}")]
     #[diagnostic(help("Ensure all embeddings use the same model and dimensions"))]
     InvalidVectorDimensions { expected: usize, actual: usize },
+
+    #[error("Error: {0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, DatabaseError>;
@@ -132,6 +144,20 @@ pub trait DatabaseBackend: Send + Sync {
         params: Vec<(String, serde_json::Value)>,
     ) -> Result<QueryResponse>;
 
+    /// Execute a query expecting a single result
+    async fn query_one<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        params: Vec<(String, serde_json::Value)>,
+    ) -> Result<Option<T>>;
+
+    /// Execute a query expecting multiple results
+    async fn query_many<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        params: Vec<(String, serde_json::Value)>,
+    ) -> Result<Vec<T>>;
+
     /// Check if the database is healthy
     async fn health_check(&self) -> Result<()>;
 
@@ -149,7 +175,66 @@ pub trait DatabaseOperations: DatabaseBackend {
         R: Send;
 }
 
-/// Transaction operations
+/// Query builder for type-safe queries
+pub struct Query<'a> {
+    query: String,
+    params: Vec<(&'a str, serde_json::Value)>,
+}
+
+impl<'a> Query<'a> {
+    /// Create a new query builder
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            params: Vec::new(),
+        }
+    }
+
+    /// Bind a parameter to the query
+    pub fn bind<T: Serialize>(mut self, name: &'a str, value: T) -> Result<Self> {
+        let json_value = serde_json::to_value(value)?;
+        self.params.push((name, json_value));
+        Ok(self)
+    }
+
+    /// Execute the query expecting a single result
+    pub async fn query_one<T: DeserializeOwned, DB: DatabaseBackend + ?Sized>(
+        self,
+        db: &DB,
+    ) -> Result<Option<T>> {
+        let params = self
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        db.query_one(&self.query, params).await
+    }
+
+    /// Execute the query expecting multiple results
+    pub async fn query_many<T: DeserializeOwned, DB: DatabaseBackend + ?Sized>(
+        self,
+        db: &DB,
+    ) -> Result<Vec<T>> {
+        let params = self
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        db.query_many(&self.query, params).await
+    }
+
+    /// Execute the query without expecting typed results
+    pub async fn execute<DB: DatabaseBackend + ?Sized>(self, db: &DB) -> Result<QueryResponse> {
+        let params = self
+            .params
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        db.execute(&self.query, params).await
+    }
+}
+
+/// Transaction handle
 #[async_trait]
 pub trait Transaction: Send + Sync {
     /// Execute a query within the transaction
@@ -228,10 +313,7 @@ pub async fn load_metadata<DB: DatabaseBackend>(db: &DB) -> Result<Option<System
         .await?;
 
     if let Some(data) = response.data.as_array().and_then(|arr| arr.first()) {
-        Ok(Some(
-            serde_json::from_value(data.clone())
-                .map_err(|e| DatabaseError::QueryFailed(Box::new(e)))?,
-        ))
+        Ok(Some(serde_json::from_value(data.clone())?))
     } else {
         Ok(None)
     }

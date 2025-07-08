@@ -5,14 +5,11 @@ use std::collections::HashMap;
 
 use crate::{
     agent::{AgentState, AgentType},
-    id::{AgentId, ConversationId, MemoryId, MessageId, TaskId, ToolCallId, UserId},
+    id::{
+        AgentId, AgentIdType, ConversationId, ConversationIdType, IdType, MemoryId, MemoryIdType,
+        MessageIdType, TaskId, TaskIdType, ToolCallId, ToolCallIdType, UserId, UserIdType,
+    },
 };
-
-// use super::serde_helpers::{
-//     deserialize_surreal_bool, deserialize_surreal_datetime, deserialize_surreal_datetime_option,
-//     deserialize_surreal_enum, deserialize_surreal_id, deserialize_surreal_id_option,
-//     deserialize_surreal_record_ref, deserialize_surreal_strand,
-// };
 
 /// SQL schema definitions for the database
 pub struct Schema;
@@ -36,14 +33,14 @@ impl Schema {
     pub fn system_metadata() -> TableDefinition {
         TableDefinition {
             name: "system_metadata".to_string(),
-            schema: r#"
+            schema: "
                 DEFINE TABLE system_metadata SCHEMAFULL;
                 DEFINE FIELD embedding_model ON system_metadata TYPE string;
                 DEFINE FIELD embedding_dimensions ON system_metadata TYPE int;
                 DEFINE FIELD schema_version ON system_metadata TYPE int;
                 DEFINE FIELD created_at ON system_metadata TYPE datetime;
                 DEFINE FIELD updated_at ON system_metadata TYPE datetime;
-            "#
+            "
             .to_string(),
             indexes: vec![],
         }
@@ -51,181 +48,239 @@ impl Schema {
 
     /// Users table
     pub fn users() -> TableDefinition {
+        let table_name = UserIdType::PREFIX;
         TableDefinition {
-            name: "users".to_string(),
-            schema: r#"
-                DEFINE TABLE users SCHEMAFULL;
-                DEFINE FIELD id ON users TYPE string;
-                DEFINE FIELD created_at ON users TYPE datetime;
-                DEFINE FIELD updated_at ON users TYPE datetime;
-                DEFINE FIELD settings ON users TYPE object;
-                DEFINE FIELD metadata ON users TYPE object;
-            "#
-            .to_string(),
-            indexes: vec!["DEFINE INDEX users_id ON users FIELDS id UNIQUE".to_string()],
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD updated_at ON {table} TYPE datetime;
+                DEFINE FIELD settings ON {table} TYPE object;
+                DEFINE FIELD metadata ON {table} TYPE object;
+            ",
+                table = table_name
+            ),
+            indexes: vec![format!(
+                "DEFINE INDEX {}_id ON {} FIELDS id UNIQUE",
+                table_name, table_name
+            )],
         }
     }
 
     /// Agents table
     pub fn agents() -> TableDefinition {
+        let table_name = AgentIdType::PREFIX;
         TableDefinition {
-            name: "agents".to_string(),
-            schema: r#"
-                DEFINE TABLE agents SCHEMAFULL;
-                DEFINE FIELD id ON agents TYPE string;
-                DEFINE FIELD user_id ON agents TYPE record;
-                DEFINE FIELD agent_type ON agents TYPE string;
-                DEFINE FIELD name ON agents TYPE string;
-                DEFINE FIELD system_prompt ON agents TYPE string;
-                DEFINE FIELD config ON agents TYPE object;
-                DEFINE FIELD state ON agents TYPE any;
-                DEFINE FIELD created_at ON agents TYPE datetime;
-                DEFINE FIELD updated_at ON agents TYPE datetime;
-                DEFINE FIELD is_active ON agents TYPE bool DEFAULT true;
-            "#
-            .to_string(),
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD user_id ON {table} TYPE record<user>;
+                DEFINE FIELD agent_type ON {table} TYPE string;
+                DEFINE FIELD name ON {table} TYPE string;
+                DEFINE FIELD system_prompt ON {table} TYPE string;
+                DEFINE FIELD config ON {table} TYPE object;
+                DEFINE FIELD state ON {table} TYPE any;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD updated_at ON {table} TYPE datetime;
+                DEFINE FIELD is_active ON {table} TYPE bool DEFAULT true;
+            ",
+                table = table_name
+            ),
             indexes: vec![
-                "DEFINE INDEX agents_user ON agents FIELDS user_id".to_string(),
-                "DEFINE INDEX agents_type ON agents FIELDS agent_type".to_string(),
-                "DEFINE INDEX agents_user_type ON agents FIELDS user_id, agent_type UNIQUE"
-                    .to_string(),
+                format!(
+                    "DEFINE INDEX {}_user ON {} FIELDS user_id",
+                    table_name, table_name
+                ),
+                format!(
+                    "DEFINE INDEX {}_type ON {} FIELDS agent_type",
+                    table_name, table_name
+                ),
+                format!(
+                    "DEFINE INDEX {}_user_type ON {} FIELDS user_id, agent_type UNIQUE",
+                    table_name, table_name
+                ),
             ],
         }
     }
 
     /// Memory blocks table with embeddings
     pub fn memory_blocks() -> TableDefinition {
+        let table_name = MemoryIdType::PREFIX;
         TableDefinition {
-            name: "memory_blocks".to_string(),
-            schema: r#"
-                DEFINE TABLE memory_blocks SCHEMAFULL;
-                DEFINE FIELD id ON memory_blocks TYPE string;
-                DEFINE FIELD agent_id ON memory_blocks TYPE record;
-                DEFINE FIELD label ON memory_blocks TYPE string;
-                DEFINE FIELD content ON memory_blocks TYPE string;
-                DEFINE FIELD description ON memory_blocks TYPE option<string>;
-                DEFINE FIELD embedding ON memory_blocks TYPE array<float>;
-                DEFINE FIELD embedding_model ON memory_blocks TYPE string;
-                DEFINE FIELD metadata ON memory_blocks TYPE object;
-                DEFINE FIELD created_at ON memory_blocks TYPE datetime;
-                DEFINE FIELD updated_at ON memory_blocks TYPE datetime;
-                DEFINE FIELD is_active ON memory_blocks TYPE bool DEFAULT true;
-            "#
-            .to_string(),
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD agent_id ON {table} TYPE record<agent>;
+                DEFINE FIELD label ON {table} TYPE string;
+                DEFINE FIELD content ON {table} TYPE string;
+                DEFINE FIELD description ON {table} TYPE option<string>;
+                DEFINE FIELD embedding ON {table} TYPE array<float>;
+                DEFINE FIELD embedding_model ON {table} TYPE string;
+                DEFINE FIELD metadata ON {table} TYPE object;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD updated_at ON {table} TYPE datetime;
+                DEFINE FIELD is_active ON {table} TYPE bool DEFAULT true;
+            ",
+                table = table_name
+            ),
             indexes: vec![
-                "DEFINE INDEX memory_agent ON memory_blocks FIELDS agent_id".to_string(),
-                "DEFINE INDEX memory_label ON memory_blocks FIELDS agent_id, label".to_string(),
+                format!(
+                    "DEFINE INDEX {}_agent ON {} FIELDS agent_id",
+                    table_name, table_name
+                ),
+                format!(
+                    "DEFINE INDEX {}_label ON {} FIELDS agent_id, label",
+                    table_name, table_name
+                ),
             ],
         }
     }
 
     /// Conversations table
     pub fn conversations() -> TableDefinition {
+        let table_name = ConversationIdType::PREFIX;
         TableDefinition {
-            name: "conversations".to_string(),
-            schema: r#"
-                DEFINE TABLE conversations SCHEMAFULL;
-                DEFINE FIELD id ON conversations TYPE string;
-                DEFINE FIELD user_id ON conversations TYPE record;
-                DEFINE FIELD agent_id ON conversations TYPE record;
-                DEFINE FIELD title ON conversations TYPE option<string>;
-                DEFINE FIELD context ON conversations TYPE object;
-                DEFINE FIELD created_at ON conversations TYPE datetime;
-                DEFINE FIELD updated_at ON conversations TYPE datetime;
-                DEFINE FIELD ended_at ON conversations TYPE option<datetime>;
-            "#
-            .to_string(),
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD user_id ON {table} TYPE record<user>;
+                DEFINE FIELD agent_id ON {table} TYPE record<agent>;
+                DEFINE FIELD title ON {table} TYPE option<string>;
+                DEFINE FIELD context ON {table} TYPE object;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD updated_at ON {table} TYPE datetime;
+                DEFINE FIELD ended_at ON {table} TYPE option<datetime>;
+            ",
+                table = table_name
+            ),
             indexes: vec![
-                "DEFINE INDEX conv_user ON conversations FIELDS user_id".to_string(),
-                "DEFINE INDEX conv_agent ON conversations FIELDS agent_id".to_string(),
-                "DEFINE INDEX conv_active ON conversations FIELDS user_id, ended_at".to_string(),
+                format!("DEFINE INDEX conv_user ON {} FIELDS user_id", table_name),
+                format!("DEFINE INDEX conv_agent ON {} FIELDS agent_id", table_name),
+                format!(
+                    "DEFINE INDEX conv_active ON {} FIELDS user_id, ended_at",
+                    table_name
+                ),
             ],
         }
     }
 
     /// Messages table with embeddings
     pub fn messages() -> TableDefinition {
+        let table_name = MessageIdType::PREFIX;
         TableDefinition {
-            name: "messages".to_string(),
-            schema: r#"
-                DEFINE TABLE messages SCHEMAFULL;
-                DEFINE FIELD id ON messages TYPE string;
-                DEFINE FIELD conversation_id ON messages TYPE record;
-                DEFINE FIELD role ON messages TYPE string;
-                DEFINE FIELD content ON messages TYPE string;
-                DEFINE FIELD embedding ON messages TYPE option<array<float>>;
-                DEFINE FIELD embedding_model ON messages TYPE option<string>;
-                DEFINE FIELD metadata ON messages TYPE object;
-                DEFINE FIELD tool_calls ON messages TYPE option<array>;
-                DEFINE FIELD created_at ON messages TYPE datetime;
-            "#
-            .to_string(),
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD conversation_id ON {table} TYPE record<conversation>;
+                DEFINE FIELD role ON {table} TYPE string;
+                DEFINE FIELD content ON {table} TYPE string;
+                DEFINE FIELD embedding ON {table} TYPE option<array<float>>;
+                DEFINE FIELD embedding_model ON {table} TYPE option<string>;
+                DEFINE FIELD metadata ON {table} TYPE object;
+                DEFINE FIELD tool_calls ON {table} TYPE option<array>;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+            ",
+                table = table_name
+            ),
             indexes: vec![
-                "DEFINE INDEX msg_conversation ON messages FIELDS conversation_id".to_string(),
-                "DEFINE INDEX msg_created ON messages FIELDS conversation_id, created_at"
-                    .to_string(),
+                format!(
+                    "DEFINE INDEX {}_conversation ON {} FIELDS conversation_id",
+                    table_name, table_name
+                ),
+                format!(
+                    "DEFINE INDEX {}_created ON {} FIELDS conversation_id, created_at",
+                    table_name, table_name
+                ),
             ],
         }
     }
 
     /// Tool calls audit table
     pub fn tool_calls() -> TableDefinition {
+        let table_name = ToolCallIdType::PREFIX;
         TableDefinition {
-            name: "tool_calls".to_string(),
-            schema: r#"
-                DEFINE TABLE tool_calls SCHEMAFULL;
-                DEFINE FIELD id ON tool_calls TYPE string;
-                DEFINE FIELD agent_id ON tool_calls TYPE record;
-                DEFINE FIELD conversation_id ON tool_calls TYPE record;
-                DEFINE FIELD tool_name ON tool_calls TYPE string;
-                DEFINE FIELD parameters ON tool_calls TYPE object;
-                DEFINE FIELD result ON tool_calls TYPE object;
-                DEFINE FIELD error ON tool_calls TYPE option<string>;
-                DEFINE FIELD duration_ms ON tool_calls TYPE int;
-                DEFINE FIELD created_at ON tool_calls TYPE datetime;
-            "#
-            .to_string(),
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD agent_id ON {table} TYPE record<agent>;
+                DEFINE FIELD conversation_id ON {table} TYPE record<conversation>;
+                DEFINE FIELD tool_name ON {table} TYPE string;
+                DEFINE FIELD parameters ON {table} TYPE object;
+                DEFINE FIELD result ON {table} TYPE object;
+                DEFINE FIELD error ON {table} TYPE option<string>;
+                DEFINE FIELD duration_ms ON {table} TYPE int;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+            ",
+                table = table_name
+            ),
             indexes: vec![
-                "DEFINE INDEX tools_agent ON tool_calls FIELDS agent_id".to_string(),
-                "DEFINE INDEX tools_name ON tool_calls FIELDS tool_name".to_string(),
-                "DEFINE INDEX tools_conversation ON tool_calls FIELDS conversation_id".to_string(),
+                format!("DEFINE INDEX tools_agent ON {} FIELDS agent_id", table_name),
+                format!("DEFINE INDEX tools_name ON {} FIELDS tool_name", table_name),
+                format!(
+                    "DEFINE INDEX tools_conversation ON {} FIELDS conversation_id",
+                    table_name
+                ),
             ],
         }
     }
 
     /// Tasks table for ADHD support
     pub fn tasks() -> TableDefinition {
+        let table_name = TaskIdType::PREFIX;
         TableDefinition {
-            name: "tasks".to_string(),
-            schema: r#"
-                DEFINE TABLE tasks SCHEMAFULL;
-                DEFINE FIELD id ON tasks TYPE string;
-                DEFINE FIELD user_id ON tasks TYPE record;
-                DEFINE FIELD parent_id ON tasks TYPE option<record>;
-                DEFINE FIELD title ON tasks TYPE string;
-                DEFINE FIELD description ON tasks TYPE option<string>;
-                DEFINE FIELD embedding ON tasks TYPE option<array<float>>;
-                DEFINE FIELD embedding_model ON tasks TYPE option<string>;
-                DEFINE FIELD status ON tasks TYPE string DEFAULT 'pending';
-                DEFINE FIELD priority ON tasks TYPE string DEFAULT 'medium';
-                DEFINE FIELD estimated_minutes ON tasks TYPE option<int>;
-                DEFINE FIELD actual_minutes ON tasks TYPE option<int>;
-                DEFINE FIELD complexity_score ON tasks TYPE option<float>;
-                DEFINE FIELD energy_required ON tasks TYPE string DEFAULT 'medium';
-                DEFINE FIELD tags ON tasks TYPE array<string> DEFAULT [];
-                DEFINE FIELD metadata ON tasks TYPE object;
-                DEFINE FIELD created_at ON tasks TYPE datetime;
-                DEFINE FIELD updated_at ON tasks TYPE datetime;
-                DEFINE FIELD started_at ON tasks TYPE option<datetime>;
-                DEFINE FIELD completed_at ON tasks TYPE option<datetime>;
-                DEFINE FIELD due_at ON tasks TYPE option<datetime>;
-            "#
-            .to_string(),
+            name: table_name.to_string(),
+            schema: format!(
+                "
+                DEFINE TABLE {table} SCHEMAFULL;
+                DEFINE FIELD id ON {table} TYPE record;
+                DEFINE FIELD user_id ON {table} TYPE record<user>;
+                DEFINE FIELD parent_id ON {table} TYPE option<record>;
+                DEFINE FIELD title ON {table} TYPE string;
+                DEFINE FIELD description ON {table} TYPE option<string>;
+                DEFINE FIELD embedding ON {table} TYPE option<array<float>>;
+                DEFINE FIELD embedding_model ON {table} TYPE option<string>;
+                DEFINE FIELD status ON {table} TYPE string DEFAULT 'pending';
+                DEFINE FIELD priority ON {table} TYPE string DEFAULT 'medium';
+                DEFINE FIELD estimated_minutes ON {table} TYPE option<int>;
+                DEFINE FIELD actual_minutes ON {table} TYPE option<int>;
+                DEFINE FIELD complexity_score ON {table} TYPE option<float>;
+                DEFINE FIELD energy_required ON {table} TYPE string DEFAULT 'medium';
+                DEFINE FIELD tags ON {table} TYPE array<string> DEFAULT [];
+                DEFINE FIELD metadata ON {table} TYPE object;
+                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD updated_at ON {table} TYPE datetime;
+                DEFINE FIELD started_at ON {table} TYPE option<datetime>;
+                DEFINE FIELD completed_at ON {table} TYPE option<datetime>;
+                DEFINE FIELD due_at ON {table} TYPE option<datetime>;
+            ",
+                table = table_name
+            ),
             indexes: vec![
-                "DEFINE INDEX tasks_user ON tasks FIELDS user_id".to_string(),
-                "DEFINE INDEX tasks_parent ON tasks FIELDS parent_id".to_string(),
-                "DEFINE INDEX tasks_status ON tasks FIELDS user_id, status".to_string(),
-                "DEFINE INDEX tasks_priority ON tasks FIELDS user_id, priority, status".to_string(),
+                format!("DEFINE INDEX tasks_user ON {} FIELDS user_id", table_name),
+                format!(
+                    "DEFINE INDEX tasks_parent ON {} FIELDS parent_id",
+                    table_name
+                ),
+                format!(
+                    "DEFINE INDEX tasks_status ON {} FIELDS user_id, status",
+                    table_name
+                ),
+                format!(
+                    "DEFINE INDEX tasks_priority ON {} FIELDS user_id, priority, status",
+                    table_name
+                ),
             ],
         }
     }
@@ -252,11 +307,10 @@ pub struct TableDefinition {
 /// User model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
     pub id: UserId,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub created_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub settings: HashMap<String, serde_json::Value>,
@@ -267,108 +321,79 @@ pub struct User {
 /// Agent model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
     pub id: AgentId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub user_id: UserId,
-    // #[serde(deserialize_with = "deserialize_surreal_enum")]
+
     pub agent_type: AgentType,
-    // #[serde(deserialize_with = "deserialize_surreal_strand")]
+
     pub name: String,
-    // #[serde(deserialize_with = "deserialize_surreal_strand")]
+
     pub system_prompt: String,
     #[serde(default)]
     pub config: serde_json::Value,
-    // #[serde(deserialize_with = "deserialize_surreal_enum")]
+
     pub state: AgentState,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub created_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_bool")]
+
     pub is_active: bool,
 }
 
 /// Memory block model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlock {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
     pub id: MemoryId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub agent_id: AgentId,
-    // #[serde(deserialize_with = "deserialize_surreal_strand")]
+
     pub label: String,
-    // #[serde(deserialize_with = "deserialize_surreal_strand")]
+
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub embedding: Vec<f32>,
-    // #[serde(deserialize_with = "deserialize_surreal_strand")]
+
     pub embedding_model: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub created_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_bool")]
+
     pub is_active: bool,
 }
 
 /// Conversation model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
     pub id: ConversationId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub user_id: UserId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub agent_id: AgentId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default)]
     pub context: serde_json::Value,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        // deserialize_with = "deserialize_surreal_datetime_option",
-        default
-    )]
-    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
-}
 
-/// Message model
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
-    pub id: MessageId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
-    pub conversation_id: ConversationId,
-    pub role: crate::agent::MessageRole,
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embedding: Option<Vec<f32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embedding_model: Option<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<crate::agent::ToolCall>>,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
     pub created_at: chrono::DateTime<chrono::Utc>,
+
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Tool call model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
     pub id: ToolCallId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub agent_id: AgentId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub conversation_id: ConversationId,
     pub tool_name: String,
     pub parameters: serde_json::Value,
@@ -376,7 +401,7 @@ pub struct ToolCall {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub duration_ms: i64,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -413,15 +438,10 @@ pub enum EnergyLevel {
 /// Task model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
     pub id: TaskId,
-    // #[serde(deserialize_with = "deserialize_surreal_id")]
+
     pub user_id: UserId,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        // deserialize_with = "deserialize_surreal_id_option",
-        default
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub parent_id: Option<TaskId>,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -446,27 +466,15 @@ pub struct Task {
     pub tags: Vec<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub created_at: chrono::DateTime<chrono::Utc>,
-    // #[serde(deserialize_with = "deserialize_surreal_datetime")]
+
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        // deserialize_with = "deserialize_surreal_datetime_option",
-        default
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        // deserialize_with = "deserialize_surreal_datetime_option",
-        default
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        // deserialize_with = "deserialize_surreal_datetime_option",
-        default
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub due_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

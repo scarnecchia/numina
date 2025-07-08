@@ -2096,9 +2096,9 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.1.23"
+version = "0.4.0-alpha.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81635eee94381ede61515ee832ee8b67bbe1548fe126f98d092f68ac9e96dacc"
+checksum = "7e31f664bff41c387ba4636e281d07b22ebc847046e79f6eda3ec0cecc1eec17"
 dependencies = [
  "bytes",
  "derive_more 2.0.1",
@@ -2111,6 +2111,7 @@ dependencies = [
  "serde_with",
  "tokio",
  "tokio-stream",
+ "tracing",
  "value-ext",
 ]
 
@@ -3691,6 +3692,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "serial_test",
  "smallvec",
  "surrealdb",
  "tempfile",
@@ -4951,6 +4953,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scc"
+version = "2.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22b2d775fb28f245817589471dd49c5edf64237f4a19d10ce9a92ff4651a27f4"
+dependencies = [
+ "sdd",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5035,6 +5046,12 @@ dependencies = [
  "ring",
  "untrusted",
 ]
+
+[[package]]
+name = "sdd"
+version = "3.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "584e070911c7017da6cb2eb0788d09f43d789029b5877d3e5ecc8acf86ceee21"
 
 [[package]]
 name = "seahash"
@@ -5261,6 +5278,31 @@ dependencies = [
  "typemap_rev",
  "url",
  "uwl",
+]
+
+[[package]]
+name = "serial_test"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b258109f244e1d6891bf1053a55d63a5cd4f8f4c30cf9a1280989f80e7a1fa9"
+dependencies = [
+ "futures",
+ "log",
+ "once_cell",
+ "parking_lot",
+ "scc",
+ "serial_test_derive",
+]
+
+[[package]]
+name = "serial_test_derive"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d69265a08751de7844521fd15003ae0a888e035773ba05695c5c759a6f89eef"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
 ]
 
 [[package]]

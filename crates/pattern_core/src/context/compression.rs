@@ -4,11 +4,10 @@
 //! when it exceeds the context window, following the MemGPT paper's approach.
 
 use chrono::{DateTime, Utc};
-use genai::chat::ChatMessage;
 use serde::{Deserialize, Serialize};
 
-use super::genai_ext::{ChatMessageExt, ChatRoleExt};
-use crate::{CoreError, Result, model::ModelProvider};
+use super::genai_ext::ChatRoleExt;
+use crate::{CoreError, ModelProvider, Result, message::Message};
 
 /// Strategy for compressing messages when context is full
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,13 +50,13 @@ impl Default for CompressionStrategy {
 #[derive(Debug, Clone)]
 pub struct CompressionResult {
     /// Messages to keep in the active context
-    pub active_messages: Vec<ChatMessage>,
+    pub active_messages: Vec<Message>,
 
     /// Summary of compressed messages (if applicable)
     pub summary: Option<String>,
 
     /// Messages moved to recall storage
-    pub archived_messages: Vec<ChatMessage>,
+    pub archived_messages: Vec<Message>,
 
     /// Metadata about the compression
     pub metadata: CompressionMetadata,
@@ -98,7 +97,7 @@ impl MessageCompressor {
     /// Compress messages according to the configured strategy
     pub async fn compress(
         &self,
-        messages: Vec<ChatMessage>,
+        messages: Vec<Message>,
         max_messages: usize,
     ) -> Result<CompressionResult> {
         let original_count = messages.len();
@@ -145,7 +144,7 @@ impl MessageCompressor {
     /// Simple truncation strategy
     fn truncate_messages(
         &self,
-        messages: Vec<ChatMessage>,
+        messages: Vec<Message>,
         keep_recent: usize,
     ) -> Result<CompressionResult> {
         let original_count = messages.len();
@@ -179,7 +178,7 @@ impl MessageCompressor {
     /// Recursive summarization following MemGPT approach
     async fn recursive_summarization(
         &self,
-        messages: Vec<ChatMessage>,
+        messages: Vec<Message>,
         max_messages: usize,
         chunk_size: usize,
     ) -> Result<CompressionResult> {
@@ -235,14 +234,14 @@ impl MessageCompressor {
     /// Importance-based compression
     fn importance_based_compression(
         &self,
-        messages: Vec<ChatMessage>,
+        messages: Vec<Message>,
         keep_recent: usize,
         keep_important: usize,
     ) -> Result<CompressionResult> {
         let original_count = messages.len();
 
         // Score messages by importance
-        let mut scored_messages: Vec<(usize, &ChatMessage, f32)> = messages
+        let mut scored_messages: Vec<(usize, &Message, f32)> = messages
             .iter()
             .enumerate()
             .map(|(idx, msg)| {
@@ -294,7 +293,7 @@ impl MessageCompressor {
     /// Time-decay based compression
     fn time_decay_compression(
         &self,
-        messages: Vec<ChatMessage>,
+        messages: Vec<Message>,
         compress_after_hours: f64,
         min_keep_recent: usize,
     ) -> Result<CompressionResult> {
@@ -338,7 +337,7 @@ impl MessageCompressor {
     /// Score a message's importance
     fn score_message_importance(
         &self,
-        message: &ChatMessage,
+        message: &Message,
         index: usize,
         total_messages: usize,
     ) -> f32 {
@@ -379,7 +378,7 @@ impl MessageCompressor {
     }
 
     /// Create a summary prompt for the model
-    fn create_summary_prompt(&self, messages: &[ChatMessage], chunk_size: usize) -> Result<String> {
+    fn create_summary_prompt(&self, messages: &[Message], chunk_size: usize) -> Result<String> {
         let chunks: Vec<String> = messages
             .chunks(chunk_size)
             .map(|chunk| {
@@ -406,7 +405,7 @@ impl MessageCompressor {
     }
 
     /// Estimate tokens for a set of messages
-    fn estimate_tokens(&self, messages: &[ChatMessage]) -> usize {
+    fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages.iter().map(|msg| msg.estimate_tokens()).sum()
     }
 }
@@ -414,14 +413,13 @@ impl MessageCompressor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genai::chat::ChatMessage;
 
     #[test]
     fn test_truncation_strategy() {
         let compressor = MessageCompressor::new(CompressionStrategy::Truncate { keep_recent: 3 });
 
-        let messages: Vec<ChatMessage> = (0..5)
-            .map(|i| ChatMessage::user(format!("Message {}", i)))
+        let messages: Vec<Message> = (0..5)
+            .map(|i| Message::user(format!("Message {}", i)))
             .collect();
 
         let result = tokio_test::block_on(compressor.compress(messages, 3)).unwrap();
@@ -435,8 +433,8 @@ mod tests {
     fn test_importance_scoring() {
         let compressor = MessageCompressor::new(CompressionStrategy::default());
 
-        let user_msg = ChatMessage::user("What is the weather?");
-        let assistant_msg = ChatMessage::assistant("The weather is sunny.");
+        let user_msg = Message::user("What is the weather?");
+        let assistant_msg = Message::agent("The weather is sunny.");
 
         let user_score = compressor.score_message_importance(&user_msg, 0, 2);
         let assistant_score = compressor.score_message_importance(&assistant_msg, 1, 2);

@@ -4,10 +4,12 @@
 //! and UUID-based uniqueness guarantees.
 
 use compact_str::CompactString;
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{self, Display};
 use std::marker::PhantomData;
 use std::str::FromStr;
+use surrealdb::RecordId;
 use uuid::Uuid;
 
 /// A type-safe ID with a consistent prefix and UUID
@@ -127,19 +129,6 @@ impl<T: IdType> FromStr for Id<T> {
     }
 }
 
-impl<T: IdType> Serialize for Id<T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de, T: IdType> Deserialize<'de> for Id<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Self::parse(&s).map_err(serde::de::Error::custom)
-    }
-}
-
 impl<T: IdType> From<Id<T>> for String {
     fn from(id: Id<T>) -> Self {
         id.to_string()
@@ -149,6 +138,77 @@ impl<T: IdType> From<Id<T>> for String {
 impl<T: IdType> AsRef<Uuid> for Id<T> {
     fn as_ref(&self) -> &Uuid {
         &self.uuid
+    }
+}
+
+impl<T: IdType> From<Id<T>> for RecordId {
+    fn from(id: Id<T>) -> Self {
+        // Use just the UUID part as the key
+        RecordId::from_table_key(T::PREFIX, id.uuid.to_string())
+    }
+}
+
+impl<T: IdType> Serialize for Id<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("{}-{}", T::PREFIX, self.uuid()))
+    }
+}
+
+impl<'de, T: IdType> Deserialize<'de> for Id<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let visitor: Id<T> = Id::nil();
+        deserializer.deserialize_str(visitor)
+    }
+}
+
+impl<'de, T: IdType> Visitor<'de> for Id<T> {
+    type Value = Id<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "A string with the format 'prefix-UUID'")
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // Check if the string contains a separator
+        let parts: Vec<&str> = s.splitn(2, '-').collect();
+        if parts.len() != 2 {
+            return Err(de::Error::custom(
+                "ID must be in format 'prefix-uuid'".to_string(),
+            ));
+        }
+
+        let [prefix, uuid_str] = [parts[0], parts[1]];
+
+        // Verify prefix matches
+        if prefix != T::PREFIX {
+            return Err(de::Error::custom(format!(
+                "ID prefix must match type ({}), but was {}",
+                T::PREFIX,
+                prefix
+            )));
+        }
+
+        // Parse the UUID
+        let uuid = Uuid::parse_str(uuid_str).map_err(|e| {
+            de::Error::custom(format!(
+                "Second component of id must be a valid UUIDv4, but got error{}",
+                e
+            ))
+        })?;
+
+        Ok(Self {
+            uuid,
+            _phantom: PhantomData,
+        })
     }
 }
 
@@ -241,6 +301,28 @@ impl IdType for SessionIdType {
 
 /// Type alias for Session IDs
 pub type SessionId = Id<SessionIdType>;
+
+/// Marker type for Session IDs
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct ModelIdType;
+
+impl IdType for ModelIdType {
+    const PREFIX: &'static str = "model";
+}
+
+/// Type alias for Session IDs
+pub type ModelId = Id<RequestIdType>;
+
+/// Marker type for Session IDs
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct RequestIdType;
+
+impl IdType for RequestIdType {
+    const PREFIX: &'static str = "request";
+}
+
+/// Type alias for Session IDs
+pub type RequestId = Id<RequestIdType>;
 
 #[cfg(test)]
 mod tests {

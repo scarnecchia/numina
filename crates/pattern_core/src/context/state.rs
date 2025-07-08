@@ -4,17 +4,20 @@
 //! conversations, including message history, memory persistence, and context rebuilding.
 
 use chrono::{DateTime, Utc};
-use genai::chat::{ChatMessage, ChatResponse};
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-use crate::{AgentId, AgentType, CoreError, Result, memory::Memory, tool::ToolRegistry};
+use crate::{
+    AgentId, AgentType, CoreError, Result,
+    memory::Memory,
+    message::{Message, Response},
+    tool::ToolRegistry,
+};
 
 use super::{
     CompressionResult, CompressionStrategy, ContextBuilder, ContextConfig, MemoryContext,
-    MessageCompressor,
-    genai_ext::{ChatMessageExt, ChatRoleExt},
+    MessageCompressor, genai_ext::ChatRoleExt,
 };
 
 /// Represents the complete state of an agent
@@ -30,10 +33,10 @@ pub struct AgentContext {
     pub memory: Memory,
 
     /// Current message history
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<Message>,
 
     /// Compressed/archived messages
-    pub archived_messages: Vec<ChatMessage>,
+    pub archived_messages: Vec<Message>,
 
     /// Summary of compressed messages
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,7 +121,7 @@ impl AgentContext {
     }
 
     /// Add a new message to the state
-    pub fn add_message(&mut self, message: ChatMessage) {
+    pub fn add_message(&mut self, message: Message) {
         // Count tool calls if this is an assistant message
         if message.role.is_assistant() {
             self.metadata.total_tool_calls += message.tool_call_count();
@@ -130,10 +133,10 @@ impl AgentContext {
     }
 
     /// Process a chat response and update state
-    pub fn process_response(&mut self, response: ChatResponse) -> Result<()> {
+    pub fn process_response(&mut self, response: Response) -> Result<()> {
         // Extract content and create assistant message
         if let Some(content) = response.content {
-            let message = ChatMessage::assistant(content);
+            let message = Message::agent(content);
             self.add_message(message);
         }
 
@@ -212,18 +215,18 @@ impl AgentContext {
     }
 
     /// Search through message history (including archived)
-    pub fn search_messages(&self, query: &str, page: usize, page_size: usize) -> Vec<&ChatMessage> {
+    pub fn search_messages(&self, query: &str, page: usize, page_size: usize) -> Vec<&Message> {
         let query_lower = query.to_lowercase();
 
         // Search through all messages (active + archived)
-        let all_messages: Vec<&ChatMessage> = self
+        let all_messages: Vec<&Message> = self
             .archived_messages
             .iter()
             .chain(self.messages.iter())
             .collect();
 
         // Filter messages containing the query
-        let matching_messages: Vec<&ChatMessage> = all_messages
+        let matching_messages: Vec<&Message> = all_messages
             .into_iter()
             .filter(|msg| {
                 msg.text_content()
@@ -305,7 +308,7 @@ pub struct AgentStats {
 pub struct StateCheckpoint {
     pub agent_id: AgentId,
     pub timestamp: DateTime<Utc>,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<Message>,
     pub memory_snapshot: Memory,
     pub metadata: AgentContextMetadata,
 }
@@ -318,7 +321,7 @@ pub struct AgentContextBuilder {
     tools: Option<Arc<ToolRegistry>>,
     context_config: Option<ContextConfig>,
     compression_strategy: Option<CompressionStrategy>,
-    initial_messages: Vec<ChatMessage>,
+    initial_messages: Vec<Message>,
 }
 
 impl AgentContextBuilder {
@@ -366,7 +369,7 @@ impl AgentContextBuilder {
     }
 
     /// Add initial messages
-    pub fn with_initial_messages(mut self, messages: Vec<ChatMessage>) -> Self {
+    pub fn with_initial_messages(mut self, messages: Vec<Message>) -> Self {
         self.initial_messages = messages;
         self
     }
@@ -441,9 +444,9 @@ mod tests {
             .build()
             .unwrap();
 
-        state.add_message(ChatMessage::user("Hello, how are you?"));
-        state.add_message(ChatMessage::assistant("I'm doing well, thank you!"));
-        state.add_message(ChatMessage::user("What's the weather like?"));
+        state.add_message(Message::user("Hello, how are you?"));
+        state.add_message(Message::agent("I'm doing well, thank you!"));
+        state.add_message(Message::user("What's the weather like?"));
 
         let results = state.search_messages("weather", 0, 10);
         assert_eq!(results.len(), 1);

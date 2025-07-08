@@ -12,6 +12,7 @@ pub mod embeddings;
 pub mod error;
 pub mod id;
 pub mod memory;
+pub mod message;
 pub mod model;
 pub mod realtime;
 pub mod tool;
@@ -25,10 +26,12 @@ pub use context::{
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use id::{
-    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, SessionId, TaskId, ToolCallId, UserId,
+    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, ModelId, RequestId, SessionId,
+    TaskId, ToolCallId, UserId,
 };
 pub use memory::{Memory, MemoryBlock};
-pub use model::{ModelCapability, ModelProvider};
+pub use model::ModelCapability;
+pub use model::ModelProvider;
 pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 
 /// Re-export commonly used types

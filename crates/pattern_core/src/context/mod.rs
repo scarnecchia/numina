@@ -10,6 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
+    message::Message,
     tool::{DynamicTool, ToolRegistry},
 };
 
@@ -18,7 +19,7 @@ pub mod genai_ext;
 pub mod state;
 
 pub use compression::{CompressionResult, CompressionStrategy, MessageCompressor};
-pub use genai_ext::{ChatMessageExt, ChatRoleExt, MessageContentExt};
+pub use genai_ext::{ChatRoleExt, MessageContentExt};
 pub use state::{AgentContext, AgentContextBuilder, AgentStats, StateCheckpoint};
 
 /// Maximum characters for core memory blocks by default
@@ -37,7 +38,7 @@ pub struct MemoryContext {
     pub tools: Vec<genai::chat::Tool>,
 
     /// Message history
-    pub messages: Vec<genai::chat::ChatMessage>,
+    pub messages: Vec<Message>,
 
     /// Metadata about the context (for debugging/logging)
     pub metadata: ContextMetadata,
@@ -145,7 +146,7 @@ pub struct ContextBuilder {
     config: ContextConfig,
     memory_blocks: Vec<MemoryBlock>,
     tools: Vec<Box<dyn DynamicTool>>,
-    messages: Vec<genai::chat::ChatMessage>,
+    messages: Vec<Message>,
     current_time: DateTime<Utc>,
 }
 
@@ -192,7 +193,7 @@ impl ContextBuilder {
     }
 
     /// Add message history
-    pub fn with_messages(mut self, messages: Vec<genai::chat::ChatMessage>) -> Self {
+    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = messages;
         self
     }
@@ -410,7 +411,7 @@ The following constraints define rules for tool usage and guide desired behavior
     }
 
     /// Process messages, compressing if needed
-    fn process_messages(&self) -> Result<(Vec<genai::chat::ChatMessage>, usize)> {
+    fn process_messages(&self) -> Result<(Vec<Message>, usize)> {
         if self.messages.len() <= self.config.max_context_messages {
             return Ok((self.messages.clone(), 0));
         }
@@ -429,11 +430,7 @@ The following constraints define rules for tool usage and guide desired behavior
     }
 
     /// Estimate token count for the context
-    fn estimate_tokens(
-        &self,
-        system_prompt: &str,
-        messages: &[genai::chat::ChatMessage],
-    ) -> Option<usize> {
+    fn estimate_tokens(&self, system_prompt: &str, messages: &[Message]) -> Option<usize> {
         if let Some(max_tokens) = self.config.model_adjustments.max_context_tokens {
             // Very rough estimation
             let system_chars = system_prompt.chars().count();

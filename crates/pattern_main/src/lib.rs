@@ -11,8 +11,6 @@ pub mod error;
 // Re-export core types
 pub use pattern_core::prelude::*;
 
-use miette::Result;
-
 /// Main Pattern service that orchestrates all components
 pub struct PatternService {
     core: Arc<pattern_core::Constellation>,
