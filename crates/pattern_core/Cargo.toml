@@ -54,6 +54,7 @@ mockall = "0.13"
 pretty_assertions = "1.4"
 tempfile = "3.0"
 serial_test = "3.1"
+tracing-test = "0.2"
 
 
 [features]

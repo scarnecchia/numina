@@ -24,6 +24,7 @@ pub use schema::{
 };
 
 use crate::embeddings::EmbeddingError;
+use crate::id::IdError;
 
 /// Core database error type
 #[derive(Error, Debug, Diagnostic)]
@@ -68,6 +69,12 @@ pub enum DatabaseError {
 
     #[error("Error: {0}")]
     Other(String),
+}
+
+impl From<IdError> for DatabaseError {
+    fn from(err: IdError) -> Self {
+        DatabaseError::Other(err.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, DatabaseError>;

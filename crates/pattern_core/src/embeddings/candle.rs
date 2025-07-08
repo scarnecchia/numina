@@ -141,6 +141,16 @@ impl CandleEmbedder {
     }
 }
 
+impl std::fmt::Debug for CandleEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CandleEmbedder")
+            .field("model", &self.model)
+            .field("dimensions", &self.dimensions)
+            .finish()
+    }
+}
+
+#[cfg(feature = "embed-candle")]
 #[async_trait]
 impl EmbeddingProvider for CandleEmbedder {
     async fn embed(&self, text: &str) -> Result<Embedding> {

@@ -110,7 +110,7 @@ impl Embedding {
 
 /// Trait for embedding providers
 #[async_trait]
-pub trait EmbeddingProvider: Send + Sync {
+pub trait EmbeddingProvider: Send + Sync + std::fmt::Debug {
     /// Generate an embedding for a single text
     async fn embed(&self, text: &str) -> Result<Embedding>;
 
@@ -131,6 +131,16 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Check if the provider is available/healthy
     async fn health_check(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Convenience method for embedding a single query (alias for embed)
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        Ok(self.embed(query).await?.vector)
+    }
+
+    /// Get the model name (alias for model_id)
+    fn model_name(&self) -> &str {
+        self.model_id()
     }
 }
 

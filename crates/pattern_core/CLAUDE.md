@@ -67,6 +67,7 @@ This crate provides the core agent framework, memory management, and tool execut
 - Direct operations via functions in `db::ops` (no unnecessary repository pattern)
 - Type-safe IDs (UserId, AgentId, etc.) throughout the codebase
 - Automatic handling of SurrealDB's nested value format via `unwrap_surreal_value`
+- **Important**: See [`db/SURREALDB_PATTERNS.md`](./src/db/SURREALDB_PATTERNS.md) for query patterns and response handling
 
 ### Embeddings (`embeddings/`)
 - Provider trait for multiple backends
@@ -92,6 +93,7 @@ This crate provides the core agent framework, memory management, and tool execut
 - Avoid nested structs in types that need MCP-compatible schemas
 - SurrealDB responses wrap data in nested structures - use `unwrap_surreal_value` helper
 - Custom serde implementations for enums (e.g., AgentType serializes Custom variants with `custom:` prefix)
+- **SurrealDB Gotchas**: Response `.take()` can return nested vectors, DELETE queries need special handling - see patterns doc
 
 ## Common Patterns
 

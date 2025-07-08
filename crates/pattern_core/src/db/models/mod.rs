@@ -11,7 +11,7 @@ use surrealdb::RecordId;
 use uuid::Uuid;
 
 use crate::{
-    agent::{AgentState, AgentType},
+    agent::{AgentState, AgentType, MemoryAccessLevel},
     id::{AgentId, MemoryId, UserId},
 };
 
@@ -48,13 +48,15 @@ pub struct DbAgent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbMemoryBlock {
     pub id: RecordId,
-    pub agent_id: RecordId,
+    pub owner_id: RecordId,
     pub label: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub embedding: Option<Vec<f32>>,
     pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<RecordId>,
     #[serde(default)]
     pub metadata: serde_json::Value,
     pub created_at: surrealdb::Datetime,
@@ -66,7 +68,6 @@ fn default_true() -> bool {
 }
 
 pub fn from_surreal_datetime(dt: surrealdb::Datetime) -> DateTime<Utc> {
-    println!("datetime: {}", strip_dt(&dt.to_string()));
     let datetime = chrono::NaiveDateTime::parse_from_str(&dt.to_string(), "d'%FT%T%.6fZ'")
         .expect("should be valid ISO-8601");
 
@@ -166,12 +167,13 @@ impl From<crate::db::schema::MemoryBlock> for DbMemoryBlock {
     fn from(memory: crate::db::schema::MemoryBlock) -> Self {
         Self {
             id: RecordId::from(memory.id),
-            agent_id: memory.agent_id.into(),
+            owner_id: memory.owner_id.into(),
             label: memory.label,
             content: memory.content,
             description: memory.description,
             embedding: Some(memory.embedding),
             embedding_model: Some(memory.embedding_model),
+            agents: Vec::new(), // Will be populated from junction table
             metadata: memory.metadata,
             created_at: memory.created_at.into(),
             updated_at: memory.updated_at.into(),
@@ -188,13 +190,13 @@ impl TryFrom<DbMemoryBlock> for crate::db::schema::MemoryBlock {
             Uuid::from_str(strip_brackets(&db_memory.id.key().to_string())).unwrap(),
         );
 
-        let agent_id = AgentId::from_uuid(
-            Uuid::from_str(strip_brackets(&db_memory.agent_id.key().to_string())).unwrap(),
+        let owner_id = UserId::from_uuid(
+            Uuid::from_str(strip_brackets(&db_memory.owner_id.key().to_string())).unwrap(),
         );
 
         Ok(Self {
             id: memory_id,
-            agent_id,
+            owner_id,
             label: db_memory.label,
             content: db_memory.content,
             description: db_memory.description,
@@ -206,4 +208,20 @@ impl TryFrom<DbMemoryBlock> for crate::db::schema::MemoryBlock {
             updated_at: from_surreal_datetime(db_memory.updated_at),
         })
     }
+}
+
+/// Database representation of an Agent-Memory relationship
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbAgentMemory {
+    pub id: RecordId,
+    pub r#in: RecordId,
+    pub out: RecordId,
+    pub access_level: MemoryAccessLevel,
+    pub created_at: surrealdb::Datetime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessBlock {
+    pub access_level: MemoryAccessLevel,
+    pub memory_data: DbMemoryBlock,
 }

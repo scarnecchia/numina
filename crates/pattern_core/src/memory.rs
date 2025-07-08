@@ -68,6 +68,16 @@ impl Memory {
         Ok(())
     }
 
+    /// Builder method to add a block
+    pub fn with_block(
+        mut self,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self> {
+        self.create_block(label, value)?;
+        Ok(self)
+    }
+
     /// Get a memory block by label
     pub fn get_block(&self, label: &str) -> Option<&MemoryBlock> {
         self.blocks.get(label)

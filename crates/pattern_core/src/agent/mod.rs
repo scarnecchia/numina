@@ -1,3 +1,13 @@
+//! Agent framework for Pattern
+//!
+//! This module provides the core agent abstraction and implementations.
+
+mod impls;
+#[cfg(test)]
+mod tests;
+
+pub use impls::{AgentDbExt, DatabaseAgent};
+
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -39,17 +49,56 @@ pub trait Agent: Send + Sync + Debug {
         params: serde_json::Value,
     ) -> Result<serde_json::Value>;
 
+    /// Create or update a memory block with just the value
+    async fn set_memory(&self, key: &str, value: String) -> Result<()> {
+        let mut memory = Memory::new();
+        memory.create_block(key, value)?;
+        self.update_memory(key, memory).await
+    }
+
+    /// List all available memory block keys
+    async fn list_memory_keys(&self) -> Result<Vec<String>>;
+
+    /// Search memory blocks by content (semantic search if embeddings available)
+    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<(String, Memory, f32)>>;
+
+    /// Share a memory block with another agent
+    async fn share_memory_with(
+        &self,
+        memory_key: &str,
+        target_agent_id: AgentId,
+        access_level: MemoryAccessLevel,
+    ) -> Result<()>;
+
+    /// Get all memory blocks shared with this agent
+    async fn get_shared_memories(&self) -> Result<Vec<(AgentId, String, Memory)>>;
+
+    /// Subscribe to memory updates (for live queries)
+    async fn subscribe_to_memory(&self, memory_key: &str) -> Result<()>;
+
     /// Get the agent's system prompt
     fn system_prompt(&self) -> &str;
 
     /// Get the list of tools available to this agent
-    fn available_tools(&self) -> Vec<String>;
+    fn available_tools(&self) -> Vec<Box<dyn DynamicTool>>;
 
     /// Get the agent's current state
     fn state(&self) -> AgentState;
 
     /// Update the agent's state
     async fn set_state(&mut self, state: AgentState) -> Result<()>;
+}
+
+/// Access levels for shared memory
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryAccessLevel {
+    /// Can only read the memory block
+    Read,
+    /// Can read and update the memory block
+    Write,
+    /// Can read, update, and manage sharing of the memory block
+    Admin,
 }
 
 /// Types of agents in the system

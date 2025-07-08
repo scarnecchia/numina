@@ -274,6 +274,14 @@ impl ToolRegistry {
             .map(|entry| entry.value().to_genai_tool())
             .collect()
     }
+
+    /// Get all tools as dynamic tool trait objects
+    pub fn get_all_as_dynamic(&self) -> Vec<Box<dyn DynamicTool>> {
+        self.tools
+            .iter()
+            .map(|entry| entry.value().clone_box())
+            .collect()
+    }
 }
 
 impl Default for ToolRegistry {

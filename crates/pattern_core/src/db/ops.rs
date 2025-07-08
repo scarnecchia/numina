@@ -1,10 +1,14 @@
 //! Database operations - direct, simple, no unnecessary abstractions
 
 use super::{DatabaseError, Result, models::*, schema::*};
+
 use crate::embeddings::EmbeddingProvider;
 use crate::id::{AgentId, AgentIdType, IdType, MemoryId, MemoryIdType, UserId, UserIdType};
+use chrono::Utc;
+use futures::{Stream, StreamExt};
 use serde::Serialize;
-use surrealdb::RecordId;
+use surrealdb::opt::PatchOp;
+use surrealdb::{Action, Notification, RecordId};
 
 pub trait SurrealExt<C> {
     fn create_user(
@@ -37,12 +41,24 @@ pub trait SurrealExt<C> {
     fn create_memory(
         &self,
         embeddings: Option<&dyn EmbeddingProvider>,
-        agent_id: AgentId,
+        owner_id: UserId,
         label: String,
         content: String,
         description: Option<String>,
         metadata: serde_json::Value,
     ) -> impl Future<Output = Result<MemoryBlock>>;
+
+    fn attach_memory_to_agent(
+        &self,
+        agent_id: AgentId,
+        memory_id: MemoryId,
+        access_level: crate::agent::MemoryAccessLevel,
+    ) -> impl Future<Output = Result<()>>;
+
+    fn get_agent_memories(
+        &self,
+        agent_id: AgentId,
+    ) -> impl Future<Output = Result<Vec<(MemoryBlock, crate::agent::MemoryAccessLevel)>>>;
 
     fn search_memories(
         &self,
@@ -52,11 +68,28 @@ pub trait SurrealExt<C> {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<(MemoryBlock, f32)>>>;
 
+    fn update_memory_content(
+        &self,
+        memory_id: MemoryId,
+        content: String,
+        embeddings: Option<&dyn EmbeddingProvider>,
+    ) -> impl Future<Output = Result<()>>;
+
     fn get_memory_by_label(
         &self,
         agent_id: AgentId,
         label: &str,
     ) -> impl Future<Output = Result<Option<MemoryBlock>>>;
+
+    fn subscribe_to_memory_updates(
+        &self,
+        memory_id: MemoryId,
+    ) -> impl Future<Output = Result<impl Stream<Item = (Action, MemoryBlock)>>>;
+
+    fn subscribe_to_agent_memory_updates(
+        &self,
+        agent_id: AgentId,
+    ) -> impl Future<Output = Result<impl Stream<Item = (Action, MemoryBlock)>>>;
 
     fn get_user_with_agents(
         &self,
@@ -212,7 +245,7 @@ where
     async fn create_memory(
         &self,
         embeddings: Option<&dyn EmbeddingProvider>,
-        agent_id: AgentId,
+        owner_id: UserId,
         label: String,
         content: String,
         description: Option<String>,
@@ -220,6 +253,11 @@ where
     ) -> Result<MemoryBlock> {
         let id = MemoryId::generate();
         let now = chrono::Utc::now();
+
+        eprintln!(
+            "DEBUG: Creating memory with id: {:?}, owner_id: {:?}",
+            id, owner_id
+        );
 
         // Generate embedding if provider is available
         let (embedding, embedding_model) = if let Some(provider) = embeddings {
@@ -233,15 +271,15 @@ where
             (Some(vec![0.0; 384]), Some("none".to_string()))
         };
 
-        // Create DB wrapper type directly
-        let db_memory = DbMemoryBlock {
+        let db_memory_block = DbMemoryBlock {
             id: RecordId::from(id),
-            agent_id: agent_id.into(),
+            owner_id: owner_id.into(),
             label,
             content,
             description,
             embedding,
             embedding_model,
+            agents: Vec::new(),
             metadata,
             created_at: now.into(),
             updated_at: now.into(),
@@ -250,9 +288,25 @@ where
         let created: Option<DbMemoryBlock> = self
             .as_ref()
             .create((MemoryIdType::PREFIX, id.uuid().to_string()))
-            .content(db_memory)
+            .content(db_memory_block)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Debug: Check if memory was actually created in the mem table
+        let check_records: Vec<DbMemoryBlock> = self
+            .as_ref()
+            .select(MemoryIdType::PREFIX)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        eprintln!(
+            "DEBUG: Memory records in {} table after creation: {}",
+            MemoryIdType::PREFIX,
+            check_records.len()
+        );
+        if !check_records.is_empty() {
+            //eprintln!("DEBUG: Memory record: {:?}", check_records[0]);
+        }
 
         created
             .map(|db| {
@@ -277,7 +331,7 @@ where
         let query_str = format!(
             r#"
             SELECT *,
-                vector::similarity::cosine(embedding, $embedding) as score
+                vector::distance::knn(embedding, $query_embedding) as score
             FROM {}
             WHERE agent_id = {}:`{}`
             ORDER BY score DESC
@@ -292,7 +346,7 @@ where
         let results: Vec<DbMemoryBlock> = self
             .as_ref()
             .query(&query_str)
-            .bind(("embedding", query_embedding.vector))
+            .bind(("query_embedding", query_embedding.vector))
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?
             .take(0)
@@ -310,35 +364,41 @@ where
         Ok(memories)
     }
 
-    /// Get memory by label
     /// Get memory by label for an agent
     async fn get_memory_by_label(
         &self,
         agent_id: AgentId,
         label: &str,
     ) -> Result<Option<MemoryBlock>> {
-        let query = format!(
-            "SELECT * FROM {} WHERE agent_id = {}:`{}` AND label = $label AND is_active = true LIMIT 1",
-            MemoryIdType::PREFIX,
-            AgentIdType::PREFIX,
-            agent_id.uuid()
-        );
+        // First find memory blocks accessible to this agent through the junction table
+        let query = r#"
+            SELECT *, out.* AS memory_data
+            FROM agent_memories
+            WHERE in = $agent_id
+            AND out.label = $label
+        "#;
 
         let mut result = self
             .as_ref()
-            .query(&query)
+            .query(query)
+            .bind(("agent_id", RecordId::from(agent_id)))
             .bind(("label", label.to_string()))
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let db_memories: Vec<DbMemoryBlock> =
-            result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
+        tracing::trace!("memory label query result: {:?}", result);
 
-        // Convert the first memory if found
-        Ok(db_memories.into_iter().next().and_then(|db| {
-            // We need to reconstruct the RecordId from the query result
-            db.try_into().ok()
-        }))
+        let records: Vec<DbMemoryBlock> = result
+            .take("memory_data")
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Extract the memory from the result
+        if let Some(record) = records.into_iter().next() {
+            tracing::trace!("record: {:?}", record);
+            Ok(Some(MemoryBlock::try_from(record)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get user with agents in one query
@@ -355,6 +415,185 @@ where
             }
             None => Ok(None),
         }
+    }
+
+    async fn attach_memory_to_agent(
+        &self,
+        agent_id: AgentId,
+        memory_id: MemoryId,
+        access_level: crate::agent::MemoryAccessLevel,
+    ) -> Result<()> {
+        let access_str = match access_level {
+            crate::agent::MemoryAccessLevel::Read => "read",
+            crate::agent::MemoryAccessLevel::Write => "write",
+            crate::agent::MemoryAccessLevel::Admin => "admin",
+        };
+
+        let query = format!(
+            "
+            RELATE $agent_id->agent_memories->$memory_id
+                SET access_level = $access_level,
+                    created_at = time::now()
+            ;
+            UPDATE $memory_id SET agents += $agent_id WHERE $agent_id NOT IN agents;
+            "
+        );
+
+        let result = self
+            .as_ref()
+            .query(query)
+            .bind(("agent_id", RecordId::from(agent_id)))
+            .bind(("memory_id", RecordId::from(memory_id)))
+            .bind(("access_level", access_str))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        tracing::trace!("attach result: {:?}", result);
+
+        Ok(())
+    }
+
+    async fn get_agent_memories(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<(MemoryBlock, crate::agent::MemoryAccessLevel)>> {
+        let query = r#"
+            SELECT *, out.* AS memory_data
+            FROM agent_memories
+            WHERE in = $agent_id
+        "#;
+
+        tracing::debug!("DEBUG: Running query: {}", query);
+        tracing::debug!(
+            "DEBUG: With agent_id binding: {:?}",
+            RecordId::from(agent_id)
+        );
+
+        let mut result = self
+            .as_ref()
+            .query(query)
+            .bind(("agent_id", RecordId::from(agent_id)))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        tracing::trace!("query_result: {:?}", result);
+
+        let records: Vec<AccessBlock> = result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+        let mut memories = Vec::new();
+        for record in records {
+            tracing::trace!("DEBUG: agent_memories record: {:?}", record);
+            let memory = MemoryBlock::try_from(record.memory_data).expect("should be a memory?");
+
+            tracing::trace!("memory: {:?}", memory);
+            memories.push((memory, record.access_level));
+        }
+
+        Ok(memories)
+    }
+
+    async fn update_memory_content(
+        &self,
+        memory_id: MemoryId,
+        content: String,
+        embeddings: Option<&dyn EmbeddingProvider>,
+    ) -> Result<()> {
+        // Generate embeddings if provider is available
+        let (embedding, model_name) = if let Some(provider) = embeddings {
+            let emb = provider.embed_query(&content).await.map_err(|e| {
+                DatabaseError::QueryFailed(surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
+                    "Embedding generation failed: {}",
+                    e
+                ))))
+            })?;
+            (Some(emb), Some(provider.model_name().to_string()))
+        } else {
+            (Some(vec![0.0; 384]), Some("none".to_string()))
+        };
+
+        let _: Option<DbMemoryBlock> = self
+            .as_ref()
+            .update((MemoryIdType::PREFIX, memory_id.uuid().to_string()))
+            .patch(PatchOp::replace("/content", content))
+            .patch(PatchOp::replace("/embedding", embedding))
+            .patch(PatchOp::replace("/embedding_model", model_name))
+            .patch(PatchOp::replace(
+                "/updated_at",
+                surrealdb::Datetime::from(Utc::now()),
+            ))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        Ok(())
+    }
+
+    async fn subscribe_to_memory_updates(
+        &self,
+        memory_id: MemoryId,
+    ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
+        let stream = self
+            .as_ref()
+            .select((MemoryIdType::PREFIX, memory_id.uuid().to_string()))
+            .live()
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        Ok(stream.filter_map(
+            |notif: surrealdb::Result<Notification<DbMemoryBlock>>| async move {
+                match notif {
+                    Ok(Notification {
+                        query_id: _,
+                        action,
+                        data,
+                        ..
+                    }) => Some((
+                        action,
+                        MemoryBlock::try_from(data)
+                            .expect("memory block conversion should succeed"),
+                    )),
+                    Err(_) => None,
+                }
+            },
+        ))
+    }
+
+    async fn subscribe_to_agent_memory_updates(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
+        // Watch memory blocks that have this agent in their agents array
+        let query = format!(
+            "LIVE SELECT * FROM mem WHERE {} IN agents",
+            RecordId::from(agent_id)
+        );
+
+        let mut result = self
+            .as_ref()
+            .query(query)
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        let stream = result
+            .stream::<Notification<DbMemoryBlock>>(0)
+            .map_err(DatabaseError::QueryFailed)?;
+
+        Ok(stream.filter_map(
+            |notif: surrealdb::Result<Notification<DbMemoryBlock>>| async move {
+                match notif {
+                    Ok(Notification {
+                        query_id: _,
+                        action,
+                        data,
+                        ..
+                    }) => Some((
+                        action,
+                        MemoryBlock::try_from(data)
+                            .expect("memory block conversion should succeed"),
+                    )),
+                    Err(_) => None,
+                }
+            },
+        ))
     }
 }
 
@@ -423,7 +662,7 @@ mod tests {
         let memory = db
             .create_memory(
                 None, // No embedding provider for test
-                agent.id,
+                user_id,
                 "test_memory".to_string(),
                 "Test content".to_string(),
                 Some("Test description".to_string()),
@@ -434,7 +673,12 @@ mod tests {
 
         // Verify memory ID is properly typed
         assert!(memory.id.to_string().starts_with("mem-"));
-        assert_eq!(memory.agent_id, agent.id);
+        assert_eq!(memory.owner_id, user_id);
+
+        // Attach memory to agent
+        db.attach_memory_to_agent(agent.id, memory.id, crate::agent::MemoryAccessLevel::Read)
+            .await
+            .unwrap();
 
         // Get memory by label
         let retrieved_memory = db

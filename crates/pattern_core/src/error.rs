@@ -1,4 +1,4 @@
-use crate::AgentId;
+use crate::{AgentId, db::DatabaseError};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -283,6 +283,86 @@ pub enum CoreError {
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+impl From<DatabaseError> for CoreError {
+    fn from(err: DatabaseError) -> Self {
+        match err {
+            DatabaseError::ConnectionFailed(e) => Self::DatabaseConnectionFailed {
+                connection_string: "embedded".to_string(),
+                cause: e,
+            },
+            DatabaseError::QueryFailed(e) => Self::DatabaseQueryFailed {
+                query: "unknown".to_string(),
+                table: "unknown".to_string(),
+                cause: e,
+            },
+
+            DatabaseError::SerdeProblem(e) => Self::SerializationError {
+                data_type: "database record".to_string(),
+                cause: e,
+            },
+            DatabaseError::NotFound { entity } => Self::AgentNotFound {
+                src: format!("database: {}", entity),
+                span: (10, 10 + entity.len()),
+                id: entity,
+            },
+            DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
+                collection: "unknown".to_string(),
+                dimension_mismatch: None,
+                cause: Box::new(e),
+            },
+            DatabaseError::EmbeddingModelMismatch {
+                db_model,
+                config_model,
+            } => Self::ConfigurationError {
+                config_path: "database".to_string(),
+                field: "embedding_model".to_string(),
+                expected: db_model.clone(),
+                cause: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Model mismatch: database has {}, config has {}",
+                        db_model, config_model
+                    ),
+                )),
+            },
+            DatabaseError::SchemaVersionMismatch {
+                db_version,
+                code_version,
+            } => Self::DatabaseQueryFailed {
+                query: "schema version check".to_string(),
+                table: "system_metadata".to_string(),
+                cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
+                    "Schema version mismatch: database v{}, code v{}",
+                    db_version, code_version
+                ))),
+            },
+            DatabaseError::InvalidVectorDimensions { expected, actual } => {
+                Self::VectorSearchFailed {
+                    collection: "unknown".to_string(),
+                    dimension_mismatch: Some((expected, actual)),
+                    cause: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Invalid vector dimensions: expected {}, got {}",
+                            expected, actual
+                        ),
+                    )),
+                }
+            }
+            DatabaseError::TransactionFailed(e) => Self::DatabaseQueryFailed {
+                query: "transaction".to_string(),
+                table: "unknown".to_string(),
+                cause: e,
+            },
+            DatabaseError::Other(msg) => Self::DatabaseQueryFailed {
+                query: "unknown".to_string(),
+                table: "unknown".to_string(),
+                cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(msg)),
+            },
+        }
+    }
+}
 
 // Helper functions for creating common errors with context
 impl CoreError {

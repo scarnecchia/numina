@@ -11,6 +11,16 @@ pub struct OpenAIEmbedder {
     dimensions: Option<usize>,
 }
 
+impl std::fmt::Debug for OpenAIEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIEmbedder")
+            .field("model", &self.model)
+            .field("dimensions", &self.dimensions)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl OpenAIEmbedder {
     /// Create a new OpenAI embedder
     pub fn new(model: String, api_key: String, dimensions: Option<usize>) -> Self {
@@ -121,6 +131,16 @@ pub struct CohereEmbedder {
     model: String,
     api_key: String,
     input_type: Option<String>,
+}
+
+impl std::fmt::Debug for CohereEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CohereEmbedder")
+            .field("model", &self.model)
+            .field("input_type", &self.input_type)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl CohereEmbedder {

@@ -11,6 +11,7 @@ pub mod db;
 pub mod embeddings;
 pub mod error;
 pub mod id;
+pub mod llm;
 pub mod memory;
 pub mod message;
 pub mod model;

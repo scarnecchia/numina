@@ -4,6 +4,7 @@ use super::{Embedding, EmbeddingError, EmbeddingProvider, Result, validate_input
 use async_trait::async_trait;
 
 /// Ollama embedding provider
+#[derive(Debug)]
 pub struct OllamaEmbedder {
     model: String,
     url: String,

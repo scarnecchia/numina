@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use crate::{
     agent::{AgentState, AgentType},
     id::{
-        AgentId, AgentIdType, ConversationId, ConversationIdType, IdType, MemoryId, MemoryIdType,
-        MessageIdType, TaskId, TaskIdType, ToolCallId, ToolCallIdType, UserId, UserIdType,
+        AgentId, AgentIdType, ConversationId, IdType, MemoryId, MemoryIdType, MessageIdType,
+        TaskId, TaskIdType, ToolCallId, ToolCallIdType, UserId, UserIdType,
     },
 };
 
@@ -22,8 +22,8 @@ impl Schema {
             Self::users(),
             Self::agents(),
             Self::memory_blocks(),
-            Self::conversations(),
             Self::messages(),
+            Self::agent_memories(),
             Self::tool_calls(),
             Self::tasks(),
         ]
@@ -55,7 +55,7 @@ impl Schema {
                 "
                 DEFINE TABLE {table} SCHEMAFULL;
                 DEFINE FIELD id ON {table} TYPE record;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
                 DEFINE FIELD settings ON {table} TYPE object;
                 DEFINE FIELD metadata ON {table} TYPE object;
@@ -84,7 +84,7 @@ impl Schema {
                 DEFINE FIELD system_prompt ON {table} TYPE string;
                 DEFINE FIELD config ON {table} TYPE object;
                 DEFINE FIELD state ON {table} TYPE any;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
                 DEFINE FIELD is_active ON {table} TYPE bool DEFAULT true;
             ",
@@ -116,14 +116,15 @@ impl Schema {
                 "
                 DEFINE TABLE {table} SCHEMAFULL;
                 DEFINE FIELD id ON {table} TYPE record;
-                DEFINE FIELD agent_id ON {table} TYPE record<agent>;
+                DEFINE FIELD owner_id ON {table} TYPE record<user>;
                 DEFINE FIELD label ON {table} TYPE string;
                 DEFINE FIELD content ON {table} TYPE string;
                 DEFINE FIELD description ON {table} TYPE option<string>;
                 DEFINE FIELD embedding ON {table} TYPE array<float>;
                 DEFINE FIELD embedding_model ON {table} TYPE string;
+                DEFINE FIELD agents ON {table} TYPE array<record<agent>> DEFAULT [];
                 DEFINE FIELD metadata ON {table} TYPE object;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
                 DEFINE FIELD is_active ON {table} TYPE bool DEFAULT true;
             ",
@@ -131,43 +132,39 @@ impl Schema {
             ),
             indexes: vec![
                 format!(
-                    "DEFINE INDEX {}_agent ON {} FIELDS agent_id",
+                    "DEFINE INDEX {}_owner ON {} FIELDS owner_id",
                     table_name, table_name
                 ),
                 format!(
-                    "DEFINE INDEX {}_label ON {} FIELDS agent_id, label",
+                    "DEFINE INDEX {}_label ON {} FIELDS label",
+                    table_name, table_name
+                ),
+                format!(
+                    "DEFINE INDEX {}_agents ON {} FIELDS agents",
                     table_name, table_name
                 ),
             ],
         }
     }
 
-    /// Conversations table
-    pub fn conversations() -> TableDefinition {
-        let table_name = ConversationIdType::PREFIX;
+    /// Agent-Memory relationship table (many-to-many)
+    pub fn agent_memories() -> TableDefinition {
         TableDefinition {
-            name: table_name.to_string(),
-            schema: format!(
-                "
-                DEFINE TABLE {table} SCHEMAFULL;
-                DEFINE FIELD id ON {table} TYPE record;
-                DEFINE FIELD user_id ON {table} TYPE record<user>;
-                DEFINE FIELD agent_id ON {table} TYPE record<agent>;
-                DEFINE FIELD title ON {table} TYPE option<string>;
-                DEFINE FIELD context ON {table} TYPE object;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
-                DEFINE FIELD updated_at ON {table} TYPE datetime;
-                DEFINE FIELD ended_at ON {table} TYPE option<datetime>;
-            ",
-                table = table_name
-            ),
+            name: "agent_memories".to_string(),
+            schema: r#"
+                DEFINE TABLE agent_memories SCHEMAFULL TYPE RELATION IN agent OUT mem ENFORCED;
+                DEFINE FIELD access_level ON agent_memories TYPE string DEFAULT read ASSERT $value INSIDE ['read', 'write', 'admin'] PERMISSIONS FULL;
+                DEFINE FIELD created_at ON agent_memories TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
+                DEFINE FIELD in ON agent_memories TYPE record<agent> PERMISSIONS FULL;
+                DEFINE FIELD out ON agent_memories TYPE record<mem> PERMISSIONS FULL;
+
+            "#.to_string(),
             indexes: vec![
-                format!("DEFINE INDEX conv_user ON {} FIELDS user_id", table_name),
-                format!("DEFINE INDEX conv_agent ON {} FIELDS agent_id", table_name),
-                format!(
-                    "DEFINE INDEX conv_active ON {} FIELDS user_id, ended_at",
-                    table_name
-                ),
+                "
+                DEFINE INDEX unique_relationships
+                    ON TABLE agent_memories
+                    COLUMNS in, out UNIQUE;
+                ".to_string()
             ],
         }
     }
@@ -181,14 +178,14 @@ impl Schema {
                 "
                 DEFINE TABLE {table} SCHEMAFULL;
                 DEFINE FIELD id ON {table} TYPE record;
-                DEFINE FIELD conversation_id ON {table} TYPE record<conversation>;
+                DEFINE FIELD agent_id ON {table} TYPE record<agent>;
                 DEFINE FIELD role ON {table} TYPE string;
                 DEFINE FIELD content ON {table} TYPE string;
                 DEFINE FIELD embedding ON {table} TYPE option<array<float>>;
                 DEFINE FIELD embedding_model ON {table} TYPE option<string>;
                 DEFINE FIELD metadata ON {table} TYPE object;
                 DEFINE FIELD tool_calls ON {table} TYPE option<array>;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
             ",
                 table = table_name
             ),
@@ -215,13 +212,12 @@ impl Schema {
                 DEFINE TABLE {table} SCHEMAFULL;
                 DEFINE FIELD id ON {table} TYPE record;
                 DEFINE FIELD agent_id ON {table} TYPE record<agent>;
-                DEFINE FIELD conversation_id ON {table} TYPE record<conversation>;
                 DEFINE FIELD tool_name ON {table} TYPE string;
                 DEFINE FIELD parameters ON {table} TYPE object;
                 DEFINE FIELD result ON {table} TYPE object;
                 DEFINE FIELD error ON {table} TYPE option<string>;
                 DEFINE FIELD duration_ms ON {table} TYPE int;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
             ",
                 table = table_name
             ),
@@ -259,7 +255,7 @@ impl Schema {
                 DEFINE FIELD energy_required ON {table} TYPE string DEFAULT 'medium';
                 DEFINE FIELD tags ON {table} TYPE array<string> DEFAULT [];
                 DEFINE FIELD metadata ON {table} TYPE object;
-                DEFINE FIELD created_at ON {table} TYPE datetime;
+                DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
                 DEFINE FIELD started_at ON {table} TYPE option<datetime>;
                 DEFINE FIELD completed_at ON {table} TYPE option<datetime>;
@@ -347,7 +343,7 @@ pub struct Agent {
 pub struct MemoryBlock {
     pub id: MemoryId,
 
-    pub agent_id: AgentId,
+    pub owner_id: UserId,
 
     pub label: String,
 
