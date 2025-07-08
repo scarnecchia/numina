@@ -6,6 +6,7 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::super::*;
+    use crate::utils::debug::{ResponseDebug, ResponseExt};
     use crate::{
         db::{DbAgent, DbMemoryBlock, client, ops::SurrealExt},
         llm::MockLlmProvider,
@@ -120,7 +121,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Both agents should be able to read the memory
-        let pattern_memories = db.get_agent_memories(pattern_agent.id).await.unwrap();
+        let _pattern_memories = db.get_agent_memories(pattern_agent.id).await.unwrap();
 
         let pattern_memory = pattern.get_memory("task_insights").await.unwrap();
         assert!(pattern_memory.is_some());
@@ -181,13 +182,13 @@ mod tests {
         .await
         .unwrap();
 
-        // Debug: Check if the memory has the agent in its agents array
+        // Debug: Check if the memory has the agent in its agents array using pretty debug
         let check_query = format!(
             "SELECT agents AS agents FROM {} FETCH agents",
             RecordId::from(deletable_memory.id)
         );
         let mut check_result = db.as_ref().query(&check_query).await.unwrap();
-        tracing::trace!("Response: {:?}", check_result);
+        tracing::debug!("Response: {:?}", check_result.pretty_debug());
         let agents_arrays: Vec<Vec<DbAgent>> =
             check_result.take("agents").expect("should have agents");
         tracing::debug!(

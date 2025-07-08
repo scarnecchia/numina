@@ -13,12 +13,18 @@ use surrealdb::RecordId;
 use uuid::Uuid;
 
 /// A type-safe ID with a consistent prefix and UUID
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id<T> {
     /// The unique identifier
     uuid: Uuid,
     /// Phantom data to make each ID type unique
     _phantom: PhantomData<T>,
+}
+
+impl<T: IdType> fmt::Debug for Id<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", T::PREFIX, self.uuid)
+    }
 }
 
 /// Trait for types that can be used as ID markers
@@ -407,5 +413,27 @@ mod tests {
         let compact = id.to_compact_string();
         let string = id.to_string();
         assert_eq!(compact.as_str(), string.as_str());
+    }
+
+    #[test]
+    fn test_debug_output() {
+        let agent_id = AgentId::generate();
+        let user_id = UserId::generate();
+
+        // Debug output should be clean, just "prefix-uuid"
+        let agent_debug = format!("{:?}", agent_id);
+        let user_debug = format!("{:?}", user_id);
+
+        assert!(agent_debug.starts_with("agent-"));
+        assert!(user_debug.starts_with("user-"));
+
+        // Should not contain PhantomData or other noise
+        assert!(!agent_debug.contains("PhantomData"));
+        assert!(!agent_debug.contains("_phantom"));
+        assert!(!agent_debug.contains("uuid:"));
+
+        // Debug should match Display
+        assert_eq!(agent_debug, agent_id.to_string());
+        assert_eq!(user_debug, user_id.to_string());
     }
 }

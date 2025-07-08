@@ -339,7 +339,7 @@ pub struct Agent {
 }
 
 /// Memory block model
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MemoryBlock {
     pub id: MemoryId,
 
@@ -361,6 +361,34 @@ pub struct MemoryBlock {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 
     pub is_active: bool,
+}
+
+impl std::fmt::Debug for MemoryBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug_struct = f.debug_struct("MemoryBlock");
+        debug_struct
+            .field("id", &self.id)
+            .field("owner_id", &self.owner_id)
+            .field("label", &self.label)
+            .field("content", &self.content)
+            .field("description", &self.description);
+
+        // Format embedding nicely
+        if self.embedding.is_empty() {
+            debug_struct.field("embedding", &"[]");
+        } else {
+            let formatted = crate::utils::debug::EmbeddingDebug(&self.embedding);
+            debug_struct.field("embedding", &format!("{}", formatted));
+        }
+
+        debug_struct
+            .field("embedding_model", &self.embedding_model)
+            .field("metadata", &self.metadata)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("is_active", &self.is_active)
+            .finish()
+    }
 }
 
 /// Conversation model
@@ -432,7 +460,7 @@ pub enum EnergyLevel {
 }
 
 /// Task model
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
 
@@ -472,6 +500,46 @@ pub struct Task {
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl std::fmt::Debug for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug_struct = f.debug_struct("Task");
+        debug_struct
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("parent_id", &self.parent_id)
+            .field("title", &self.title)
+            .field("description", &self.description);
+
+        // Format embedding nicely
+        match &self.embedding {
+            Some(arr) => {
+                let formatted = crate::utils::debug::EmbeddingDebug(arr);
+                debug_struct.field("embedding", &format!("{}", formatted));
+            }
+            None => {
+                debug_struct.field("embedding", &None::<Vec<f32>>);
+            }
+        }
+
+        debug_struct
+            .field("embedding_model", &self.embedding_model)
+            .field("status", &self.status)
+            .field("priority", &self.priority)
+            .field("estimated_minutes", &self.estimated_minutes)
+            .field("actual_minutes", &self.actual_minutes)
+            .field("complexity_score", &self.complexity_score)
+            .field("energy_required", &self.energy_required)
+            .field("tags", &self.tags)
+            .field("metadata", &self.metadata)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("started_at", &self.started_at)
+            .field("completed_at", &self.completed_at)
+            .field("due_at", &self.due_at)
+            .finish()
+    }
 }
 
 fn default_pending() -> TaskStatus {

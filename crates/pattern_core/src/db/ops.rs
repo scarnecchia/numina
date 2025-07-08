@@ -4,6 +4,7 @@ use super::{DatabaseError, Result, models::*, schema::*};
 
 use crate::embeddings::EmbeddingProvider;
 use crate::id::{AgentId, AgentIdType, IdType, MemoryId, MemoryIdType, UserId, UserIdType};
+use crate::utils::debug::ResponseExt;
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serde::Serialize;
@@ -386,7 +387,7 @@ where
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        tracing::trace!("memory label query result: {:?}", result);
+        tracing::trace!("memory label query result: {:?}", result.pretty_debug());
 
         let records: Vec<DbMemoryBlock> = result
             .take("memory_data")
@@ -448,7 +449,7 @@ where
             .await
             .map_err(DatabaseError::QueryFailed)?;
 
-        tracing::trace!("attach result: {:?}", result);
+        tracing::trace!("attach result: {:?}", result.pretty_debug());
 
         Ok(())
     }
@@ -476,7 +477,7 @@ where
             .await
             .map_err(DatabaseError::QueryFailed)?;
 
-        tracing::trace!("query_result: {:?}", result);
+        tracing::trace!("query_result: {:?}", result.pretty_debug());
 
         let records: Vec<AccessBlock> = result.take(0).map_err(DatabaseError::QueryFailed)?;
 

@@ -1,5 +1,7 @@
 //! Utility functions and helpers for pattern-core
 
+pub mod debug;
+
 pub mod duration_millis {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;

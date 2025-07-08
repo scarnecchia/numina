@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, fmt, str::FromStr};
 use surrealdb::RecordId;
 use uuid::Uuid;
 
@@ -45,7 +45,7 @@ pub struct DbAgent {
 }
 
 /// Database representation of a MemoryBlock
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DbMemoryBlock {
     pub id: RecordId,
     pub owner_id: RecordId,
@@ -61,6 +61,37 @@ pub struct DbMemoryBlock {
     pub metadata: serde_json::Value,
     pub created_at: surrealdb::Datetime,
     pub updated_at: surrealdb::Datetime,
+}
+
+impl fmt::Debug for DbMemoryBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("DbMemoryBlock");
+        debug_struct
+            .field("id", &self.id)
+            .field("owner_id", &self.owner_id)
+            .field("label", &self.label)
+            .field("content", &self.content)
+            .field("description", &self.description);
+
+        // Format embedding nicely
+        match &self.embedding {
+            Some(arr) => {
+                let formatted = crate::utils::debug::EmbeddingDebug(arr);
+                debug_struct.field("embedding", &format!("{}", formatted));
+            }
+            None => {
+                debug_struct.field("embedding", &None::<Vec<f32>>);
+            }
+        }
+
+        debug_struct
+            .field("embedding_model", &self.embedding_model)
+            .field("agents", &self.agents)
+            .field("metadata", &self.metadata)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 fn default_true() -> bool {
