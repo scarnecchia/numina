@@ -2,7 +2,7 @@
 
 use super::{DatabaseError, Result};
 use crate::db::schema::Schema;
-use crate::id::{IdType, MemoryIdType, MessageIdType, TaskIdType};
+use crate::id::{IdType, MemoryIdType, MessageId as MessageIdType, TaskIdType};
 use surrealdb::{Connection, Surreal};
 
 /// Database migration runner

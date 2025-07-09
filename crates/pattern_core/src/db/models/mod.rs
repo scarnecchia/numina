@@ -5,6 +5,7 @@
 //! SurrealDB's record ID format.
 
 use chrono::{DateTime, Utc};
+use compact_str::ToCompactString;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt, str::FromStr};
 use surrealdb::RecordId;
@@ -13,6 +14,8 @@ use uuid::Uuid;
 use crate::{
     agent::{AgentState, AgentType, MemoryAccessLevel},
     id::{AgentId, MemoryId, UserId},
+    memory::MemoryBlock,
+    message::Message,
 };
 
 /// Database representation of a User
@@ -27,7 +30,7 @@ pub struct DbUser {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
-/// Database representation of an Agent
+/// Database representation of an Agent with full context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbAgent {
     pub id: RecordId,
@@ -35,10 +38,39 @@ pub struct DbAgent {
     pub agent_type: AgentType,
     pub name: String,
     pub system_prompt: String,
+    pub state: AgentState,
+
+    // Memory storage
+    #[serde(default)]
+    pub memory_blocks: Vec<DbMemoryBlock>,
+
+    // Message history
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub archived_messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_summary: Option<String>,
+
+    // Context configuration (stored as JSON to avoid SurrealDB enum issues)
+    pub context_config: serde_json::Value,
+    pub compression_strategy: serde_json::Value,
+
+    // Metadata
+    pub created_at: surrealdb::Datetime,
+    pub last_active: surrealdb::Datetime,
+    #[serde(default)]
+    pub total_messages: usize,
+    #[serde(default)]
+    pub total_tool_calls: usize,
+    #[serde(default)]
+    pub context_rebuilds: usize,
+    #[serde(default)]
+    pub compression_events: usize,
+
+    // Legacy fields
     #[serde(default)]
     pub config: serde_json::Value,
-    pub state: AgentState,
-    pub created_at: surrealdb::Datetime,
     pub updated_at: surrealdb::Datetime,
     #[serde(default = "default_true")]
     pub is_active: bool,
@@ -80,7 +112,7 @@ impl fmt::Debug for DbMemoryBlock {
                 debug_struct.field("embedding", &format!("{}", formatted));
             }
             None => {
-                debug_struct.field("embedding", &None::<Vec<f32>>);
+                debug_struct.field("embedding", &"none");
             }
         }
 
@@ -145,9 +177,22 @@ impl From<crate::db::schema::Agent> for DbAgent {
             agent_type: agent.agent_type,
             name: agent.name,
             system_prompt: agent.system_prompt,
-            config: agent.config,
             state: agent.state,
+            memory_blocks: agent.memory_blocks.into_iter().map(Into::into).collect(),
+            messages: agent.messages,
+            archived_messages: agent.archived_messages,
+            message_summary: agent.message_summary,
+            context_config: serde_json::to_value(agent.context_config)
+                .expect("ContextConfig should serialize"),
+            compression_strategy: serde_json::to_value(agent.compression_strategy)
+                .expect("CompressionStrategy should serialize"),
             created_at: agent.created_at.into(),
+            last_active: agent.last_active.into(),
+            total_messages: agent.total_messages,
+            total_tool_calls: agent.total_tool_calls,
+            context_rebuilds: agent.context_rebuilds,
+            compression_events: agent.compression_events,
+            config: agent.config,
             updated_at: agent.updated_at.into(),
             is_active: agent.is_active,
         }
@@ -175,6 +220,9 @@ impl TryFrom<DbAgent> for crate::db::schema::Agent {
             Uuid::from_str(strip_brackets(&db_agent.id.key().to_string())).unwrap(),
         );
 
+        println!("context config: {:?}", db_agent.context_config);
+        println!("compression_strategy: {:?}", db_agent.compression_strategy);
+
         let user_id = UserId::from_uuid(
             Uuid::from_str(strip_brackets(&db_agent.user_id.key().to_string())).unwrap(),
         );
@@ -185,25 +233,49 @@ impl TryFrom<DbAgent> for crate::db::schema::Agent {
             agent_type: db_agent.agent_type,
             name: db_agent.name,
             system_prompt: db_agent.system_prompt,
-            config: db_agent.config,
             state: db_agent.state,
+            memory_blocks: db_agent
+                .memory_blocks
+                .into_iter()
+                .map(|mb| MemoryBlock::try_from(mb).expect("should deserialize memories"))
+                .collect(),
+            messages: db_agent.messages,
+            archived_messages: db_agent.archived_messages,
+            message_summary: db_agent.message_summary,
+            context_config: serde_json::from_value(db_agent.context_config).map_err(|e| {
+                crate::id::IdError::InvalidFormat(format!("Invalid context_config: {}", e))
+            })?,
+            compression_strategy: serde_json::from_value(db_agent.compression_strategy).map_err(
+                |e| {
+                    crate::id::IdError::InvalidFormat(format!(
+                        "Invalid compression_strategy: {}",
+                        e
+                    ))
+                },
+            )?,
             created_at: from_surreal_datetime(db_agent.created_at),
+            last_active: from_surreal_datetime(db_agent.last_active),
+            total_messages: db_agent.total_messages,
+            total_tool_calls: db_agent.total_tool_calls,
+            context_rebuilds: db_agent.context_rebuilds,
+            compression_events: db_agent.compression_events,
+            config: db_agent.config,
             updated_at: from_surreal_datetime(db_agent.updated_at),
             is_active: db_agent.is_active,
         })
     }
 }
 
-impl From<crate::db::schema::MemoryBlock> for DbMemoryBlock {
-    fn from(memory: crate::db::schema::MemoryBlock) -> Self {
+impl From<crate::memory::MemoryBlock> for DbMemoryBlock {
+    fn from(memory: crate::memory::MemoryBlock) -> Self {
         Self {
             id: RecordId::from(memory.id),
             owner_id: memory.owner_id.into(),
-            label: memory.label,
+            label: memory.label.to_string(),
             content: memory.content,
             description: memory.description,
-            embedding: Some(memory.embedding),
-            embedding_model: Some(memory.embedding_model),
+            embedding: None, // Core MemoryBlock doesn't have embedding
+            embedding_model: memory.embedding_model,
             agents: Vec::new(), // Will be populated from junction table
             metadata: memory.metadata,
             created_at: memory.created_at.into(),
@@ -212,7 +284,7 @@ impl From<crate::db::schema::MemoryBlock> for DbMemoryBlock {
     }
 }
 
-impl TryFrom<DbMemoryBlock> for crate::db::schema::MemoryBlock {
+impl TryFrom<DbMemoryBlock> for crate::memory::MemoryBlock {
     type Error = crate::id::IdError;
 
     fn try_from(db_memory: DbMemoryBlock) -> Result<Self, Self::Error> {
@@ -228,11 +300,10 @@ impl TryFrom<DbMemoryBlock> for crate::db::schema::MemoryBlock {
         Ok(Self {
             id: memory_id,
             owner_id,
-            label: db_memory.label,
+            label: db_memory.label.try_to_compact_string().unwrap(),
             content: db_memory.content,
             description: db_memory.description,
-            embedding: db_memory.embedding.unwrap_or_default(),
-            embedding_model: db_memory.embedding_model.unwrap_or_default(),
+            embedding_model: db_memory.embedding_model,
             metadata: db_memory.metadata,
             is_active: true,
             created_at: from_surreal_datetime(db_memory.created_at),

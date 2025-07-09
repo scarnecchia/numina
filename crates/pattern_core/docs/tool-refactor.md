@@ -2,7 +2,7 @@
 
 ## Overview
 
-We've refactored the `AiTool` trait to use generics instead of `serde_json::Value`, providing compile-time type safety while maintaining compatibility with MCP's requirement for reference-free JSON schemas.
+We've refactored the `AiTool` trait to use generics instead of `serde_json::Value`, providing compile-time type safety while maintaining compatibility with MCP's requirement for reference-free JSON schemas. This system now supports both external tools and built-in agent tools.
 
 ## Key Changes
 
@@ -167,6 +167,39 @@ To migrate existing tools:
 
 The registry API remains unchanged, so tool consumers don't need modifications.
 
+## Built-in Tools
+
+Pattern agents come with built-in tools that use the same `AiTool` trait:
+
+### UpdateMemoryTool
+- Updates or creates memory blocks
+- Uses `AgentHandle` for efficient access to agent memory
+- Type-safe with `UpdateMemoryInput` and `UpdateMemoryOutput`
+
+### SendMessageTool
+- Sends messages to users, agents, groups, or channels
+- Currently a stub implementation
+- Will integrate with message routing system
+
+### Registration
+
+Built-in tools are registered automatically when creating an agent:
+
+```rust
+let builtin = BuiltinTools::default_for_agent(context.handle());
+builtin.register_all(&context.tools);
+```
+
+### Customization
+
+Built-in tools can be replaced with custom implementations:
+
+```rust
+let builtin = BuiltinTools::builder()
+    .with_memory_tool(CustomMemoryTool::new())
+    .build_for_agent(handle);
+```
+
 ## Technical Notes
 
 - We use `schemars` with `inline_subschemas = true` to ensure MCP compatibility
@@ -175,3 +208,5 @@ The registry API remains unchanged, so tool consumers don't need modifications.
 - The `DynamicToolAdapter` handles all serialization/deserialization errors gracefully
 - Both `AiTool` and `DynamicTool` now have `to_genai_tool()` methods for direct conversion to genai tools
 - `DynamicTool` includes a `validate_params()` method for custom parameter validation
+- Built-in tools use `AgentHandle` which provides cheap cloning without copying message history
+- Memory uses `Arc<DashMap>` internally for thread-safe concurrent access

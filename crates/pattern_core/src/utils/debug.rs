@@ -639,31 +639,9 @@ mod tests {
 
     #[test]
     fn test_pretty_debug_output() {
-        use crate::db::schema::{MemoryBlock, Task};
-        use crate::id::{MemoryId, TaskId, UserId};
+        use crate::db::schema::Task;
+        use crate::id::{TaskId, UserId};
         use chrono::Utc;
-
-        // Create a MemoryBlock with embeddings
-        let memory = MemoryBlock {
-            id: MemoryId::generate(),
-            owner_id: UserId::generate(),
-            label: "test_memory".to_string(),
-            content: "This is a test memory block".to_string(),
-            description: Some("Test description".to_string()),
-            embedding: vec![0.1; 384], // Typical embedding size
-            embedding_model: "text-embedding-3-small".to_string(),
-            metadata: serde_json::json!({"test": true}),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            is_active: true,
-        };
-
-        let debug_output = format!("{:#?}", memory);
-        println!("MemoryBlock debug output:\n{}", debug_output);
-
-        // Check that embedding is truncated
-        assert!(debug_output.contains("(384d)"));
-        assert!(!debug_output.contains("0.1, 0.1, 0.1")); // Should not have full array
 
         // Create a Task with embeddings
         let task = Task {

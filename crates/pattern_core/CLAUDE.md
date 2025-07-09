@@ -1,6 +1,6 @@
 # CLAUDE.md - Pattern Core
 
-This crate provides the core agent framework, memory management, and tool execution system that powers Pattern's multi-agent cognitive support system.
+This crate provides the core agent framework, memory management, and tool execution system that powers Pattern's multi-agent cognitive support system. Inspired by MemGPT's architecture for building stateful agents on stateless LLMs.
 
 ## Core Principles
 
@@ -30,6 +30,7 @@ This crate provides the core agent framework, memory management, and tool execut
    - Dynamic dispatch via `DynamicTool` trait
    - Thread-safe `ToolRegistry` using DashMap
    - MCP-compatible schema generation (no $ref)
+   - Built-in tools in `tool/builtin/` subdirectory
 
 4. **Context Building** (`context/`)
    - Stateful agents on stateless protocols
@@ -48,24 +49,33 @@ This crate provides the core agent framework, memory management, and tool execut
 - Tools must be `Clone` to work with the registry
 - Schema generation uses `schemars` with `inline_subschemas = true` for MCP compatibility
 - DynamicToolAdapter provides type erasure while preserving type safety
+- Built-in tools (update_memory, send_message) use AgentHandle for efficient access
+- Built-in tools are registered in the same ToolRegistry as external tools
+- BuiltinTools::builder() allows customization of default implementations
 
 ### Memory Management
 - Memory blocks are soft-limited by character count
 - Each block has a label, value, optional description, and last_modified timestamp
 - No versioning in the current implementation (kept simple)
+- Memory uses Arc<DashMap> internally for thread-safe concurrent access
 
 ### Context Building
 - ContextBuilder follows builder pattern for flexibility
 - Compression happens automatically when message count exceeds limits
 - Support for XML-style tags or plain text formatting based on model
+- AgentContext split into:
+  - AgentHandle: Cheap, cloneable handle with agent_id and memory
+  - MessageHistory: Large message data behind Arc<RwLock<_>>
+  - Metadata behind Arc<RwLock<_>> for concurrent updates
 
 ### Database Backend (`db/`)
-- Trait-based abstraction (`DatabaseBackend`, `VectorStore`) for multiple implementations
-- Pure Rust embedded database using SurrealKV (no RocksDB dependency)
+- Pure Rust embedded database using SurrealKV
 - Schema migrations with version tracking
 - Vector search support with HNSW indexes
-- Direct operations via functions in `db::ops` (no unnecessary repository pattern)
+- Direct operations via functions in `db::ops`
 - Type-safe IDs (UserId, AgentId, etc.) throughout the codebase
+  - All IDs use underscore separator format: `prefix_uuid` (e.g., `agent_12345678-...`)
+  - MemoryIdType uses "mem" prefix, not "memory"
 - Automatic handling of SurrealDB's nested value format via `unwrap_surreal_value`
 - **Important**: See [`db/SURREALDB_PATTERNS.md`](./src/db/SURREALDB_PATTERNS.md) for query patterns and response handling
 
@@ -84,15 +94,13 @@ This crate provides the core agent framework, memory management, and tool execut
   - `jinaai/jina-embeddings-v2-base-en` (768 dims) ✅
 
 **Known Issues:**
-- BERT models (`BAAI/bge-*`) fail with "unsupported dtype F32 for op index-select" error due to Candle's BERT implementation. Use Jina models for local embeddings or cloud providers for production.
+- BERT models (`BAAI/bge-*`) fail with dtype errors in Candle. Use Jina models for local embeddings.
 
-### Serialization
 ### Serialization
 - All `Option<T>` fields use `#[serde(skip_serializing_if = "Option::is_none")]`
 - Duration fields use custom serialization (as milliseconds)
 - Avoid nested structs in types that need MCP-compatible schemas
 - SurrealDB responses wrap data in nested structures - use `unwrap_surreal_value` helper
-- Custom serde implementations for enums (e.g., AgentType serializes Custom variants with `custom:` prefix)
 - **SurrealDB Gotchas**: Response `.take()` can return nested vectors, DELETE queries need special handling - see patterns doc
 
 ## Common Patterns
@@ -116,6 +124,24 @@ impl AiTool for MyTool {
 }
 ```
 
+### Built-in Tools Pattern
+```rust
+// Creating built-in tools with AgentHandle
+let handle = AgentHandle {
+    agent_id: agent_id.clone(),
+    memory: memory.clone(),
+};
+
+// Register default built-in tools
+let builtin = BuiltinTools::default_for_agent(handle);
+builtin.register_all(&registry);
+
+// Or customize built-in tools
+let builtin = BuiltinTools::builder()
+    .with_memory_tool(CustomMemoryTool::new())
+    .build_for_agent(handle);
+```
+
 ### Error Handling
 ```rust
 // Use specific error variants with context
@@ -137,6 +163,7 @@ return Err(CoreError::memory_not_found(
 - Prefer integration-style tests over unit tests
 - Keep slow tests (e.g., Candle embeddings) in integration tests, not unit tests
 - Unit test suite should run in <1 second
+- Use MockModelProvider and MockEmbeddingProvider for testing agent functionality
 
 ## Performance Considerations
 
@@ -144,10 +171,12 @@ return Err(CoreError::memory_not_found(
 - DashMap shards internally for concurrent access
 - Message compression is async but happens during context building
 - Token estimation is rough (4 chars ≈ 1 token)
+- Memory uses Arc<DashMap> for efficient cloning and thread-safe access
+- AgentHandle provides cheap cloning for built-in tools
+- MessageHistory behind RwLock to avoid cloning large message vectors
 
 ## Future Considerations
 
-- ~~Vector embeddings for semantic memory search~~ ✅ Implemented
 - Streaming response support
 - Multi-modal message content
 - Advanced compression strategies (semantic clustering)
@@ -156,4 +185,5 @@ return Err(CoreError::memory_not_found(
 - Fix BERT model support in Candle (dtype issues)
 - Additional embedding providers (local ONNX, etc.)
 - Batch embedding operations
-- Cross-agent memory sharing
+- ~~Cross-agent memory sharing~~ ✅ Implemented
+- Agent groups (dynamic, supervisor, sleeptime managers)

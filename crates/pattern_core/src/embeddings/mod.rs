@@ -258,6 +258,58 @@ pub fn validate_input(texts: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Mock embedding provider for testing
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct MockEmbeddingProvider {
+    pub model: String,
+    pub dimensions: usize,
+}
+
+#[cfg(test)]
+impl Default for MockEmbeddingProvider {
+    fn default() -> Self {
+        Self {
+            model: "mock-model".to_string(),
+            dimensions: 384,
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl EmbeddingProvider for MockEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Embedding> {
+        if text.trim().is_empty() {
+            return Err(EmbeddingError::EmptyInput);
+        }
+
+        // Return a mock embedding with the configured dimensions
+        Ok(Embedding::new(
+            vec![0.1; self.dimensions],
+            self.model.clone(),
+        ))
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
+        validate_input(texts)?;
+
+        // Return mock embeddings for each text
+        Ok(texts
+            .iter()
+            .map(|_| Embedding::new(vec![0.1; self.dimensions], self.model.clone()))
+            .collect())
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,7 @@ mod impls;
 #[cfg(test)]
 mod tests;
 
+use compact_str::CompactString;
 pub use impls::{AgentDbExt, DatabaseAgent};
 
 use async_trait::async_trait;
@@ -13,10 +14,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use crate::{
-    AgentId, Memory, Result,
+    AgentId, MemoryBlock, Result,
     message::{Message, Response},
     tool::DynamicTool,
 };
@@ -37,10 +37,10 @@ pub trait Agent: Send + Sync + Debug {
     async fn process_message(&self, message: Message) -> Result<Response>;
 
     /// Get a memory block by key
-    async fn get_memory(&self, key: &str) -> Result<Option<Memory>>;
+    async fn get_memory(&self, key: &str) -> Result<Option<MemoryBlock>>;
 
     /// Update a memory block
-    async fn update_memory(&self, key: &str, memory: Memory) -> Result<()>;
+    async fn update_memory(&self, key: &str, memory: MemoryBlock) -> Result<()>;
 
     /// Execute a tool with the given parameters
     async fn execute_tool(
@@ -51,16 +51,18 @@ pub trait Agent: Send + Sync + Debug {
 
     /// Create or update a memory block with just the value
     async fn set_memory(&self, key: &str, value: String) -> Result<()> {
-        let mut memory = Memory::new();
-        memory.create_block(key, value)?;
-        self.update_memory(key, memory).await
+        self.update_memory(key, MemoryBlock::new(key, value)).await
     }
 
     /// List all available memory block keys
-    async fn list_memory_keys(&self) -> Result<Vec<String>>;
+    async fn list_memory_keys(&self) -> Result<Vec<CompactString>>;
 
     /// Search memory blocks by content (semantic search if embeddings available)
-    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<(String, Memory, f32)>>;
+    async fn search_memory(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(CompactString, MemoryBlock, f32)>>;
 
     /// Share a memory block with another agent
     async fn share_memory_with(
@@ -71,13 +73,10 @@ pub trait Agent: Send + Sync + Debug {
     ) -> Result<()>;
 
     /// Get all memory blocks shared with this agent
-    async fn get_shared_memories(&self) -> Result<Vec<(AgentId, String, Memory)>>;
+    async fn get_shared_memories(&self) -> Result<Vec<(AgentId, CompactString, MemoryBlock)>>;
 
-    /// Subscribe to memory updates (for live queries)
-    async fn subscribe_to_memory(&self, memory_key: &str) -> Result<()>;
-
-    /// Get the agent's system prompt
-    fn system_prompt(&self) -> &str;
+    /// Get the agent's system prompt components
+    async fn system_prompt(&self) -> Vec<String>;
 
     /// Get the list of tools available to this agent
     fn available_tools(&self) -> Vec<Box<dyn DynamicTool>>;
@@ -271,60 +270,4 @@ pub enum ActionPriority {
     Medium,
     High,
     Critical,
-}
-
-/// Builder for creating new agents
-#[derive(Debug, Clone)]
-pub struct AgentBuilder {
-    id: Option<AgentId>,
-    name: Option<String>,
-    agent_type: AgentType,
-    system_prompt: Option<String>,
-    tools: Vec<Box<dyn DynamicTool>>,
-    memory_blocks: Vec<(String, Memory)>,
-}
-
-impl AgentBuilder {
-    pub fn new(agent_type: AgentType) -> Self {
-        Self {
-            id: None,
-            name: None,
-            agent_type,
-            system_prompt: None,
-            tools: Vec::new(),
-            memory_blocks: Vec::new(),
-        }
-    }
-
-    pub fn with_id(mut self, id: AgentId) -> Self {
-        self.id = Some(id);
-        self
-    }
-
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
-        self
-    }
-
-    pub fn with_tool(mut self, tool: Box<dyn DynamicTool>) -> Self {
-        self.tools.push(tool);
-        self
-    }
-
-    pub fn with_memory(mut self, key: impl Into<String>, memory: Memory) -> Self {
-        self.memory_blocks.push((key.into(), memory));
-        self
-    }
-
-    pub async fn build(self) -> Result<Arc<dyn Agent>> {
-        // This would create the actual agent implementation
-        // The agent_type field will be used here to create the appropriate agent type
-        let _ = self.agent_type; // TODO: Use this when implementing
-        todo!("Implement agent building")
-    }
 }

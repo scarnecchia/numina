@@ -23,7 +23,7 @@ pub struct Id<T> {
 
 impl<T: IdType> fmt::Debug for Id<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", T::PREFIX, self.uuid)
+        write!(f, "{}_{}", T::PREFIX, self.uuid)
     }
 }
 
@@ -66,10 +66,10 @@ impl<T: IdType> Id<T> {
     /// Parse an ID from a string
     pub fn parse(s: &str) -> Result<Self, IdError> {
         // Check if the string contains a separator
-        let parts: Vec<&str> = s.splitn(2, '-').collect();
+        let parts: Vec<&str> = s.splitn(2, '_').collect();
         if parts.len() != 2 {
             return Err(IdError::InvalidFormat(
-                "ID must be in format 'prefix-uuid'".to_string(),
+                "ID must be in format 'prefix_uuid'".to_string(),
             ));
         }
 
@@ -104,7 +104,7 @@ impl<T: IdType> Id<T> {
 
     /// Convert to a compact string representation
     pub fn to_compact_string(&self) -> CompactString {
-        compact_str::format_compact!("{}-{}", T::PREFIX, self.uuid)
+        compact_str::format_compact!("{}_{}", T::PREFIX, self.uuid)
     }
 
     /// Create a nil/empty ID (all zeros)
@@ -123,7 +123,7 @@ impl<T: IdType> Id<T> {
 
 impl<T: IdType> Display for Id<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", T::PREFIX, self.uuid)
+        write!(f, "{}_{}", T::PREFIX, self.uuid)
     }
 }
 
@@ -159,7 +159,7 @@ impl<T: IdType> Serialize for Id<T> {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("{}-{}", T::PREFIX, self.uuid()))
+        serializer.serialize_str(&format!("{}_{}", T::PREFIX, self.uuid()))
     }
 }
 
@@ -177,7 +177,7 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
     type Value = Id<T>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "A string with the format 'prefix-UUID'")
+        write!(formatter, "A string with the format 'prefix_UUID'")
     }
 
     fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
@@ -185,10 +185,10 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
         E: de::Error,
     {
         // Check if the string contains a separator
-        let parts: Vec<&str> = s.splitn(2, '-').collect();
+        let parts: Vec<&str> = s.splitn(2, '_').collect();
         if parts.len() != 2 {
             return Err(de::Error::custom(
-                "ID must be in format 'prefix-uuid'".to_string(),
+                "ID must be in format 'prefix_uuid'".to_string(),
             ));
         }
 
@@ -275,16 +275,28 @@ impl IdType for ToolCallIdType {
 /// Type alias for Tool Call IDs
 pub type ToolCallId = Id<ToolCallIdType>;
 
-/// Marker type for Message IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct MessageIdType;
+/// Type alias for Message IDs (these are just strings for compat with API)
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct MessageId(pub String);
 
-impl IdType for MessageIdType {
+impl IdType for MessageId {
     const PREFIX: &'static str = "msg";
 }
 
-/// Type alias for Message IDs
-pub type MessageId = Id<MessageIdType>;
+impl MessageId {
+    pub fn generate() -> Self {
+        let mut buf = Uuid::encode_buffer();
+        let uuid = uuid::Uuid::new_v4().simple().encode_lower(&mut buf);
+        MessageId(format!("msg_{uuid}"))
+    }
+}
+
+impl From<MessageId> for RecordId {
+    fn from(value: MessageId) -> Self {
+        RecordId::from_table_key("msg", value.0)
+    }
+}
 
 /// Marker type for Memory Block IDs
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -344,7 +356,7 @@ mod tests {
 
         // IDs should have correct prefix
         assert_eq!(id1.prefix(), "agent");
-        assert!(id2.to_string().starts_with("agent-"));
+        assert!(id2.to_string().starts_with("agent_"));
     }
 
     #[test]
@@ -361,9 +373,12 @@ mod tests {
 
         // Should fail with invalid format
         assert!(AgentId::parse("invalid").is_err());
+        assert!(AgentId::parse("agent_").is_err());
+        assert!(AgentId::parse("agent_not-a-uuid").is_err());
+
+        // Should succeed with valid format
         let uuid = uuid::Uuid::new_v4();
-        assert!(AgentId::parse(&format!("agent_{uuid}")).is_err());
-        assert!(AgentId::parse("agent-not-a-uuid").is_err());
+        assert!(AgentId::parse(&format!("agent_{}", uuid)).is_ok());
     }
 
     #[test]
@@ -375,8 +390,8 @@ mod tests {
         let deserialized: AgentId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, deserialized);
 
-        // Should serialize as "prefix-uuid"
-        assert!(json.contains("agent-"));
+        // Should serialize as "prefix_uuid"
+        assert!(json.contains("agent_"));
     }
 
     #[test]
@@ -385,9 +400,9 @@ mod tests {
         let user_id = UserId::generate();
         let task_id = TaskId::generate();
 
-        assert!(agent_id.to_string().starts_with("agent-"));
-        assert!(user_id.to_string().starts_with("user-"));
-        assert!(task_id.to_string().starts_with("task-"));
+        assert!(agent_id.to_string().starts_with("agent_"));
+        assert!(user_id.to_string().starts_with("user_"));
+        assert!(task_id.to_string().starts_with("task_"));
     }
 
     #[test]
@@ -396,7 +411,7 @@ mod tests {
         assert!(nil_id.is_nil());
         assert_eq!(
             nil_id.to_string(),
-            "agent-00000000-0000-0000-0000-000000000000"
+            "agent_00000000-0000-0000-0000-000000000000"
         );
     }
 
@@ -424,8 +439,8 @@ mod tests {
         let agent_debug = format!("{:?}", agent_id);
         let user_debug = format!("{:?}", user_id);
 
-        assert!(agent_debug.starts_with("agent-"));
-        assert!(user_debug.starts_with("user-"));
+        assert!(agent_debug.starts_with("agent_"));
+        assert!(user_debug.starts_with("user_"));
 
         // Should not contain PhantomData or other noise
         assert!(!agent_debug.contains("PhantomData"));

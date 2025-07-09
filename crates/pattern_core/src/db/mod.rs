@@ -19,9 +19,7 @@ pub mod schema;
 
 // Re-export commonly used types
 pub use models::{DbAgent, DbMemoryBlock, DbUser};
-pub use schema::{
-    Agent, Conversation, EnergyLevel, MemoryBlock, Task, TaskPriority, TaskStatus, ToolCall, User,
-};
+pub use schema::{EnergyLevel, Task, TaskPriority, TaskStatus, ToolCall, User};
 
 use crate::embeddings::EmbeddingError;
 use crate::id::IdError;

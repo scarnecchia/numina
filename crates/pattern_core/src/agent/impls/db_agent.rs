@@ -1,54 +1,77 @@
 //! Database-backed agent implementation
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use compact_str::CompactString;
+use std::str::FromStr;
 use std::sync::Arc;
 use surrealdb::{RecordId, Surreal};
+use tokio::sync::RwLock;
+use uuid::Uuid;
+
+use crate::db::models::{from_surreal_datetime, strip_brackets};
+use crate::tool::builtin::BuiltinTools;
 
 use crate::{
-    CoreError, Result,
+    CoreError, MemoryBlock, ModelProvider, Result, UserId,
     agent::{Agent, AgentState, AgentType, MemoryAccessLevel},
+    context::AgentContext,
     db::{DatabaseError, DbAgent, ops::SurrealExt, schema},
     embeddings::EmbeddingProvider,
     id::{AgentId, IdType},
-    llm::LlmProvider,
     memory::Memory,
-    message::{Message, Response, ResponseMetadata},
+    message::{Message, Request, Response},
+    model::ResponseOptions,
     tool::{DynamicTool, ToolRegistry},
 };
 
 /// A concrete agent implementation backed by the database
-pub struct DatabaseAgent<C: surrealdb::Connection> {
-    /// The agent's database record
-    agent: schema::Agent,
+pub struct DatabaseAgent<C, M, E>
+where
+    C: surrealdb::Connection,
+{
+    /// The agent's ID (stored separately for sync access)
+    agent_id: AgentId,
 
+    /// The agent's name (stored separately for sync access)
+    name: String,
+
+    /// The agent's type (stored separately for sync access)
+    agent_type: AgentType,
+
+    /// The user who owns this agent
+    user_id: UserId,
+
+    /// The agent's current state (stored separately for sync access)
+    state: AgentState,
+
+    /// The agent's context (includes all state)
+    context: AgentContext,
+
+    /// model provider
+    model: Arc<RwLock<M>>,
+
+    /// model configuration
+    chat_options: Arc<RwLock<Option<ResponseOptions>>>,
     /// Database connection
     db: Arc<Surreal<C>>,
 
-    /// LLM provider for generating responses
-    llm: Arc<dyn LlmProvider>,
-
     /// Embedding provider for semantic search
-    embeddings: Option<Arc<dyn EmbeddingProvider>>,
-
-    /// Tool registry for this agent
-    tools: Arc<ToolRegistry>,
-
-    /// Cached memory blocks
-    memory_cache: Arc<RwLock<Memory>>,
-
-    /// Subscribed memory keys for live updates
-    subscriptions: Arc<RwLock<Vec<String>>>,
+    embeddings: Option<Arc<E>>,
 }
 
-impl<C: surrealdb::Connection> DatabaseAgent<C> {
+impl<C, M, E> DatabaseAgent<C, M, E>
+where
+    C: surrealdb::Connection,
+    M: ModelProvider + 'static,
+    E: EmbeddingProvider + 'static,
+{
     /// Create a new database-backed agent
     pub async fn new(
         agent_id: AgentId,
         db: Arc<Surreal<C>>,
-        llm: Arc<dyn LlmProvider>,
-        embeddings: Option<Arc<dyn EmbeddingProvider>>,
-        tools: Arc<ToolRegistry>,
+        model: Arc<RwLock<M>>,
+        embeddings: Option<Arc<E>>,
+        tools: ToolRegistry,
     ) -> Result<Self> {
         // Load the agent from database
         let agent = db
@@ -60,34 +83,113 @@ impl<C: surrealdb::Connection> DatabaseAgent<C> {
                 id: agent_id.to_string(),
             })?;
 
-        Ok(Self {
-            agent,
-            db,
-            llm,
-            embeddings,
+        let user_id = UserId::from_uuid(
+            Uuid::from_str(strip_brackets(&agent.user_id.key().to_string())).unwrap(),
+        );
+
+        // Create memory with owner
+        let memory = Memory::with_owner(user_id.clone());
+
+        // Add memory blocks
+        for block in &agent.memory_blocks {
+            memory.create_block(block.label.clone(), &block.content)?;
+            if let Some(desc) = &block.description {
+                if let Some(mut block) = memory.get_block_mut(&block.label) {
+                    block.description = Some(desc.clone());
+                }
+            }
+        }
+
+        // Build AgentContext with tools
+        let context = AgentContext::new(
+            agent_id,
+            agent.agent_type.clone(),
+            memory,
             tools,
-            memory_cache: Arc::new(RwLock::new(Memory::new())),
-            subscriptions: Arc::new(RwLock::new(Vec::new())),
+            serde_json::from_value(agent.context_config)
+                .map_err(|e| {
+                    crate::id::IdError::InvalidFormat(format!("Invalid context_config: {}", e))
+                })
+                .expect("context config should be valid"),
+        );
+
+        // Register built-in tools
+        let builtin = BuiltinTools::default_for_agent(context.handle());
+        builtin.register_all(&context.tools);
+
+        // Restore message history
+        {
+            let mut history = context.history.write().await;
+            history.messages = agent.messages.clone();
+            history.archived_messages = agent.archived_messages.clone();
+            history.message_summary = agent.message_summary.clone();
+            history.compression_strategy = serde_json::from_value(agent.compression_strategy)
+                .expect("compression strategy should be valid")
+        }
+
+        // Restore metadata
+        {
+            let mut metadata = context.metadata.write().await;
+            metadata.created_at = from_surreal_datetime(agent.created_at);
+            metadata.last_active = from_surreal_datetime(agent.last_active);
+            metadata.total_messages = agent.total_messages;
+            metadata.total_tool_calls = agent.total_tool_calls;
+            metadata.context_rebuilds = agent.context_rebuilds;
+            metadata.compression_events = agent.compression_events;
+        }
+
+        Ok(Self {
+            agent_id,
+            name: agent.name.clone(),
+            agent_type: agent.agent_type.clone(),
+            user_id,
+            state: agent.state,
+            context,
+            chat_options: Arc::new(RwLock::const_new(None)),
+            db,
+            embeddings,
+            model,
         })
+    }
+
+    /// Persist the current context state to the database
+    async fn persist_context(&self) -> Result<()> {
+        let history = self.context.history.read().await;
+        let metadata = self.context.metadata.read().await;
+
+        // Update the agent record with the current context
+        self.db
+            .update_agent_context(
+                self.context.handle.agent_id.clone(),
+                self.context.handle.memory.get_all_blocks(),
+                history.messages.clone(),
+                history.archived_messages.clone(),
+                history.message_summary.clone(),
+                self.context.context_config.clone(),
+                history.compression_strategy.clone(),
+                metadata.clone(),
+            )
+            .await?;
+
+        Ok(())
     }
 
     /// Start background task to sync memory updates via live queries
     pub async fn start_memory_sync(self: Arc<Self>) -> Result<()> {
-        let agent_id = self.agent.id;
-        let memory_cache = Arc::clone(&self.memory_cache);
+        let agent_id = self.agent_id;
+        let memory = self.context.handle.memory.clone();
         let db = Arc::clone(&self.db);
-        self.refresh_memory_cache().await?;
 
         // Spawn background task to handle updates
         tokio::spawn(async move {
             use futures::StreamExt;
-            tracing::debug!("Memory sync task started for agent {}", agent_id);
+            tracing::info!("Memory sync task started for agent {}", agent_id);
 
             // Subscribe to all memory changes for this agent
             let stream = match db.subscribe_to_agent_memory_updates(agent_id).await {
                 Ok(s) => {
-                    tracing::debug!(
-                        "Successfully subscribed to memory updates for agent {}",
+                    tracing::info!(
+                        "Successfully subscribed to memory updates for agent {} - live query active",
                         agent_id
                     );
                     s
@@ -101,20 +203,24 @@ impl<C: surrealdb::Connection> DatabaseAgent<C> {
             futures::pin_mut!(stream);
 
             while let Some((action, memory_block)) = stream.next().await {
-                tracing::trace!(
-                    "Agent {} received memory update: {:?} for block '{}'",
+                tracing::info!(
+                    "🔔 Agent {} received live query notification: {:?} for block '{}' with content: '{}'",
                     agent_id,
                     action,
-                    memory_block.label
+                    memory_block.label,
+                    memory_block.content
                 );
-                let mut cache = memory_cache.write();
 
                 match action {
                     surrealdb::Action::Create => {
-                        tracing::trace!("creating {}", memory_block.label);
+                        tracing::info!(
+                            "Agent {} creating memory block '{}'",
+                            agent_id,
+                            memory_block.label
+                        );
                         // Create new block
                         if let Err(e) =
-                            cache.create_block(&memory_block.label, &memory_block.content)
+                            memory.create_block(memory_block.label.clone(), &memory_block.content)
                         {
                             tracing::error!(
                                 "Failed to create memory block {}: {}",
@@ -122,21 +228,31 @@ impl<C: surrealdb::Connection> DatabaseAgent<C> {
                                 e
                             );
                         }
-                        // Update description if present
-                        if let Some(desc) = &memory_block.description {
-                            if let Some(mem_block) = cache.get_block_mut(&memory_block.label) {
-                                mem_block.description = Some(desc.clone());
-                            }
+                        // Update other fields if present
+                        if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
+                            block.id = memory_block.id;
+                            block.owner_id = memory_block.owner_id;
+                            block.description = memory_block.description;
+                            block.metadata = memory_block.metadata;
+                            block.embedding_model = memory_block.embedding_model;
+                            block.created_at = memory_block.created_at;
+                            block.updated_at = memory_block.updated_at;
+                            block.is_active = memory_block.is_active;
                         }
                     }
 
                     surrealdb::Action::Update => {
                         // Update or create the block
-                        if cache.get_block(&memory_block.label).is_some() {
-                            tracing::trace!("updating {}", memory_block.label);
+                        if memory.get_block(&memory_block.label).is_some() {
+                            tracing::info!(
+                                "✅ Agent {} updating existing memory '{}' with content: '{}'",
+                                agent_id,
+                                memory_block.label,
+                                memory_block.content
+                            );
                             // Update existing block
-                            if let Err(e) =
-                                cache.update_block_value(&memory_block.label, &memory_block.content)
+                            if let Err(e) = memory
+                                .update_block_value(&memory_block.label, &memory_block.content)
                             {
                                 tracing::error!(
                                     "Failed to update memory block {}: {}",
@@ -145,10 +261,14 @@ impl<C: surrealdb::Connection> DatabaseAgent<C> {
                                 );
                             }
                         } else {
-                            tracing::trace!("creating {}", memory_block.label);
+                            tracing::info!(
+                                "Agent {} creating new memory block '{}' (from update)",
+                                agent_id,
+                                memory_block.label
+                            );
                             // Create new block
-                            if let Err(e) =
-                                cache.create_block(&memory_block.label, &memory_block.content)
+                            if let Err(e) = memory
+                                .create_block(memory_block.label.clone(), &memory_block.content)
                             {
                                 tracing::error!(
                                     "Failed to create memory block {}: {}",
@@ -158,20 +278,25 @@ impl<C: surrealdb::Connection> DatabaseAgent<C> {
                             }
                         }
 
-                        // Update description if present
-                        if let Some(desc) = &memory_block.description {
-                            if let Some(mem_block) = cache.get_block_mut(&memory_block.label) {
-                                mem_block.description = Some(desc.clone());
-                            }
+                        // Update other fields if present
+                        if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
+                            block.id = memory_block.id;
+                            block.owner_id = memory_block.owner_id;
+                            block.description = memory_block.description;
+                            block.metadata = memory_block.metadata;
+                            block.embedding_model = memory_block.embedding_model;
+                            block.created_at = memory_block.created_at;
+                            block.updated_at = memory_block.updated_at;
+                            block.is_active = memory_block.is_active;
                         }
                     }
                     surrealdb::Action::Delete => {
-                        tracing::debug!(
-                            "Agent {} received DELETE for memory block '{}'",
+                        tracing::info!(
+                            "🗑️ Agent {} received DELETE for memory block '{}'",
                             agent_id,
                             memory_block.label
                         );
-                        cache.remove_block(&memory_block.label);
+                        memory.remove_block(&memory_block.label);
                     }
                     _ => {
                         tracing::debug!("Ignoring action {:?} for memory block", action);
@@ -179,190 +304,119 @@ impl<C: surrealdb::Connection> DatabaseAgent<C> {
                 }
             }
 
-            tracing::debug!("Memory sync task exiting for agent {}", agent_id);
-            tracing::info!("Memory sync stream ended for agent {}", agent_id);
+            tracing::warn!(
+                "⚠️ Memory sync task exiting for agent {} - stream ended",
+                agent_id
+            );
         });
 
         Ok(())
     }
-
-    /// Load memory blocks from database into cache
-    async fn refresh_memory_cache(&self) -> Result<()> {
-        let memories = self.db.get_agent_memories(self.agent.id).await?;
-
-        let mut memory = Memory::new();
-        for (block, _access_level) in memories {
-            memory.create_block(&block.label, &block.content)?;
-            if let Some(desc) = &block.description {
-                if let Some(mem_block) = memory.get_block_mut(&block.label) {
-                    mem_block.description = Some(desc.clone());
-                }
-            }
-        }
-
-        *self.memory_cache.write() = memory;
-        Ok(())
-    }
-
-    /// Get or load memory cache
-    async fn get_memory_cache(&self) -> Result<Memory> {
-        // // Cache miss, load from database
-        // self.refresh_memory_cache().await?;
-
-        Ok(self.memory_cache.read().clone())
-    }
 }
 
-impl<C: surrealdb::Connection> std::fmt::Debug for DatabaseAgent<C> {
+impl<C, M, E> std::fmt::Debug for DatabaseAgent<C, M, E>
+where
+    C: surrealdb::Connection,
+    M: ModelProvider,
+    E: EmbeddingProvider,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatabaseAgent")
-            .field("agent_id", &self.agent.id)
-            .field("agent_name", &self.agent.name)
-            .field("agent_type", &self.agent.agent_type)
-            .field("state", &self.agent.state)
+            .field("agent_id", &self.agent_id)
+            .field("name", &self.name)
+            .field("agent_type", &self.agent_type)
+            .field("user_id", &self.user_id)
+            .field("state", &self.state)
             .field("has_embeddings", &self.embeddings.is_some())
-            .field("tools_count", &self.tools.list_tools().len())
-            .field("subscriptions", &self.subscriptions.read().len())
+            .field(
+                "memory_blocks",
+                &self.context.handle.memory.list_blocks().len(),
+            )
             .finish()
     }
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + 'static> Agent for DatabaseAgent<C>
+impl<C, M, E> Agent for DatabaseAgent<C, M, E>
 where
-    C: std::fmt::Debug,
+    C: surrealdb::Connection + std::fmt::Debug + 'static,
+    M: ModelProvider + 'static,
+    E: EmbeddingProvider + 'static,
 {
     fn id(&self) -> AgentId {
-        self.agent.id
+        self.agent_id
     }
 
     fn name(&self) -> &str {
-        &self.agent.name
+        &self.name
     }
 
     fn agent_type(&self) -> AgentType {
-        self.agent.agent_type.clone()
+        self.agent_type.clone()
     }
 
     async fn process_message(&self, message: Message) -> Result<Response> {
         // Update state to processing
         self.db
-            .update_agent_state(self.agent.id, AgentState::Processing)
+            .update_agent_state(self.agent_id, AgentState::Processing)
             .await?;
 
-        // Get current memory context
-        let memory = self.get_memory_cache().await?;
+        // Add message to context
+        self.context.add_message(message.clone()).await;
 
-        // Build context from memory blocks
-        let mut context = String::new();
-        context.push_str("# Current Memory Context\n\n");
+        // Build the memory context for the LLM
+        let memory_context = self.context.build_context().await?;
+        let request = Request {
+            system: Some(vec![memory_context.system_prompt.clone()]),
+            messages: memory_context.messages,
+            tools: Some(memory_context.tools),
+        };
 
-        for block in memory.get_all_blocks() {
-            context.push_str(&format!("## {}\n{}\n\n", block.label, block.value));
-        }
+        let model = self.model.read().await;
 
-        // Add available tools to context
-        context.push_str("# Available Tools\n\n");
-        for tool in &self.available_tools() {
-            context.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
-        }
-
-        // Generate response using LLM
-        let system_prompt = format!("{}\n\n{}", self.agent.system_prompt, context);
-
-        // Extract text content from the message
-        let message_text = message.text_content().ok_or_else(|| {
-            CoreError::tool_validation_error("process_message", "Message has no text content")
-        })?;
-
-        let response = self
-            .llm
-            .generate_response(
-                &system_prompt,
-                &message_text,
-                None, // temperature
-                None, // max_tokens
+        let options = self.chat_options.read().await;
+        let response = model
+            .complete(
+                &options.clone().expect("should have options or default"),
+                request,
             )
-            .await?;
+            .await
+            .expect("Add error handling later");
+
+        // Handle
+
+        // Process response and update state
+        self.context.process_response(&response)?;
+
+        // Persist context changes
+        self.persist_context().await?;
 
         // Update state back to ready
         self.db
-            .update_agent_state(self.agent.id, AgentState::Ready)
+            .update_agent_state(self.agent_id, AgentState::Ready)
             .await?;
 
-        Ok(Response {
-            id: crate::MessageId::generate(),
-            content: Some(genai::chat::MessageContent::Text(response)),
-            reasoning: None,
-            tool_calls: vec![],
-            metadata: ResponseMetadata {
-                processing_time: None,
-                tokens_used: None,
-                model_used: Some(self.llm.model_name().to_string()),
-                confidence: None,
-                model_iden: genai::ModelIden {
-                    adapter_kind: genai::adapter::AdapterKind::Anthropic,
-                    model_name: self.llm.model_name().to_string().into(),
-                },
-                custom: serde_json::Value::Null,
-            },
-        })
+        Ok(response)
     }
 
-    async fn get_memory(&self, key: &str) -> Result<Option<Memory>> {
-        let memory = self.get_memory_cache().await?;
-
-        if let Some(block) = memory.get_block(key) {
-            let mut single_memory = Memory::new();
-            single_memory.create_block(&block.label, &block.value)?;
-            if let Some(desc) = &block.description {
-                if let Some(mem_block) = single_memory.get_block_mut(&block.label) {
-                    mem_block.description = Some(desc.clone());
-                }
-            }
-            Ok(Some(single_memory))
-        } else {
-            Ok(None)
-        }
+    async fn get_memory(&self, key: &str) -> Result<Option<MemoryBlock>> {
+        Ok(self.context.handle.memory.get_block(key).map(|b| b.clone()))
     }
 
-    async fn update_memory(&self, key: &str, memory: Memory) -> Result<()> {
-        tracing::debug!("Agent {} updating memory key '{}'", self.agent.id, key);
-        // Find the memory block in our cache
-        let current_memory = self.get_memory_cache().await?;
+    async fn update_memory(&self, key: &str, memory: MemoryBlock) -> Result<()> {
+        tracing::info!("🔧 Agent {} updating memory key '{}'", self.agent_id, key);
 
-        // Look up the memory ID by label
-        let memory_block_result = self.db.get_memory_by_label(self.agent.id, key).await?;
+        // Update in context
+        self.context
+            .update_memory_block(key, memory.content.clone())
+            .await?;
 
-        tracing::trace!(
-            "Memory lookup for '{}' returned: {:?}",
-            key,
-            memory_block_result.is_some()
-        );
-
-        let memory_block = memory_block_result.ok_or_else(|| CoreError::MemoryNotFound {
-            agent_id: self.agent.id.to_string(),
-            block_name: key.to_string(),
-            available_blocks: current_memory.list_blocks(),
-        })?;
-
-        // Get the new content from the provided memory
-        let new_content = memory
-            .get_block(key)
-            .map(|b| b.value.clone())
-            .ok_or_else(|| CoreError::MemoryNotFound {
-                agent_id: self.agent.id.to_string(),
-                block_name: key.to_string(),
-                available_blocks: memory.list_blocks(),
-            })?;
-
-        // Update in database
         self.db
-            .update_memory_content(memory_block.id, new_content, self.embeddings.as_deref())
+            .update_memory_content(memory.id, memory.content, self.embeddings.as_deref())
             .await?;
 
-        // Refresh cache
-        self.refresh_memory_cache().await?;
+        // Persist to database
+        //self.persist_context().await?;
 
         Ok(())
     }
@@ -372,10 +426,12 @@ where
         tool_name: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let tool = self.tools.get(tool_name).ok_or_else(|| {
+        // Get the tool from the registry
+        let tool = self.context.tools.get(tool_name).ok_or_else(|| {
             CoreError::tool_not_found(
                 tool_name,
-                self.tools
+                self.context
+                    .tools
                     .list_tools()
                     .iter()
                     .map(|s| s.to_string())
@@ -386,115 +442,98 @@ where
         // Execute the tool
         let result = tool.execute(params).await?;
 
-        // TODO: Log tool execution to database once we have the proper schema
+        // Update tool call count in metadata
+        self.context.metadata.write().await.total_tool_calls += 1;
+
+        // Persist the updated metadata
+        self.persist_context().await?;
 
         Ok(result)
     }
 
-    async fn list_memory_keys(&self) -> Result<Vec<String>> {
-        let memory = self.get_memory_cache().await?;
-        Ok(memory.list_blocks())
+    async fn list_memory_keys(&self) -> Result<Vec<CompactString>> {
+        Ok(self.context.handle.memory.list_blocks())
     }
 
-    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<(String, Memory, f32)>> {
-        let results = self
-            .db
-            .search_memories(
-                self.embeddings.as_deref().ok_or_else(|| {
-                    CoreError::tool_validation_error(
-                        "search_memory",
-                        "No embedding provider configured",
-                    )
-                })?,
-                self.agent.id,
-                query,
-                limit,
-            )
-            .await?;
+    async fn search_memory(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(CompactString, MemoryBlock, f32)>> {
+        // For now, do a simple text search in memory blocks
+        // TODO: Implement proper semantic search with embeddings
+        let query_lower = query.to_lowercase();
 
-        let mut output = Vec::new();
-        for (block, score) in results {
-            let mut memory = Memory::new();
-            memory.create_block(&block.label, &block.content)?;
-            if let Some(desc) = &block.description {
-                if let Some(mem_block) = memory.get_block_mut(&block.label) {
-                    mem_block.description = Some(desc.clone());
-                }
+        let mut results: Vec<(CompactString, MemoryBlock, f32)> = Vec::new();
+
+        let blocks = self.context.handle.memory.get_all_blocks();
+        for block in blocks {
+            let content_lower = block.content.to_lowercase();
+            if content_lower.contains(&query_lower) {
+                // Simple scoring based on match count
+                let score =
+                    content_lower.matches(&query_lower).count() as f32 / block.content.len() as f32;
+                results.push((block.label.clone(), block, score));
             }
-            output.push((block.label.clone(), memory, score));
         }
 
-        Ok(output)
+        // Sort by score descending
+        results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+
+        Ok(results)
     }
 
     async fn share_memory_with(
         &self,
-        memory_key: &str,
-        target_agent_id: AgentId,
-        access_level: MemoryAccessLevel,
+        _memory_key: &str,
+        _target_agent_id: AgentId,
+        _access_level: MemoryAccessLevel,
     ) -> Result<()> {
-        // Get the memory block
-        let memory_block = self
-            .db
-            .get_memory_by_label(self.agent.id, memory_key)
-            .await?
-            .ok_or_else(|| CoreError::MemoryNotFound {
-                agent_id: self.agent.id.to_string(),
-                block_name: memory_key.to_string(),
-                available_blocks: vec![],
-            })?;
-
-        // Create the agent-memory relationship
-        self.db
-            .attach_memory_to_agent(target_agent_id, memory_block.id, access_level)
-            .await?;
-
-        Ok(())
+        // This would need to be reimplemented based on new sharing model
+        // For now, return not implemented
+        Err(CoreError::tool_validation_error(
+            "share_memory_with",
+            "Memory sharing not yet implemented with new context model",
+        ))
     }
 
-    async fn get_shared_memories(&self) -> Result<Vec<(AgentId, String, Memory)>> {
+    async fn get_shared_memories(&self) -> Result<Vec<(AgentId, CompactString, MemoryBlock)>> {
         // This would need a reverse lookup - find all memory blocks that other agents
         // have shared with this agent. For now, return empty.
         // TODO: Implement reverse lookup query
         Ok(vec![])
     }
 
-    async fn subscribe_to_memory(&self, memory_key: &str) -> Result<()> {
-        // Get the memory block
-        let memory_block = self
-            .db
-            .get_memory_by_label(self.agent.id, memory_key)
-            .await?
-            .ok_or_else(|| CoreError::MemoryNotFound {
-                agent_id: self.agent.id.to_string(),
-                block_name: memory_key.to_string(),
-                available_blocks: vec![],
-            })?;
-
-        // Subscribe to updates
-        let _ = self.db.subscribe_to_memory_updates(memory_block.id).await?;
-
-        // Track subscription
-        self.subscriptions.write().push(memory_key.to_string());
-
-        Ok(())
-    }
-
-    fn system_prompt(&self) -> &str {
-        &self.agent.system_prompt
+    async fn system_prompt(&self) -> Vec<String> {
+        match self.context.build_context().await {
+            Ok(memory_context) => {
+                // Split the built system prompt into logical sections
+                memory_context
+                    .system_prompt
+                    .split("\n\n")
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }
+            Err(_) => {
+                // If context building fails, return base instructions
+                vec![self.context.context_config.base_instructions.clone()]
+            }
+        }
     }
 
     fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
-        self.tools.get_all_as_dynamic()
+        self.context.tools.get_all_as_dynamic()
     }
 
     fn state(&self) -> AgentState {
-        self.agent.state
+        self.state
     }
 
     async fn set_state(&mut self, state: AgentState) -> Result<()> {
-        self.db.update_agent_state(self.agent.id, state).await?;
-        self.agent.state = state;
+        self.state = state;
+        self.db.update_agent_state(self.agent_id, state).await?;
         Ok(())
     }
 }
@@ -502,7 +541,7 @@ where
 // Extension trait for database operations
 #[async_trait]
 pub trait AgentDbExt<C: surrealdb::Connection> {
-    async fn get_agent(&self, agent_id: AgentId) -> Result<Option<schema::Agent>>;
+    async fn get_agent(&self, agent_id: AgentId) -> Result<Option<DbAgent>>;
     async fn create_tool_call(&self, tool_call: schema::ToolCall) -> Result<()>;
 }
 
@@ -512,9 +551,9 @@ where
     T: AsRef<Surreal<C>> + Sync,
     C: surrealdb::Connection,
 {
-    async fn get_agent(&self, agent_id: AgentId) -> Result<Option<schema::Agent>> {
+    async fn get_agent(&self, agent_id: AgentId) -> Result<Option<DbAgent>> {
         let query = format!(
-            "SELECT * FROM {} WHERE id = $agent_id LIMIT 1",
+            "SELECT * FROM {} WHERE id = $agent_id LIMIT 1 FETCH memory_blocks, messages, archived_messages",
             crate::id::AgentIdType::PREFIX
         );
 
@@ -525,6 +564,7 @@ where
             .await
             .map_err(DatabaseError::QueryFailed)?;
 
+        println!("agent response: {:#?}", result);
         let agents: Vec<DbAgent> = result.take(0).map_err(DatabaseError::QueryFailed)?;
 
         Ok(agents

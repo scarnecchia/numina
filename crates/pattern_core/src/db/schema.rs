@@ -5,10 +5,13 @@ use std::collections::HashMap;
 
 use crate::{
     agent::{AgentState, AgentType},
+    context::{CompressionStrategy, ContextConfig},
     id::{
-        AgentId, AgentIdType, ConversationId, IdType, MemoryId, MemoryIdType, MessageIdType,
+        AgentId, AgentIdType, ConversationId, IdType, MemoryIdType, MessageId as MessageIdType,
         TaskId, TaskIdType, ToolCallId, ToolCallIdType, UserId, UserIdType,
     },
+    memory::MemoryBlock,
+    message::Message,
 };
 
 /// SQL schema definitions for the database
@@ -57,8 +60,8 @@ impl Schema {
                 DEFINE FIELD id ON {table} TYPE record;
                 DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
-                DEFINE FIELD settings ON {table} TYPE object;
-                DEFINE FIELD metadata ON {table} TYPE object;
+                DEFINE FIELD settings ON {table} FLEXIBLE TYPE object;
+                DEFINE FIELD metadata ON {table} FLEXIBLE TYPE object;
             ",
                 table = table_name
             ),
@@ -69,7 +72,7 @@ impl Schema {
         }
     }
 
-    /// Agents table
+    /// Agents table with full context storage
     pub fn agents() -> TableDefinition {
         let table_name = AgentIdType::PREFIX;
         TableDefinition {
@@ -82,9 +85,26 @@ impl Schema {
                 DEFINE FIELD agent_type ON {table} TYPE string;
                 DEFINE FIELD name ON {table} TYPE string;
                 DEFINE FIELD system_prompt ON {table} TYPE string;
-                DEFINE FIELD config ON {table} TYPE object;
                 DEFINE FIELD state ON {table} TYPE any;
+
+                DEFINE FIELD memory_blocks ON {table} TYPE array<record<mem>> DEFAULT [];
+                DEFINE FIELD messages ON {table} TYPE array<record<msg>> DEFAULT [];
+                DEFINE FIELD archived_messages ON {table} TYPE array<record<msg>> DEFAULT [];
+                DEFINE FIELD message_summary ON {table} TYPE option<string>;
+
+                DEFINE FIELD context_config ON {table} FLEXIBLE TYPE object;
+                DEFINE FIELD compression_strategy ON {table} FLEXIBLE TYPE object;
+
+                -- Metadata
                 DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
+                DEFINE FIELD last_active ON {table} TYPE datetime;
+                DEFINE FIELD total_messages ON {table} TYPE int DEFAULT 0;
+                DEFINE FIELD total_tool_calls ON {table} TYPE int DEFAULT 0;
+                DEFINE FIELD context_rebuilds ON {table} TYPE int DEFAULT 0;
+                DEFINE FIELD compression_events ON {table} TYPE int DEFAULT 0;
+
+                -- Legacy fields for compatibility
+                DEFINE FIELD config ON {table} FLEXIBLE TYPE object DEFAULT {{}};
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
                 DEFINE FIELD is_active ON {table} TYPE bool DEFAULT true;
             ",
@@ -101,6 +121,10 @@ impl Schema {
                 ),
                 format!(
                     "DEFINE INDEX {}_user_type ON {} FIELDS user_id, agent_type UNIQUE",
+                    table_name, table_name
+                ),
+                format!(
+                    "DEFINE INDEX {}_last_active ON {} FIELDS last_active",
                     table_name, table_name
                 ),
             ],
@@ -123,7 +147,7 @@ impl Schema {
                 DEFINE FIELD embedding ON {table} TYPE array<float>;
                 DEFINE FIELD embedding_model ON {table} TYPE string;
                 DEFINE FIELD agents ON {table} TYPE array<record<agent>> DEFAULT [];
-                DEFINE FIELD metadata ON {table} TYPE object;
+                DEFINE FIELD metadata ON {table} FLEXIBLE TYPE object;
                 DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
                 DEFINE FIELD updated_at ON {table} TYPE datetime;
                 DEFINE FIELD is_active ON {table} TYPE bool DEFAULT true;
@@ -183,7 +207,7 @@ impl Schema {
                 DEFINE FIELD content ON {table} TYPE string;
                 DEFINE FIELD embedding ON {table} TYPE option<array<float>>;
                 DEFINE FIELD embedding_model ON {table} TYPE option<string>;
-                DEFINE FIELD metadata ON {table} TYPE object;
+                DEFINE FIELD metadata ON {table} FLEXIBLE TYPE object;
                 DEFINE FIELD tool_calls ON {table} TYPE option<array>;
                 DEFINE FIELD created_at ON {table} TYPE datetime PERMISSIONS FOR select, create FULL, FOR update NONE;
             ",
@@ -314,101 +338,49 @@ pub struct User {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
-/// Agent model
+/// Agent model with full context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
-
     pub user_id: UserId,
-
     pub agent_type: AgentType,
-
     pub name: String,
-
     pub system_prompt: String,
-    #[serde(default)]
-    pub config: serde_json::Value,
-
     pub state: AgentState,
 
-    pub created_at: chrono::DateTime<chrono::Utc>,
-
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-
-    pub is_active: bool,
-}
-
-/// Memory block model
-#[derive(Clone, Serialize, Deserialize)]
-pub struct MemoryBlock {
-    pub id: MemoryId,
-
-    pub owner_id: UserId,
-
-    pub label: String,
-
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub embedding: Vec<f32>,
-
-    pub embedding_model: String,
+    // Memory storage
     #[serde(default)]
-    pub metadata: serde_json::Value,
+    pub memory_blocks: Vec<MemoryBlock>,
 
-    pub created_at: chrono::DateTime<chrono::Utc>,
-
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-
-    pub is_active: bool,
-}
-
-impl std::fmt::Debug for MemoryBlock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug_struct = f.debug_struct("MemoryBlock");
-        debug_struct
-            .field("id", &self.id)
-            .field("owner_id", &self.owner_id)
-            .field("label", &self.label)
-            .field("content", &self.content)
-            .field("description", &self.description);
-
-        // Format embedding nicely
-        if self.embedding.is_empty() {
-            debug_struct.field("embedding", &"[]");
-        } else {
-            let formatted = crate::utils::debug::EmbeddingDebug(&self.embedding);
-            debug_struct.field("embedding", &format!("{}", formatted));
-        }
-
-        debug_struct
-            .field("embedding_model", &self.embedding_model)
-            .field("metadata", &self.metadata)
-            .field("created_at", &self.created_at)
-            .field("updated_at", &self.updated_at)
-            .field("is_active", &self.is_active)
-            .finish()
-    }
-}
-
-/// Conversation model
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Conversation {
-    pub id: ConversationId,
-
-    pub user_id: UserId,
-
-    pub agent_id: AgentId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    // Message history
     #[serde(default)]
-    pub context: serde_json::Value,
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub archived_messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_summary: Option<String>,
 
+    // Context configuration
+    pub context_config: ContextConfig,
+    pub compression_strategy: CompressionStrategy,
+
+    // Metadata
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_active: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub total_messages: usize,
+    #[serde(default)]
+    pub total_tool_calls: usize,
+    #[serde(default)]
+    pub context_rebuilds: usize,
+    #[serde(default)]
+    pub compression_events: usize,
 
+    // Legacy fields
+    #[serde(default)]
+    pub config: serde_json::Value,
     pub updated_at: chrono::DateTime<chrono::Utc>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub is_active: bool,
 }
 
 /// Tool call model
@@ -417,8 +389,6 @@ pub struct ToolCall {
     pub id: ToolCallId,
 
     pub agent_id: AgentId,
-
-    pub conversation_id: ConversationId,
     pub tool_name: String,
     pub parameters: serde_json::Value,
     pub result: serde_json::Value,
@@ -519,7 +489,7 @@ impl std::fmt::Debug for Task {
                 debug_struct.field("embedding", &format!("{}", formatted));
             }
             None => {
-                debug_struct.field("embedding", &None::<Vec<f32>>);
+                debug_struct.field("embedding", &"none");
             }
         }
 

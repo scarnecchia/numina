@@ -1,4 +1,5 @@
 use crate::{AgentId, db::DatabaseError};
+use compact_str::CompactString;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -36,7 +37,7 @@ pub enum CoreError {
     MemoryNotFound {
         agent_id: String,
         block_name: String,
-        available_blocks: Vec<String>,
+        available_blocks: Vec<CompactString>,
     },
 
     #[error("Memory operation failed")]
@@ -378,7 +379,7 @@ impl CoreError {
     pub fn memory_not_found(
         agent_id: &AgentId,
         block_name: impl Into<String>,
-        available_blocks: Vec<String>,
+        available_blocks: Vec<CompactString>,
     ) -> Self {
         Self::MemoryNotFound {
             agent_id: agent_id.to_string(),

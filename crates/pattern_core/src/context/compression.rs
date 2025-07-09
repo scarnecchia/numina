@@ -11,6 +11,7 @@ use crate::{CoreError, ModelProvider, Result, message::Message};
 
 /// Strategy for compressing messages when context is full
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompressionStrategy {
     /// Simple truncation - keep only the most recent messages
     Truncate { keep_recent: usize },
@@ -442,5 +443,31 @@ mod tests {
         // User message with question should score higher than plain assistant message
         assert!(user_score > 0.0);
         assert!(assistant_score > 0.0);
+    }
+
+    #[test]
+    fn test_compression_strategy_serialization() {
+        // Test default serialization
+        let strategy = CompressionStrategy::default();
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(json, r#"{"type":"truncate","keep_recent":50}"#);
+
+        // Test deserialization
+        let deserialized: CompressionStrategy = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            CompressionStrategy::Truncate { keep_recent } => assert_eq!(keep_recent, 50),
+            _ => panic!("Expected Truncate variant"),
+        }
+
+        // Test that empty object fails to deserialize
+        let empty = "{}";
+        let result = serde_json::from_str::<CompressionStrategy>(empty);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `type`")
+        );
     }
 }

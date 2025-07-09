@@ -11,7 +11,6 @@ pub mod db;
 pub mod embeddings;
 pub mod error;
 pub mod id;
-pub mod llm;
 pub mod memory;
 pub mod message;
 pub mod model;
@@ -19,7 +18,7 @@ pub mod realtime;
 pub mod tool;
 pub mod utils;
 
-pub use agent::{Agent, AgentBuilder, AgentState, AgentType};
+pub use agent::{Agent, AgentState, AgentType};
 pub use context::{
     AgentContext, AgentContextBuilder, CompressionStrategy, ContextBuilder, ContextConfig,
     MemoryContext, MessageCompressor,
@@ -38,11 +37,10 @@ pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        Agent, AgentBuilder, AgentContext, AgentContextBuilder, AgentId, AgentState, AgentType,
-        AiTool, CompressionStrategy, Constellation, ContextBuilder, ContextConfig,
-        CoordinationPattern, CoreError, DynamicTool, Id, IdType, Memory, MemoryBlock,
-        MemoryContext, MessageCompressor, ModelCapability, ModelProvider, Result, ToolRegistry,
-        ToolResult,
+        Agent, AgentContext, AgentContextBuilder, AgentId, AgentState, AgentType, AiTool,
+        CompressionStrategy, Constellation, ContextBuilder, ContextConfig, CoordinationPattern,
+        CoreError, DynamicTool, Id, IdType, Memory, MemoryBlock, MemoryContext, MessageCompressor,
+        ModelCapability, ModelProvider, Result, ToolRegistry, ToolResult,
     };
 }
 

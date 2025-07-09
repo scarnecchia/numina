@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use std::sync::Arc;
 
@@ -20,40 +21,57 @@ use super::{
     MessageCompressor, genai_ext::ChatRoleExt,
 };
 
-/// Represents the complete state of an agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentContext {
-    /// Unique identifier for this agent
+/// Cheap handle to agent internals that built-in tools can hold
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentHandle {
     pub agent_id: AgentId,
+    pub memory: Memory, // already cheap (DashMap)
+                        // TODO: Add message_sender when we implement it
+}
+
+/// Message history that needs locking
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MessageHistory {
+    pub messages: Vec<Message>,
+    pub archived_messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_summary: Option<String>,
+    pub compression_strategy: CompressionStrategy,
+    pub last_compression: DateTime<Utc>,
+}
+
+impl MessageHistory {
+    pub fn new(compression_strategy: CompressionStrategy) -> Self {
+        Self {
+            messages: Vec::new(),
+            archived_messages: Vec::new(),
+            message_summary: None,
+            compression_strategy,
+            last_compression: Utc::now(),
+        }
+    }
+}
+
+/// Represents the complete state of an agent
+#[derive(Clone)]
+pub struct AgentContext {
+    /// Cheap, frequently accessed stuff
+    pub handle: AgentHandle,
 
     /// Type of agent (e.g., memgpt_agent, custom)
     pub agent_type: AgentType,
 
-    /// Agent's memory store
-    pub memory: Memory,
-
-    /// Current message history
-    pub messages: Vec<Message>,
-
-    /// Compressed/archived messages
-    pub archived_messages: Vec<Message>,
-
-    /// Summary of compressed messages
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_summary: Option<String>,
-
     /// Tools available to this agent
-    #[serde(skip)]
-    pub tools: Arc<ToolRegistry>,
+    pub tools: ToolRegistry,
 
     /// Configuration for context building
     pub context_config: ContextConfig,
 
-    /// Compression strategy for messages
-    pub compression_strategy: CompressionStrategy,
-
     /// Metadata about the agent state
-    pub metadata: AgentContextMetadata,
+    pub metadata: Arc<RwLock<AgentContextMetadata>>,
+
+    /// The big stuff in its own lock
+    pub history: Arc<RwLock<MessageHistory>>,
 }
 
 /// Metadata about the agent state
@@ -73,156 +91,191 @@ impl AgentContext {
         agent_id: AgentId,
         agent_type: AgentType,
         memory: Memory,
-        tools: Arc<ToolRegistry>,
+        tools: ToolRegistry,
         context_config: ContextConfig,
     ) -> Self {
+        let handle = AgentHandle { agent_id, memory };
+
         Self {
-            agent_id,
+            handle,
             agent_type,
-            memory,
-            messages: Vec::new(),
-            archived_messages: Vec::new(),
-            message_summary: None,
             tools,
             context_config,
-            compression_strategy: CompressionStrategy::default(),
-            metadata: AgentContextMetadata {
+            metadata: Arc::new(RwLock::new(AgentContextMetadata {
                 created_at: Utc::now(),
                 last_active: Utc::now(),
                 total_messages: 0,
                 total_tool_calls: 0,
                 context_rebuilds: 0,
                 compression_events: 0,
-            },
+            })),
+            history: Arc::new(RwLock::new(MessageHistory::new(
+                CompressionStrategy::default(),
+            ))),
         }
     }
 
+    /// Get a cheap handle to agent internals
+    pub fn handle(&self) -> AgentHandle {
+        self.handle.clone()
+    }
+
     /// Build the current context for this agent
-    pub async fn build_context(&mut self) -> Result<MemoryContext> {
-        self.metadata.last_active = Utc::now();
-        self.metadata.context_rebuilds += 1;
+    pub async fn build_context(&self) -> Result<MemoryContext> {
+        {
+            let mut metadata = self.metadata.write().await;
+            metadata.last_active = Utc::now();
+            metadata.context_rebuilds += 1;
+        }
 
         // Check if we need to compress messages
-        if self.messages.len() > self.context_config.max_context_messages {
-            self.compress_messages().await?;
+        {
+            let history = self.history.read().await;
+            if history.messages.len() > self.context_config.max_context_messages {
+                drop(history); // release read lock
+                self.compress_messages().await?;
+            }
         }
 
         // Get memory blocks
-        let memory_blocks = self.memory.get_all_blocks();
+        let memory_blocks = self.handle.memory.get_all_blocks();
 
-        // Build context
-        let context = ContextBuilder::new(self.agent_id.clone(), self.context_config.clone())
-            .with_memory_blocks(memory_blocks)
-            .with_tools_from_registry(&self.tools)
-            .with_messages(self.messages.clone())
-            .build()?;
+        // Build context with read lock
+        let history = self.history.read().await;
+        let context =
+            ContextBuilder::new(self.handle.agent_id.clone(), self.context_config.clone())
+                .with_memory_blocks(memory_blocks)
+                .with_tools_from_registry(&self.tools)
+                .with_messages(history.messages.clone())
+                .build()?;
 
         Ok(context)
     }
 
     /// Add a new message to the state
-    pub fn add_message(&mut self, message: Message) {
+    pub async fn add_message(&self, message: Message) {
         // Count tool calls if this is an assistant message
         if message.role.is_assistant() {
-            self.metadata.total_tool_calls += message.tool_call_count();
+            let mut metadata = self.metadata.write().await;
+            metadata.total_tool_calls += message.tool_call_count();
         }
 
-        self.messages.push(message);
-        self.metadata.total_messages += 1;
-        self.metadata.last_active = Utc::now();
+        let mut history = self.history.write().await;
+        history.messages.push(message);
+        {
+            let mut metadata = self.metadata.write().await;
+            metadata.total_messages += 1;
+            metadata.last_active = Utc::now();
+        }
     }
 
     /// Process a chat response and update state
-    pub fn process_response(&mut self, response: Response) -> Result<()> {
-        // Extract content and create assistant message
-        if let Some(content) = response.content {
-            let message = Message::agent(content);
-            self.add_message(message);
-        }
-
+    pub fn process_response(&self, _response: &Response) -> Result<()> {
         Ok(())
     }
 
     /// Update a memory block
-    pub fn update_memory_block(&mut self, label: &str, new_value: String) -> Result<()> {
-        self.memory.update_block_value(label, new_value)?;
-        self.metadata.last_active = Utc::now();
+    pub async fn update_memory_block(&self, label: &str, new_value: String) -> Result<()> {
+        self.handle.memory.update_block_value(label, new_value)?;
+        self.metadata.write().await.last_active = Utc::now();
         Ok(())
     }
 
     /// Append to a memory block
-    pub fn append_to_memory_block(&mut self, label: &str, content: &str) -> Result<()> {
-        let current = self.memory.get_block(label).ok_or_else(|| {
-            CoreError::memory_not_found(&self.agent_id, label, self.memory.list_blocks())
+    pub async fn append_to_memory_block(&self, label: &str, content: &str) -> Result<()> {
+        let current = self.handle.memory.get_block(label).ok_or_else(|| {
+            CoreError::memory_not_found(
+                &self.handle.agent_id,
+                label,
+                self.handle.memory.list_blocks(),
+            )
         })?;
 
-        let new_value = format!("{}\n{}", current.value, content);
-        self.memory.update_block_value(label, new_value)?;
-        self.metadata.last_active = Utc::now();
+        let new_value = format!("{}\n{}", current.content, content);
+        self.handle.memory.update_block_value(label, new_value)?;
+        self.metadata.write().await.last_active = Utc::now();
         Ok(())
     }
 
     /// Replace content in a memory block
-    pub fn replace_in_memory_block(
-        &mut self,
+    pub async fn replace_in_memory_block(
+        &self,
         label: &str,
         old_content: &str,
         new_content: &str,
     ) -> Result<()> {
-        let current = self.memory.get_block(label).ok_or_else(|| {
-            CoreError::memory_not_found(&self.agent_id, label, self.memory.list_blocks())
+        let current = self.handle.memory.get_block(label).ok_or_else(|| {
+            CoreError::memory_not_found(
+                &self.handle.agent_id,
+                label,
+                self.handle.memory.list_blocks(),
+            )
         })?;
 
-        let new_value = current.value.replace(old_content, new_content);
-        self.memory.update_block_value(label, new_value)?;
-        self.metadata.last_active = Utc::now();
+        let new_value = current.content.replace(old_content, new_content);
+        self.handle.memory.update_block_value(label, new_value)?;
+        self.metadata.write().await.last_active = Utc::now();
         Ok(())
     }
 
     /// Compress messages using the configured strategy
-    async fn compress_messages(&mut self) -> Result<()> {
-        let compressor = MessageCompressor::new(self.compression_strategy.clone());
+    async fn compress_messages(&self) -> Result<()> {
+        let mut history = self.history.write().await;
+        let compressor = MessageCompressor::new(history.compression_strategy.clone());
 
         let result = compressor
             .compress(
-                self.messages.clone(),
+                history.messages.clone(),
                 self.context_config.max_context_messages,
             )
             .await?;
 
-        self.apply_compression_result(result)
+        self.apply_compression_result(&mut history, result)?;
+        history.last_compression = Utc::now();
+        self.metadata.write().await.compression_events += 1;
+        Ok(())
     }
 
     /// Apply compression result to state
-    fn apply_compression_result(&mut self, result: CompressionResult) -> Result<()> {
+    fn apply_compression_result(
+        &self,
+        history: &mut MessageHistory,
+        result: CompressionResult,
+    ) -> Result<()> {
         // Move compressed messages to archive
-        self.archived_messages.extend(result.archived_messages);
+        history.archived_messages.extend(result.archived_messages);
 
         // Update active messages
-        self.messages = result.active_messages;
+        history.messages = result.active_messages;
 
         // Update or append to summary
         if let Some(new_summary) = result.summary {
-            if let Some(existing_summary) = &mut self.message_summary {
+            if let Some(existing_summary) = &mut history.message_summary {
                 *existing_summary = format!("{}\n\n{}", existing_summary, new_summary);
             } else {
-                self.message_summary = Some(new_summary);
+                history.message_summary = Some(new_summary);
             }
         }
 
-        self.metadata.compression_events += 1;
         Ok(())
     }
 
     /// Search through message history (including archived)
-    pub fn search_messages(&self, query: &str, page: usize, page_size: usize) -> Vec<&Message> {
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        page: usize,
+        page_size: usize,
+    ) -> Vec<Message> {
         let query_lower = query.to_lowercase();
 
+        let history = self.history.read().await;
+
         // Search through all messages (active + archived)
-        let all_messages: Vec<&Message> = self
+        let all_messages: Vec<&Message> = history
             .archived_messages
             .iter()
-            .chain(self.messages.iter())
+            .chain(history.messages.iter())
             .collect();
 
         // Filter messages containing the query
@@ -240,40 +293,46 @@ impl AgentContext {
         let end = (start + page_size).min(matching_messages.len());
 
         if start < matching_messages.len() {
-            matching_messages[start..end].to_vec()
+            matching_messages[start..end]
+                .iter()
+                .map(|m| (*m).clone())
+                .collect()
         } else {
             Vec::new()
         }
     }
 
     /// Get agent statistics
-    pub fn get_stats(&self) -> AgentStats {
+    pub async fn get_stats(&self) -> AgentStats {
+        let history = self.history.read().await;
+        let metadata = self.metadata.read().await;
         AgentStats {
-            total_messages: self.metadata.total_messages,
-            active_messages: self.messages.len(),
-            archived_messages: self.archived_messages.len(),
-            total_tool_calls: self.metadata.total_tool_calls,
-            memory_blocks: self.memory.list_blocks().len(),
-            compression_events: self.metadata.compression_events,
-            uptime: Utc::now() - self.metadata.created_at,
-            last_active: self.metadata.last_active,
+            total_messages: metadata.total_messages,
+            active_messages: history.messages.len(),
+            archived_messages: history.archived_messages.len(),
+            total_tool_calls: metadata.total_tool_calls,
+            memory_blocks: self.handle.memory.list_blocks().len(),
+            compression_events: metadata.compression_events,
+            uptime: Utc::now() - metadata.created_at,
+            last_active: metadata.last_active,
         }
     }
 
     /// Create a checkpoint of the current state
-    pub fn checkpoint(&self) -> StateCheckpoint {
+    pub async fn checkpoint(&self) -> StateCheckpoint {
+        let history = self.history.read().await;
         StateCheckpoint {
-            agent_id: self.agent_id.clone(),
+            agent_id: self.handle.agent_id.clone(),
             timestamp: Utc::now(),
-            messages: self.messages.clone(),
-            memory_snapshot: self.memory.clone(),
-            metadata: self.metadata.clone(),
+            messages: history.messages.clone(),
+            memory_snapshot: self.handle.memory.clone(),
+            metadata: self.metadata.read().await.clone(),
         }
     }
 
     /// Restore from a checkpoint
-    pub fn restore_from_checkpoint(&mut self, checkpoint: StateCheckpoint) -> Result<()> {
-        if checkpoint.agent_id != self.agent_id {
+    pub async fn restore_from_checkpoint(&self, checkpoint: StateCheckpoint) -> Result<()> {
+        if checkpoint.agent_id != self.handle.agent_id {
             return Err(CoreError::AgentInitFailed {
                 agent_type: format!("{:?}", self.agent_type),
                 cause: Box::new(std::io::Error::new(
@@ -283,9 +342,11 @@ impl AgentContext {
             });
         }
 
-        self.messages = checkpoint.messages;
-        self.memory = checkpoint.memory_snapshot;
-        self.metadata = checkpoint.metadata;
+        let mut history = self.history.write().await;
+        history.messages = checkpoint.messages;
+        // Note: memory is shared via handle, so we can't restore it here
+        // This might need a different approach
+        *self.metadata.write().await = checkpoint.metadata;
         Ok(())
     }
 }
@@ -318,7 +379,7 @@ pub struct AgentContextBuilder {
     agent_id: AgentId,
     agent_type: AgentType,
     memory_blocks: Vec<(String, String, Option<String>)>,
-    tools: Option<Arc<ToolRegistry>>,
+    tools: Option<ToolRegistry>,
     context_config: Option<ContextConfig>,
     compression_strategy: Option<CompressionStrategy>,
     initial_messages: Vec<Message>,
@@ -351,7 +412,7 @@ impl AgentContextBuilder {
     }
 
     /// Set the tool registry
-    pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
+    pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
         self.tools = Some(tools);
         self
     }
@@ -375,26 +436,26 @@ impl AgentContextBuilder {
     }
 
     /// Build the agent state
-    pub fn build(self) -> Result<AgentContext> {
+    pub async fn build(self) -> Result<AgentContext> {
         // Create memory
-        let mut memory = Memory::new();
+        let memory = Memory::new();
         for (label, value, description) in self.memory_blocks {
             memory.create_block(&label, &value)?;
             if let Some(desc) = description {
-                if let Some(block) = memory.get_block_mut(&label) {
+                if let Some(mut block) = memory.get_block_mut(&label) {
                     block.description = Some(desc);
                 }
             }
         }
 
         // Get or create default tools
-        let tools = self.tools.unwrap_or_else(|| Arc::new(ToolRegistry::new()));
+        let tools = self.tools.unwrap_or_else(|| ToolRegistry::new());
 
         // Get or create default context config
         let context_config = self.context_config.unwrap_or_default();
 
         // Create state
-        let mut state = AgentContext::new(
+        let state = AgentContext::new(
             self.agent_id,
             self.agent_type,
             memory,
@@ -404,12 +465,13 @@ impl AgentContextBuilder {
 
         // Set compression strategy if provided
         if let Some(strategy) = self.compression_strategy {
-            state.compression_strategy = strategy;
+            let mut history = state.history.write().await;
+            history.compression_strategy = strategy;
         }
 
         // Add initial messages
         for message in self.initial_messages {
-            state.add_message(message);
+            state.add_message(message).await;
         }
 
         Ok(state)
@@ -420,8 +482,8 @@ impl AgentContextBuilder {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_agent_state_builder() {
+    #[tokio::test]
+    async fn test_agent_state_builder() {
         let id = AgentId::generate();
         let state = AgentContextBuilder::new(id.clone(), AgentType::Generic)
             .with_memory_block(
@@ -431,24 +493,32 @@ mod tests {
             )
             .with_memory_block("human", "The user's name is unknown", None::<String>)
             .build()
+            .await
             .unwrap();
 
-        assert_eq!(state.agent_id, id);
-        assert_eq!(state.memory.list_blocks().len(), 2);
-        assert!(state.memory.get_block("persona").is_some());
+        assert_eq!(state.handle.agent_id, id);
+        assert_eq!(state.handle.memory.list_blocks().len(), 2);
+        assert!(state.handle.memory.get_block("persona").is_some());
     }
 
-    #[test]
-    fn test_message_search() {
-        let mut state = AgentContextBuilder::new(AgentId::generate(), AgentType::Generic)
+    #[tokio::test]
+    async fn test_message_search() {
+        let state = AgentContextBuilder::new(AgentId::generate(), AgentType::Generic)
             .build()
+            .await
             .unwrap();
 
-        state.add_message(Message::user("Hello, how are you?"));
-        state.add_message(Message::agent("I'm doing well, thank you!"));
-        state.add_message(Message::user("What's the weather like?"));
+        state
+            .add_message(Message::user("Hello, how are you?"))
+            .await;
+        state
+            .add_message(Message::agent("I'm doing well, thank you!"))
+            .await;
+        state
+            .add_message(Message::user("What's the weather like?"))
+            .await;
 
-        let results = state.search_messages("weather", 0, 10);
+        let results = state.search_messages("weather", 0, 10).await;
         assert_eq!(results.len(), 1);
     }
 }

@@ -20,7 +20,7 @@ pub mod state;
 
 pub use compression::{CompressionResult, CompressionStrategy, MessageCompressor};
 pub use genai_ext::{ChatRoleExt, MessageContentExt};
-pub use state::{AgentContext, AgentContextBuilder, AgentStats, StateCheckpoint};
+pub use state::{AgentContext, AgentContextBuilder, AgentHandle, AgentStats, StateCheckpoint};
 
 /// Maximum characters for core memory blocks by default
 const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 5000;
@@ -270,7 +270,7 @@ impl ContextBuilder {
         let last_modified = self
             .memory_blocks
             .iter()
-            .filter_map(|b| b.last_modified)
+            .map(|b| b.updated_at)
             .max()
             .unwrap_or(self.current_time);
 
@@ -312,7 +312,7 @@ impl ContextBuilder {
         let mut blocks_text = Vec::new();
 
         for block in &self.memory_blocks {
-            let char_count = block.value.chars().count();
+            let char_count = block.content.chars().count();
             let char_limit = self.config.memory_char_limit;
 
             if self.config.model_adjustments.use_xml_tags {
@@ -336,7 +336,7 @@ impl ContextBuilder {
                         .unwrap_or("No description provided"),
                     char_count,
                     char_limit,
-                    block.value,
+                    block.content,
                     block.label
                 ));
             } else {
@@ -350,7 +350,7 @@ Content:
                     block.description.as_deref().unwrap_or("No description"),
                     char_count,
                     char_limit,
-                    block.value
+                    block.content
                 ));
             }
         }
@@ -476,6 +476,11 @@ You can execute multiple tools in sequence when needed."#;
 #[cfg(test)]
 mod tests {
 
+    use compact_str::ToCompactString;
+    use serde_json::json;
+
+    use crate::{MemoryId, UserId};
+
     use super::*;
 
     #[test]
@@ -485,10 +490,16 @@ mod tests {
 
         let context = builder
             .add_memory_block(MemoryBlock {
-                label: "persona".to_string(),
-                value: "I am a helpful AI assistant.".to_string(),
+                label: "persona".to_compact_string(),
+                content: "I am a helpful AI assistant.".to_string(),
                 description: Some("Agent persona".to_string()),
-                last_modified: Some(Utc::now()),
+                id: MemoryId::generate(),
+                owner_id: UserId::generate(),
+                metadata: json!({}),
+                embedding_model: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                is_active: true,
             })
             .build()
             .unwrap();
@@ -513,10 +524,16 @@ mod tests {
 
         let context = builder
             .add_memory_block(MemoryBlock {
-                label: "test".to_string(),
-                value: long_text,
+                label: "test".to_compact_string(),
+                content: long_text,
                 description: None,
-                last_modified: None,
+                id: MemoryId::generate(),
+                owner_id: UserId::generate(),
+                metadata: json!({}),
+                embedding_model: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                is_active: true,
             })
             .build()
             .unwrap();

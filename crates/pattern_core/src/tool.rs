@@ -1,3 +1,5 @@
+pub mod builtin;
+
 use async_trait::async_trait;
 use compact_str::{CompactString, ToCompactString};
 use schemars::{JsonSchema, r#gen::SchemaGenerator, r#gen::SchemaSettings};
@@ -214,14 +216,14 @@ pub struct DynamicToolExample {
 /// A registry for managing available tools
 #[derive(Debug, Clone)]
 pub struct ToolRegistry {
-    tools: dashmap::DashMap<CompactString, Box<dyn DynamicTool>>,
+    tools: Arc<dashmap::DashMap<CompactString, Box<dyn DynamicTool>>>,
 }
 
 impl ToolRegistry {
     /// Create a new empty tool registry
     pub fn new() -> Self {
         Self {
-            tools: dashmap::DashMap::new(),
+            tools: Arc::new(dashmap::DashMap::new()),
         }
     }
 

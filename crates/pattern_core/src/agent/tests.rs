@@ -4,15 +4,19 @@
 mod tests {
     use surrealdb::RecordId;
     use tracing_test::traced_test;
+    use uuid::Uuid;
 
     use super::super::*;
-    use crate::utils::debug::{ResponseDebug, ResponseExt};
+    #[allow(unused_imports)]
+    use crate::utils::debug::ResponseDebug;
     use crate::{
-        db::{DbAgent, DbMemoryBlock, client, ops::SurrealExt},
-        llm::MockLlmProvider,
+        db::{DbMemoryBlock, client, models::strip_brackets, ops::SurrealExt},
+        embeddings::MockEmbeddingProvider,
+        model::MockModelProvider,
         tool::ToolRegistry,
     };
     use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[traced_test]
@@ -20,13 +24,13 @@ mod tests {
         // Create a test database
         let db = Arc::new(client::create_test_db().await.unwrap());
 
-        // Create a mock LLM provider
-        let llm = Arc::new(MockLlmProvider {
+        // Create a mock model provider
+        let model = Arc::new(RwLock::new(MockModelProvider {
             response: "Test response".to_string(),
-        });
+        }));
 
         // Create empty tool registry
-        let tools = Arc::new(ToolRegistry::new());
+        let tools = ToolRegistry::new();
 
         // Create a test user
         let user_id = crate::id::UserId::generate();
@@ -79,22 +83,29 @@ mod tests {
             .await
             .unwrap();
 
+        let pattern_id = AgentId::from_uuid(
+            Uuid::from_str(strip_brackets(&pattern_agent.id.key().to_string())).unwrap(),
+        );
+        let entropy_id = AgentId::from_uuid(
+            Uuid::from_str(strip_brackets(&entropy_agent.id.key().to_string())).unwrap(),
+        );
+
         // Attach memory to both agents with different access levels
-        db.attach_memory_to_agent(pattern_agent.id, memory.id, MemoryAccessLevel::Admin)
+        db.attach_memory_to_agent(pattern_id, memory.id, MemoryAccessLevel::Admin)
             .await
             .unwrap();
 
-        db.attach_memory_to_agent(entropy_agent.id, memory.id, MemoryAccessLevel::Write)
+        db.attach_memory_to_agent(entropy_id, memory.id, MemoryAccessLevel::Write)
             .await
             .unwrap();
 
         // Create agent instances
         let pattern = Arc::new(
             DatabaseAgent::new(
-                pattern_agent.id,
+                pattern_id,
                 db.clone(),
-                llm.clone(),
-                None,
+                model.clone(),
+                None::<Arc<MockEmbeddingProvider>>,
                 tools.clone(),
             )
             .await
@@ -103,10 +114,10 @@ mod tests {
 
         let entropy = Arc::new(
             DatabaseAgent::new(
-                entropy_agent.id,
+                entropy_id,
                 db.clone(),
-                llm.clone(),
-                None,
+                model.clone(),
+                None::<Arc<MockEmbeddingProvider>>,
                 tools.clone(),
             )
             .await
@@ -121,30 +132,24 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Both agents should be able to read the memory
-        let _pattern_memories = db.get_agent_memories(pattern_agent.id).await.unwrap();
+        let _pattern_memories = db.get_agent_memories(pattern_id).await.unwrap();
 
         let pattern_memory = pattern.get_memory("task_insights").await.unwrap();
         assert!(pattern_memory.is_some());
-        let pattern_memory = pattern_memory.unwrap();
-        let pattern_block = pattern_memory.get_block("task_insights").unwrap();
-        assert_eq!(pattern_block.value, "User struggles with large tasks");
+        let pattern_block = pattern_memory.unwrap();
+        assert_eq!(pattern_block.content, "User struggles with large tasks");
 
         let entropy_memory = entropy.get_memory("task_insights").await.unwrap();
         assert!(entropy_memory.is_some());
-        let entropy_memory = entropy_memory.unwrap();
-        let entropy_block = entropy_memory.get_block("task_insights").unwrap();
-        assert_eq!(entropy_block.value, "User struggles with large tasks");
+        let entropy_block = entropy_memory.unwrap();
+        assert_eq!(entropy_block.content, "User struggles with large tasks");
 
         // Entropy updates the memory
-        let mut updated_memory = Memory::new();
-        updated_memory
-            .create_block(
-                "task_insights",
-                "User struggles with large tasks - break them into smaller pieces",
-            )
-            .unwrap();
+        let mut updated_memory = memory;
+        updated_memory.content =
+            "User struggles with large tasks - break them into smaller pieces".to_string();
         entropy
-            .update_memory("task_insights", updated_memory)
+            .update_memory("task_insights", updated_memory.clone())
             .await
             .unwrap();
 
@@ -153,10 +158,9 @@ mod tests {
 
         // Pattern should see the update through the live query cache update
         let pattern_updated = pattern.get_memory("task_insights").await.unwrap();
-        let pattern_updated = pattern_updated.unwrap();
-        let pattern_updated_block = pattern_updated.get_block("task_insights").unwrap();
+        let pattern_updated_block = pattern_updated.unwrap();
         assert_eq!(
-            pattern_updated_block.value,
+            pattern_updated_block.content,
             "User struggles with large tasks - break them into smaller pieces"
         );
 
@@ -183,18 +187,18 @@ mod tests {
         .unwrap();
 
         // Debug: Check if the memory has the agent in its agents array using pretty debug
-        let check_query = format!(
-            "SELECT agents AS agents FROM {} FETCH agents",
-            RecordId::from(deletable_memory.id)
-        );
-        let mut check_result = db.as_ref().query(&check_query).await.unwrap();
-        tracing::debug!("Response: {:?}", check_result.pretty_debug());
-        let agents_arrays: Vec<Vec<DbAgent>> =
-            check_result.take("agents").expect("should have agents");
-        tracing::debug!(
-            "After attach, temporary_note agents array: {:?}",
-            agents_arrays.concat()
-        );
+        // let check_query = format!(
+        //     "SELECT agents AS agents FROM {} FETCH agents",
+        //     RecordId::from(deletable_memory.id)
+        // );
+        // let mut check_result = db.as_ref().query(&check_query).await.unwrap();
+        // tracing::debug!("Response: {:?}", check_result.pretty_debug());
+        // let agents_arrays: Vec<Vec<DbAgent>> =
+        //     check_result.take("agents").expect("should have agents");
+        // tracing::debug!(
+        //     "After attach, temporary_note agents array: {:?}",
+        //     agents_arrays.concat()
+        // );
 
         // Wait for live query to pick it up
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -269,10 +273,10 @@ mod tests {
     #[traced_test]
     async fn test_agent_state_transitions() {
         let db = Arc::new(client::create_test_db().await.unwrap());
-        let llm = Arc::new(MockLlmProvider {
+        let model = Arc::new(RwLock::new(MockModelProvider {
             response: "Test".to_string(),
-        });
-        let tools = Arc::new(ToolRegistry::new());
+        }));
+        let tools = ToolRegistry::new();
 
         let user_id = crate::id::UserId::generate();
         let user = db
@@ -292,9 +296,15 @@ mod tests {
             .await
             .unwrap();
 
-        let mut agent = DatabaseAgent::new(agent_record.id, db.clone(), llm, None, tools)
-            .await
-            .unwrap();
+        let mut agent = DatabaseAgent::new(
+            agent_record.id,
+            db.clone(),
+            model,
+            None::<Arc<MockEmbeddingProvider>>,
+            tools,
+        )
+        .await
+        .unwrap();
 
         // Check initial state
         assert_eq!(agent.state(), AgentState::Ready);

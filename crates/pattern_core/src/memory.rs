@@ -1,44 +1,64 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+use compact_str::CompactString;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::json;
 use std::fmt::Debug;
+use std::ops::Deref;
+use std::ops::DerefMut;
+use std::sync::Arc;
 
-use crate::Result;
+use crate::{MemoryId, Result, UserId};
 
 /// A memory block following the MemGPT pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlock {
-    /// Label/name of the memory block (e.g., "persona", "human")
-    pub label: String,
+    pub id: MemoryId,
 
-    /// The actual content of the memory block
-    pub value: String,
+    pub owner_id: UserId,
 
-    /// Optional description of what this block is for
+    pub label: CompactString,
+
+    pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub embedding_model: Option<String>,
 
-    /// When this block was last modified
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_modified: Option<DateTime<Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+
+    pub is_active: bool,
 }
 
 /// Core memory system for agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
     /// Memory blocks by label
-    blocks: HashMap<String, MemoryBlock>,
+    blocks: Arc<DashMap<CompactString, MemoryBlock>>,
 
     /// Maximum characters per block (soft limit)
     char_limit: usize,
+    pub owner_id: UserId,
 }
 
 impl Memory {
     /// Create a new memory system
     pub fn new() -> Self {
         Self {
-            blocks: HashMap::new(),
+            blocks: Arc::new(DashMap::new()),
             char_limit: 5000,
+            owner_id: UserId::generate(),
+        }
+    }
+
+    pub fn with_owner(owner_id: UserId) -> Self {
+        Self {
+            blocks: Arc::new(DashMap::new()),
+            char_limit: 5000,
+            owner_id,
         }
     }
 
@@ -50,18 +70,24 @@ impl Memory {
 
     /// Create a new memory block
     pub fn create_block(
-        &mut self,
-        label: impl Into<String>,
+        &self,
+        label: impl Into<CompactString>,
         value: impl Into<String>,
     ) -> Result<()> {
         let label = label.into();
         let value = value.into();
 
         let block = MemoryBlock {
+            id: MemoryId::generate(),
+            owner_id: self.owner_id.clone(),
             label: label.clone(),
-            value,
+            content: value,
             description: None,
-            last_modified: Some(Utc::now()),
+            embedding_model: None,
+            updated_at: Utc::now(),
+            is_active: true,
+            metadata: json!({}),
+            created_at: Utc::now(),
         };
 
         self.blocks.insert(label, block);
@@ -70,8 +96,8 @@ impl Memory {
 
     /// Builder method to add a block
     pub fn with_block(
-        mut self,
-        label: impl Into<String>,
+        self,
+        label: impl Into<CompactString>,
         value: impl Into<String>,
     ) -> Result<Self> {
         self.create_block(label, value)?;
@@ -79,20 +105,20 @@ impl Memory {
     }
 
     /// Get a memory block by label
-    pub fn get_block(&self, label: &str) -> Option<&MemoryBlock> {
+    pub fn get_block(&self, label: &str) -> Option<impl Deref<Target = MemoryBlock> + use<'_>> {
         self.blocks.get(label)
     }
 
     /// Get a mutable reference to a memory block
-    pub fn get_block_mut(&mut self, label: &str) -> Option<&mut MemoryBlock> {
+    pub fn get_block_mut(&self, label: &str) -> Option<impl DerefMut<Target = MemoryBlock>> {
         self.blocks.get_mut(label)
     }
 
     /// Update the value of a memory block
-    pub fn update_block_value(&mut self, label: &str, value: impl Into<String>) -> Result<()> {
-        if let Some(block) = self.blocks.get_mut(label) {
-            block.value = value.into();
-            block.last_modified = Some(Utc::now());
+    pub fn update_block_value(&self, label: &str, value: impl Into<String>) -> Result<()> {
+        if let Some(mut block) = self.blocks.get_mut(label) {
+            block.content = value.into();
+            block.updated_at = Utc::now();
             Ok(())
         } else {
             Err(crate::CoreError::MemoryNotFound {
@@ -105,17 +131,17 @@ impl Memory {
 
     /// Get all memory blocks
     pub fn get_all_blocks(&self) -> Vec<MemoryBlock> {
-        self.blocks.values().cloned().collect()
+        self.blocks.iter().map(|e| e.value().clone()).collect()
     }
 
     /// List all block labels
-    pub fn list_blocks(&self) -> Vec<String> {
-        self.blocks.keys().cloned().collect()
+    pub fn list_blocks(&self) -> Vec<CompactString> {
+        self.blocks.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Remove a memory block
-    pub fn remove_block(&mut self, label: &str) -> Option<MemoryBlock> {
-        self.blocks.remove(label)
+    pub fn remove_block(&self, label: &str) -> Option<MemoryBlock> {
+        self.blocks.remove(label).map(|e| e.1)
     }
 }
 
@@ -127,18 +153,71 @@ impl Default for Memory {
 
 impl MemoryBlock {
     /// Create a new memory block
-    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(label: impl Into<CompactString>, value: impl Into<String>) -> Self {
         Self {
+            id: MemoryId::generate(),
+            owner_id: UserId::generate(),
             label: label.into(),
-            value: value.into(),
+            content: value.into(),
             description: None,
-            last_modified: Some(Utc::now()),
+
+            embedding_model: None,
+            updated_at: Utc::now(),
+            metadata: json!({}),
+            created_at: Utc::now(),
+            is_active: true,
+        }
+    }
+
+    pub fn owned_with_id(
+        id: MemoryId,
+        owner_id: UserId,
+        label: impl Into<CompactString>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            owner_id,
+            label: label.into(),
+            content: value.into(),
+            description: None,
+
+            embedding_model: None,
+            updated_at: Utc::now(),
+            metadata: json!({}),
+            created_at: Utc::now(),
+            is_active: true,
+        }
+    }
+
+    pub fn owned(
+        owner_id: UserId,
+        label: impl Into<CompactString>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: MemoryId::generate(),
+            owner_id,
+            label: label.into(),
+            content: value.into(),
+            description: None,
+            updated_at: Utc::now(),
+
+            embedding_model: None,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            is_active: true,
         }
     }
 
     /// Set the description
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_embedding_model(mut self, embedding_model: impl Into<String>) -> Self {
+        self.embedding_model = Some(embedding_model.into());
         self
     }
 }
@@ -149,19 +228,19 @@ mod tests {
 
     #[test]
     fn test_memory_creation() {
-        let mut memory = Memory::new();
+        let memory = Memory::new();
         assert_eq!(memory.list_blocks().len(), 0);
 
         memory.create_block("test", "test content").unwrap();
         assert_eq!(memory.list_blocks().len(), 1);
 
         let block = memory.get_block("test").unwrap();
-        assert_eq!(block.value, "test content");
+        assert_eq!(block.content, "test content");
     }
 
     #[test]
     fn test_memory_block_versioning() {
-        let mut memory = Memory::new();
+        let memory = Memory::new();
         memory.create_block("persona", "I am a helpful AI").unwrap();
         memory
             .create_block("human", "The user's name is Alice")
@@ -174,7 +253,7 @@ mod tests {
             .unwrap();
 
         let persona_block = memory.get_block("persona").unwrap();
-        assert_eq!(persona_block.value, "I am a very helpful AI assistant");
+        assert_eq!(persona_block.content, "I am a very helpful AI assistant");
     }
 
     #[test]
@@ -182,7 +261,7 @@ mod tests {
         let block = MemoryBlock::new("test", "content").with_description("Test block");
 
         assert_eq!(block.label, "test");
-        assert_eq!(block.value, "content");
+        assert_eq!(block.content, "content");
         assert_eq!(block.description, Some("Test block".to_string()));
     }
 }

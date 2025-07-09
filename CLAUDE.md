@@ -1,6 +1,6 @@
 # CLAUDE.md - Pattern ADHD Cognitive Support System
 
-Pattern is a multi-agent ADHD support system using Letta's architecture to provide external executive function through specialized cognitive agents.
+Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture to provide external executive function through specialized cognitive agents.
 
 ## TODO Management
 
@@ -141,17 +141,17 @@ just pre-commit-all
 
 ### Architecture & Design
 - [Pattern ADHD Architecture](./docs/architecture/PATTERN_ADHD_ARCHITECTURE.md) - Multi-agent cognitive support system design
-- [Memory and Groups Architecture](./docs/architecture/MEMORY_AND_GROUPS.md) - Memory hierarchy, Letta groups, and sleeptime strategy
+- [Memory and Groups Architecture](./docs/architecture/MEMORY_AND_GROUPS.md) - Memory hierarchy, agent groups, and sleeptime strategy
 - [Agent Routing](./docs/architecture/AGENT-ROUTING.md) - How messages are routed to agents
 - [System Prompts](./docs/architecture/pattern-system-prompts.md) - Agent personality and behavior
 
 ### Integration Guides
 - [MCP Integration](./docs/guides/MCP_INTEGRATION.md) - MCP tools and workflows
-- [Letta Integration](./docs/guides/LETTA_INTEGRATION.md) - Multi-agent implementation with Letta
+- [MemGPT Architecture](./docs/guides/MEMGPT_ARCHITECTURE.md) - Stateful agent patterns and design
 - [Discord Setup](./docs/guides/DISCORD_SETUP.md) - Discord bot configuration
 
 ### API References
-- [Letta API Reference](./docs/api/LETTA_API_REFERENCE.md) - Common patterns and gotchas
+- [Agent API Reference](./docs/api/AGENT_API_REFERENCE.md) - Common patterns and gotchas
 
 ### Troubleshooting
 - [Discord Issues](./docs/troubleshooting/DISCORD_ISSUES.md) - Known Discord integration issues
@@ -162,10 +162,10 @@ just pre-commit-all
 ## Build Priority Breakdown
 
 ### Phase 1: Core Foundation (In Progress)
-1. **Letta Groups Integration** 🚧
-   - Test different manager types (dynamic, supervisor, sleeptime)
+1. **Agent Groups Implementation** 🚧
+   - Implement group managers (dynamic, supervisor, sleeptime) in pattern-core
    - Document group patterns and best practices
-   - **Status**: Groups implemented, need testing and documentation
+   - **Status**: To be implemented in pattern-core
 
 2. **Custom Sleeptime Architecture** ✅
    - Two-tier monitoring (cheap rules + expensive intervention)
@@ -225,23 +225,18 @@ just pre-commit-all
 
 ## Groups Implementation Status
 
-✅ **Completed**: Native Letta groups with dynamic, supervisor, round-robin, and sleeptime managers
-- Database schema and caching with Foyer
-- Default groups created on user init: main, crisis, planning, memory
-- Discord bot routes to groups based on message content
-- Unified `send_message` tool handles all routing
-
-🚧 **Remaining**:
-- Test different manager types in production
-- Document group patterns and best practices
-- Add configurable custom groups via API/config
+🚧 **To Be Implemented**: Agent groups with dynamic, supervisor, round-robin, and sleeptime managers
+- Will support: main, crisis, planning, memory groups
+- Discord bot will route to groups based on message content
+- Unified `send_message` tool will handle all routing
+- Configurable custom groups via API/config
 
 ### Current TODOs
 
 ### High Priority
 - ~~Implement core agent framework in pattern-core (Agent trait, memory system, tool execution)~~ ✅ (2025-07-06)
 - ~~Set up SurrealDB integration for persistence~~ ✅ (2025-07-06)
-- Migrate existing agent logic from Letta to pattern-core 🚧
+- Implement agent groups in pattern-core (dynamic, supervisor, sleeptime managers) 🚧
 - Add task CRUD operations to database module (schema ready, needs implementation)
 - Create task manager with ADHD-aware task breakdown
 - Add contract/client tracking (time, invoices, follow-ups)
@@ -261,25 +256,7 @@ just pre-commit-all
 - Support additional Candle models (BERT dtype issues need fixing)
 
 ### Completed
-- [x] Letta integration layer with agent management
-- [x] Library restructure with feature flags
-- [x] Database module with SQLite migrations
-- [x] Multi-agent system architecture (Pattern + 5 agents)
-- [x] Discord bot with slash commands and agent routing
-- [x] MCP server with 10+ tools (official SDK patterns)
-- [x] Multiple MCP transports (stdio, HTTP, SSE)
-- [x] Comprehensive test suite
-- [x] Documentation refactoring
-- [x] Agent update functionality (instead of delete/recreate for cloud limits)
-- [x] Fixed agent infinite loop issue when prefixing messages
-- [x] Removed MCP tool name conflicts with Letta defaults
-- [x] Implemented database caching for agent IDs (multi-agent support)
-- [x] Load all system prompts and agent configurations from a config file
-- [x] Optimized agent initialization to eliminate API calls for existing agents
-- [x] Model capability abstraction system (Routine/Interactive/Investigative/Critical)
-- [x] Configurable model mappings in pattern.toml (global and per-agent)
-- [x] Implement passive knowledge sharing via Letta sources (2025-07-04)
-- [x] Knowledge tools for agents (write_agent_knowledge, read_agent_knowledge, sync_knowledge_to_letta)
+Recent completions (keeping last 2 weeks):
 - [x] Implement schedule_event MCP tool with database storage (2025-07-05)
 - [x] Implement check_activity_state MCP tool with energy state tracking (2025-07-05)
 - [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-07-05)
@@ -297,54 +274,70 @@ just pre-commit-all
 - [x] Implemented type-safe database operations with custom ID types (2025-07-06)
 - [x] Fixed SurrealDB value unwrapping for all wrapped types (2025-07-06)
 - [x] Optimized test suite by moving slow tests to integration tests (2025-07-06)
+- [x] Implemented built-in tools system for agents (update_memory, send_message) (2025-07-09)
+- [x] Refactored AgentContext to separate cheap handles from expensive message history (2025-07-09)
+- [x] Made DatabaseAgent generic over ModelProvider and EmbeddingProvider (2025-07-09)
+- [x] Implemented type-safe tool system with MCP-compatible schema generation (2025-07-09)
+- [x] Added Arc to Memory's internal DashMap for thread-safe sharing (2025-07-09)
+- [x] Fixed ID format consistency (all IDs now use underscore separator) (2025-07-09)
 
 ## Current Status
 
-**Last Updated**: 2025-07-06 (Late Night Session)
+**Last Updated**: 2025-07-09
 
 ### System Architecture ✅
 - **Unified binary** with feature flags (`discord`, `mcp`, `binary`, `full`)
-- **Foyer caching layer**: Hybrid memory/disk caching for agents, groups, memory blocks
+- **Caching layer**: Foyer (hybrid memory/disk caching) may be used for caching agents, groups, memory blocks
 - **Multi-agent constellation**: Pattern orchestrator + 5 specialist agents (Entropy, Flux, Archive, Momentum, Anchor)
-- **Native Letta groups**: Main (dynamic), crisis (round-robin), planning (supervisor), memory (sleeptime)
-- **Three-tier memory**: Core blocks, Letta sources, archival storage
+- **Agent groups** (planned): Main (dynamic), crisis (round-robin), planning (supervisor), memory (sleeptime)
+- **Three-tier memory**: Core blocks, knowledge sources, archival storage
 - **Custom sleeptime monitor**: Two-tier ADHD monitoring (lightweight checks + Pattern intervention)
 - **Database backend**: Pure Rust SurrealKV with vector search, migrations, and embedding support
+- **Built-in tools**: Type-safe agent tools (update_memory, send_message) with customizable implementations
+- **Generic agents**: DatabaseAgent is generic over ModelProvider and EmbeddingProvider
 
-### Recent Achievements (2025-07-04 to 2025-07-06)
+### Recent Achievements (2025-07-09)
+- **Built-in tools system**: Agents now have standard tools (update_memory, send_message) that can be customized
+- **AgentContext refactor**: Separated cheap AgentHandle from expensive MessageHistory
+- **Thread-safe memory**: Added Arc to Memory's DashMap for efficient sharing
+- **Type-safe tools**: Refactored AiTool trait to use generics instead of serde_json::Value
+- **MCP-compatible schemas**: Tool schemas are automatically inlined (no $ref) for MCP compatibility
+- **Generic DatabaseAgent**: Now generic over both ModelProvider and EmbeddingProvider
+- **ID format consistency**: All TypedId implementations now use underscore separator (e.g., agent_uuid)
+- **MockProviders for testing**: Added MockModelProvider and MockEmbeddingProvider
+- **Tool registry improvements**: Built-in tools use the same registry as external tools
+- **All tests passing**: Fixed all test failures related to ID formats and memory sharing
+
+### Previous Achievements (2025-07-04 to 2025-07-06)
 - **Caching migration**: SQLite KV store → Foyer library with automatic tiering
+- **Workspace refactor**: Migrated from monolithic to multi-crate workspace structure
+- **Custom agent framework**: Building MemGPT-inspired stateful agents with SurrealDB
 - **MCP schema fixes**: Removed unsupported references, enums, nested structs
-- **Partner threading**: Agents receive actual partner names and Discord IDs
-- **Unified messaging**: Single `send_message` tool routes to agents/groups/Discord
 - **ADHD tools**: Energy tracking, event scheduling, interruptibility detection
-- **Auto tool attachment**: MCP tools automatically attached to agents on creation
-- **Group management**: Proper caching prevents constant recreation
-- **Agent configuration**: External TOML files for prompts and model mappings
 - **Sleeptime monitoring**: Automatic ADHD support with hyperfocus detection, break reminders
-- **Workspace refactor**: ✅ Migrated from monolithic to multi-crate workspace structure (2025-07-06)
-- **Removed Letta dependency**: ✅ Building our own agent framework with SurrealDB
-- **Rich error types**: ✅ All errors now use miette for detailed diagnostics
-- **Pure Rust dependencies**: ✅ Removed C dependencies (no rocksdb, using rustls)
-- **Tool registry optimization**: ✅ DashMap for concurrent access, CompactString for memory efficiency
-- **JSON payload optimization**: ✅ Added `skip_serializing_if` to all Option fields
-- **Database implementation**: ✅ SurrealDB embedded with schema migrations and vector search
-- **Embedding providers**: ✅ Feature-gated providers - Candle (Jina only), OpenAI, Cohere, Ollama (stub)
-- **Simplified abstractions**: ✅ Removed Java-esque patterns (repositories, factories) for direct operations
-- **Type-safe database**: ✅ Custom ID types with strong typing throughout the codebase
-- **SurrealDB integration**: ✅ Proper handling of SurrealDB's nested value format
-- **Test optimization**: ✅ Moved slow Candle tests to integration tests (2+ minutes → <1s for unit tests)
+- **Embedding providers**: Feature-gated providers - Candle (Jina only), OpenAI, Cohere, Ollama (stub)
+- **Type-safe database**: Custom ID types with strong typing throughout the codebase
 
 ### Key Features Implemented
 
 **Database**: 
-- SQLite with migrations, Foyer caching layer (pattern-main)
-- SurrealDB with vector search, migrations (pattern-core)
+- SurrealDB with vector search, migrations, embedded storage
+- Foyer caching layer (planned for production optimization)
 - Users, agents, groups, tasks, events, energy states tables
 - Memory blocks with embeddings for semantic search
 - Contract/client and social memory schemas ready
 - Unique constraints prevent duplicate agents/groups
 - Type-safe operations with custom ID types (UserId, AgentId, etc.)
 - Automatic handling of SurrealDB's wrapped value format
+
+**Agent Framework**:
+- Generic DatabaseAgent<Connection, ModelProvider, EmbeddingProvider>
+- Built-in tools system with type-safe AiTool trait
+- AgentHandle for cheap access to agent internals
+- Separated MessageHistory behind RwLock for concurrent access
+- Thread-safe Memory with Arc<DashMap> for shared state
+- Tool registry with dynamic dispatch support
+- MCP-compatible schema generation (no $ref fields)
 
 **Embeddings**:
 - ✅ Candle (local) - Pure Rust embeddings with Jina models (BERT has dtype issues)
@@ -354,12 +347,14 @@ just pre-commit-all
 - Automatic embedding generation for memory blocks
 - Semantic search with cosine similarity
 - Dummy embeddings (384-dim zeros) when no provider configured
+- MockEmbeddingProvider for testing
 
 **Testing**: 
-- 40+ unit tests that validate actual behavior (not mocks)
+- 50+ unit tests that validate actual behavior (not mocks)
 - Unit tests run in <1 second
 - Slow integration tests (Candle embeddings) separated out
 - All tests must fail properly - no silent skipping
+- MockModelProvider and MockEmbeddingProvider for testing
 
 **Discord Bot**:
 - Natural language chat with slash commands
@@ -422,10 +417,10 @@ Discord/Platform Context:
 4. **Channel Context**: Public interactions can see channel history but not private memory
 
 ### Implementation Strategy
-1. **Agent State Updates**: Use Letta's update APIs instead of delete/recreate (cloud limits)
-   - ✅ Added `update_agent()` method to update system prompts without recreation
-   - ✅ Added `update_all_agents()` to batch update all agents for a user
-   - ✅ Automatic update detection in `create_or_get_agent()`
+1. **Agent State Management**: Efficient updates without recreation
+   - Update system prompts and configuration on the fly
+   - Batch updates for all agents belonging to a user
+   - Automatic change detection and updates
 2. **Dynamic Memory Loading**:
    - Primary blocks: Partner's personal memory (always loaded)
    - Secondary blocks: Conversant info (loaded for group interactions)
@@ -483,7 +478,7 @@ Each crate has its own dependencies and can be developed/tested independently.
 
 ### Workspace Refactor ✅
 - **Multi-crate workspace structure implemented**:
-  - `pattern-core`: Agent framework, memory, tools (no Letta dependency)
+  - `pattern-core`: Agent framework, memory, tools (MemGPT-inspired architecture)
   - `pattern-nd`: ADHD-specific tools and agent personalities
   - `pattern-mcp`: MCP server with multiple transports
   - `pattern-discord`: Discord bot integration
@@ -567,7 +562,7 @@ Each crate has its own dependencies and can be developed/tested independently.
 ### External Documentation
 - [Official MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk) - Use git version only
 - [MCP Specification](https://modelcontextprotocol.io/specification/2025-06-18)
-- [Letta Documentation](https://docs.letta.com/)
+- [MemGPT Paper](https://arxiv.org/abs/2310.08560) - Original stateful agent architecture
 - [Discord.py Interactions Guide](https://discordpy.readthedocs.io/en/stable/interactions/api.html) (concepts apply to serenity)
 - [Activity Detection Research](https://dl.acm.org/doi/10.1145/3290605.3300589)
 

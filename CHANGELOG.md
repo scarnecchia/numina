@@ -2,6 +2,38 @@
 
 All notable changes to Pattern will be documented in this file.
 
+## 2025-07-09
+
+### Added
+- Built-in tools system for agents (update_memory, send_message)
+  - Type-safe `AiTool` trait with generics instead of `serde_json::Value`
+  - `AgentHandle` provides cheap, cloneable access to agent internals
+  - `BuiltinTools::builder()` allows customization of default implementations
+  - Tools are registered in the same ToolRegistry as external tools
+- Generic `DatabaseAgent<Connection, ModelProvider, EmbeddingProvider>`
+  - Allows using different model providers (OpenAI, Anthropic, local, etc.)
+  - Supports various embedding providers for semantic search
+  - Added `MockModelProvider` and `MockEmbeddingProvider` for testing
+- Thread-safe memory system improvements
+  - Added `Arc<DashMap>` to Memory for efficient concurrent access
+  - Memory blocks can be shared across threads without cloning data
+
+### Changed
+- Refactored `AgentContext` to separate concerns:
+  - `AgentHandle`: Cheap, frequently accessed data (agent_id, memory)
+  - `MessageHistory`: Large message vectors behind `Arc<RwLock<_>>`
+  - Metadata behind `Arc<tokio::sync::RwLock<_>>` for concurrent updates
+- ID format consistency: All TypedId implementations now use underscore separator
+  - Format: `prefix_uuid` (e.g., `agent_12345678-...`, `user_abcdef12-...`)
+  - MemoryIdType uses "mem" prefix, not "memory"
+- Tool schemas are automatically inlined for MCP compatibility (no `$ref` fields)
+
+### Fixed
+- All test failures related to ID format changes
+- Memory sharing issues in built-in tools
+- Thread safety issues with agent metadata updates
+- MCP schema generation to be fully compliant
+
 ## 2025-07-06 (Late Night Session)
 
 ### Added
