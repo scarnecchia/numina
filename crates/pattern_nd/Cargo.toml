@@ -19,6 +19,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+surrealdb = { workspace = true }
 
 # Core framework
 pattern-core = { path = "../pattern_core" }

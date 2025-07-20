@@ -2,10 +2,12 @@
 
 pub mod debug;
 
+/// Serde helpers for serializing `Option<Duration>` as milliseconds
 pub mod duration_millis {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 
+    /// Serialize an optional Duration as milliseconds
     pub fn serialize<S>(duration: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -16,6 +18,7 @@ pub mod duration_millis {
         }
     }
 
+    /// Deserialize milliseconds into an optional Duration
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
     where
         D: Deserializer<'de>,
@@ -25,10 +28,12 @@ pub mod duration_millis {
     }
 }
 
+/// Serde helpers for serializing `Option<Duration>` as seconds
 pub mod duration_secs {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
 
+    /// Serialize an optional Duration as seconds
     pub fn serialize<S>(duration: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -39,6 +44,7 @@ pub mod duration_secs {
         }
     }
 
+    /// Deserialize seconds into an optional Duration
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
     where
         D: Deserializer<'de>,

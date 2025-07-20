@@ -18,6 +18,7 @@ pub struct Message {
 }
 
 impl Message {
+    /// Convert this message to a genai ChatMessage
     pub fn as_chat_message(&self) -> genai::chat::ChatMessage {
         genai::chat::ChatMessage {
             role: self.role.clone(),
@@ -53,6 +54,7 @@ pub struct Request {
 }
 
 impl Request {
+    /// Convert this request to a genai ChatRequest
     pub fn as_chat_request(&self) -> genai::chat::ChatRequest {
         genai::chat::ChatRequest::from_system(self.system.clone().unwrap().join("\n\n"))
             .append_messages(self.messages.iter().map(Message::as_chat_message).collect())
@@ -70,6 +72,7 @@ pub struct Response {
 }
 
 impl Response {
+    /// Create a Response from a genai ChatResponse
     pub fn from_chat_response(resp: genai::chat::ChatResponse) -> Self {
         let metadata = ResponseMetadata {
             processing_time: None,
@@ -117,6 +120,7 @@ impl Default for ResponseMetadata {
 }
 
 impl Message {
+    /// Create a user message with the given content
     pub fn user(content: impl Into<MessageContent>) -> Self {
         Self {
             id: MessageId::generate(),
@@ -127,6 +131,7 @@ impl Message {
         }
     }
 
+    /// Create a system message with the given content
     pub fn system(content: impl Into<MessageContent>) -> Self {
         Self {
             id: MessageId::generate(),
@@ -137,6 +142,7 @@ impl Message {
         }
     }
 
+    /// Create an agent (assistant) message with the given content
     pub fn agent(content: impl Into<MessageContent>) -> Self {
         Self {
             id: MessageId::generate(),
@@ -147,6 +153,9 @@ impl Message {
         }
     }
 
+    /// Extract text content from the message if available
+    ///
+    /// Returns None if the message contains only non-text content (e.g., tool calls)
     pub fn text_content(&self) -> Option<String> {
         match &self.content {
             MessageContent::Text(text) => Some(text.clone()),
@@ -170,10 +179,12 @@ impl Message {
         }
     }
 
+    /// Check if this message contains tool calls
     pub fn has_tool_calls(&self) -> bool {
         matches!(&self.content, MessageContent::ToolCalls(_))
     }
 
+    /// Get the number of tool calls in this message
     pub fn tool_call_count(&self) -> usize {
         match &self.content {
             MessageContent::ToolCalls(calls) => calls.len(),
@@ -181,6 +192,9 @@ impl Message {
         }
     }
 
+    /// Rough estimation of token count for this message
+    ///
+    /// Uses the approximation of ~4 characters per token
     pub fn estimate_tokens(&self) -> usize {
         // Rough estimation: ~4 chars per token
         match &self.content {

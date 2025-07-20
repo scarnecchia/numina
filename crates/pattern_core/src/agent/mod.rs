@@ -108,16 +108,22 @@ pub enum AgentType {
 
     /// ADHD-specific agent types
     #[cfg(feature = "nd")]
+    /// Orchestrator agent - coordinates other agents and runs background checks
     Pattern,
     #[cfg(feature = "nd")]
+    /// Task specialist - breaks down overwhelming tasks into atomic units
     Entropy,
     #[cfg(feature = "nd")]
+    /// Time translator - converts between ADHD time and clock time
     Flux,
     #[cfg(feature = "nd")]
+    /// Memory bank - external memory for context recovery and pattern finding
     Archive,
     #[cfg(feature = "nd")]
+    /// Energy tracker - monitors energy patterns and protects flow states
     Momentum,
     #[cfg(feature = "nd")]
+    /// Habit manager - manages routines and basic needs without nagging
     Anchor,
 
     /// Custom agent type
@@ -164,6 +170,9 @@ impl<'de> Deserialize<'de> for AgentType {
 }
 
 impl AgentType {
+    /// Convert the agent type to its string representation
+    ///
+    /// For custom agents, returns the raw name without any prefix
     pub fn as_str(&self) -> &str {
         match self {
             Self::Generic => "generic",
@@ -264,10 +273,18 @@ impl FromStr for AgentState {
     }
 }
 
+/// Priority levels for agent actions and tasks
+///
+/// Used to determine the urgency and ordering of agent actions.
+/// The variants are ordered from lowest to highest priority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ActionPriority {
+    /// Low priority - can be deferred or batched
     Low,
+    /// Medium priority - normal operations
     Medium,
+    /// High priority - should be handled soon
     High,
+    /// Critical priority - requires immediate attention
     Critical,
 }

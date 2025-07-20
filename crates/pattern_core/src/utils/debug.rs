@@ -639,40 +639,27 @@ mod tests {
 
     #[test]
     fn test_pretty_debug_output() {
-        use crate::db::schema::Task;
-        use crate::id::{TaskId, UserId};
+        use crate::db::{BaseTask, BaseTaskPriority, BaseTaskStatus};
+        use crate::id::TaskId;
         use chrono::Utc;
 
         // Create a Task with embeddings
-        let task = Task {
+        let task = BaseTask {
             id: TaskId::generate(),
-            user_id: UserId::generate(),
-            parent_id: None,
             title: "Write documentation".to_string(),
             description: Some("Write comprehensive docs".to_string()),
-            embedding: Some(vec![0.2; 768]), // Larger embedding
-            embedding_model: Some("text-embedding-3-large".to_string()),
-            status: crate::db::schema::TaskStatus::Pending,
-            priority: crate::db::schema::TaskPriority::High,
-            estimated_minutes: Some(120),
-            actual_minutes: None,
-            complexity_score: Some(0.7),
-            energy_required: crate::db::schema::EnergyLevel::Medium,
-            tags: vec!["docs".to_string(), "important".to_string()],
-            metadata: serde_json::json!({}),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            started_at: None,
-            completed_at: None,
-            due_at: None,
+            status: BaseTaskStatus::Pending,
+            priority: BaseTaskPriority::High,
+            due_date: Some(Utc::now() + chrono::Duration::days(7)),
+            ..Default::default()
         };
 
         let task_debug = format!("{:#?}", task);
         println!("\nTask debug output:\n{}", task_debug);
 
-        // Check that embedding is truncated
-        assert!(task_debug.contains("(768d)"));
-        assert!(!task_debug.contains("0.2, 0.2, 0.2")); // Should not have full array
+        // Check that basic fields are present
+        assert!(task_debug.contains("Write documentation"));
+        assert!(task_debug.contains("Pending")); // Enum variant without the type name
     }
 
     #[test]

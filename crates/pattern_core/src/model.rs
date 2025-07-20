@@ -43,6 +43,11 @@ pub struct ModelInfo {
     pub cost_per_1k_completion_tokens: Option<f64>,
 }
 
+/// Options for configuring model responses
+///
+/// This struct contains all the parameters that can be used to control
+/// how a language model generates its response, including sampling parameters,
+/// output format, and what information to capture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseOptions {
     pub model_info: ModelInfo,
@@ -72,6 +77,7 @@ pub struct ResponseOptions {
 }
 
 impl ResponseOptions {
+    /// Convert ResponseOptions to a tuple of (ModelInfo, ChatOptions) for use with genai
     pub fn to_chat_options_tuple(&self) -> (ModelInfo, ChatOptions) {
         (
             self.model_info.clone(),
@@ -130,6 +136,10 @@ pub enum ModelCapability {
     FineTuning,
 }
 
+/// A client for interacting with language models through the genai library
+///
+/// This wraps the genai::Client and provides a consistent interface for
+/// model interactions across different providers (OpenAI, Anthropic, etc.)
 #[derive(Debug, Clone)]
 pub struct GenAiClient {
     client: genai::Client,
@@ -206,7 +216,7 @@ impl ModelProvider for GenAiClient {
 }
 
 /// Mock model provider for testing
-#[cfg(test)]
+
 #[derive(Debug, Clone)]
 pub struct MockModelProvider {
     pub response: String,

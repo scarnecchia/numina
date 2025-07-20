@@ -1,4 +1,7 @@
-use crate::{AgentId, db::DatabaseError};
+use crate::{
+    AgentId,
+    db::{DatabaseError, entity::EntityError},
+};
 use compact_str::CompactString;
 use miette::Diagnostic;
 use thiserror::Error;
@@ -302,10 +305,10 @@ impl From<DatabaseError> for CoreError {
                 data_type: "database record".to_string(),
                 cause: e,
             },
-            DatabaseError::NotFound { entity } => Self::AgentNotFound {
-                src: format!("database: {}", entity),
-                span: (10, 10 + entity.len()),
-                id: entity,
+            DatabaseError::NotFound { entity_type, id } => Self::AgentNotFound {
+                src: format!("database: {} with id {}", entity_type, id),
+                span: (10, 10 + id.len()),
+                id,
             },
             DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
                 collection: "unknown".to_string(),
@@ -362,6 +365,14 @@ impl From<DatabaseError> for CoreError {
                 cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(msg)),
             },
         }
+    }
+}
+
+impl From<EntityError> for CoreError {
+    fn from(err: EntityError) -> Self {
+        // Convert EntityError to DatabaseError, then to CoreError
+        let db_err: DatabaseError = err.into();
+        db_err.into()
     }
 }
 

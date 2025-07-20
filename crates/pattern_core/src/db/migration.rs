@@ -19,6 +19,31 @@ impl MigrationRunner {
             Self::update_schema_version(db, 1).await?;
         }
 
+        // Create entity tables using their schema definitions
+        use crate::MemoryBlock;
+        use crate::db::entity::{BaseAgent, BaseEvent, BaseTask, BaseUser, DbEntity};
+
+        // Create all entity tables
+        for table_def in [
+            BaseUser::schema(),
+            BaseAgent::schema(),
+            BaseTask::schema(),
+            MemoryBlock::schema(),
+            BaseEvent::schema(),
+        ] {
+            // Execute table schema
+            db.query(&table_def.schema)
+                .await
+                .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+            // Create indexes
+            for index in &table_def.indexes {
+                db.query(index)
+                    .await
+                    .map_err(|e| DatabaseError::QueryFailed(e))?;
+            }
+        }
+
         // Add more migrations here as needed
         // if current_version < 2 {
         //     tracing::info!("Running migration v2: ...");
@@ -29,22 +54,21 @@ impl MigrationRunner {
         Ok(())
     }
 
-    /// Migration v1: Initial schema
+    /// Migration v1: Initial schema - only creates system metadata
     async fn migrate_v1<C: Connection>(db: &Surreal<C>) -> Result<()> {
-        // Create all tables
-        for table in Schema::tables() {
-            // Execute table schema
-            db.query(&table.schema)
+        // Only create the system metadata table
+        let metadata_table = Schema::system_metadata();
+
+        // Execute table schema
+        db.query(&metadata_table.schema)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Create indexes
+        for index in &metadata_table.indexes {
+            db.query(index)
                 .await
                 .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-            // Create indexes
-            // Execute indexes
-            for index in &table.indexes {
-                db.query(index)
-                    .await
-                    .map_err(|e| DatabaseError::QueryFailed(e))?;
-            }
         }
 
         // Create vector indexes with default dimensions (384 for MiniLM)

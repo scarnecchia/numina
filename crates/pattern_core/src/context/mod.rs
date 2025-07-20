@@ -312,7 +312,7 @@ impl ContextBuilder {
         let mut blocks_text = Vec::new();
 
         for block in &self.memory_blocks {
-            let char_count = block.content.chars().count();
+            let char_count = block.value.chars().count();
             let char_limit = self.config.memory_char_limit;
 
             if self.config.model_adjustments.use_xml_tags {
@@ -336,7 +336,7 @@ impl ContextBuilder {
                         .unwrap_or("No description provided"),
                     char_count,
                     char_limit,
-                    block.content,
+                    block.value,
                     block.label
                 ));
             } else {
@@ -350,7 +350,7 @@ Content:
                     block.description.as_deref().unwrap_or("No description"),
                     char_count,
                     char_limit,
-                    block.content
+                    block.value
                 ));
             }
         }
@@ -491,7 +491,7 @@ mod tests {
         let context = builder
             .add_memory_block(MemoryBlock {
                 label: "persona".to_compact_string(),
-                content: "I am a helpful AI assistant.".to_string(),
+                value: "I am a helpful AI assistant.".to_string(),
                 description: Some("Agent persona".to_string()),
                 id: MemoryId::generate(),
                 owner_id: UserId::generate(),
@@ -500,6 +500,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 is_active: true,
+                ..Default::default()
             })
             .build()
             .unwrap();
@@ -525,7 +526,7 @@ mod tests {
         let context = builder
             .add_memory_block(MemoryBlock {
                 label: "test".to_compact_string(),
-                content: long_text,
+                value: long_text,
                 description: None,
                 id: MemoryId::generate(),
                 owner_id: UserId::generate(),
@@ -534,6 +535,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 is_active: true,
+                ..Default::default()
             })
             .build()
             .unwrap();

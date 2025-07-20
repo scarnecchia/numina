@@ -11,6 +11,55 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 When starting work, check the TODO list below and load it into TodoWrite.
 When finishing work, update this list with any changes.
 
+## Recent Major Updates (2025-01-10)
+
+### Entity System Integration ✅ COMPLETED
+
+Successfully integrated the modular entity system throughout the codebase:
+
+1. **Removed old db models** - No more UserDbModel, AgentDbModel, MemoryBlockDbModel
+2. **Using macro-generated types** - BaseUser, BaseAgent, BaseTask, BaseMemoryBlock, BaseEvent
+3. **Refactored database operations**:
+   - Removed redundant `SurrealExt` trait
+   - Created focused extension traits:
+     - `VectorSearchExt` - for semantic search
+     - `LiveQueryExt` - for real-time subscriptions
+     - `MemoryOpsExt` - for memory-agent relationships
+     - `AgentContextExt` - for complex updates
+   - Using generic entity operations for CRUD
+4. **Updated all code** - Examples, tests, and implementations now use the new API
+
+### Modular Entity System ✅ COMPLETED (2025-07-09)
+
+We've successfully implemented a macro-based entity system that:
+
+1. **Separates ADHD concerns from core** - All ADHD-specific types now live in pattern-nd
+2. **Uses compile-time macros** - The `define_entity!` macro eliminates boilerplate
+3. **Leverages SurrealDB graph relationships** - Proper RELATE queries instead of foreign keys
+
+Key changes:
+- Removed `owner_id`, `assigned_agent_id`, etc. from entities
+- Created edge tables: `owns`, `created`, `assigned`, `subtask_of`, `remembers`, `scheduled`
+- All IDs are now proper `record` types
+- Relationships use `record<table>` types
+- Helper functions for common RELATE operations
+
+Example:
+```rust
+// Old way (foreign keys)
+let task = Task { owner_id: user.id, assigned_agent_id: Some(agent.id), ... };
+
+// New way (RELATE)
+create_task(&db, &task).await?;
+relate_user_created_task(&db, &user.id, &task.id).await?;
+relate_agent_assigned_task(&db, &agent.id, &task.id, Some("high".to_string())).await?;
+```
+
+### What's Removed
+- ❌ EntityRegistry - not needed with compile-time approach
+- ❌ ExtensibleEntity trait - macros are simpler
+- ❌ Direct foreign key fields - use RELATE instead
+
 ## Git Workflow - Feature Branches
 
 **IMPORTANT**: Once the project is stable, we use feature branches for all development:
@@ -162,12 +211,18 @@ just pre-commit-all
 ## Build Priority Breakdown
 
 ### Phase 1: Core Foundation (In Progress)
-1. **Agent Groups Implementation** 🚧
+1. **Modular Entity System** ✅
+   - Macro-based entity definitions with `define_entity!`
+   - ADHD types isolated in pattern-nd
+   - SurrealDB RELATE for all relationships
+   - **Status**: Completed, ready for integration
+
+2. **Agent Groups Implementation** 🚧
    - Implement group managers (dynamic, supervisor, sleeptime) in pattern-core
    - Document group patterns and best practices
    - **Status**: To be implemented in pattern-core
 
-2. **Custom Sleeptime Architecture** ✅
+3. **Custom Sleeptime Architecture** ✅
    - Two-tier monitoring (cheap rules + expensive intervention)
    - Conditional Pattern awakening
    - Cost-optimized background processing
@@ -175,11 +230,12 @@ just pre-commit-all
 
 ### Phase 2: Core Features (MVP)
 1. **Task Management System**
-   - Add task CRUD operations to database module
+   - ~~Add task CRUD operations to database module~~ ✅ Schema ready with RELATE
    - Create task manager with ADHD-aware task breakdown
    - Hidden complexity detection and atomic task creation
    - Add task-related MCP tools
    - **Why**: Task paralysis is core ADHD challenge
+   - **Note**: Now uses edge tables for relationships (user->created->task, agent->assigned->task)
 
 2. **Pattern Sleeptime Agent**
    - Implement 20-30min background checks
@@ -236,6 +292,8 @@ just pre-commit-all
 ### High Priority
 - ~~Implement core agent framework in pattern-core (Agent trait, memory system, tool execution)~~ ✅ (2025-07-06)
 - ~~Set up SurrealDB integration for persistence~~ ✅ (2025-07-06)
+- ~~Implement modular entity system with SurrealDB RELATE~~ ✅ (2025-07-09)
+- ~~Integrate new entity system with existing code~~ ✅ (2025-01-10)
 - Implement agent groups in pattern-core (dynamic, supervisor, sleeptime managers) 🚧
 - Add task CRUD operations to database module (schema ready, needs implementation)
 - Create task manager with ADHD-aware task breakdown
@@ -257,6 +315,11 @@ just pre-commit-all
 
 ### Completed
 Recent completions (keeping last 2 weeks):
+- [x] Implement modular database entity system with macros (2025-07-09)
+- [x] Migrate all entities to use SurrealDB RELATE instead of foreign keys(2025-07-09)
+- [x] Move ADHD-specific types from core to pattern-nd (2025-07-09)
+- [x] Create relationship helper functions for common patterns (2025-07-09)
+- [x] Remove EntityRegistry and ExtensibleEntity in favor of macros (2025-07-09)
 - [x] Implement schedule_event MCP tool with database storage (2025-07-05)
 - [x] Implement check_activity_state MCP tool with energy state tracking (2025-07-05)
 - [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-07-05)
@@ -280,6 +343,9 @@ Recent completions (keeping last 2 weeks):
 - [x] Implemented type-safe tool system with MCP-compatible schema generation (2025-07-09)
 - [x] Added Arc to Memory's internal DashMap for thread-safe sharing (2025-07-09)
 - [x] Fixed ID format consistency (all IDs now use underscore separator) (2025-07-09)
+- [x] Integrated entity system - removed old db models, using macro-generated types (2025-01-10)
+- [x] Refactored SurrealExt into focused extension traits (VectorSearchExt, LiveQueryExt, etc.) (2025-01-10)
+- [x] Updated all examples and tests to use new entity-based API (2025-01-10)
 
 ## Current Status
 
@@ -320,7 +386,7 @@ Recent completions (keeping last 2 weeks):
 
 ### Key Features Implemented
 
-**Database**: 
+**Database**:
 - SurrealDB with vector search, migrations, embedded storage
 - Foyer caching layer (planned for production optimization)
 - Users, agents, groups, tasks, events, energy states tables
@@ -349,7 +415,7 @@ Recent completions (keeping last 2 weeks):
 - Dummy embeddings (384-dim zeros) when no provider configured
 - MockEmbeddingProvider for testing
 
-**Testing**: 
+**Testing**:
 - 50+ unit tests that validate actual behavior (not mocks)
 - Unit tests run in <1 second
 - Slow integration tests (Candle embeddings) separated out

@@ -12,6 +12,8 @@ use std::str::FromStr;
 use surrealdb::RecordId;
 use uuid::Uuid;
 
+use crate::db::strip_brackets;
+
 /// A type-safe ID with a consistent prefix and UUID
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id<T> {
@@ -34,15 +36,20 @@ pub trait IdType: Send + Sync + 'static {
 }
 
 /// Errors that can occur when working with IDs
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum IdError {
     #[error("Invalid ID format: expected prefix '{expected}', got '{actual}'")]
+    #[diagnostic(help("Ensure the ID starts with the correct prefix followed by an underscore"))]
     InvalidPrefix { expected: String, actual: String },
 
     #[error("Invalid UUID: {0}")]
+    #[diagnostic(help("The UUID portion of the ID must be a valid UUID v4 format"))]
     InvalidUuid(#[from] uuid::Error),
 
     #[error("Invalid ID format: {0}")]
+    #[diagnostic(help(
+        "IDs must be in the format 'prefix_uuid' where prefix matches the expected type"
+    ))]
     InvalidFormat(String),
 }
 
@@ -97,6 +104,13 @@ impl<T: IdType> Id<T> {
         self.uuid
     }
 
+    pub fn from_record(record: RecordId) -> Self {
+        Self::from_uuid(
+            Uuid::from_str(strip_brackets(&record.key().to_string()))
+                .expect("should be a valid uuid"),
+        )
+    }
+
     /// Get the prefix for this ID type
     pub fn prefix(&self) -> &'static str {
         T::PREFIX
@@ -105,6 +119,10 @@ impl<T: IdType> Id<T> {
     /// Convert to a compact string representation
     pub fn to_compact_string(&self) -> CompactString {
         compact_str::format_compact!("{}_{}", T::PREFIX, self.uuid)
+    }
+
+    pub fn to_record_id(&self) -> String {
+        self.uuid().to_string()
     }
 
     /// Create a nil/empty ID (all zeros)
@@ -149,6 +167,13 @@ impl<T: IdType> AsRef<Uuid> for Id<T> {
 
 impl<T: IdType> From<Id<T>> for RecordId {
     fn from(id: Id<T>) -> Self {
+        // Use just the UUID part as the key
+        RecordId::from_table_key(T::PREFIX, id.uuid.to_string())
+    }
+}
+
+impl<T: IdType> From<&Id<T>> for RecordId {
+    fn from(id: &Id<T>) -> Self {
         // Use just the UUID part as the key
         RecordId::from_table_key(T::PREFIX, id.uuid.to_string())
     }
@@ -219,6 +244,15 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
 }
 
 // Implement common ID types
+//
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RelationIdType;
+
+impl IdType for RelationIdType {
+    const PREFIX: &'static str = "rel";
+}
+
+pub type RelationId = Id<RelationIdType>;
 
 /// Marker type for Agent IDs
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -276,6 +310,10 @@ impl IdType for ToolCallIdType {
 pub type ToolCallId = Id<ToolCallIdType>;
 
 /// Type alias for Message IDs (these are just strings for compat with API)
+///
+/// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
+/// format because it needs to be compatible with Anthropic/OpenAI APIs which
+/// expect arbitrary string UUIDs.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct MessageId(pub String);
@@ -309,6 +347,17 @@ impl IdType for MemoryIdType {
 /// Type alias for Memory Block IDs
 pub type MemoryId = Id<MemoryIdType>;
 
+/// Marker type for Event IDs
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct EventIdType;
+
+impl IdType for EventIdType {
+    const PREFIX: &'static str = "event";
+}
+
+/// Type alias for Event IDs
+pub type EventId = Id<EventIdType>;
+
 /// Marker type for Session IDs
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct SessionIdType;
@@ -341,6 +390,17 @@ impl IdType for RequestIdType {
 
 /// Type alias for Session IDs
 pub type RequestId = Id<RequestIdType>;
+
+/// Marker type for Group IDs
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct GroupIdType;
+
+impl IdType for GroupIdType {
+    const PREFIX: &'static str = "group";
+}
+
+/// Type alias for Group IDs
+pub type GroupId = Id<GroupIdType>;
 
 #[cfg(test)]
 mod tests {
@@ -435,7 +495,7 @@ mod tests {
         let agent_id = AgentId::generate();
         let user_id = UserId::generate();
 
-        // Debug output should be clean, just "prefix-uuid"
+        // Debug output should be clean, just "prefix_uuid"
         let agent_debug = format!("{:?}", agent_id);
         let user_debug = format!("{:?}", user_id);
 

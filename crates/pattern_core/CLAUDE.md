@@ -2,6 +2,148 @@
 
 This crate provides the core agent framework, memory management, and tool execution system that powers Pattern's multi-agent cognitive support system. Inspired by MemGPT's architecture for building stateful agents on stateless LLMs.
 
+## Modular Database Entity System ✅ COMPLETED (2025-01-10)
+
+### Overview
+Successfully implemented a proc macro-based system for extensible database entities that:
+- Keeps ADHD-specific types in pattern-nd
+- Uses compile-time proc macros instead of runtime registration
+- Properly uses SurrealDB's graph relationships with RELATE
+- Provides automatic relation management with convenience methods
+
+### Implementation
+The entity system is built around the `#[derive(Entity)]` proc macro which generates all necessary boilerplate. See [Entity System Architecture](../../docs/architecture/ENTITY_SYSTEM.md) for comprehensive documentation.
+
+Example usage:
+```rust
+#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
+#[entity(entity_type = "user")]
+pub struct User {
+    pub id: UserId,
+    pub username: String,
+    
+    // Skip fields - not persisted
+    #[entity(skip)]
+    pub runtime_state: UserState,
+    
+    // ID relations - just store/load IDs
+    #[entity(relation = "owns")]
+    pub owned_agent_ids: Vec<AgentId>,
+    
+    // Full entity relations
+    #[entity(relation = "created")]
+    pub created_tasks: Vec<Task>,
+}
+
+// Usage with automatic relation management
+let stored = user.store_with_relations(&db).await?;
+let loaded = User::load_with_relations(&db, user_id).await?;
+```
+
+### Key Features
+
+1. **Proc Macro Approach**
+   - `#[derive(Entity)]` generates storage types, conversions, and methods
+   - Field attributes: `skip`, `relation`, `db_type`, `crate_path`
+   - Automatic schema generation with proper SurrealDB types
+
+2. **SurrealDB Graph Relationships**
+   - No foreign keys - all relationships use RELATE
+   - Bidirectional traversal support
+   - Relations ordered by ID for consistent results
+   - Edge tables can store relationship metadata
+
+3. **Automatic Type Conversions**
+   - `DateTime<Utc>` ↔ `surrealdb::Datetime`
+   - `UserId/AgentId/etc` ↔ `surrealdb::RecordId`
+   - `serde_json::Value` → FLEXIBLE object
+   - Custom conversions via `db_type` attribute
+   - Enums serialize as strings (with custom Serialize/Deserialize)
+
+4. **Convenience Methods**
+   - `store_with_relations()` - upserts entity and all relations
+   - `load_with_relations()` - loads entity with all relations
+   - Manual control via `store_relations()` and `load_relations()`
+
+### Benefits Achieved
+- ✅ Zero boilerplate for entity definitions
+- ✅ Type-safe relation management
+- ✅ Optimized SurrealDB graph traversals (faster than SQL joins!)
+- ✅ Flexible relation types (ID-only or full entities)
+- ✅ Domain separation (ADHD types in pattern-nd)
+
+### Important Implementation Notes
+
+1. **Enum Serialization**: Enums like `BaseAgentType` must implement custom serialization to work with SurrealDB's string field type:
+   ```rust
+   impl Serialize for BaseAgentType {
+       fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+       where S: serde::Serializer,
+       {
+           match self {
+               BaseAgentType::Assistant => serializer.serialize_str("assistant"),
+               BaseAgentType::Custom(s) => serializer.serialize_str(s),
+           }
+       }
+   }
+   ```
+
+2. **Relation Ordering**: Relations are automatically ordered by ID to ensure consistent results across queries. The ORDER BY clause is added to all relation queries.
+
+3. **Upsert Behavior**: `store_with_relations()` uses UPSERT internally, so it's safe to call multiple times without creating duplicates.
+
+## Recent Updates (2025-01-10)
+
+### Completed
+1. **Entity System with Proc Macros** ✅
+   - `#[derive(Entity)]` with full relation support
+   - Automatic storage type generation
+   - Built-in convenience methods
+   - Comprehensive test coverage
+   - Fixed enum serialization for SurrealDB compatibility
+
+2. **Relation Management** ✅
+   - ID-only and full entity relations
+   - Automatic loading/storing with `*_with_relations` methods
+   - Ordered results for consistency
+   - No traditional joins needed!
+
+3. **Type System Integration** ✅
+   - All ID types use consistent format
+   - Proper SurrealDB type mappings
+   - Custom storage via `db_type` attribute
+   - Enum fields serialize as strings
+
+4. **Base Entity Refactor** ✅
+   - Updated BaseUser, BaseAgent, BaseTask, BaseEvent, BaseMemoryBlock
+   - Added proper relation fields (owns, created, assigned, etc.)
+   - Removed foreign key fields in favor of relations
+   - All base entities now use the Entity macro
+
+### Documentation TODOs
+1. **Tool execution flow**
+   - registration pathway
+   - dynamic tool conversion
+   - registry execution model
+   - built-in tools integration
+
+2. **Embedding provider selection guide**
+   - when to use which provider
+   - dimension selection criteria
+   - performance/cost tradeoffs
+
+### Next Steps
+1. **Update database operations**
+   - Replace manual RELATE queries with entity methods
+   - Use `store_with_relations` throughout codebase
+   - Remove old relation helper functions
+   - Update tests to use new entity system
+
+2. **Migration Guide**
+   - Document how to migrate from foreign keys to relations
+   - Provide examples of common patterns
+   - Create migration scripts for existing data
+
 ## Core Principles
 
 - **Type Safety First**: Use generics and strong typing wherever possible (see tool.rs refactor)
@@ -76,14 +218,24 @@ This crate provides the core agent framework, memory management, and tool execut
 - Type-safe IDs (UserId, AgentId, etc.) throughout the codebase
   - All IDs use underscore separator format: `prefix_uuid` (e.g., `agent_12345678-...`)
   - MemoryIdType uses "mem" prefix, not "memory"
+  - MessageId exception: plain string UUID for API compatibility
 - Automatic handling of SurrealDB's nested value format via `unwrap_surreal_value`
+- **Graph relationships using RELATE**:
+  - No direct foreign keys in entities
+  - Edge tables for all relationships
+  - Bidirectional traversal support
+  - Relationship metadata in edge tables
+- **Macro-based entity system**:
+  - `define_entity!` macro for minimal boilerplate
+  - Compile-time field validation
+  - Automatic schema generation
 - **Important**: See [`db/SURREALDB_PATTERNS.md`](./src/db/SURREALDB_PATTERNS.md) for query patterns and response handling
 
 ### Embeddings (`embeddings/`)
 - Provider trait for multiple backends
 - Feature-gated implementations:
   - ✅ Candle (local) - Pure Rust embeddings with Jina models
-  - ✅ OpenAI - text-embedding-3-small/large  
+  - ✅ OpenAI - text-embedding-3-small/large
   - ✅ Cohere - embed-english-v3.0
   - 🚧 Ollama - Stub implementation only
 - Automatic embedding generation for memory blocks
@@ -114,10 +266,10 @@ struct MyTool;
 impl AiTool for MyTool {
     type Input = MyInput;   // Must impl JsonSchema + Deserialize + Serialize
     type Output = MyOutput; // Must impl JsonSchema + Serialize
-    
+
     fn name(&self) -> &str { "my_tool" }
     fn description(&self) -> &str { "Does something useful" }
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         // Implementation
     }
@@ -149,8 +301,8 @@ return Err(CoreError::tool_not_found(name, available_tools));
 
 // For complex errors, use the builder methods
 return Err(CoreError::memory_not_found(
-    &agent_id, 
-    &block_name, 
+    &agent_id,
+    &block_name,
     available_blocks
 ));
 ```
@@ -187,3 +339,5 @@ return Err(CoreError::memory_not_found(
 - Batch embedding operations
 - ~~Cross-agent memory sharing~~ ✅ Implemented
 - Agent groups (dynamic, supervisor, sleeptime managers)
+- Modular entity system with macro-based definitions
+- Graph-based relationships using SurrealDB RELATE

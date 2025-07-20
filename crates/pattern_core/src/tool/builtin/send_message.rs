@@ -40,7 +40,7 @@ pub struct SendMessageOutput {
 /// Tool for sending messages to various targets
 #[derive(Debug, Clone)]
 pub struct SendMessageTool {
-    pub(crate) handle: AgentHandle,
+    pub handle: AgentHandle,
 }
 
 #[async_trait]
@@ -136,14 +136,14 @@ impl AiTool for SendMessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentId, UserId, memory::Memory};
+    use crate::{UserId, memory::Memory};
 
     #[tokio::test]
     async fn test_send_message_tool() {
         let memory = Memory::with_owner(UserId::generate());
         let handle = AgentHandle {
-            agent_id: AgentId::generate(),
             memory,
+            ..Default::default()
         };
 
         let tool = SendMessageTool { handle };

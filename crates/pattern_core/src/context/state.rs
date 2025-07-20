@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use std::sync::Arc;
 
 use crate::{
-    AgentId, AgentType, CoreError, Result,
+    AgentId, AgentState, AgentType, CoreError, Result,
     memory::Memory,
     message::{Message, Response},
     tool::ToolRegistry,
@@ -24,23 +24,50 @@ use super::{
 /// Cheap handle to agent internals that built-in tools can hold
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentHandle {
+    /// The agent's display name
+    pub name: String,
+    /// Unique identifier for this agent
     pub agent_id: AgentId,
-    pub memory: Memory, // already cheap (DashMap)
-                        // TODO: Add message_sender when we implement it
+    /// Type of agent (e.g., memgpt_agent, custom)
+    pub agent_type: AgentType,
+
+    /// The agent's memory system (already cheap to clone via Arc<DashMap>)
+    pub memory: Memory,
+    /// The agent's current state
+    pub state: AgentState,
+    // TODO: Add message_sender when we implement it
+}
+
+impl Default for AgentHandle {
+    fn default() -> Self {
+        Self {
+            name: "".to_string(),
+            agent_id: AgentId::generate(),
+            memory: Memory::new(),
+            state: AgentState::Ready,
+            agent_type: AgentType::Generic,
+        }
+    }
 }
 
 /// Message history that needs locking
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MessageHistory {
+    /// Active messages in the current context window
     pub messages: Vec<Message>,
+    /// Messages that have been compressed/archived to save context space
     pub archived_messages: Vec<Message>,
+    /// Optional summary of archived messages
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_summary: Option<String>,
+    /// Strategy used for compressing messages when context is full
     pub compression_strategy: CompressionStrategy,
+    /// When compression was last performed
     pub last_compression: DateTime<Utc>,
 }
 
 impl MessageHistory {
+    /// Create a new message history with the specified compression strategy
     pub fn new(compression_strategy: CompressionStrategy) -> Self {
         Self {
             messages: Vec::new(),
@@ -53,13 +80,10 @@ impl MessageHistory {
 }
 
 /// Represents the complete state of an agent
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct AgentContext {
     /// Cheap, frequently accessed stuff
     pub handle: AgentHandle,
-
-    /// Type of agent (e.g., memgpt_agent, custom)
-    pub agent_type: AgentType,
 
     /// Tools available to this agent
     pub tools: ToolRegistry,
@@ -85,20 +109,39 @@ pub struct AgentContextMetadata {
     pub compression_events: usize,
 }
 
+impl Default for AgentContextMetadata {
+    fn default() -> Self {
+        Self {
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            total_messages: 0,
+            total_tool_calls: 0,
+            context_rebuilds: 0,
+            compression_events: 0,
+        }
+    }
+}
+
 impl AgentContext {
     /// Create a new agent state
     pub fn new(
         agent_id: AgentId,
+        name: String,
         agent_type: AgentType,
         memory: Memory,
         tools: ToolRegistry,
         context_config: ContextConfig,
     ) -> Self {
-        let handle = AgentHandle { agent_id, memory };
+        let handle = AgentHandle {
+            agent_id,
+            memory,
+            name,
+            agent_type,
+            ..Default::default()
+        };
 
         Self {
             handle,
-            agent_type,
             tools,
             context_config,
             metadata: Arc::new(RwLock::new(AgentContextMetadata {
@@ -191,7 +234,7 @@ impl AgentContext {
             )
         })?;
 
-        let new_value = format!("{}\n{}", current.content, content);
+        let new_value = format!("{}\n{}", current.value, content);
         self.handle.memory.update_block_value(label, new_value)?;
         self.metadata.write().await.last_active = Utc::now();
         Ok(())
@@ -212,7 +255,7 @@ impl AgentContext {
             )
         })?;
 
-        let new_value = current.content.replace(old_content, new_content);
+        let new_value = current.value.replace(old_content, new_content);
         self.handle.memory.update_block_value(label, new_value)?;
         self.metadata.write().await.last_active = Utc::now();
         Ok(())
@@ -334,7 +377,7 @@ impl AgentContext {
     pub async fn restore_from_checkpoint(&self, checkpoint: StateCheckpoint) -> Result<()> {
         if checkpoint.agent_id != self.handle.agent_id {
             return Err(CoreError::AgentInitFailed {
-                agent_type: format!("{:?}", self.agent_type),
+                agent_type: format!("{:?}", self.handle.agent_type),
                 cause: Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Checkpoint is for a different agent",
@@ -457,6 +500,7 @@ impl AgentContextBuilder {
         // Create state
         let state = AgentContext::new(
             self.agent_id,
+            "test_agent".into(),
             self.agent_type,
             memory,
             tools,

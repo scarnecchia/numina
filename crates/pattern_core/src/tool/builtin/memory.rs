@@ -60,7 +60,7 @@ impl AiTool for UpdateMemoryTool {
             .handle
             .memory
             .get_block(&params.label)
-            .map(|block| block.content.clone());
+            .map(|block| block.value.clone());
 
         // Update or create the memory block
         if previous_value.is_some() {
@@ -170,8 +170,8 @@ impl AiTool for AppendMemoryTool {
             )
         })?;
 
-        let previous_value = Some(current.content.clone());
-        let new_value = format!("{}{}{}", current.content, separator, params.content);
+        let previous_value = Some(current.value.clone());
+        let new_value = format!("{}{}{}", current.value, separator, params.content);
 
         // Update the block
         self.handle
@@ -236,19 +236,19 @@ impl AiTool for ReplaceInMemoryTool {
             )
         })?;
 
-        let previous_value = Some(current.content.clone());
+        let previous_value = Some(current.value.clone());
 
         let new_value = if params.replace_all {
-            current.content.replace(&params.search, &params.replace)
+            current.value.replace(&params.search, &params.replace)
         } else {
-            current.content.replacen(&params.search, &params.replace, 1)
+            current.value.replacen(&params.search, &params.replace, 1)
         };
 
         // Check if anything was replaced
         let replacements = if params.replace_all {
-            current.content.matches(&params.search).count()
+            current.value.matches(&params.search).count()
         } else {
-            if current.content.contains(&params.search) {
+            if current.value.contains(&params.search) {
                 1
             } else {
                 0
@@ -274,7 +274,7 @@ impl AiTool for ReplaceInMemoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentId, UserId, memory::Memory};
+    use crate::{UserId, memory::Memory};
 
     #[tokio::test]
     async fn test_update_memory_tool() {
@@ -282,8 +282,8 @@ mod tests {
         memory.create_block("test", "initial value").unwrap();
 
         let handle = AgentHandle {
-            agent_id: AgentId::generate(),
             memory: memory.clone(),
+            ..Default::default()
         };
 
         let tool = UpdateMemoryTool {
@@ -305,7 +305,7 @@ mod tests {
 
         // Verify the update
         let block = handle.memory.get_block("test").unwrap();
-        assert_eq!(block.content, "updated value");
+        assert_eq!(block.value, "updated value");
 
         // Test creating new block
         let result = tool
@@ -323,7 +323,7 @@ mod tests {
 
         // Verify the new block
         let block = handle.memory.get_block("new_block").unwrap();
-        assert_eq!(block.content, "new value");
+        assert_eq!(block.value, "new value");
         assert_eq!(block.description, Some("A test block".to_string()));
     }
 }

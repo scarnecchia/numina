@@ -16,7 +16,10 @@ pub mod message;
 pub mod model;
 pub mod realtime;
 pub mod tool;
+pub mod users;
 pub mod utils;
+
+// Macros are automatically available at crate root due to #[macro_export]
 
 pub use agent::{Agent, AgentState, AgentType};
 pub use context::{

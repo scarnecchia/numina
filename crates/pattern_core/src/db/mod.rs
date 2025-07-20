@@ -12,14 +12,15 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub mod client;
+pub mod entity;
 pub mod migration;
-pub mod models;
 pub mod ops;
 pub mod schema;
 
 // Re-export commonly used types
-pub use models::{DbAgent, DbMemoryBlock, DbUser};
-pub use schema::{EnergyLevel, Task, TaskPriority, TaskStatus, ToolCall, User};
+pub use entity::{BaseAgent, BaseEvent, BaseTask, BaseUser, DbEntity};
+pub use entity::{BaseTaskPriority, BaseTaskStatus};
+pub use schema::{EnergyLevel, ToolCall};
 
 use crate::embeddings::EmbeddingError;
 use crate::id::IdError;
@@ -58,8 +59,8 @@ pub enum DatabaseError {
     #[diagnostic(help("Run migrations to update the database schema"))]
     SchemaVersionMismatch { db_version: u32, code_version: u32 },
 
-    #[error("Record not found: {entity}")]
-    NotFound { entity: String },
+    #[error("Record not found: {entity_type} with id {id}")]
+    NotFound { entity_type: String, id: String },
 
     #[error("Invalid vector dimensions: expected {expected}, got {actual}")]
     #[diagnostic(help("Ensure all embeddings use the same model and dimensions"))]
@@ -75,26 +76,53 @@ impl From<IdError> for DatabaseError {
     }
 }
 
+impl From<entity::EntityError> for DatabaseError {
+    fn from(err: entity::EntityError) -> Self {
+        use entity::EntityError;
+        match err {
+            EntityError::InvalidId(e) => DatabaseError::Other(e.to_string()),
+            EntityError::Serialization(e) => DatabaseError::SerdeProblem(e),
+            EntityError::Database(e) => DatabaseError::QueryFailed(e),
+            EntityError::Validation { message, .. } => DatabaseError::Other(message),
+            EntityError::NotFound { entity_type, id } => {
+                DatabaseError::NotFound { entity_type, id }
+            }
+            EntityError::RequiredFieldMissing { field, entity_type } => DatabaseError::Other(
+                format!("Missing required field '{}' for {}", field, entity_type),
+            ),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, DatabaseError>;
 
 /// Configuration for database backends
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DatabaseConfig {
+    /// Embedded database using SurrealKV
     Embedded {
+        /// Path to the database file (defaults to "./pattern.db")
         #[serde(default = "default_db_path")]
         path: String,
+        /// Whether to enforce strict schema validation
         #[serde(default)]
         strict_mode: bool,
     },
+    /// Remote database connection (requires surreal-remote feature)
     #[cfg(feature = "surreal-remote")]
     Remote {
+        /// Database server URL (e.g., "ws://localhost:8000")
         url: String,
+        /// Optional username for authentication
         #[serde(default)]
         username: Option<String>,
+        /// Optional password for authentication
         #[serde(default)]
         password: Option<String>,
+        /// SurrealDB namespace to use
         namespace: String,
+        /// SurrealDB database to use within the namespace
         database: String,
     },
 }
@@ -115,22 +143,29 @@ impl Default for DatabaseConfig {
 /// A database query result
 #[derive(Debug)]
 pub struct QueryResponse {
+    /// Number of rows affected by the query (for INSERT/UPDATE/DELETE)
     pub affected_rows: usize,
+    /// The result data as JSON (for SELECT queries)
     pub data: serde_json::Value,
 }
 
 /// Search result from vector similarity search
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorSearchResult {
+    /// ID of the matching record
     pub id: String,
+    /// Similarity score (higher is more similar, typically 0-1 for cosine)
     pub score: f32,
+    /// The full record data as JSON
     pub data: serde_json::Value,
 }
 
 /// Filter for vector searches
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
+    /// Optional SQL WHERE clause to filter results (e.g., "status = 'active'")
     pub where_clause: Option<String>,
+    /// Parameters for the WHERE clause to prevent SQL injection
     pub params: Vec<(String, serde_json::Value)>,
 }
 
@@ -304,10 +339,15 @@ impl DistanceMetric {
 /// System metadata stored in the database
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMetadata {
+    /// The embedding model used for vector storage
     pub embedding_model: String,
+    /// Number of dimensions in the embedding vectors
     pub embedding_dimensions: usize,
+    /// Current database schema version
     pub schema_version: u32,
+    /// When the database was created
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the database was last updated
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -406,4 +446,26 @@ mod tests {
             _ => panic!("Expected embedded config"),
         }
     }
+}
+
+/// Strip SurrealDB's angle brackets from record IDs (⟨id⟩ -> id)
+pub fn strip_brackets(s: &str) -> &str {
+    s.strip_prefix('⟨')
+        .and_then(|s| s.strip_suffix('⟩'))
+        .unwrap_or(s)
+}
+
+/// Strip SurrealDB's datetime prefix/suffix (d'2024-01-01T00:00:00Z' -> 2024-01-01T00:00:00Z)
+pub fn strip_dt(s: &str) -> &str {
+    s.strip_prefix("d'")
+        .and_then(|s| s.strip_suffix('\''))
+        .unwrap_or(s)
+}
+
+/// Convert SurrealDB's Datetime type to a chrono DateTime
+pub fn from_surreal_datetime(dt: surrealdb::Datetime) -> chrono::DateTime<chrono::Utc> {
+    let datetime = chrono::NaiveDateTime::parse_from_str(&dt.to_string(), "d'%FT%T%.6fZ'")
+        .expect("should be valid ISO-8601");
+
+    datetime.and_utc()
 }

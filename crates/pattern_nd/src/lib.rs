@@ -4,6 +4,7 @@
 //! and cognitive support features tailored for neurodivergent users.
 
 pub mod agents;
+pub mod entities;
 pub mod sleeptime;
 pub mod tools;
 
@@ -31,7 +32,6 @@ pub mod prelude {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn it_works() {

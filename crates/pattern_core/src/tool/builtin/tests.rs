@@ -2,7 +2,7 @@
 mod tests {
     use super::super::*;
     use crate::{
-        AgentId, UserId,
+        UserId,
         context::AgentHandle,
         memory::Memory,
         tool::builtin::memory::{UpdateMemoryInput, UpdateMemoryOutput, UpdateMemoryTool},
@@ -16,8 +16,8 @@ mod tests {
         memory.create_block("test", "initial value").unwrap();
 
         let handle = AgentHandle {
-            agent_id: AgentId::generate(),
             memory,
+            ..Default::default()
         };
 
         // Create a tool registry
@@ -40,8 +40,8 @@ mod tests {
         memory.create_block("test", "initial value").unwrap();
 
         let handle = AgentHandle {
-            agent_id: AgentId::generate(),
             memory: memory.clone(),
+            ..Default::default()
         };
 
         // Create and register tools
@@ -64,17 +64,14 @@ mod tests {
 
         // Verify the memory was actually updated
         let block = memory.get_block("test").unwrap();
-        assert_eq!(block.content, "updated value");
+        assert_eq!(block.value, "updated value");
         assert_eq!(block.description, Some("Test block".to_string()));
     }
 
     #[tokio::test]
     async fn test_send_message_through_registry() {
         // Create a handle
-        let handle = AgentHandle {
-            agent_id: AgentId::generate(),
-            memory: Memory::with_owner(UserId::generate()),
-        };
+        let handle = AgentHandle::default();
 
         // Create and register tools
         let registry = ToolRegistry::new();
@@ -133,8 +130,8 @@ mod tests {
         // Create memory and handle
         let memory = Memory::with_owner(UserId::generate());
         let handle = AgentHandle {
-            agent_id: AgentId::generate(),
             memory: memory.clone(),
+            ..Default::default()
         };
 
         // Use builder to replace default memory tool
@@ -161,6 +158,6 @@ mod tests {
 
         // Verify the prefix was added
         let block = memory.get_block("test").unwrap();
-        assert_eq!(block.content, "PREFIXED: hello world");
+        assert_eq!(block.value, "PREFIXED: hello world");
     }
 }
