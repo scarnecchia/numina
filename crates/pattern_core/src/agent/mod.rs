@@ -2,11 +2,13 @@
 //!
 //! This module provides the core agent abstraction and implementations.
 
+mod entity;
 mod impls;
 #[cfg(test)]
 mod tests;
 
 use compact_str::CompactString;
+pub use entity::{AgentMemoryRelation, AgentRecord, get_next_message_position};
 pub use impls::{AgentDbExt, DatabaseAgent};
 
 use async_trait::async_trait;

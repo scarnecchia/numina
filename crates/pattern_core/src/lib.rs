@@ -29,8 +29,8 @@ pub use context::{
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use id::{
-    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, ModelId, RequestId, SessionId,
-    TaskId, ToolCallId, UserId,
+    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, MessageIdType, ModelId, RequestId,
+    SessionId, TaskId, ToolCallId, UserId,
 };
 pub use memory::{Memory, MemoryBlock};
 pub use model::ModelCapability;

@@ -2,7 +2,7 @@
 
 use super::{DatabaseError, Result};
 use crate::db::schema::Schema;
-use crate::id::{IdType, MemoryIdType, MessageId as MessageIdType, TaskIdType};
+use crate::id::{IdType, MemoryIdType, TaskIdType};
 use surrealdb::{Connection, Surreal};
 
 /// Database migration runner
@@ -21,15 +21,21 @@ impl MigrationRunner {
 
         // Create entity tables using their schema definitions
         use crate::MemoryBlock;
-        use crate::db::entity::{BaseAgent, BaseEvent, BaseTask, BaseUser, DbEntity};
+        use crate::agent::AgentRecord;
+        use crate::db::entity::{BaseEvent, BaseTask, DbEntity};
+        use crate::db::schema::ToolCall;
+        use crate::message::Message;
+        use crate::users::User;
 
         // Create all entity tables
         for table_def in [
-            BaseUser::schema(),
-            BaseAgent::schema(),
+            User::schema(),
+            AgentRecord::schema(),
             BaseTask::schema(),
             MemoryBlock::schema(),
             BaseEvent::schema(),
+            Message::schema(),
+            ToolCall::schema(),
         ] {
             // Execute table schema
             db.query(&table_def.schema)
@@ -43,6 +49,24 @@ impl MigrationRunner {
                     .map_err(|e| DatabaseError::QueryFailed(e))?;
             }
         }
+
+        // Create auxiliary tables (system_metadata, etc.)
+        for table_def in Schema::tables() {
+            // Execute table schema
+            db.query(&table_def.schema)
+                .await
+                .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+            // Create indexes
+            for index in &table_def.indexes {
+                db.query(index)
+                    .await
+                    .map_err(|e| DatabaseError::QueryFailed(e))?;
+            }
+        }
+
+        // Create specialized indices (full-text search, vector indices)
+        Self::create_specialized_indices(db).await?;
 
         // Add more migrations here as needed
         // if current_version < 2 {
@@ -80,7 +104,7 @@ impl MigrationRunner {
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let message_index = Schema::vector_index(MessageIdType::PREFIX, "embedding", dimensions);
+        let message_index = Schema::vector_index("message", "embedding", dimensions);
         db.query(&message_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
@@ -130,6 +154,50 @@ impl MigrationRunner {
                 .await
                 .map_err(|e| DatabaseError::QueryFailed(e))?;
         }
+
+        Ok(())
+    }
+
+    /// Create specialized indices (full-text search, vector indices)
+    async fn create_specialized_indices<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        use crate::id::{MemoryIdType, MessageIdType, TaskIdType};
+
+        // Create full-text search analyzer and index for messages
+        let message_analyzer = format!(
+            "DEFINE ANALYZER {}_content_analyzer TOKENIZERS class FILTERS lowercase, ascii",
+            MessageIdType::PREFIX
+        );
+        db.query(&message_analyzer)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let message_search_index = format!(
+            "DEFINE INDEX {}_content_search ON {} FIELDS content SEARCH ANALYZER {}_content_analyzer BM25",
+            MessageIdType::PREFIX,
+            MessageIdType::PREFIX,
+            MessageIdType::PREFIX
+        );
+        db.query(&message_search_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Create vector indexes with default dimensions (384 for MiniLM)
+        let dimensions = 384;
+
+        let memory_index = Schema::vector_index(MemoryIdType::PREFIX, "embedding", dimensions);
+        db.query(&memory_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let message_index = Schema::vector_index(MessageIdType::PREFIX, "embedding", dimensions);
+        db.query(&message_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let task_index = Schema::vector_index(TaskIdType::PREFIX, "embedding", dimensions);
+        db.query(&task_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
 
         Ok(())
     }

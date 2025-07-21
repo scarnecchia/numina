@@ -1676,6 +1676,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "ferroid"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e74492302b392e57629c1a216d2a18c2cbd8bc1e14b7ef4a811b44492bb7f68a"
+dependencies = [
+ "futures",
+ "pin-project-lite",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3723,6 +3735,7 @@ dependencies = [
  "chrono",
  "compact_str",
  "dashmap 6.1.0",
+ "ferroid",
  "futures",
  "genai",
  "hf-hub",
@@ -3731,6 +3744,7 @@ dependencies = [
  "parking_lot",
  "pattern-macros",
  "pretty_assertions",
+ "proc-macro2-diagnostics",
  "reqwest 0.12.22",
  "schemars 0.8.22",
  "serde",
@@ -3783,6 +3797,7 @@ dependencies = [
  "const_format",
  "darling",
  "proc-macro2",
+ "proc-macro2-diagnostics",
  "quote",
  "serde",
  "serde_json",
@@ -4100,6 +4115,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02b3e5e68a3a1a02aad3ec490a98007cbc13c37cbe84a3cd7b8e406d76e7f778"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proc-macro2-diagnostics"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af066a9c399a26e020ada66a034357a868728e72cd426f3adcd35f80d88d88c8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+ "version_check",
+ "yansi",
 ]
 
 [[package]]

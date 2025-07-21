@@ -245,14 +245,35 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
 
 // Implement common ID types
 //
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Type alias for Message IDs (these are just strings for compat with API)
+///
+/// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
+/// format because it needs to be compatible with Anthropic/OpenAI APIs which
+/// expect arbitrary string UUIDs.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct RelationId(pub String);
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct RelationIdType;
 
 impl IdType for RelationIdType {
     const PREFIX: &'static str = "rel";
 }
 
-pub type RelationId = Id<RelationIdType>;
+impl RelationId {
+    pub fn generate() -> Self {
+        let mut buf = Uuid::encode_buffer();
+        let uuid = uuid::Uuid::new_v4().simple().encode_lower(&mut buf);
+        RelationId(format!("rel_{uuid}"))
+    }
+}
+
+impl From<RelationId> for RecordId {
+    fn from(value: RelationId) -> Self {
+        RecordId::from_table_key("rel", value.0)
+    }
+}
 
 /// Marker type for Agent IDs
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -311,6 +332,14 @@ pub type ToolCallId = Id<ToolCallIdType>;
 
 /// Type alias for Message IDs (these are just strings for compat with API)
 ///
+/// Type marker for Message IDs
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct MessageIdType;
+
+impl IdType for MessageIdType {
+    const PREFIX: &'static str = "msg";
+}
+
 /// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
 /// format because it needs to be compatible with Anthropic/OpenAI APIs which
 /// expect arbitrary string UUIDs.
@@ -318,21 +347,45 @@ pub type ToolCallId = Id<ToolCallIdType>;
 #[repr(transparent)]
 pub struct MessageId(pub String);
 
-impl IdType for MessageId {
-    const PREFIX: &'static str = "msg";
-}
+// MessageId cannot implement Copy because String doesn't implement Copy
+// This is intentional as MessageId needs to own its string data
 
 impl MessageId {
     pub fn generate() -> Self {
-        let mut buf = Uuid::encode_buffer();
-        let uuid = uuid::Uuid::new_v4().simple().encode_lower(&mut buf);
-        MessageId(format!("msg_{uuid}"))
+        let uuid = uuid::Uuid::new_v4();
+        MessageId(format!("msg_{}", uuid))
+    }
+
+    pub fn to_record_id(&self) -> String {
+        // Return the full string as the record key
+        // MessageId can be arbitrary strings for API compatibility
+        self.0.clone()
+    }
+
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        MessageId(format!("msg_{}", uuid))
+    }
+
+    pub fn from_record(record_id: RecordId) -> Self {
+        MessageId(record_id.key().to_string())
+    }
+
+    pub fn nil() -> Self {
+        MessageId("msg_nil".to_string())
     }
 }
 
 impl From<MessageId> for RecordId {
     fn from(value: MessageId) -> Self {
+        // Use the full string as the key - MessageId can be arbitrary
         RecordId::from_table_key("msg", value.0)
+    }
+}
+
+impl From<&MessageId> for RecordId {
+    fn from(value: &MessageId) -> Self {
+        // Use the full string as the key - MessageId can be arbitrary
+        RecordId::from_table_key("msg", &value.0)
     }
 }
 

@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     CompressionResult, CompressionStrategy, ContextBuilder, ContextConfig, MemoryContext,
-    MessageCompressor, genai_ext::ChatRoleExt,
+    MessageCompressor,
 };
 
 /// Cheap handle to agent internals that built-in tools can hold

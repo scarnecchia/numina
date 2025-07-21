@@ -1,29 +1,96 @@
-use genai::{
-    ModelIden,
-    chat::{ChatRole, ContentPart, MessageContent, MessageOptions, ToolCall, Usage},
-};
+use chrono::{DateTime, Utc};
+use genai::{ModelIden, chat::Usage};
+use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
+use std::sync::Arc;
 
-use crate::MessageId;
+use crate::{MessageId, UserId};
+
+// Conversions to/from genai types
+mod conversions;
 
 /// A message to be processed by an agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
+#[entity(entity_type = "message")]
 pub struct Message {
     pub id: MessageId,
     pub role: ChatRole,
+
+    /// The user (human) who initiated this conversation
+    /// This helps track message ownership without tying messages to specific agents
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<UserId>,
+
+    /// Message content stored as flexible object for searchability
+    #[entity(db_type = "object")]
     pub content: MessageContent,
+
+    /// Metadata stored as flexible object
+    #[entity(db_type = "object")]
     pub metadata: MessageMetadata,
-    pub options: Option<MessageOptions>,
+
+    /// Options stored as flexible object
+    #[entity(db_type = "object")]
+    pub options: MessageOptions,
+
+    // Precomputed fields for performance
+    pub has_tool_calls: bool,
+    pub word_count: u32,
+    pub created_at: DateTime<Utc>,
+
+    // Embeddings - loaded selectively via custom methods
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+}
+
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            id: MessageId::generate(),
+            role: ChatRole::User,
+            owner_id: None,
+            content: MessageContent::Text(String::new()),
+            metadata: MessageMetadata::default(),
+            options: MessageOptions::default(),
+            has_tool_calls: false,
+            word_count: 0,
+            created_at: Utc::now(),
+            embedding: None,
+            embedding_model: None,
+        }
+    }
 }
 
 impl Message {
+    /// Estimate word count for content
+    fn estimate_word_count(content: &MessageContent) -> u32 {
+        match content {
+            MessageContent::Text(text) => text.split_whitespace().count() as u32,
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text(text) => text.split_whitespace().count() as u32,
+                    _ => 0,
+                })
+                .sum(),
+            MessageContent::ToolCalls(calls) => calls.len() as u32 * 10, // Estimate
+            MessageContent::ToolResponses(responses) => responses
+                .iter()
+                .map(|r| r.content.split_whitespace().count() as u32)
+                .sum(),
+        }
+    }
+
     /// Convert this message to a genai ChatMessage
     pub fn as_chat_message(&self) -> genai::chat::ChatMessage {
         genai::chat::ChatMessage {
-            role: self.role.clone(),
-            content: self.content.clone(),
-            options: self.options.clone(),
+            role: self.role.clone().into(),
+            content: self.content.clone().into(),
+            options: Some(self.options.clone().into()),
         }
     }
 }
@@ -57,8 +124,262 @@ impl Request {
     /// Convert this request to a genai ChatRequest
     pub fn as_chat_request(&self) -> genai::chat::ChatRequest {
         genai::chat::ChatRequest::from_system(self.system.clone().unwrap().join("\n\n"))
-            .append_messages(self.messages.iter().map(Message::as_chat_message).collect())
+            .append_messages(self.messages.iter().map(|m| m.as_chat_message()).collect())
             .with_tools(self.tools.clone().unwrap_or_default())
+    }
+}
+
+/// Message options
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MessageOptions {
+    pub cache_control: Option<CacheControl>,
+}
+
+/// Cache control options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CacheControl {
+    Ephemeral,
+}
+
+impl From<CacheControl> for MessageOptions {
+    fn from(cache_control: CacheControl) -> Self {
+        Self {
+            cache_control: Some(cache_control),
+        }
+    }
+}
+
+/// Chat roles
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl std::fmt::Display for ChatRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChatRole::System => write!(f, "system"),
+            ChatRole::User => write!(f, "user"),
+            ChatRole::Assistant => write!(f, "assistant"),
+            ChatRole::Tool => write!(f, "tool"),
+        }
+    }
+}
+
+impl ChatRole {
+    /// Check if this is a System role
+    pub fn is_system(&self) -> bool {
+        matches!(self, ChatRole::System)
+    }
+
+    /// Check if this is a User role
+    pub fn is_user(&self) -> bool {
+        matches!(self, ChatRole::User)
+    }
+
+    /// Check if this is an Assistant role
+    pub fn is_assistant(&self) -> bool {
+        matches!(self, ChatRole::Assistant)
+    }
+
+    /// Check if this is a Tool role
+    pub fn is_tool(&self) -> bool {
+        matches!(self, ChatRole::Tool)
+    }
+}
+
+/// Message content variants
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageContent {
+    /// Simple text content
+    Text(String),
+
+    /// Multi-part content (text + images)
+    Parts(Vec<ContentPart>),
+
+    /// Tool calls from the assistant
+    ToolCalls(Vec<ToolCall>),
+
+    /// Tool responses
+    ToolResponses(Vec<ToolResponse>),
+}
+
+/// Constructors
+impl MessageContent {
+    /// Create text content
+    pub fn from_text(content: impl Into<String>) -> Self {
+        MessageContent::Text(content.into())
+    }
+
+    /// Create multi-part content
+    pub fn from_parts(parts: impl Into<Vec<ContentPart>>) -> Self {
+        MessageContent::Parts(parts.into())
+    }
+
+    /// Create tool calls content
+    pub fn from_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        MessageContent::ToolCalls(tool_calls)
+    }
+}
+
+/// Getters
+impl MessageContent {
+    /// Get text content if this is a Text variant
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(content) => Some(content.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Consume and return text content if this is a Text variant
+    pub fn into_text(self) -> Option<String> {
+        match self {
+            MessageContent::Text(content) => Some(content),
+            _ => None,
+        }
+    }
+
+    /// Get tool calls if this is a ToolCalls variant
+    pub fn tool_calls(&self) -> Option<&[ToolCall]> {
+        match self {
+            MessageContent::ToolCalls(calls) => Some(calls),
+            _ => None,
+        }
+    }
+
+    /// Check if content is empty
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MessageContent::Text(content) => content.is_empty(),
+            MessageContent::Parts(parts) => parts.is_empty(),
+            MessageContent::ToolCalls(calls) => calls.is_empty(),
+            MessageContent::ToolResponses(responses) => responses.is_empty(),
+        }
+    }
+}
+
+// From impls for convenience
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        MessageContent::Text(s.to_string())
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        MessageContent::Text(s)
+    }
+}
+
+impl From<&String> for MessageContent {
+    fn from(s: &String) -> Self {
+        MessageContent::Text(s.clone())
+    }
+}
+
+impl From<Vec<ToolCall>> for MessageContent {
+    fn from(calls: Vec<ToolCall>) -> Self {
+        MessageContent::ToolCalls(calls)
+    }
+}
+
+impl From<ToolResponse> for MessageContent {
+    fn from(response: ToolResponse) -> Self {
+        MessageContent::ToolResponses(vec![response])
+    }
+}
+
+impl From<Vec<ContentPart>> for MessageContent {
+    fn from(parts: Vec<ContentPart>) -> Self {
+        MessageContent::Parts(parts)
+    }
+}
+
+/// Content part for multi-modal messages
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContentPart {
+    Text(String),
+    Image {
+        content_type: String,
+        source: ImageSource,
+    },
+}
+
+impl ContentPart {
+    /// Create text part
+    pub fn from_text(text: impl Into<String>) -> Self {
+        ContentPart::Text(text.into())
+    }
+
+    /// Create image part from base64
+    pub fn from_image_base64(
+        content_type: impl Into<String>,
+        content: impl Into<Arc<str>>,
+    ) -> Self {
+        ContentPart::Image {
+            content_type: content_type.into(),
+            source: ImageSource::Base64(content.into()),
+        }
+    }
+
+    /// Create image part from URL
+    pub fn from_image_url(content_type: impl Into<String>, url: impl Into<String>) -> Self {
+        ContentPart::Image {
+            content_type: content_type.into(),
+            source: ImageSource::Url(url.into()),
+        }
+    }
+}
+
+impl From<&str> for ContentPart {
+    fn from(s: &str) -> Self {
+        ContentPart::Text(s.to_string())
+    }
+}
+
+impl From<String> for ContentPart {
+    fn from(s: String) -> Self {
+        ContentPart::Text(s)
+    }
+}
+
+/// Image source
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ImageSource {
+    /// URL to the image (not all models support this)
+    Url(String),
+
+    /// Base64 encoded image data
+    Base64(Arc<str>),
+}
+
+/// Tool call from the assistant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub call_id: String,
+    pub fn_name: String,
+    pub fn_arguments: Value,
+}
+
+/// Tool response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResponse {
+    pub call_id: String,
+    pub content: String,
+}
+
+impl ToolResponse {
+    /// Create a new tool response
+    pub fn new(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            content: content.into(),
+        }
     }
 }
 
@@ -74,6 +395,8 @@ pub struct Response {
 impl Response {
     /// Create a Response from a genai ChatResponse
     pub fn from_chat_response(resp: genai::chat::ChatResponse) -> Self {
+        // Extract data before consuming resp
+        let reasoning = resp.reasoning_content.clone();
         let metadata = ResponseMetadata {
             processing_time: None,
             tokens_used: Some(resp.usage.clone()),
@@ -82,10 +405,26 @@ impl Response {
             model_iden: resp.model_iden.clone(),
             custom: resp.captured_raw_body.clone().unwrap_or_default(),
         };
+
+        // Convert genai MessageContent to our MessageContent
+        let content: Vec<MessageContent> = resp
+            .content
+            .clone()
+            .into_iter()
+            .map(|gc| gc.into())
+            .collect();
+
+        // Convert genai ToolCall to our ToolCall - this consumes resp
+        let tool_calls: Vec<ToolCall> = resp
+            .into_tool_calls()
+            .into_iter()
+            .map(|tc| tc.into())
+            .collect();
+
         Self {
-            content: resp.content.clone(),
-            reasoning: resp.reasoning_content.clone(),
-            tool_calls: resp.into_tool_calls(),
+            content,
+            reasoning,
+            tool_calls,
             metadata,
         }
     }
@@ -122,34 +461,115 @@ impl Default for ResponseMetadata {
 impl Message {
     /// Create a user message with the given content
     pub fn user(content: impl Into<MessageContent>) -> Self {
+        let content = content.into();
+        let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
+        let word_count = Self::estimate_word_count(&content);
+
         Self {
             id: MessageId::generate(),
             role: ChatRole::User,
-            content: content.into(),
+            owner_id: None,
+            content,
             metadata: MessageMetadata::default(),
-            options: None,
+            options: MessageOptions::default(),
+            has_tool_calls,
+            word_count,
+            created_at: Utc::now(),
+            embedding: None,
+            embedding_model: None,
         }
     }
 
     /// Create a system message with the given content
     pub fn system(content: impl Into<MessageContent>) -> Self {
+        let content = content.into();
+        let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
+        let word_count = Self::estimate_word_count(&content);
+
         Self {
             id: MessageId::generate(),
             role: ChatRole::System,
-            content: content.into(),
+            owner_id: None,
+            content,
             metadata: MessageMetadata::default(),
-            options: None,
+            options: MessageOptions::default(),
+            has_tool_calls,
+            word_count,
+            created_at: Utc::now(),
+            embedding: None,
+            embedding_model: None,
         }
     }
 
     /// Create an agent (assistant) message with the given content
     pub fn agent(content: impl Into<MessageContent>) -> Self {
+        let content = content.into();
+        let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
+        let word_count = Self::estimate_word_count(&content);
+
         Self {
             id: MessageId::generate(),
             role: ChatRole::Assistant,
-            content: content.into(),
+            owner_id: None,
+            content,
             metadata: MessageMetadata::default(),
-            options: None,
+            options: MessageOptions::default(),
+            has_tool_calls,
+            word_count,
+            created_at: Utc::now(),
+            embedding: None,
+            embedding_model: None,
+        }
+    }
+
+    /// Create a Message from an agent Response
+    pub fn from_response(response: &Response, agent_id: crate::AgentId) -> Self {
+        // Determine content based on what the response contains
+        let content = if !response.content.is_empty() {
+            // If there's only one content item, use it directly
+            if response.content.len() == 1 {
+                response.content[0].clone()
+            } else {
+                // Multiple content items - convert to parts
+                let parts: Vec<ContentPart> = response
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        MessageContent::Text(text) => Some(ContentPart::Text(text.clone())),
+                        _ => None, // Skip non-text content for now
+                    })
+                    .collect();
+                MessageContent::Parts(parts)
+            }
+        } else if !response.tool_calls.is_empty() {
+            // Tool calls response
+            MessageContent::ToolCalls(response.tool_calls.clone())
+        } else if let Some(reasoning) = &response.reasoning {
+            // Just reasoning text
+            MessageContent::Text(reasoning.clone())
+        } else {
+            // Empty response
+            MessageContent::Text(String::new())
+        };
+
+        let has_tool_calls = !response.tool_calls.is_empty();
+        let word_count = Self::estimate_word_count(&content);
+
+        Self {
+            id: MessageId::generate(),
+            role: ChatRole::Assistant,
+            content,
+            metadata: MessageMetadata {
+                user_id: Some(agent_id.to_string()),
+                ..Default::default()
+            },
+            options: MessageOptions::default(),
+            created_at: Utc::now(),
+            owner_id: None,
+            has_tool_calls,
+            word_count,
+            embedding: None,
+            embedding_model: None,
         }
     }
 
@@ -211,5 +631,594 @@ impl Message {
             MessageContent::ToolCalls(calls) => calls.len() * 50, // Rough estimate
             MessageContent::ToolResponses(responses) => responses.len() * 30, // Rough estimate
         }
+    }
+}
+
+// Search helper methods for MessageContent
+impl Message {
+    /// Search for messages containing specific text (case-insensitive)
+    ///
+    /// This generates a SurrealQL query for searching within MessageContent
+    pub fn search_text_query(search_term: &str) -> String {
+        // Use full-text search operator for better performance and accuracy
+        format!(
+            r#"SELECT * FROM msg WHERE content @@ "{}""#,
+            search_term.replace('"', r#"\""#)
+        )
+    }
+
+    /// Search for messages with specific tool calls
+    pub fn search_tool_calls_query(tool_name: &str) -> String {
+        format!(
+            r#"SELECT * FROM msg WHERE content.ToolCalls[?fn_name = "{}"]"#,
+            tool_name.replace('"', r#"\""#)
+        )
+    }
+
+    /// Search for messages by role
+    pub fn search_by_role_query(role: &ChatRole) -> String {
+        format!(r#"SELECT * FROM msg WHERE role = "{}""#, role)
+    }
+
+    /// Search for messages within a date range
+    pub fn search_by_date_range_query(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+        let start_dt = surrealdb::sql::Datetime::from(start);
+        let end_dt = surrealdb::sql::Datetime::from(end);
+        format!(
+            r#"SELECT * FROM msg WHERE created_at >= {} AND created_at <= {}"#,
+            start_dt, end_dt
+        )
+    }
+
+    /// Search for messages with embeddings
+    pub fn search_with_embeddings_query() -> String {
+        "SELECT * FROM msg WHERE embedding IS NOT NULL".to_string()
+    }
+
+    /// Complex search combining multiple criteria
+    pub fn search_complex_query(
+        text: Option<&str>,
+        role: Option<&ChatRole>,
+        has_tool_calls: Option<bool>,
+        start_date: Option<DateTime<Utc>>,
+        end_date: Option<DateTime<Utc>>,
+    ) -> String {
+        let mut conditions = Vec::new();
+
+        if let Some(text) = text {
+            conditions.push(format!(r#"content @@ "{}""#, text.replace('"', r#"\""#)));
+        }
+
+        if let Some(role) = role {
+            conditions.push(format!(r#"role = "{}""#, role));
+        }
+
+        if let Some(has_tools) = has_tool_calls {
+            conditions.push(format!("has_tool_calls = {}", has_tools));
+        }
+
+        if let Some(start) = start_date {
+            let start_dt = surrealdb::sql::Datetime::from(start);
+            conditions.push(format!(r#"created_at >= {}"#, start_dt));
+        }
+
+        if let Some(end) = end_date {
+            let end_dt = surrealdb::sql::Datetime::from(end);
+            conditions.push(format!(r#"created_at <= {}"#, end_dt));
+        }
+
+        if conditions.is_empty() {
+            "SELECT * FROM msg".to_string()
+        } else {
+            format!("SELECT * FROM msg WHERE {}", conditions.join(" AND "))
+        }
+    }
+}
+
+// Selective embedding loading
+impl Message {
+    /// Load a message without embeddings (more efficient for most operations)
+    pub async fn load_without_embeddings<C: surrealdb::Connection>(
+        db: &surrealdb::Surreal<C>,
+        id: &MessageId,
+    ) -> Result<Option<Self>, crate::db::DatabaseError> {
+        // Use load_with_relations and then clear the embeddings
+        let mut message = Self::load_with_relations(db, id).await?;
+
+        if let Some(ref mut msg) = message {
+            msg.embedding = None;
+            msg.embedding_model = None;
+        }
+
+        Ok(message)
+    }
+
+    /// Load only the embedding for a message
+    pub async fn load_embedding<C: surrealdb::Connection>(
+        db: &surrealdb::Surreal<C>,
+        id: &MessageId,
+    ) -> Result<Option<(Vec<f32>, String)>, crate::db::DatabaseError> {
+        let query = r#"SELECT embedding, embedding_model FROM $msg_id"#;
+
+        let mut result = db
+            .query(query)
+            .bind(("msg_id", surrealdb::RecordId::from(id)))
+            .await
+            .map_err(crate::db::DatabaseError::QueryFailed)?;
+
+        #[derive(serde::Deserialize)]
+        struct EmbeddingResult {
+            embedding: Option<Vec<f32>>,
+            embedding_model: Option<String>,
+        }
+
+        let results: Vec<EmbeddingResult> = result
+            .take(0)
+            .map_err(crate::db::DatabaseError::QueryFailed)?;
+
+        Ok(results
+            .into_iter()
+            .next()
+            .and_then(|r| match (r.embedding, r.embedding_model) {
+                (Some(emb), Some(model)) => Some((emb, model)),
+                _ => None,
+            }))
+    }
+
+    /// Update only the embedding for a message
+    pub async fn update_embedding<C: surrealdb::Connection>(
+        &self,
+        db: &surrealdb::Surreal<C>,
+        embedding: Vec<f32>,
+        model: String,
+    ) -> Result<(), crate::db::DatabaseError> {
+        let query = r#"UPDATE $msg_id SET embedding = $embedding, embedding_model = $model"#;
+
+        db.query(query)
+            .bind(("msg_id", surrealdb::RecordId::from(&self.id)))
+            .bind(("embedding", embedding))
+            .bind(("model", model))
+            .await
+            .map_err(crate::db::DatabaseError::QueryFailed)?;
+
+        Ok(())
+    }
+
+    /// Check if content has changed and needs re-embedding
+    pub fn needs_reembedding(&self, other_content: &MessageContent) -> bool {
+        // Simple content comparison - could be made more sophisticated
+        match (&self.content, other_content) {
+            (MessageContent::Text(a), MessageContent::Text(b)) => a != b,
+            (MessageContent::Parts(a), MessageContent::Parts(b)) => {
+                // Extract only text parts for comparison
+                let a_texts: Vec<&str> = a
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+
+                let b_texts: Vec<&str> = b
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+
+                // Different number of text parts or different content
+                a_texts != b_texts
+            }
+            _ => true, // Different content types means re-embedding needed
+        }
+    }
+}
+
+/// Type of relationship between an agent and a message
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRelationType {
+    /// Message is in the agent's active context window
+    Active,
+    /// Message has been compressed/archived to save context
+    Archived,
+    /// Message is shared from another agent/conversation
+    Shared,
+}
+
+impl std::fmt::Display for MessageRelationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Archived => write!(f, "archived"),
+            Self::Shared => write!(f, "shared"),
+        }
+    }
+}
+
+/// Edge entity for agent-message relationships
+///
+/// This allows messages to be shared between agents and tracks
+/// the relationship type and ordering.
+#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
+#[entity(entity_type = "agent_messages", edge = true)]
+pub struct AgentMessageRelation {
+    /// Edge entity ID (generated by SurrealDB)
+    pub id: Option<surrealdb::RecordId>,
+
+    /// The agent in this relationship
+    pub in_id: crate::AgentId,
+
+    /// The message in this relationship
+    pub out_id: MessageId,
+
+    /// Type of relationship
+    pub message_type: MessageRelationType,
+
+    /// Position in the agent's message history (for ordering)
+    /// Stores a Snowflake ID as a string for distributed monotonic ordering
+    pub position: String,
+
+    /// When this relationship was created
+    pub added_at: DateTime<Utc>,
+}
+
+impl Default for AgentMessageRelation {
+    fn default() -> Self {
+        Self {
+            id: None,
+            in_id: crate::AgentId::generate(),
+            out_id: MessageId::generate(),
+            message_type: MessageRelationType::Active,
+            position: "0".to_string(),
+            added_at: Utc::now(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::*;
+    use crate::db::entity::DbEntity;
+
+    #[test]
+    fn test_agent_message_relation_schema() {
+        let schema = AgentMessageRelation::schema();
+        println!("AgentMessageRelation schema:\n{}", schema.schema);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_conversions() {
+        let msg = Message::user("Hello");
+        let chat_msg = msg.as_chat_message();
+        assert_eq!(chat_msg.content.text().unwrap(), "Hello");
+    }
+
+    use crate::db::{client, ops::query_messages_raw};
+    use tokio;
+
+    #[tokio::test]
+    async fn test_message_entity_storage() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create and store a message
+        let msg = Message::user("Test message for database");
+        let stored = msg.store_with_relations(&db).await.unwrap();
+
+        // Load it back
+        let loaded = Message::load_with_relations(&db, &stored.id).await.unwrap();
+        assert!(loaded.is_some());
+
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.id, stored.id);
+        assert_eq!(
+            loaded.text_content(),
+            Some("Test message for database".to_string())
+        );
+        assert_eq!(loaded.word_count, 4);
+        assert!(!loaded.has_tool_calls);
+    }
+
+    #[tokio::test]
+    async fn test_search_text_query() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Store multiple messages
+        let msg1 = Message::user("Hello world from Pattern");
+        let msg2 = Message::user("Goodbye cruel world");
+        let msg3 = Message::agent("I understand your message about the world");
+
+        msg1.store_with_relations(&db).await.unwrap();
+        msg2.store_with_relations(&db).await.unwrap();
+        msg3.store_with_relations(&db).await.unwrap();
+
+        // Search for "world"
+        let query = Message::search_text_query("world");
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 3);
+
+        // Search for "Pattern"
+        let query = Message::search_text_query("Pattern");
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text_content().unwrap().contains("Pattern"));
+    }
+
+    #[tokio::test]
+    async fn test_search_tool_calls_query() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create messages with and without tool calls
+        let msg1 = Message::user("Please send a message");
+        let msg2 = Message::agent(MessageContent::ToolCalls(vec![ToolCall {
+            call_id: "call_123".to_string(),
+            fn_name: "send_message".to_string(),
+            fn_arguments: json!({"message": "Hello"}),
+        }]));
+        let msg3 = Message::agent(MessageContent::ToolCalls(vec![ToolCall {
+            call_id: "call_456".to_string(),
+            fn_name: "update_memory".to_string(),
+            fn_arguments: json!({"key": "test"}),
+        }]));
+
+        msg1.store_with_relations(&db).await.unwrap();
+        msg2.store_with_relations(&db).await.unwrap();
+        msg3.store_with_relations(&db).await.unwrap();
+
+        // Search for send_message tool calls
+        let query = Message::search_tool_calls_query("send_message");
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].has_tool_calls);
+
+        // Search for update_memory tool calls
+        let query = Message::search_tool_calls_query("update_memory");
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_by_role_query() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create messages with different roles
+        let user_msg = Message::user("User message");
+        let assistant_msg = Message::agent("Assistant message");
+        let system_msg = Message::system("System prompt");
+
+        user_msg.store_with_relations(&db).await.unwrap();
+        assistant_msg.store_with_relations(&db).await.unwrap();
+        system_msg.store_with_relations(&db).await.unwrap();
+
+        // Search for assistant messages
+        let query = Message::search_by_role_query(&ChatRole::Assistant);
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, ChatRole::Assistant);
+
+        // Search for user messages
+        let query = Message::search_by_role_query(&ChatRole::User);
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, ChatRole::User);
+    }
+
+    #[tokio::test]
+    async fn test_search_by_date_range() {
+        let db = client::create_test_db().await.unwrap();
+
+        // We can't easily control created_at in our constructor,
+        // so we'll test with a wide range
+        let now = Utc::now();
+        let start = now - chrono::Duration::hours(1);
+        let end = now + chrono::Duration::hours(1);
+
+        // Create some messages
+        let msg1 = Message::user("Message 1");
+        let msg2 = Message::user("Message 2");
+
+        msg1.store_with_relations(&db).await.unwrap();
+        msg2.store_with_relations(&db).await.unwrap();
+
+        // Search within the date range
+        let query = Message::search_by_date_range_query(start, end);
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 2);
+
+        // Search outside the date range
+        let past_start = now - chrono::Duration::days(2);
+        let past_end = now - chrono::Duration::days(1);
+
+        let query = Message::search_by_date_range_query(past_start, past_end);
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_without_embeddings() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create a message with embeddings (384 dimensions as expected by the vector index)
+        let mut msg = Message::user("Test message with embeddings");
+        msg.embedding = Some(vec![0.1; 384]); // 384 dimensions filled with 0.1
+        msg.embedding_model = Some("test-model".to_string());
+
+        let stored = msg.store_with_relations(&db).await.unwrap();
+
+        // Load without embeddings
+        let loaded = Message::load_without_embeddings(&db, &stored.id)
+            .await
+            .unwrap();
+        assert!(loaded.is_some());
+
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.id, stored.id);
+        assert_eq!(
+            loaded.text_content(),
+            Some("Test message with embeddings".to_string())
+        );
+        assert!(loaded.embedding.is_none());
+        assert!(loaded.embedding_model.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_and_update_embedding() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create a message without embeddings
+        let msg = Message::user("Test message for embedding");
+        let stored = msg.store_with_relations(&db).await.unwrap();
+
+        // Update with embeddings (384 dimensions as expected by the vector index)
+        let embedding = vec![0.5; 384]; // 384 dimensions filled with 0.5
+        let model = "test-embed-model".to_string();
+        stored
+            .update_embedding(&db, embedding.clone(), model.clone())
+            .await
+            .unwrap();
+
+        // Load just the embedding
+        let loaded_embedding = Message::load_embedding(&db, &stored.id).await.unwrap();
+        assert!(loaded_embedding.is_some());
+
+        let (loaded_emb, loaded_model) = loaded_embedding.unwrap();
+        assert_eq!(loaded_emb, embedding);
+        assert_eq!(loaded_model, model);
+
+        // Verify full message has embeddings
+        let full_msg = Message::load_with_relations(&db, &stored.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(full_msg.embedding, Some(embedding));
+        assert_eq!(full_msg.embedding_model, Some(model));
+    }
+
+    #[tokio::test]
+    async fn test_search_complex_query() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create various messages
+        let msg1 = Message::user("Hello world");
+        let mut msg2 = Message::agent("Goodbye world");
+        msg2.has_tool_calls = true; // Simulate tool calls
+        let msg3 = Message::user("Hello universe");
+        let msg4 = Message::system("System message with world");
+
+        msg1.store_with_relations(&db).await.unwrap();
+        msg2.store_with_relations(&db).await.unwrap();
+        msg3.store_with_relations(&db).await.unwrap();
+        msg4.store_with_relations(&db).await.unwrap();
+
+        // Complex search: text "world", role User, no tool calls
+        let query = Message::search_complex_query(
+            Some("world"),
+            Some(&ChatRole::User),
+            Some(false),
+            None,
+            None,
+        );
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_content(), Some("Hello world".to_string()));
+
+        // Search for messages with tool calls
+        let query = Message::search_complex_query(None, None, Some(true), None, None);
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, ChatRole::Assistant);
+    }
+
+    #[tokio::test]
+    async fn test_message_with_parts_content() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create a message with parts
+        let parts = vec![
+            ContentPart::Text("Check out this image:".to_string()),
+            ContentPart::from_image_base64("image/png", "base64encodeddata"),
+            ContentPart::Text("Pretty cool, right?".to_string()),
+        ];
+        let msg = Message::user(MessageContent::Parts(parts));
+        let stored = msg.store_with_relations(&db).await.unwrap();
+
+        // Load it back
+        let loaded = Message::load_with_relations(&db, &stored.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        match &loaded.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert!(matches!(&parts[0], ContentPart::Text(t) if t == "Check out this image:"));
+                assert!(matches!(&parts[1], ContentPart::Image { .. }));
+                assert!(matches!(&parts[2], ContentPart::Text(t) if t == "Pretty cool, right?"));
+            }
+            _ => panic!("Expected Parts content"),
+        }
+
+        // Now that we have full-text search index created in migrations, we can search
+        let query = Message::search_text_query("cool");
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+        assert_eq!(messages.len(), 1);
+
+        // Verify it found the right message
+        assert_eq!(
+            messages[0].text_content(),
+            Some("Check out this image: Pretty cool, right?".to_string())
+        );
+
+        // Test searching for text from different parts
+        let query = Message::search_text_query("image");
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_with_embeddings() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create messages with and without embeddings
+        let mut msg1 = Message::user("Message with embedding");
+        msg1.embedding = Some(vec![0.1; 384]); // 384 dimensions as expected by the vector index
+        msg1.embedding_model = Some("model1".to_string());
+
+        let msg2 = Message::user("Message without embedding");
+
+        msg1.store_with_relations(&db).await.unwrap();
+        msg2.store_with_relations(&db).await.unwrap();
+
+        // Search for messages with embeddings
+        let query = Message::search_with_embeddings_query();
+        let messages = query_messages_raw(&db, &query).await.unwrap();
+
+        // Filter out messages that actually have embeddings since SurrealDB might store empty arrays
+        let messages_with_embeddings: Vec<_> = messages
+            .into_iter()
+            .filter(|msg| msg.embedding.is_some() && !msg.embedding.as_ref().unwrap().is_empty())
+            .collect();
+
+        assert_eq!(messages_with_embeddings.len(), 1);
+        assert_eq!(
+            messages_with_embeddings[0].text_content(),
+            Some("Message with embedding".to_string())
+        );
     }
 }

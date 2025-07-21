@@ -10,20 +10,60 @@ mod tests {
     #[allow(unused_imports)]
     use crate::utils::debug::ResponseDebug;
     use crate::{
-        agent::{Agent, AgentState, AgentType, DatabaseAgent, MemoryAccessLevel},
-        memory::{Memory, MemoryBlock},
-    };
-    use crate::{
+        agent::{Agent, AgentRecord, AgentState, AgentType, DatabaseAgent, MemoryAccessLevel},
         db::{
             client,
-            entity::{BaseAgent, BaseAgentType, BaseUser},
-            ops::{MemoryOpsExt, create_entity},
+            ops::{attach_memory_to_agent, create_entity, get_agent_memories},
         },
         embeddings::MockEmbeddingProvider,
         id::{AgentId, MemoryId, UserId},
+        memory::{Memory, MemoryBlock, MemoryBlockDbModel},
         model::MockModelProvider,
         tool::ToolRegistry,
+        users::User,
     };
+
+    #[tokio::test]
+    async fn test_simple_agent_creation() {
+        let db = client::create_test_db().await.unwrap();
+
+        // Create a minimal agent
+        let agent = AgentRecord {
+            id: AgentId::generate(),
+            name: "Test Agent".to_string(),
+            agent_type: AgentType::Generic,
+            state: AgentState::Ready,
+            owner_id: UserId::generate(),
+            ..Default::default()
+        };
+
+        // Debug the agent before creation
+        println!("Agent before creation:");
+        println!("  id: {:?}", agent.id);
+        println!("  name: {:?}", agent.name);
+        println!("  created_at: {:?}", agent.created_at);
+        println!("  last_active: {:?}", agent.last_active);
+        println!("  compression_strategy: {:?}", agent.compression_strategy);
+
+        // Try to create
+        match create_entity::<AgentRecord, _>(&db, &agent).await {
+            Ok(created) => {
+                println!("Successfully created agent!");
+                println!("Created agent: {:?}", created);
+            }
+            Err(e) => {
+                println!("Failed to create agent: {:?}", e);
+
+                // Try to see what the DB model looks like
+                use crate::db::entity::DbEntity;
+                let db_model = agent.to_db_model();
+                println!("\nDB Model:");
+                println!("{:#?}", serde_json::to_string_pretty(&db_model).unwrap());
+
+                panic!("Agent creation failed");
+            }
+        }
+    }
 
     #[tokio::test]
     #[traced_test]
@@ -39,22 +79,23 @@ mod tests {
         let tools = ToolRegistry::new();
 
         // Create a test user
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             ..Default::default()
         };
-        let user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
+        let user = create_entity::<User, _>(&db, &user).await.unwrap();
 
         // Create two agent records
-        let pattern_record = BaseAgent {
+        let pattern_record = AgentRecord {
             id: AgentId::generate(),
             name: "Pattern".to_string(),
-            agent_type: BaseAgentType::Custom("pattern".to_string()),
+            agent_type: AgentType::Custom("pattern".to_string()),
             state: AgentState::default(),
             model_id: None,
+            owner_id: user.id,
             ..Default::default()
         };
-        let pattern_record = create_entity::<BaseAgent, _>(&db, &pattern_record)
+        let pattern_record = create_entity::<AgentRecord, _>(&db, &pattern_record)
             .await
             .unwrap();
 
@@ -63,15 +104,16 @@ mod tests {
         user_with_pattern.owned_agent_ids = vec![pattern_record.id];
         user_with_pattern.store_relations(&db).await.unwrap();
 
-        let entropy_record = BaseAgent {
+        let entropy_record = AgentRecord {
             id: AgentId::generate(),
             name: "Entropy".to_string(),
-            agent_type: BaseAgentType::Custom("entropy".to_string()),
+            agent_type: AgentType::Custom("entropy".to_string()),
             state: AgentState::default(),
             model_id: None,
+            owner_id: user.id,
             ..Default::default()
         };
-        let entropy_record = create_entity::<BaseAgent, _>(&db, &entropy_record)
+        let entropy_record = create_entity::<AgentRecord, _>(&db, &entropy_record)
             .await
             .unwrap();
 
@@ -126,7 +168,8 @@ mod tests {
             .unwrap();
 
         // Attach memory to both agents
-        db.attach_memory_to_agent(
+        attach_memory_to_agent(
+            &db,
             pattern_record.id,
             shared_memory.id,
             MemoryAccessLevel::Write,
@@ -134,9 +177,14 @@ mod tests {
         .await
         .unwrap();
 
-        db.attach_memory_to_agent(entropy_record.id, shared_memory.id, MemoryAccessLevel::Read)
-            .await
-            .unwrap();
+        attach_memory_to_agent(
+            &db,
+            entropy_record.id,
+            shared_memory.id,
+            MemoryAccessLevel::Read,
+        )
+        .await
+        .unwrap();
 
         // Start memory sync for both agents
         // Start memory sync for both agents
@@ -168,21 +216,22 @@ mod tests {
         }));
         let tools = ToolRegistry::new();
 
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             ..Default::default()
         };
-        let user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
+        let user = create_entity::<User, _>(&db, &user).await.unwrap();
 
-        let agent_record = BaseAgent {
+        let agent_record = AgentRecord {
             id: AgentId::generate(),
             name: "TestAgent".to_string(),
-            agent_type: BaseAgentType::Assistant,
+            agent_type: AgentType::Generic,
             state: AgentState::default(),
             model_id: None,
+            owner_id: user.id,
             ..Default::default()
         };
-        let agent_record = create_entity::<BaseAgent, _>(&db, &agent_record)
+        let agent_record = create_entity::<AgentRecord, _>(&db, &agent_record)
             .await
             .unwrap();
 
@@ -225,9 +274,14 @@ mod tests {
             .await
             .unwrap();
 
-        db.attach_memory_to_agent(agent_id, persistent_memory.id, MemoryAccessLevel::Write)
-            .await
-            .unwrap();
+        attach_memory_to_agent(
+            &db,
+            agent_id,
+            persistent_memory.id,
+            MemoryAccessLevel::Write,
+        )
+        .await
+        .unwrap();
 
         let temp_memory = MemoryBlock {
             id: MemoryId::generate(),
@@ -246,7 +300,7 @@ mod tests {
             .await
             .unwrap();
 
-        db.attach_memory_to_agent(agent_id, deletable_memory.id, MemoryAccessLevel::Write)
+        attach_memory_to_agent(&db, agent_id, deletable_memory.id, MemoryAccessLevel::Write)
             .await
             .unwrap();
 
@@ -258,8 +312,8 @@ mod tests {
         // Verify both memories are loaded
         // Note: Direct context access is not available
 
-        // Delete the memory block
-        let _: Option<MemoryBlock> = db
+        // Delete the memory block - need to use DbModel type
+        let _: Option<MemoryBlockDbModel> = db
             .delete(RecordId::from(deletable_memory.id))
             .await
             .unwrap();
@@ -277,21 +331,22 @@ mod tests {
     async fn test_memory_access_levels() {
         let db = Arc::new(client::create_test_db().await.unwrap());
 
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             ..Default::default()
         };
-        let user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
+        let user = create_entity::<User, _>(&db, &user).await.unwrap();
 
-        let agent = BaseAgent {
+        let agent = AgentRecord {
             id: AgentId::generate(),
             name: "TestAgent".to_string(),
-            agent_type: BaseAgentType::Assistant,
+            agent_type: AgentType::Generic,
             state: AgentState::default(),
             model_id: None,
+            owner_id: user.id,
             ..Default::default()
         };
-        let agent = create_entity::<BaseAgent, _>(&db, &agent).await.unwrap();
+        let agent = create_entity::<AgentRecord, _>(&db, &agent).await.unwrap();
 
         // Create ownership relationship using entity system
         let mut user_with_agent = user.clone();
@@ -316,11 +371,11 @@ mod tests {
         let agent_id = agent.id;
 
         // Test different access levels
-        db.attach_memory_to_agent(agent_id, memory.id, MemoryAccessLevel::Read)
+        attach_memory_to_agent(&db, agent_id, memory.id, MemoryAccessLevel::Read)
             .await
             .unwrap();
 
-        let memories = db.get_agent_memories(agent_id).await.unwrap();
+        let memories = get_agent_memories(&db, agent_id).await.unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].1, MemoryAccessLevel::Read);
         assert_eq!(memories[0].0.label, "test_memory");
@@ -335,21 +390,22 @@ mod tests {
         }));
         let tools = ToolRegistry::new();
 
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             ..Default::default()
         };
-        let user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
+        let user = create_entity::<User, _>(&db, &user).await.unwrap();
 
-        let agent_record = BaseAgent {
+        let agent_record = AgentRecord {
             id: AgentId::generate(),
             name: "TestAgent".to_string(),
-            agent_type: BaseAgentType::Assistant,
+            agent_type: AgentType::Generic,
             state: AgentState::Ready,
             model_id: None,
+            owner_id: user.id,
             ..Default::default()
         };
-        let agent_record = create_entity::<BaseAgent, _>(&db, &agent_record)
+        let agent_record = create_entity::<AgentRecord, _>(&db, &agent_record)
             .await
             .unwrap();
 

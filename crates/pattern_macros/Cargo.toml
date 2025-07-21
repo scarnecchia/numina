@@ -10,6 +10,7 @@ proc-macro = true
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
+proc-macro2-diagnostics = "0.10"
 darling = "0.20"                                               # For better attribute parsing
 const_format = { version = "0.2.34", features = ["fmt"] }
 [dev-dependencies]

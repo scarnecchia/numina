@@ -10,12 +10,9 @@ use crate::tool::builtin::BuiltinTools;
 
 use crate::{
     CoreError, MemoryBlock, ModelProvider, Result, UserId,
-    agent::{Agent, AgentState, AgentType, MemoryAccessLevel},
+    agent::{Agent, AgentMemoryRelation, AgentState, AgentType, MemoryAccessLevel},
     context::{AgentContext, ContextConfig},
-    db::{
-        ops::{LiveQueryExt, MemoryOpsExt},
-        schema,
-    },
+    db::{DatabaseError, ops, schema},
     embeddings::EmbeddingProvider,
     id::AgentId,
     memory::Memory,
@@ -97,6 +94,82 @@ where
         }
     }
 
+    /// Create a DatabaseAgent from a persisted AgentRecord
+    ///
+    /// This reconstructs the runtime agent from its stored state.
+    /// The model provider, tools, and embeddings are injected at runtime.
+    pub async fn from_record(
+        record: crate::agent::AgentRecord,
+        db: Arc<Surreal<C>>,
+        model: Arc<RwLock<M>>,
+        tools: ToolRegistry,
+        embeddings: Option<Arc<E>>,
+    ) -> Result<Self> {
+        // Create memory with the owner
+        let memory = Memory::with_owner(record.owner_id);
+
+        // Load memory blocks from the record's relations
+        for (memory_block, _relation) in &record.memories {
+            memory.create_block(memory_block.label.clone(), memory_block.value.clone())?;
+            if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
+                block.id = memory_block.id;
+                block.description = memory_block.description.clone();
+                block.metadata = memory_block.metadata.clone();
+                block.embedding_model = memory_block.embedding_model.clone();
+                block.created_at = memory_block.created_at;
+                block.updated_at = memory_block.updated_at;
+                block.is_active = memory_block.is_active;
+            }
+        }
+
+        // Build the context config from the record
+        let context_config = record.to_context_config();
+
+        // Create the agent with the loaded configuration
+        let mut agent = Self::new(
+            record.id,
+            record.owner_id,
+            record.agent_type.clone(),
+            record.name.clone(),
+            context_config.base_instructions.clone(),
+            memory,
+            db,
+            model,
+            tools,
+            embeddings,
+        );
+
+        // Restore the agent state
+        agent.context.handle.state = record.state;
+
+        // Restore message history and compression state
+        {
+            let mut history = agent.context.history.write().await;
+            history.compression_strategy = record.compression_strategy.clone();
+            history.message_summary = record.message_summary.clone();
+
+            // Load active messages from relations (already ordered by position)
+            for (message, relation) in &record.messages {
+                if relation.message_type == crate::message::MessageRelationType::Active {
+                    history.messages.push(message.clone());
+                }
+            }
+        }
+
+        // Restore statistics
+        {
+            let mut metadata = agent.context.metadata.write().await;
+            metadata.created_at = record.created_at;
+            metadata.last_active = record.last_active;
+            metadata.total_messages = record.total_messages;
+            metadata.total_tool_calls = record.total_tool_calls;
+            metadata.context_rebuilds = record.context_rebuilds;
+            metadata.compression_events = record.compression_events;
+        }
+
+        Ok(agent)
+    }
+
     /// Start background task to sync memory updates via live queries
     pub async fn start_memory_sync(self: Arc<Self>) -> Result<()> {
         let agent_id = self.context.handle.agent_id;
@@ -109,7 +182,7 @@ where
             tracing::info!("Memory sync task started for agent {}", agent_id);
 
             // Subscribe to all memory changes for this agent
-            let stream = match db.subscribe_to_agent_memory_updates(agent_id).await {
+            let stream = match ops::subscribe_to_agent_memory_updates(&db, agent_id).await {
                 Ok(s) => {
                     tracing::info!(
                         "Successfully subscribed to memory updates for agent {} - live query active",
@@ -284,8 +357,27 @@ where
         // Note: state changes would need to use interior mutability
         // For now, we'll track state locally
 
-        // Add message to context
-        self.context.add_message(message.clone()).await;
+        // Clone what we need for the background task
+        let db = Arc::clone(&self.db);
+        let agent_id = self.context.handle.agent_id;
+        let message_clone = message.clone();
+
+        // Fire off message persistence in background
+        let _handle1 = tokio::spawn(async move {
+            if let Err(e) = crate::db::ops::persist_agent_message(
+                &db,
+                agent_id,
+                &message_clone,
+                crate::message::MessageRelationType::Active,
+            )
+            .await
+            {
+                tracing::error!("Failed to persist incoming message: {:?}", e);
+            }
+        });
+
+        // Add message to context immediately
+        self.context.add_message(message).await;
 
         // Build the memory context for the LLM
         let memory_context = self.context.build_context().await?;
@@ -298,6 +390,8 @@ where
         let model = self.model.read().await;
 
         let options = self.chat_options.read().await;
+
+        // Note: this will usually make a network request and will need to wait for generated tokens from the LLM. it's the slowest bit.
         let response = model
             .complete(
                 &options.clone().expect("should have options or default"),
@@ -306,12 +400,41 @@ where
             .await
             .expect("Add error handling later");
 
-        // Handle
+        // Convert Response to Message
+        let response_message = Message::from_response(&response, self.context.handle.agent_id);
+
+        // Clone for background persistence
+        let db = Arc::clone(&self.db);
+        let response_msg_clone = response_message.clone();
+
+        // Fire off response persistence in background
+        let _handle2 = tokio::spawn(async move {
+            if let Err(e) = crate::db::ops::persist_agent_message(
+                &db,
+                agent_id,
+                &response_msg_clone,
+                crate::message::MessageRelationType::Active,
+            )
+            .await
+            {
+                tracing::error!("Failed to persist response message: {:?}", e);
+            }
+        });
+
+        // Add response message to context immediately
+        self.context.add_message(response_message).await;
 
         // Process response and update state
         self.context.process_response(&response)?;
 
-        // State would be updated here if using interior mutability
+        // Update stats in background
+        let db = Arc::clone(&self.db);
+        let stats = self.context.get_stats().await;
+        let _handle3 = tokio::spawn(async move {
+            if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id, &stats).await {
+                tracing::error!("Failed to update agent stats: {:?}", e);
+            }
+        });
 
         Ok(response)
     }
@@ -327,17 +450,28 @@ where
             key
         );
 
-        // Update in context
+        // Update in context immediately
         self.context
             .update_memory_block(key, memory.value.clone())
             .await?;
 
-        self.db
-            .update_memory_content(memory.id, memory.value, self.embeddings.as_deref())
-            .await?;
+        // Persist memory block in background
+        let db = Arc::clone(&self.db);
+        let agent_id = self.context.handle.agent_id;
+        let memory_clone = memory.clone();
 
-        // Persist to database
-        //self.persist_context().await?;
+        let _handle = tokio::spawn(async move {
+            if let Err(e) = crate::db::ops::persist_agent_memory(
+                &db,
+                agent_id,
+                &memory_clone,
+                MemoryAccessLevel::Write, // Agent has write access to its own memory
+            )
+            .await
+            {
+                tracing::error!("Failed to persist memory block: {:?}", e);
+            }
+        });
 
         Ok(())
     }
@@ -360,16 +494,41 @@ where
             )
         })?;
 
+        // Record start time
+        let start_time = std::time::Instant::now();
+        let created_at = chrono::Utc::now();
+
         // Execute the tool
-        let result = tool.execute(params).await?;
+        let result = tool.execute(params.clone()).await;
+
+        // Calculate duration
+        let duration_ms = start_time.elapsed().as_millis() as i64;
 
         // Update tool call count in metadata
         self.context.metadata.write().await.total_tool_calls += 1;
 
-        // Persist the updated metadata
-        // Context persistence would happen here if needed
+        // Create tool call record
+        let tool_call = schema::ToolCall {
+            id: crate::id::ToolCallId::generate(),
+            agent_id: self.context.handle.agent_id,
+            tool_name: tool_name.to_string(),
+            parameters: params,
+            result: result.as_ref().unwrap_or(&serde_json::json!(null)).clone(),
+            error: result.as_ref().err().map(|e| e.to_string()),
+            duration_ms,
+            created_at,
+        };
 
-        Ok(result)
+        // Persist tool call in background
+        let db = Arc::clone(&self.db);
+        let _handle = tokio::spawn(async move {
+            if let Err(e) = crate::db::ops::create_entity(&db, &tool_call).await {
+                tracing::error!("Failed to persist tool call: {:?}", e);
+            }
+        });
+
+        // Return the result
+        result
     }
 
     async fn list_memory_keys(&self) -> Result<Vec<CompactString>> {
@@ -407,23 +566,98 @@ where
 
     async fn share_memory_with(
         &self,
-        _memory_key: &str,
-        _target_agent_id: AgentId,
-        _access_level: MemoryAccessLevel,
+        memory_key: &str,
+        target_agent_id: AgentId,
+        access_level: MemoryAccessLevel,
     ) -> Result<()> {
-        // This would need to be reimplemented based on new sharing model
-        // For now, return not implemented
-        Err(CoreError::tool_validation_error(
-            "share_memory_with",
-            "Memory sharing not yet implemented with new context model",
-        ))
+        // First verify the memory block exists
+        let memory_block = self
+            .context
+            .handle
+            .memory
+            .get_block(memory_key)
+            .ok_or_else(|| {
+                CoreError::memory_not_found(
+                    &self.context.handle.agent_id,
+                    memory_key,
+                    self.context.handle.memory.list_blocks(),
+                )
+            })?;
+
+        // Create the memory relation for the target agent
+        let db = Arc::clone(&self.db);
+        let memory_id = memory_block.id.clone();
+        let relation = AgentMemoryRelation {
+            id: None,
+            in_id: target_agent_id.clone(),
+            out_id: memory_id.clone(),
+            access_level,
+            created_at: chrono::Utc::now(),
+        };
+
+        // Persist the sharing relationship in background
+        let target_id_clone = target_agent_id.clone();
+        let _handle = tokio::spawn(async move {
+            if let Err(e) = crate::db::ops::create_relation_typed(&db, &relation).await {
+                tracing::error!("Failed to share memory block: {:?}", e);
+            } else {
+                tracing::info!(
+                    "Shared memory block {} with agent {} (access: {:?})",
+                    memory_id,
+                    target_id_clone,
+                    access_level
+                );
+            }
+        });
+
+        Ok(())
     }
 
     async fn get_shared_memories(&self) -> Result<Vec<(AgentId, CompactString, MemoryBlock)>> {
-        // This would need a reverse lookup - find all memory blocks that other agents
-        // have shared with this agent. For now, return empty.
-        // TODO: Implement reverse lookup query
-        Ok(vec![])
+        let db = Arc::clone(&self.db);
+        let agent_id = self.context.handle.agent_id;
+
+        // Query for all memory blocks shared with this agent
+        let query = r#"
+            SELECT 
+                out AS memory_block,
+                in AS source_agent_id,
+                access_level
+            FROM agent_memories
+            WHERE in = $agent_id
+            FETCH out, in
+        "#;
+
+        let mut response = db
+            .query(query)
+            .bind(("agent_id", surrealdb::RecordId::from(&agent_id)))
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Extract the shared memory relationships
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let mut shared_memories = Vec::new();
+
+        for result in results {
+            if let (Some(memory_value), Some(source_id)) =
+                (result.get("memory_block"), result.get("source_agent_id"))
+            {
+                // Parse the memory block
+                let memory_block: MemoryBlock = serde_json::from_value(memory_value.clone())
+                    .map_err(|e| DatabaseError::SerdeProblem(e))?;
+
+                // Parse the source agent ID
+                let source_agent_id: AgentId = serde_json::from_value(source_id.clone())
+                    .map_err(|e| DatabaseError::SerdeProblem(e))?;
+
+                shared_memories.push((source_agent_id, memory_block.label.clone(), memory_block));
+            }
+        }
+
+        Ok(shared_memories)
     }
 
     async fn system_prompt(&self) -> Vec<String> {
@@ -454,9 +688,29 @@ where
 
     /// Set the agent's state
     async fn set_state(&mut self, state: AgentState) -> Result<()> {
-        // Note: This would need to use interior mutability to modify state
-        // through a shared reference. For now, state changes are local.
-        let _ = state; // Suppress unused variable warning
+        // Update the state in the context
+        self.context.handle.state = state;
+
+        // Update last_active timestamp
+        self.context.metadata.write().await.last_active = chrono::Utc::now();
+
+        // Persist the state update in background
+        let db = Arc::clone(&self.db);
+        let agent_id = self.context.handle.agent_id;
+        let _handle = tokio::spawn(async move {
+            let query =
+                "UPDATE agent SET state = $state, last_active = $last_active WHERE id = $id";
+            if let Err(e) = db
+                .query(query)
+                .bind(("id", surrealdb::RecordId::from(&agent_id)))
+                .bind(("state", serde_json::to_value(&state).unwrap()))
+                .bind(("last_active", chrono::Utc::now()))
+                .await
+            {
+                tracing::error!("Failed to persist agent state update: {:?}", e);
+            }
+        });
+
         Ok(())
     }
 }
@@ -473,8 +727,9 @@ where
     T: AsRef<surrealdb::Surreal<C>> + Sync,
     C: surrealdb::Connection,
 {
-    async fn create_tool_call(&self, _tool_call: schema::ToolCall) -> Result<()> {
+    async fn create_tool_call(&self, tool_call: schema::ToolCall) -> Result<()> {
         // Store the tool call in the database
-        todo!("Implement create_tool_call")
+        crate::db::ops::create_entity(self.as_ref(), &tool_call).await?;
+        Ok(())
     }
 }

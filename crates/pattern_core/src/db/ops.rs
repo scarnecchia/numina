@@ -5,8 +5,7 @@ use super::{DatabaseError, Result, entity::DbEntity};
 use serde_json::json;
 use surrealdb::{Connection, Surreal};
 
-use crate::context::state::AgentContextMetadata;
-use crate::context::{CompressionStrategy, ContextConfig};
+use crate::MessageId;
 use crate::embeddings::EmbeddingProvider;
 use crate::id::{AgentId, IdType, MemoryId, MemoryIdType};
 use crate::memory::MemoryBlock;
@@ -17,7 +16,6 @@ use crate::utils::debug::ResponseExt;
 use chrono::Utc;
 
 use futures::{Stream, StreamExt};
-use serde::Serialize;
 use surrealdb::opt::PatchOp;
 
 use surrealdb::{Action, Notification, RecordId};
@@ -42,7 +40,7 @@ pub async fn create_entity<E: DbEntity, C: Connection>(
     );
 
     let created: E::DbModel = conn
-        .create((E::table_name(), entity.id().uuid().to_string()))
+        .create((E::table_name(), entity.record_key()))
         .content(db_model)
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?
@@ -182,6 +180,10 @@ pub async fn create_relation_typed<E: DbEntity, C: Connection>(
             "Edge entity must have out_id field".into(),
         )))
     })?;
+
+    // Remove the id field as well - SurrealDB generates this automatically for edge entities
+    obj.remove("id");
+
     // Debug: print the raw values
     tracing::debug!("from_value: {:?}", from_value);
     tracing::debug!("to_value: {:?}", to_value);
@@ -437,369 +439,446 @@ impl<C: Connection> VectorSearchExt<C> for Surreal<C> {
 }
 
 // ============================================================================
-// Specialized Operations - Live Queries
+// Live Query Operations - Free Functions
 // ============================================================================
 
-/// Extension trait for live query operations
-pub trait LiveQueryExt<C: Connection> {
-    /// Subscribe to memory updates for a specific memory
-    fn subscribe_to_memory_updates(
-        &self,
-        memory_id: MemoryId,
-    ) -> impl Future<Output = Result<impl Stream<Item = (Action, MemoryBlock)>>>;
+/// Subscribe to memory updates for a specific memory
+pub async fn subscribe_to_memory_updates<C: Connection>(
+    conn: &Surreal<C>,
+    memory_id: MemoryId,
+) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
+    let stream = conn
+        .select((MemoryIdType::PREFIX, memory_id.uuid().to_string()))
+        .live()
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
 
-    /// Subscribe to all memory updates for an agent
-    fn subscribe_to_agent_memory_updates(
-        &self,
-        agent_id: AgentId,
-    ) -> impl Future<Output = Result<impl Stream<Item = (Action, MemoryBlock)>>>;
+    Ok(stream.filter_map(
+        |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
+            match notif {
+                Ok(Notification { action, data, .. }) => {
+                    if let Ok(memory) = serde_json::from_value::<MemoryBlock>(data) {
+                        Some((action, memory))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        },
+    ))
 }
 
-impl<C: Connection> LiveQueryExt<C> for Surreal<C> {
-    async fn subscribe_to_memory_updates(
-        &self,
-        memory_id: MemoryId,
-    ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
-        let stream = self
-            .select((MemoryIdType::PREFIX, memory_id.uuid().to_string()))
-            .live()
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
+/// Subscribe to all memory updates for an agent
+pub async fn subscribe_to_agent_memory_updates<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
+    // Watch memory blocks that have this agent in their agents array
+    let query = format!(
+        "LIVE SELECT * FROM mem WHERE {} IN agents",
+        RecordId::from(agent_id)
+    );
 
-        Ok(stream.filter_map(
-            |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
-                match notif {
-                    Ok(Notification { action, data, .. }) => {
-                        if let Ok(memory) = serde_json::from_value::<MemoryBlock>(data) {
-                            Some((action, memory))
-                        } else {
-                            None
-                        }
+    let mut result = conn
+        .query(query)
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
+
+    let stream = result
+        .stream::<Notification<serde_json::Value>>(0)
+        .map_err(DatabaseError::QueryFailed)?;
+
+    Ok(stream.filter_map(
+        |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
+            match notif {
+                Ok(Notification { action, data, .. }) => {
+                    if let Ok(memory) = serde_json::from_value::<MemoryBlock>(data) {
+                        Some((action, memory))
+                    } else {
+                        None
                     }
-                    Err(_) => None,
                 }
-            },
-        ))
-    }
-
-    async fn subscribe_to_agent_memory_updates(
-        &self,
-        agent_id: AgentId,
-    ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
-        // Watch memory blocks that have this agent in their agents array
-        let query = format!(
-            "LIVE SELECT * FROM mem WHERE {} IN agents",
-            RecordId::from(agent_id)
-        );
-
-        let mut result = self
-            .query(query)
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
-
-        let stream = result
-            .stream::<Notification<serde_json::Value>>(0)
-            .map_err(DatabaseError::QueryFailed)?;
-
-        Ok(stream.filter_map(
-            |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
-                match notif {
-                    Ok(Notification { action, data, .. }) => {
-                        if let Ok(memory) = serde_json::from_value::<MemoryBlock>(data) {
-                            Some((action, memory))
-                        } else {
-                            None
-                        }
-                    }
-                    Err(_) => None,
-                }
-            },
-        ))
-    }
+                Err(_) => None,
+            }
+        },
+    ))
 }
 
 // ============================================================================
 // Specialized Operations - Memory Management
 // ============================================================================
 
-/// Extension trait for memory-specific operations
-pub trait MemoryOpsExt<C: Connection> {
-    /// Attach a memory block to an agent with specific access level
-    fn attach_memory_to_agent(
-        &self,
-        agent_id: AgentId,
-        memory_id: MemoryId,
-        access_level: crate::agent::MemoryAccessLevel,
-    ) -> impl Future<Output = Result<()>>;
+/// Attach a memory block to an agent with specific access level
+pub async fn attach_memory_to_agent<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    memory_id: MemoryId,
+    access_level: crate::agent::MemoryAccessLevel,
+) -> Result<()> {
+    use crate::db::entity::AgentMemoryRelation;
 
-    /// Get all memories accessible to an agent
-    fn get_agent_memories(
-        &self,
-        agent_id: AgentId,
-    ) -> impl Future<Output = Result<Vec<(MemoryBlock, crate::agent::MemoryAccessLevel)>>>;
+    // Create the edge entity (without ID - SurrealDB will generate it)
+    let relation = AgentMemoryRelation {
+        id: None, // SurrealDB will generate the edge entity ID
+        in_id: agent_id,
+        out_id: memory_id,
+        access_level,
+        created_at: chrono::Utc::now(),
+    };
 
-    /// Get memory by label for an agent
-    fn get_memory_by_label(
-        &self,
-        agent_id: AgentId,
-        label: &str,
-    ) -> impl Future<Output = Result<Option<MemoryBlock>>>;
+    // Create the relation using the typed function
+    let _created = create_relation_typed(conn, &relation).await?;
+    tracing::debug!("Created agent-memory relation: {:?}", _created);
 
-    /// Update memory content with optional re-embedding
-    fn update_memory_content(
-        &self,
-        memory_id: MemoryId,
-        content: String,
-        embeddings: Option<&impl EmbeddingProvider>,
-    ) -> impl Future<Output = Result<()>>;
+    Ok(())
 }
 
-impl<C: Connection> MemoryOpsExt<C> for Surreal<C> {
-    async fn attach_memory_to_agent(
-        &self,
-        agent_id: AgentId,
-        memory_id: MemoryId,
-        access_level: crate::agent::MemoryAccessLevel,
-    ) -> Result<()> {
-        use crate::db::entity::AgentMemoryRelation;
-        use crate::id::RelationId;
+/// Get all memories accessible to an agent
+pub async fn get_agent_memories<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+) -> Result<Vec<(MemoryBlock, crate::agent::MemoryAccessLevel)>> {
+    use crate::db::entity::AgentMemoryRelation;
 
-        // Create the edge entity
-        let relation = AgentMemoryRelation {
-            id: RelationId::generate(),
+    // Query the edge entities for this agent
+    let query = r#"
+        SELECT * FROM agent_memories
+        WHERE in = $agent_id
+    "#;
+
+    let mut result = conn
+        .query(query)
+        .bind(("agent_id", RecordId::from(agent_id)))
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
+
+    // Take the DB models (which have the serde rename attributes)
+    let relation_db_models: Vec<<AgentMemoryRelation as DbEntity>::DbModel> =
+        result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+    // Convert DB models to domain types
+    let relations: Vec<AgentMemoryRelation> = relation_db_models
+        .into_iter()
+        .map(|db_model| AgentMemoryRelation::from_db_model(db_model).map_err(DatabaseError::from))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Now fetch the actual memory blocks
+    let mut memories = Vec::new();
+    for relation in relations {
+        let memory_db: Option<<MemoryBlock as DbEntity>::DbModel> = conn
+            .select(RecordId::from(relation.out_id))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        if let Some(db_model) = memory_db {
+            let memory = MemoryBlock::from_db_model(db_model)?;
+            memories.push((memory, relation.access_level));
+        }
+    }
+
+    Ok(memories)
+}
+
+/// Get memory by label for an agent
+pub async fn get_memory_by_label<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    label: &str,
+) -> Result<Option<MemoryBlock>> {
+    // First find memory blocks accessible to this agent through the junction table
+    let query = r#"
+        SELECT *, out.* AS memory_data
+        FROM agent_memories
+        WHERE in = $agent_id
+        AND out.label = $label
+    "#;
+
+    let mut result = conn
+        .query(query)
+        .bind(("agent_id", RecordId::from(agent_id)))
+        .bind(("label", label.to_string()))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    tracing::trace!("memory label query result: {:?}", result.pretty_debug());
+
+    let records: Vec<serde_json::Value> = result
+        .take("memory_data")
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    // Extract the memory from the result
+    if let Some(record) = records.into_iter().next() {
+        tracing::trace!("record: {:?}", record);
+        Ok(serde_json::from_value(record).ok())
+    } else {
+        Ok(None)
+    }
+}
+
+/// Update memory content with optional re-embedding
+pub async fn update_memory_content<C: Connection>(
+    conn: &Surreal<C>,
+    memory_id: MemoryId,
+    content: String,
+    embeddings: Option<&impl EmbeddingProvider>,
+) -> Result<()> {
+    // Generate embeddings if provider is available
+    let (embedding, model_name) = if let Some(provider) = embeddings {
+        let emb = provider.embed_query(&content).await.map_err(|e| {
+            DatabaseError::QueryFailed(surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
+                "Embedding generation failed: {}",
+                e
+            ))))
+        })?;
+        (Some(emb), Some(provider.model_name().to_string()))
+    } else {
+        (Some(vec![0.0; 384]), Some("none".to_string()))
+    };
+
+    let _: Option<serde_json::Value> = conn
+        .update(RecordId::from(memory_id))
+        .patch(PatchOp::replace("/content", content))
+        .patch(PatchOp::replace("/embedding", embedding))
+        .patch(PatchOp::replace("/embedding_model", model_name))
+        .patch(PatchOp::replace(
+            "/updated_at",
+            surrealdb::Datetime::from(Utc::now()),
+        ))
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Agent-Message Persistence Operations
+// ============================================================================
+
+/// Persist a message and create agent-message relation
+pub async fn persist_agent_message<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    message: &Message,
+    message_type: crate::message::MessageRelationType,
+) -> Result<()> {
+    // First, store the message
+    let stored_message = message.store_with_relations(conn).await?;
+
+    // Then create the agent-message relation with position
+    let position = crate::agent::get_next_message_position().await;
+
+    let relation = crate::message::AgentMessageRelation {
+        id: None,
+        in_id: agent_id,
+        out_id: stored_message.id.clone(),
+        message_type,
+        position,
+        added_at: Utc::now(),
+    };
+
+    create_relation_typed(conn, &relation).await?;
+
+    Ok(())
+}
+
+/// Archive messages by updating their relation type to Archived
+pub async fn archive_agent_messages<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    message_ids: &[MessageId],
+) -> Result<()> {
+    // Update all relations for these messages to Archived type
+    let query = r#"
+        UPDATE agent_messages
+        SET message_type = $message_type
+        WHERE in = $agent_id
+        AND out IN $message_ids
+    "#;
+
+    conn.query(query)
+        .bind(("agent_id", RecordId::from(agent_id)))
+        .bind((
+            "message_ids",
+            message_ids
+                .iter()
+                .map(|id| RecordId::from(id.clone()))
+                .collect::<Vec<_>>(),
+        ))
+        .bind(("message_type", "archived"))
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
+
+    Ok(())
+}
+
+/// Persist or update an agent's memory block with relation
+pub async fn persist_agent_memory<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    memory: &MemoryBlock,
+    access_level: crate::agent::MemoryAccessLevel,
+) -> Result<()> {
+    // Store or update the memory block
+    let stored_memory = memory.store_with_relations(conn).await?;
+
+    // Check if relation already exists
+    let existing_query = r#"
+        SELECT * FROM agent_memories
+        WHERE in = $agent_id AND out = $memory_id
+    "#;
+
+    let mut result = conn
+        .query(existing_query)
+        .bind(("agent_id", RecordId::from(agent_id)))
+        .bind(("memory_id", RecordId::from(stored_memory.id)))
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
+
+    let existing: Vec<serde_json::Value> = result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+    if existing.is_empty() {
+        // Create new relation
+        let relation = crate::db::entity::AgentMemoryRelation {
+            id: None,
             in_id: agent_id,
-            out_id: memory_id,
+            out_id: stored_memory.id,
             access_level,
-            created_at: chrono::Utc::now(),
+            created_at: Utc::now(),
         };
 
-        // Create the relation using the typed function
-        let _created = create_relation_typed(self, &relation).await?;
-        tracing::debug!("Created agent-memory relation: {:?}", _created);
-
-        Ok(())
+        create_relation_typed(conn, &relation).await?;
     }
 
-    async fn get_agent_memories(
-        &self,
-        agent_id: AgentId,
-    ) -> Result<Vec<(MemoryBlock, crate::agent::MemoryAccessLevel)>> {
-        use crate::db::entity::AgentMemoryRelation;
+    Ok(())
+}
 
-        // Query the edge entities for this agent
-        let query = r#"
-            SELECT * FROM agent_memories
-            WHERE in = $agent_id
-        "#;
+/// Update only agent runtime statistics
+pub async fn update_agent_stats<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    stats: &crate::context::state::AgentStats,
+) -> Result<()> {
+    let update = json!({
+        "total_messages": stats.total_messages,
+        "total_tool_calls": stats.total_tool_calls,
+        "last_active": surrealdb::Datetime::from(stats.last_active),
+        "updated_at": surrealdb::Datetime::from(Utc::now()),
+    });
 
-        let mut result = self
-            .query(query)
-            .bind(("agent_id", RecordId::from(agent_id)))
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
+    let _: Option<serde_json::Value> = conn
+        .update(RecordId::from(agent_id))
+        .merge(update)
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
 
-        let relations: Vec<AgentMemoryRelation> =
-            result.take(0).map_err(DatabaseError::QueryFailed)?;
+    Ok(())
+}
 
-        // Now fetch the actual memory blocks
-        let mut memories = Vec::new();
-        for relation in relations {
-            let memory: Option<MemoryBlock> = self
-                .select(RecordId::from(relation.out_id))
-                .await
-                .map_err(DatabaseError::QueryFailed)?;
+/// Load full agent state from database
+pub async fn load_agent_state<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+) -> Result<(crate::agent::AgentRecord, Vec<Message>, Vec<MemoryBlock>)> {
+    // Load the agent record with relations
+    let agent = crate::agent::AgentRecord::load_with_relations(conn, agent_id)
+        .await?
+        .ok_or_else(|| DatabaseError::NotFound {
+            entity_type: "agent".to_string(),
+            id: agent_id.to_string(),
+        })?;
 
-            if let Some(memory) = memory {
-                memories.push((memory, relation.access_level));
-            }
-        }
+    // Messages are loaded via the relation
+    let messages: Vec<Message> = agent
+        .messages
+        .iter()
+        .filter(|(_, rel)| rel.message_type == crate::message::MessageRelationType::Active)
+        .map(|(msg, _)| msg.clone())
+        .collect();
 
-        Ok(memories)
-    }
+    // Memory blocks are loaded via the relation
+    let memories: Vec<MemoryBlock> = agent.memories.iter().map(|(mem, _)| mem.clone()).collect();
 
-    async fn get_memory_by_label(
-        &self,
-        agent_id: AgentId,
-        label: &str,
-    ) -> Result<Option<MemoryBlock>> {
-        // First find memory blocks accessible to this agent through the junction table
-        let query = r#"
-            SELECT *, out.* AS memory_data
-            FROM agent_memories
-            WHERE in = $agent_id
-            AND out.label = $label
-        "#;
-
-        let mut result = self
-            .query(query)
-            .bind(("agent_id", RecordId::from(agent_id)))
-            .bind(("label", label.to_string()))
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-        tracing::trace!("memory label query result: {:?}", result.pretty_debug());
-
-        let records: Vec<serde_json::Value> = result
-            .take("memory_data")
-            .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-        // Extract the memory from the result
-        if let Some(record) = records.into_iter().next() {
-            tracing::trace!("record: {:?}", record);
-            Ok(serde_json::from_value(record).ok())
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn update_memory_content(
-        &self,
-        memory_id: MemoryId,
-        content: String,
-        embeddings: Option<&impl EmbeddingProvider>,
-    ) -> Result<()> {
-        // Generate embeddings if provider is available
-        let (embedding, model_name) = if let Some(provider) = embeddings {
-            let emb = provider.embed_query(&content).await.map_err(|e| {
-                DatabaseError::QueryFailed(surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
-                    "Embedding generation failed: {}",
-                    e
-                ))))
-            })?;
-            (Some(emb), Some(provider.model_name().to_string()))
-        } else {
-            (Some(vec![0.0; 384]), Some("none".to_string()))
-        };
-
-        let _: Option<serde_json::Value> = self
-            .update(RecordId::from(memory_id))
-            .patch(PatchOp::replace("/content", content))
-            .patch(PatchOp::replace("/embedding", embedding))
-            .patch(PatchOp::replace("/embedding_model", model_name))
-            .patch(PatchOp::replace(
-                "/updated_at",
-                surrealdb::Datetime::from(Utc::now()),
-            ))
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
-
-        Ok(())
-    }
+    Ok((agent, messages, memories))
 }
 
 // ============================================================================
-// Specialized Operations - Agent Context
+// Message Query Operations
 // ============================================================================
 
-/// Extension trait for complex agent context updates
-pub trait AgentContextExt<C: Connection> {
-    /// Update agent context in one atomic operation
-    fn update_agent_context(
-        &self,
-        agent_id: AgentId,
-        memory_blocks: Vec<MemoryBlock>,
-        messages: Vec<Message>,
-        archived_messages: Vec<Message>,
-        message_summary: Option<String>,
-        context_config: ContextConfig,
-        compression_strategy: CompressionStrategy,
-        metadata: AgentContextMetadata,
-    ) -> impl Future<Output = Result<()>>;
+/// Query messages using a custom query builder function
+///
+/// This function executes a query and deserializes the results from the database
+/// model format to the domain model format.
+///
+/// # Example
+/// ```no_run
+/// use pattern_core::db::ops::query_messages;
+/// use pattern_core::message::{Message, ChatRole};
+///
+/// let messages = query_messages(&db, |_| {
+///     Message::search_by_role_query(&ChatRole::User)
+/// }).await?;
+/// ```
+pub async fn query_messages<C, F>(db: &Surreal<C>, query_builder: F) -> Result<Vec<Message>>
+where
+    C: Connection,
+    F: FnOnce(&Surreal<C>) -> String,
+{
+    let query = query_builder(db);
+    let mut result = db.query(&query).await.map_err(DatabaseError::QueryFailed)?;
+
+    let db_messages: Vec<<Message as DbEntity>::DbModel> =
+        result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+    let messages: Result<Vec<_>> = db_messages
+        .into_iter()
+        .map(|db_msg| <Message as DbEntity>::from_db_model(db_msg).map_err(|e| e.into()))
+        .collect();
+
+    messages
 }
 
-impl<C: Connection> AgentContextExt<C> for Surreal<C> {
-    async fn update_agent_context(
-        &self,
-        agent_id: AgentId,
-        memory_blocks: Vec<MemoryBlock>,
-        messages: Vec<Message>,
-        archived_messages: Vec<Message>,
-        message_summary: Option<String>,
-        context_config: ContextConfig,
-        compression_strategy: CompressionStrategy,
-        metadata: AgentContextMetadata,
-    ) -> Result<()> {
-        #[derive(Serialize)]
-        struct ContextUpdate {
-            memory_blocks: Vec<RecordId>,
-            messages: Vec<RecordId>,
-            archived_messages: Vec<RecordId>,
-            message_summary: Option<String>,
-            context_config: serde_json::Value,
-            compression_strategy: serde_json::Value,
-            last_active: surrealdb::Datetime,
-            total_messages: usize,
-            total_tool_calls: usize,
-            context_rebuilds: usize,
-            compression_events: usize,
-            updated_at: surrealdb::Datetime,
-        }
-
-        let update = ContextUpdate {
-            memory_blocks: memory_blocks.iter().map(|m| RecordId::from(m.id)).collect(),
-            messages: messages
-                .iter()
-                .map(|m| RecordId::from(m.id.clone()))
-                .collect(),
-            archived_messages: archived_messages
-                .iter()
-                .map(|m| RecordId::from(m.id.clone()))
-                .collect(),
-            message_summary,
-            context_config: serde_json::to_value(context_config)
-                .expect("ContextConfig should serialize"),
-            compression_strategy: serde_json::to_value(compression_strategy)
-                .expect("CompressionStrategy should serialize"),
-            last_active: metadata.last_active.into(),
-            total_messages: metadata.total_messages,
-            total_tool_calls: metadata.total_tool_calls,
-            context_rebuilds: metadata.context_rebuilds,
-            compression_events: metadata.compression_events,
-            updated_at: chrono::Utc::now().into(),
-        };
-
-        let update_query = format!(
-            "UPDATE {} MERGE $agent_update RETURN NONE",
-            RecordId::from(agent_id)
-        );
-
-        let _: surrealdb::Response = self
-            .query(update_query)
-            .bind(("agent_update", update))
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-        Ok(())
-    }
+/// Query messages with a pre-built query string
+///
+/// This is a simpler version when you already have the query string.
+pub async fn query_messages_raw<C: Connection>(
+    db: &Surreal<C>,
+    query: &str,
+) -> Result<Vec<Message>> {
+    query_messages(db, |_| query.to_string()).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentState;
+    use crate::agent::{AgentRecord, AgentState, AgentType};
     use crate::db::{
         client,
-        entity::{BaseAgent, BaseTask, BaseTaskPriority, BaseTaskStatus, BaseUser},
+        entity::{BaseTask, BaseTaskPriority, BaseTaskStatus},
     };
     use crate::id::{TaskId, UserId};
+    use crate::users::User;
 
     #[tokio::test]
     async fn test_create_relation_with_properties() {
         let db = client::create_test_db().await.unwrap();
 
         // Create a user and agent first
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             ..Default::default()
         };
-        let agent = BaseAgent {
+        let agent = AgentRecord {
             id: AgentId::generate(),
             name: "Test Agent".to_string(),
+            agent_type: AgentType::Generic,
+            owner_id: user.id,
             ..Default::default()
         };
 
-        let created_user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
-        let created_agent = create_entity::<BaseAgent, _>(&db, &agent).await.unwrap();
+        let created_user = create_entity::<User, _>(&db, &user).await.unwrap();
+        let created_agent = create_entity::<AgentRecord, _>(&db, &agent).await.unwrap();
 
         // Test creating a relation with properties
         // Using string for access_level since it's an enum that serializes to lowercase strings
@@ -862,31 +941,32 @@ mod tests {
         let db = client::create_test_db().await.unwrap();
 
         // Create a user using generic operations
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             discord_id: Some("123456789".to_string()),
             ..Default::default()
         };
 
-        let created_user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
+        let created_user = create_entity::<User, _>(&db, &user).await.unwrap();
         assert_eq!(created_user.id, user.id);
 
         // Get the user by ID
-        let retrieved_user = get_entity::<BaseUser, _>(&db, &user.id).await.unwrap();
+        let retrieved_user = get_entity::<User, _>(&db, &user.id).await.unwrap();
         assert!(retrieved_user.is_some());
         assert_eq!(retrieved_user.unwrap().id, user.id);
 
         // Create an agent
-        let agent = BaseAgent {
+        let agent = AgentRecord {
             id: AgentId::generate(),
             name: "Test Agent".to_string(),
-            agent_type: crate::db::entity::BaseAgentType::Assistant,
+            agent_type: AgentType::Generic,
             state: AgentState::Ready,
             model_id: None,
+            owner_id: user.id,
             ..Default::default()
         };
 
-        let _created_agent = create_entity::<BaseAgent, _>(&db, &agent).await.unwrap();
+        let _created_agent = create_entity::<AgentRecord, _>(&db, &agent).await.unwrap();
 
         // Create ownership relationship using entity system
         let mut user_with_agent = user.clone();
@@ -894,7 +974,7 @@ mod tests {
         user_with_agent.store_relations(&db).await.unwrap();
 
         // Get agents for the user using entity system
-        let retrieved_user = BaseUser::load_with_relations(&db, user.id)
+        let retrieved_user = User::load_with_relations(&db, user.id)
             .await
             .unwrap()
             .unwrap();
@@ -922,13 +1002,13 @@ mod tests {
         agent_with_task.store_relations(&db).await.unwrap();
 
         // Query relationships using entity system
-        let final_user = BaseUser::load_with_relations(&db, user.id)
+        let final_user = User::load_with_relations(&db, user.id)
             .await
             .unwrap()
             .unwrap();
         assert!(!final_user.created_task_ids.is_empty());
 
-        let final_agent = BaseAgent::load_with_relations(&db, agent.id)
+        let final_agent = AgentRecord::load_with_relations(&db, agent.id)
             .await
             .unwrap()
             .unwrap();
@@ -941,7 +1021,7 @@ mod tests {
         let db = client::create_test_db().await.unwrap();
 
         // Create a simple user
-        let user = BaseUser {
+        let user = User {
             id: UserId::generate(),
             ..Default::default()
         };
@@ -950,7 +1030,7 @@ mod tests {
         println!("Creating user: {:?}", user);
 
         // Try to create the user
-        let created_user = create_entity::<BaseUser, _>(&db, &user).await.unwrap();
+        let created_user = create_entity::<User, _>(&db, &user).await.unwrap();
         assert_eq!(created_user.id, user.id);
     }
 }

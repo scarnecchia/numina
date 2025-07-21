@@ -247,7 +247,7 @@ impl ModelProvider for MockModelProvider {
     }
 
     async fn complete(&self, _options: &ResponseOptions, _request: Request) -> Result<Response> {
-        use genai::chat::MessageContent;
+        use crate::message::MessageContent;
 
         Ok(Response {
             content: vec![MessageContent::from_text(&self.response)],

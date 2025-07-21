@@ -123,24 +123,16 @@ pub trait DbEntity: Send + Sync {
 
     fn id(&self) -> crate::Id<Self::Id>;
 
+    /// Get the record key for storing in the database
+    /// Default implementation uses the UUID, but can be overridden
+    fn record_key(&self) -> String {
+        self.id().uuid().to_string()
+    }
+
     /// Get the schema definition for this entity
     fn schema() -> TableDefinition;
 
     fn field_keys() -> Vec<String>;
-}
-
-pub trait DbEdgeEntity: Send + Sync {
-    /// The database model type (what gets stored)
-    type DbModel: for<'de> Deserialize<'de> + Serialize + Send + Sync + Debug + 'static;
-
-    /// The domain type (what the app uses)
-    type Domain: Send + Sync + Debug + 'static;
-
-    /// Get the table name for this entity
-    fn table_name() -> &'static str;
-
-    /// Get the schema definition for this entity
-    fn schema() -> TableDefinition;
 }
 
 pub trait HasRecordId {

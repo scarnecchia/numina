@@ -18,8 +18,9 @@ pub mod ops;
 pub mod schema;
 
 // Re-export commonly used types
-pub use entity::{BaseAgent, BaseEvent, BaseTask, BaseUser, DbEntity};
+pub use entity::{BaseEvent, BaseTask, DbEntity};
 pub use entity::{BaseTaskPriority, BaseTaskStatus};
+// Note: BaseAgent is replaced by AgentRecord from the agent module
 pub use schema::{EnergyLevel, ToolCall};
 
 use crate::embeddings::EmbeddingError;

@@ -20,6 +20,7 @@
           rust-analyzer
           clang
           pkg-config
+          cargo-expand
         ];
       };
     };

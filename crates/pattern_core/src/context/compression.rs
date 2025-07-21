@@ -6,7 +6,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::genai_ext::ChatRoleExt;
 use crate::{CoreError, ModelProvider, Result, message::Message};
 
 /// Strategy for compressing messages when context is full

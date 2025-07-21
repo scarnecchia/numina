@@ -3,132 +3,17 @@
 //! These implementations provide the core entities that all deployments need,
 //! using the derive macro for minimal boilerplate and proper type separation.
 
-use crate::agent::AgentState;
 use crate::id::{AgentId, EventId, MemoryId, TaskId, TaskIdType, UserId};
+use crate::users::User;
 use chrono::{DateTime, Utc};
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
-// Base User Implementation
+// Base Agent Implementation - REMOVED
 // ============================================================================
-
-/// Base user entity with no extensions
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "user")]
-pub struct BaseUser {
-    pub id: UserId,
-    pub discord_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-
-    // Relations
-    #[entity(relation = "owns")]
-    pub owned_agent_ids: Vec<AgentId>,
-
-    #[entity(relation = "created")]
-    pub created_task_ids: Vec<TaskId>,
-
-    #[entity(relation = "remembers")]
-    pub memory_ids: Vec<MemoryId>,
-
-    #[entity(relation = "scheduled")]
-    pub scheduled_event_ids: Vec<EventId>,
-}
-
-impl Default for BaseUser {
-    fn default() -> Self {
-        let now = Utc::now();
-        Self {
-            id: UserId::generate(),
-            discord_id: None,
-            created_at: now,
-            updated_at: now,
-            owned_agent_ids: Vec::new(),
-            created_task_ids: Vec::new(),
-            memory_ids: Vec::new(),
-            scheduled_event_ids: Vec::new(),
-        }
-    }
-}
-
-// ============================================================================
-// Base Agent Implementation
-// ============================================================================
-
-/// Base agent type enum
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BaseAgentType {
-    /// Generic assistant agent
-    Assistant,
-    /// Custom agent with a string identifier
-    Custom(String),
-}
-
-impl Serialize for BaseAgentType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            BaseAgentType::Assistant => serializer.serialize_str("assistant"),
-            BaseAgentType::Custom(s) => serializer.serialize_str(s),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for BaseAgentType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "assistant" => Ok(BaseAgentType::Assistant),
-            custom => Ok(BaseAgentType::Custom(custom.to_string())),
-        }
-    }
-}
-
-/// Base agent entity
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "agent")]
-pub struct BaseAgent {
-    pub id: AgentId,
-    pub name: String,
-    pub agent_type: BaseAgentType,
-    pub state: AgentState,
-    pub model_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-
-    // Owner reference (not a relation to avoid circular dependency)
-    pub owner_id: UserId,
-
-    #[entity(relation = "assigned")]
-    pub assigned_task_ids: Vec<TaskId>,
-
-    #[entity(relation = "has_memory")]
-    pub memory_ids: Vec<MemoryId>,
-}
-
-impl Default for BaseAgent {
-    fn default() -> Self {
-        let now = Utc::now();
-        Self {
-            id: AgentId::generate(),
-            name: String::new(),
-            agent_type: BaseAgentType::Assistant,
-            state: AgentState::default(),
-            model_id: None,
-            created_at: now,
-            updated_at: now,
-            owner_id: UserId::nil(),
-            assigned_task_ids: Vec::new(),
-            memory_ids: Vec::new(),
-        }
-    }
-}
+// BaseAgent has been replaced by AgentRecord in the agent module.
+// BaseAgentType has been moved to the agent module as part of AgentType.
 
 // ============================================================================
 // Base Task Implementation
@@ -241,13 +126,13 @@ impl Default for BaseEvent {
 // ============================================================================
 
 use crate::agent::MemoryAccessLevel;
-use crate::id::{RelationId, RelationIdType};
+use surrealdb::RecordId;
 
 /// Edge entity for agent-memory relationships with access levels
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "agent_memories")]
+#[entity(entity_type = "agent_memories", edge = true)]
 pub struct AgentMemoryRelation {
-    pub id: RelationId,
+    pub id: Option<RecordId>,
     pub in_id: AgentId,
     pub out_id: MemoryId,
     pub access_level: MemoryAccessLevel,
@@ -257,7 +142,7 @@ pub struct AgentMemoryRelation {
 impl Default for AgentMemoryRelation {
     fn default() -> Self {
         Self {
-            id: RelationId::generate(),
+            id: None,
             in_id: AgentId::nil(),
             out_id: MemoryId::nil(),
             access_level: MemoryAccessLevel::Read,
@@ -283,7 +168,7 @@ pub async fn get_user_agents<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     user_id: &UserId,
 ) -> Result<Vec<AgentId>, crate::db::DatabaseError> {
-    let user = BaseUser::load_with_relations(db, *user_id).await?;
+    let user = User::load_with_relations(db, *user_id).await?;
     Ok(user.map(|u| u.owned_agent_ids).unwrap_or_default())
 }
 
@@ -292,7 +177,7 @@ pub async fn get_user_tasks<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     user_id: &UserId,
 ) -> Result<Vec<TaskId>, crate::db::DatabaseError> {
-    let user = BaseUser::load_with_relations(db, *user_id).await?;
+    let user = User::load_with_relations(db, *user_id).await?;
     Ok(user.map(|u| u.created_task_ids).unwrap_or_default())
 }
 
@@ -301,7 +186,8 @@ pub async fn get_agent_tasks<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     agent_id: &AgentId,
 ) -> Result<Vec<TaskId>, crate::db::DatabaseError> {
-    let agent = BaseAgent::load_with_relations(db, *agent_id).await?;
+    use crate::agent::AgentRecord;
+    let agent = AgentRecord::load_with_relations(db, *agent_id).await?;
     Ok(agent.map(|a| a.assigned_task_ids).unwrap_or_default())
 }
 
@@ -327,24 +213,6 @@ pub async fn get_task_subtasks<C: surrealdb::Connection>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_base_user_creation() {
-        let user = BaseUser::default();
-        assert!(user.discord_id.is_none());
-        assert!(user.created_at <= Utc::now());
-    }
-
-    #[test]
-    fn test_base_agent_creation() {
-        let agent = BaseAgent {
-            name: "Test Agent".to_string(),
-            agent_type: BaseAgentType::Custom("test".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(agent.name, "Test Agent");
-        assert!(matches!(agent.agent_type, BaseAgentType::Custom(ref s) if s == "test"));
-    }
 
     #[test]
     fn test_base_task_creation() {

@@ -11,9 +11,19 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 When starting work, check the TODO list below and load it into TodoWrite.
 When finishing work, update this list with any changes.
 
-## Recent Major Updates (2025-01-10)
+## Recent Major Updates (2025-07-21)
 
-### Entity System Integration ✅ COMPLETED
+### Message-Agent Relationships ✅ COMPLETED
+
+Successfully implemented proper graph relationships between agents and messages:
+
+1. **Created AgentMessageRelation edge entity** - Tracks message type, position, and metadata
+2. **Integrated ferroid for Snowflake IDs** - Distributed monotonic ordering for message positions
+3. **Fixed MessageId handling** - Preserves full string including prefix for API compatibility
+4. **Updated all queries** - Parameterized queries to prevent SQL injection
+5. **All tests passing** - Including edge cases with rapid message creation
+
+### Entity System Integration ✅ COMPLETED (2025-01-10)
 
 Successfully integrated the modular entity system throughout the codebase:
 
@@ -294,7 +304,17 @@ just pre-commit-all
 - ~~Set up SurrealDB integration for persistence~~ ✅ (2025-07-06)
 - ~~Implement modular entity system with SurrealDB RELATE~~ ✅ (2025-07-09)
 - ~~Integrate new entity system with existing code~~ ✅ (2025-01-10)
-- Implement agent groups in pattern-core (dynamic, supervisor, sleeptime managers) 🚧
+- ~~Create Message entity with chat types and search capabilities~~ ✅ (2025-07-21)
+- ~~Implement Message-Agent relationships with edge entities~~ ✅ (2025-07-21)
+- ~~Refactor DatabaseAgent for proper persistence and entity relationships~~ ✅ (2025-07-21)
+  - ~~Create granular persistence methods to replace monolithic update_agent_context~~ ✅
+  - ~~Implement message persistence with RELATE edges~~ ✅
+  - ~~Update memory blocks to use AgentMemoryRelation edge entities~~ ✅
+  - ~~Implement non-blocking database operations~~ ✅
+  - ~~Implement state persistence and database initialization~~ ✅
+- Implement message compression with archival when context window fills 🚧
+- Add live query for agent stats updates 🚧
+- Implement agent groups in pattern-core (dynamic, supervisor, sleeptime managers)
 - Add task CRUD operations to database module (schema ready, needs implementation)
 - Create task manager with ADHD-aware task breakdown
 - Add contract/client tracking (time, invoices, follow-ups)
@@ -307,49 +327,58 @@ just pre-commit-all
 - Add energy/attention monitoring (Momentum agent)
 - Add `/reload_config` Discord command to hot-reload model mappings and agent configs
 - Complete Ollama embedding provider implementation
+- Create Task and Event entities using Entity derive macro
 
 ### Low Priority
 - Add activity monitoring for interruption detection
 - Bluesky integration for public accountability posts (see docs/BLUESKY_SHAME_FEATURE.md)
 - Support additional Candle models (BERT dtype issues need fixing)
+- Add Entity derive to ToolCall from db/schema.rs
+- Add Entity derive to EnergyLevel from db/schema.rs
 
 ### Completed
 Recent completions (keeping last 2 weeks):
-- [x] Implement modular database entity system with macros (2025-07-09)
-- [x] Migrate all entities to use SurrealDB RELATE instead of foreign keys(2025-07-09)
-- [x] Move ADHD-specific types from core to pattern-nd (2025-07-09)
-- [x] Create relationship helper functions for common patterns (2025-07-09)
-- [x] Remove EntityRegistry and ExtensibleEntity in favor of macros (2025-07-09)
-- [x] Implement schedule_event MCP tool with database storage (2025-07-05)
-- [x] Implement check_activity_state MCP tool with energy state tracking (2025-07-05)
-- [x] Add record_energy_state MCP tool for tracking ADHD energy/attention states (2025-07-05)
-- [x] Refactor caching from SQLite KV store to foyer library (disk-backed async cache) (2025-07-05)
-- [x] Fixed MCP tool schema issues - removed references, enums, nested structs, unsigned ints (2025-07-05)
-- [x] Implement custom tiered sleeptime monitor with rules-based checks and Pattern intervention (2025-07-06)
-- [x] Refactored to multi-crate workspace structure (2025-07-06)
-- [x] Created pattern-core with agent framework, memory system, and tool registry (2025-07-06)
-- [x] Created pattern-nd with ADHD-specific tools and agent personalities (2025-07-06)
-- [x] Created pattern-mcp with MCP server implementation (2025-07-06)
-- [x] Created pattern-discord with Discord bot functionality (2025-07-06)
-- [x] Implemented rich error types using miette for all crates (2025-07-06)
-- [x] Removed C dependencies (using SurrealDB without rocksdb, rustls instead of native TLS) (2025-07-06)
-- [x] Set up proper Nix flake for workspace builds (2025-07-06)
-- [x] Implemented type-safe database operations with custom ID types (2025-07-06)
-- [x] Fixed SurrealDB value unwrapping for all wrapped types (2025-07-06)
-- [x] Optimized test suite by moving slow tests to integration tests (2025-07-06)
+- [x] Eliminate redundant extension traits in db::ops (2025-07-21)
+  - Converted AgentContextExt, MemoryOpsExt, LiveQueryExt, VectorSearchExt to free functions
+  - Updated all usages throughout codebase (tests, DatabaseAgent)
+  - Cleaner API without needing trait imports
+- [x] Refactor DatabaseAgent for proper persistence and entity relationships (2025-07-21)
+  - Created granular persistence methods in db::ops (free functions, not extension traits)
+  - Implemented non-blocking database operations with tokio::spawn
+  - Message persistence with RELATE edges and Snowflake positions
+  - Memory blocks use AgentMemoryRelation edge entities
+  - Full state restoration from AgentRecord
+  - Optimistic updates - UI responds immediately while DB syncs in background
+  - Implemented all previously stubbed methods:
+    - Agent state persistence with set_state()
+    - Memory sharing with share_memory_with() using edge entities
+    - Shared memory queries with get_shared_memories()
+    - Tool call persistence tracking execution time and results
+- [x] Implement Message-Agent relationships with edge entities (2025-07-21)
+  - Created AgentMessageRelation edge entity with position tracking
+  - Integrated ferroid for distributed Snowflake ID generation
+  - Fixed MessageId handling to preserve full string for API compatibility
+  - Converted all queries to parameterized format to prevent SQL injection
+- [x] Create Message entity with Entity derive and chat types (2025-07-21)
+- [x] Implement message search helpers (text, role, date range, embeddings) (2025-07-21)
+- [x] Add selective embedding loading for messages (2025-07-21)
+- [x] Set up full-text search with SurrealDB analyzer and BM25 index (2025-07-21)
+- [x] Move query_messages to db::ops with flexible query builder design (2025-07-21)
+- [x] Fix all message database tests with proper RecordId format (2025-07-21)
+- [x] Enable full-text search in message tests (2025-07-21)
+- [x] Integrate entity system - removed old db models, using macro-generated types (2025-01-10)
+- [x] Refactored SurrealExt into focused extension traits (VectorSearchExt, LiveQueryExt, etc.) (2025-01-10)
+- [x] Updated all examples and tests to use new entity-based API (2025-01-10)
 - [x] Implemented built-in tools system for agents (update_memory, send_message) (2025-07-09)
 - [x] Refactored AgentContext to separate cheap handles from expensive message history (2025-07-09)
 - [x] Made DatabaseAgent generic over ModelProvider and EmbeddingProvider (2025-07-09)
 - [x] Implemented type-safe tool system with MCP-compatible schema generation (2025-07-09)
 - [x] Added Arc to Memory's internal DashMap for thread-safe sharing (2025-07-09)
 - [x] Fixed ID format consistency (all IDs now use underscore separator) (2025-07-09)
-- [x] Integrated entity system - removed old db models, using macro-generated types (2025-01-10)
-- [x] Refactored SurrealExt into focused extension traits (VectorSearchExt, LiveQueryExt, etc.) (2025-01-10)
-- [x] Updated all examples and tests to use new entity-based API (2025-01-10)
 
 ## Current Status
 
-**Last Updated**: 2025-07-09
+**Last Updated**: 2025-07-21
 
 ### System Architecture ✅
 - **Unified binary** with feature flags (`discord`, `mcp`, `binary`, `full`)
@@ -362,7 +391,23 @@ Recent completions (keeping last 2 weeks):
 - **Built-in tools**: Type-safe agent tools (update_memory, send_message) with customizable implementations
 - **Generic agents**: DatabaseAgent is generic over ModelProvider and EmbeddingProvider
 
-### Recent Achievements (2025-07-09)
+### Recent Achievements (2025-07-21)
+- **DatabaseAgent Refactoring Complete**: Fully integrated with new entity system and edge relationships
+  - Granular persistence methods in db::ops (free functions, not extension traits)
+  - Non-blocking database operations - all persistence happens in background
+  - Messages and memory blocks properly persisted with RELATE edges
+  - Full state recovery from AgentRecord with all relations
+  - Optimistic updates ensure responsive UI while DB syncs
+- **Message-Agent Relationships**: Proper graph relationships with edge entities
+  - AgentMessageRelation tracks position (Snowflake ID), type, and metadata
+  - Message ordering preserved across restarts
+  - Support for Active, Archived, and Shared message types
+- **Message Entity System**: Complete with search and embedding support
+  - Full-text search with SurrealDB indices
+  - Flexible query builder for complex searches
+  - Selective embedding loading for performance
+
+### Previous Achievements (2025-07-09)
 - **Built-in tools system**: Agents now have standard tools (update_memory, send_message) that can be customized
 - **AgentContext refactor**: Separated cheap AgentHandle from expensive MessageHistory
 - **Thread-safe memory**: Added Arc to Memory's DashMap for efficient sharing
