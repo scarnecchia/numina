@@ -279,15 +279,19 @@ impl ContextBuilder {
             .len()
             .saturating_sub(self.config.max_context_messages);
 
+        let active_message_count = self.messages.len();
+
         if self.config.model_adjustments.use_xml_tags {
             format!(
                 "<memory_metadata>
 - The current time is: {}
 - Memory blocks were last modified: {}
-- {} previous messages between you and the user are stored in recall memory (use tools to access them)
+- {} messages are in the current conversation
+- {} additional messages are stored in recall memory (use tools to access them)
 </memory_metadata>",
                 self.current_time.format("%Y-%m-%d %I:%M:%S %p UTC%z"),
                 last_modified.format("%Y-%m-%d %I:%M:%S %p UTC%z"),
+                active_message_count,
                 recall_count
             )
         } else {

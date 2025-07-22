@@ -54,6 +54,29 @@ pub mod duration_secs {
     }
 }
 
+/// Serde helpers for serializing Duration (not optional) as milliseconds
+pub mod serde_duration {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
+
+    /// Serialize a Duration as milliseconds
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        duration.as_millis().serialize(serializer)
+    }
+
+    /// Deserialize milliseconds into a Duration
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis: u64 = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
+}
+
 /// Format a duration in a human-readable way
 pub fn format_duration(duration: std::time::Duration) -> String {
     let total_secs = duration.as_secs();

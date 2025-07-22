@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use pattern_core::{
-    agent::{AgentRecord, AgentState, AgentType, MemoryAccessLevel},
+    agent::{AgentRecord, AgentType, MemoryAccessLevel},
     db::{
         DatabaseError,
         entity::{AgentMemoryRelation, DbEntity},

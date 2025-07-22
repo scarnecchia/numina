@@ -30,7 +30,7 @@ pub trait Agent: Send + Sync + Debug {
     fn id(&self) -> AgentId;
 
     /// Get the agent's name
-    fn name(&self) -> &str;
+    fn name(&self) -> String;
 
     /// Get the agent's type
     fn agent_type(&self) -> AgentType;
@@ -87,7 +87,7 @@ pub trait Agent: Send + Sync + Debug {
     fn state(&self) -> AgentState;
 
     /// Update the agent's state
-    async fn set_state(&mut self, state: AgentState) -> Result<()>;
+    async fn set_state(&self, state: AgentState) -> Result<()>;
 }
 
 /// Access levels for shared memory

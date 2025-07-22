@@ -12,6 +12,7 @@ pub mod error;
 pub use pattern_core::prelude::*;
 
 /// Main Pattern service that orchestrates all components
+#[allow(dead_code)]
 pub struct PatternService {
     core: Arc<pattern_core::Constellation>,
     #[cfg(feature = "discord")]

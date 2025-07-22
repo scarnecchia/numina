@@ -191,11 +191,19 @@ impl AgentRecord {
             )
         };
 
+        tracing::debug!(
+            "Loading message history for agent {}: query={}",
+            self.id,
+            query
+        );
+
         let mut result = db
             .query(&query)
             .bind(("agent_id", surrealdb::RecordId::from(&self.id)))
             .await
             .map_err(crate::db::DatabaseError::QueryFailed)?;
+
+        tracing::trace!("Message history query result: {:?}", result);
 
         // First get the DB models (which have the serde rename attributes)
         use crate::db::entity::DbEntity;
@@ -203,6 +211,12 @@ impl AgentRecord {
             result
                 .take(0)
                 .map_err(crate::db::DatabaseError::QueryFailed)?;
+
+        tracing::debug!(
+            "Found {} agent_messages relations for agent {}",
+            relation_db_models.len(),
+            self.id
+        );
 
         // Convert DB models to domain types
         let relations: Vec<crate::message::AgentMessageRelation> = relation_db_models
@@ -217,12 +231,33 @@ impl AgentRecord {
         let mut messages_with_relations = Vec::new();
 
         for relation in relations {
+            tracing::trace!(
+                "Loading message for relation: message_id={:?}, type={:?}, position={}",
+                relation.out_id,
+                relation.message_type,
+                relation.position
+            );
+
             if let Some(message) =
                 crate::message::Message::load_with_relations(db, &relation.out_id).await?
             {
+                tracing::trace!(
+                    "Loaded message: id={:?}, role={:?}, content_len={}",
+                    message.id,
+                    message.role,
+                    message.text_content().map(|s| s.len()).unwrap_or(0)
+                );
                 messages_with_relations.push((message, relation));
+            } else {
+                tracing::warn!("Message {:?} not found in database", relation.out_id);
             }
         }
+
+        tracing::debug!(
+            "Total messages loaded for agent {}: {}",
+            self.id,
+            messages_with_relations.len()
+        );
 
         Ok(messages_with_relations)
     }

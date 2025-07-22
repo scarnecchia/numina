@@ -94,6 +94,8 @@ impl ResponseOptions {
                 response_format: self.response_format.clone(),
                 capture_usage: self.capture_usage,
                 capture_tool_calls: self.capture_tool_calls,
+                extra_headers: None,
+                seed: None,
             },
         )
     }
@@ -146,6 +148,47 @@ pub struct GenAiClient {
     available_endpoints: Vec<AdapterKind>,
 }
 
+impl GenAiClient {
+    /// Create a new GenAiClient with the default configuration
+    /// This will use environment variables for API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+    pub async fn new() -> Result<Self> {
+        let client = genai::Client::default();
+
+        // Discover available endpoints based on configured API keys
+        let mut available_endpoints = Vec::new();
+
+        // Check which providers have API keys configured
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::OpenAI);
+        }
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::Anthropic);
+        }
+        if std::env::var("GEMINI_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::Gemini);
+        }
+        if std::env::var("GROQ_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::Groq);
+        }
+        if std::env::var("COHERE_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::Cohere);
+        }
+
+        Ok(Self {
+            client,
+            available_endpoints,
+        })
+    }
+
+    /// Create a new GenAiClient with specific endpoints
+    pub fn with_endpoints(client: genai::Client, endpoints: Vec<AdapterKind>) -> Self {
+        Self {
+            client,
+            available_endpoints: endpoints,
+        }
+    }
+}
+
 #[async_trait]
 impl ModelProvider for GenAiClient {
     fn name(&self) -> &str {
@@ -163,14 +206,14 @@ impl ModelProvider for GenAiClient {
                 .expect("Fix error handling here");
 
             for model in models {
-                let model_iden = self
+                let _model_iden = self
                     .client
                     .resolve_service_target(&model)
                     .await
                     .expect("Fix error handling here");
                 model_strings.push(ModelInfo {
                     provider: endpoint.to_string(),
-                    id: model_iden.model.to_string(),
+                    id: model.clone(), // Use the clean model name, not the formatted one
                     name: model,
                     capabilities: vec![
                         ModelCapability::FunctionCalling,
@@ -191,15 +234,25 @@ impl ModelProvider for GenAiClient {
     /// Generate a completion
     async fn complete(&self, options: &ResponseOptions, request: Request) -> Result<Response> {
         let (model_info, chat_options) = options.to_chat_options_tuple();
-        let response = self
+
+        // Log the full request
+        let chat_request = request.as_chat_request();
+        tracing::trace!("Chat Request:\n{:#?}", chat_request);
+
+        let response = match self
             .client
-            .exec_chat(
-                &model_info.id,
-                request.as_chat_request(),
-                Some(&chat_options),
-            )
+            .exec_chat(&model_info.id, chat_request, Some(&chat_options))
             .await
-            .expect("handle errors for genai");
+        {
+            Ok(response) => {
+                tracing::trace!("GenAI Response: {:#?}", response);
+                response
+            }
+            Err(e) => {
+                tracing::error!("GenAI API error: {:?}", e);
+                return Err(crate::CoreError::model_error("genai", &model_info.id, e));
+            }
+        };
 
         Ok(Response::from_chat_response(response))
     }

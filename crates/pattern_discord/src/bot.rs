@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::{CommandHandler, DiscordContext, MessageRouter, Result};
+use crate::{CommandHandler, MessageRouter, Result};
 
 /// The main Discord bot that handles all Discord interactions
+#[allow(dead_code)]
 pub struct DiscordBot {
     client: serenity::Client,
     config: DiscordBotConfig,
@@ -105,10 +106,11 @@ impl DiscordBot {
     }
 
     /// Send a message to a channel
+
     pub async fn send_message(
         &self,
-        channel_id: serenity::model::id::ChannelId,
-        content: impl Into<String>,
+        _channel_id: serenity::model::id::ChannelId,
+        _content: impl Into<String>,
     ) -> Result<serenity::model::channel::Message> {
         // This would send a message through the Discord API
         todo!("Implement message sending")

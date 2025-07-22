@@ -1,13 +1,12 @@
 //! Database operations - direct, simple, no unnecessary abstractions
 
 use super::{DatabaseError, Result, entity::DbEntity};
-
 use serde_json::json;
 use surrealdb::{Connection, Surreal};
 
 use crate::MessageId;
 use crate::embeddings::EmbeddingProvider;
-use crate::id::{AgentId, IdType, MemoryId, MemoryIdType};
+use crate::id::{AgentId, AgentIdType, IdType, MemoryId, MemoryIdType};
 use crate::memory::MemoryBlock;
 use crate::message::Message;
 
@@ -662,8 +661,16 @@ pub async fn persist_agent_message<C: Connection>(
     message: &Message,
     message_type: crate::message::MessageRelationType,
 ) -> Result<()> {
+    tracing::debug!(
+        "Persisting message for agent {}: message_id={:?}, type={:?}",
+        agent_id,
+        message.id,
+        message_type
+    );
+
     // First, store the message
     let stored_message = message.store_with_relations(conn).await?;
+    tracing::debug!("Stored message with id: {:?}", stored_message.id);
 
     // Then create the agent-message relation with position
     let position = crate::agent::get_next_message_position().await;
@@ -673,11 +680,19 @@ pub async fn persist_agent_message<C: Connection>(
         in_id: agent_id,
         out_id: stored_message.id.clone(),
         message_type,
-        position,
+        position: position.clone(),
         added_at: Utc::now(),
     };
 
-    create_relation_typed(conn, &relation).await?;
+    tracing::debug!(
+        "Creating agent_messages relation: agent={}, message={:?}, position={}",
+        agent_id,
+        stored_message.id,
+        position
+    );
+
+    let created_relation = create_relation_typed(conn, &relation).await?;
+    tracing::debug!("Created relation: {:?}", created_relation);
 
     Ok(())
 }
@@ -759,20 +774,57 @@ pub async fn update_agent_stats<C: Connection>(
     agent_id: AgentId,
     stats: &crate::context::state::AgentStats,
 ) -> Result<()> {
-    let update = json!({
-        "total_messages": stats.total_messages,
-        "total_tool_calls": stats.total_tool_calls,
-        "last_active": surrealdb::Datetime::from(stats.last_active),
-        "updated_at": surrealdb::Datetime::from(Utc::now()),
-    });
+    // Use query builder to properly handle datetime types
+    let query = r#"
+        UPDATE agent
+        SET
+            total_messages = $total_messages,
+            total_tool_calls = $total_tool_calls,
+            last_active = $last_active,
+            updated_at = $updated_at
+        WHERE id = $id
+    "#;
 
-    let _: Option<serde_json::Value> = conn
-        .update(RecordId::from(agent_id))
-        .merge(update)
+    let resp: surrealdb::Response = conn
+        .query(query)
+        .bind(("id", RecordId::from(agent_id)))
+        .bind(("total_messages", stats.total_messages))
+        .bind(("total_tool_calls", stats.total_tool_calls))
+        .bind(("last_active", surrealdb::Datetime::from(stats.last_active)))
+        .bind(("updated_at", surrealdb::Datetime::from(Utc::now())))
         .await
         .map_err(DatabaseError::QueryFailed)?;
 
+    tracing::debug!("stats updated {:?}", resp.pretty_debug());
+
     Ok(())
+}
+
+/// Subscribe to agent stats updates
+pub async fn subscribe_to_agent_stats<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+) -> Result<impl Stream<Item = (Action, crate::agent::AgentRecord)>> {
+    let stream = conn
+        .select((AgentIdType::PREFIX, agent_id.uuid().to_string()))
+        .live()
+        .await
+        .map_err(DatabaseError::QueryFailed)?;
+
+    Ok(stream.filter_map(
+        |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
+            match notif {
+                Ok(Notification { action, data, .. }) => {
+                    if let Ok(agent) = serde_json::from_value::<crate::agent::AgentRecord>(data) {
+                        Some((action, agent))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        },
+    ))
 }
 
 /// Load full agent state from database

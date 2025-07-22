@@ -245,7 +245,7 @@ impl ToolRegistry {
     pub fn get(
         &self,
         name: &str,
-    ) -> Option<dashmap::mapref::one::Ref<CompactString, Box<dyn DynamicTool>>> {
+    ) -> Option<dashmap::mapref::one::Ref<'_, CompactString, Box<dyn DynamicTool>>> {
         self.tools.get(name)
     }
 

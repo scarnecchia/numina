@@ -185,12 +185,25 @@ impl AgentContext {
 
         // Build context with read lock
         let history = self.history.read().await;
+        tracing::debug!(
+            "Building context for agent {}: {} messages in history, max_context_messages={}",
+            self.handle.agent_id,
+            history.messages.len(),
+            self.context_config.max_context_messages
+        );
+
         let context =
             ContextBuilder::new(self.handle.agent_id.clone(), self.context_config.clone())
                 .with_memory_blocks(memory_blocks)
                 .with_tools_from_registry(&self.tools)
                 .with_messages(history.messages.clone())
                 .build()?;
+
+        tracing::debug!(
+            "Built context with {} messages, system_prompt length={} chars",
+            context.messages.len(),
+            context.system_prompt.len()
+        );
 
         Ok(context)
     }
@@ -273,18 +286,36 @@ impl AgentContext {
             )
             .await?;
 
-        self.apply_compression_result(&mut history, result)?;
+        let archived_ids = self.apply_compression_result(&mut history, result)?;
         history.last_compression = Utc::now();
         self.metadata.write().await.compression_events += 1;
+
+        // Return the archived IDs so the caller can persist them to the database
+        // For now, just log that compression happened
+        if !archived_ids.is_empty() {
+            tracing::info!(
+                "Compressed {} messages for agent {}, ready to archive in database",
+                archived_ids.len(),
+                self.handle.agent_id
+            );
+        }
+
         Ok(())
     }
 
-    /// Apply compression result to state
+    /// Apply compression result to state and return archived message IDs
     fn apply_compression_result(
         &self,
         history: &mut MessageHistory,
         result: CompressionResult,
-    ) -> Result<()> {
+    ) -> Result<Vec<crate::MessageId>> {
+        // Collect message IDs that will be archived
+        let archived_ids: Vec<crate::MessageId> = result
+            .archived_messages
+            .iter()
+            .map(|msg| msg.id.clone())
+            .collect();
+
         // Move compressed messages to archive
         history.archived_messages.extend(result.archived_messages);
 
@@ -300,7 +331,8 @@ impl AgentContext {
             }
         }
 
-        Ok(())
+        // Return the archived message IDs for the caller to persist
+        Ok(archived_ids)
     }
 
     /// Search through message history (including archived)

@@ -243,6 +243,20 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
     }
 }
 
+/// Macro to define new ID types with minimal boilerplate
+#[macro_export]
+macro_rules! define_id_type {
+    ($type_name:ident, $prefix:expr) => {
+        /// Marker type for the ID
+        #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+        pub struct $type_name;
+
+        impl $crate::id::IdType for $type_name {
+            const PREFIX: &'static str = $prefix;
+        }
+    };
+}
+
 // Implement common ID types
 //
 /// Type alias for Message IDs (these are just strings for compat with API)
@@ -254,6 +268,7 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
 #[repr(transparent)]
 pub struct RelationId(pub String);
 
+// RelationId is special and doesn't use the macro
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct RelationIdType;
 
@@ -275,70 +290,30 @@ impl From<RelationId> for RecordId {
     }
 }
 
-/// Marker type for Agent IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct AgentIdType;
-
-impl IdType for AgentIdType {
-    const PREFIX: &'static str = "agent";
-}
+// Define common ID types using the macro
+define_id_type!(AgentIdType, "agent");
+define_id_type!(UserIdType, "user");
+define_id_type!(ConversationIdType, "convo");
+define_id_type!(TaskIdType, "task");
+define_id_type!(ToolCallIdType, "toolcall");
 
 /// Type alias for Agent IDs
 pub type AgentId = Id<AgentIdType>;
 
-/// Marker type for User IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct UserIdType;
-
-impl IdType for UserIdType {
-    const PREFIX: &'static str = "user";
-}
-
 /// Type alias for User IDs
 pub type UserId = Id<UserIdType>;
-
-/// Marker type for Conversation IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct ConversationIdType;
-
-impl IdType for ConversationIdType {
-    const PREFIX: &'static str = "convo";
-}
 
 /// Type alias for Conversation IDs
 pub type ConversationId = Id<ConversationIdType>;
 
-/// Marker type for Task IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct TaskIdType;
-
-impl IdType for TaskIdType {
-    const PREFIX: &'static str = "task";
-}
-
 /// Type alias for Task IDs
 pub type TaskId = Id<TaskIdType>;
-
-/// Marker type for Tool Call IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct ToolCallIdType;
-
-impl IdType for ToolCallIdType {
-    const PREFIX: &'static str = "toolcall";
-}
 
 /// Type alias for Tool Call IDs
 pub type ToolCallId = Id<ToolCallIdType>;
 
-/// Type alias for Message IDs (these are just strings for compat with API)
-///
-/// Type marker for Message IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct MessageIdType;
-
-impl IdType for MessageIdType {
-    const PREFIX: &'static str = "msg";
-}
+// MessageIdType uses the macro
+define_id_type!(MessageIdType, "msg");
 
 /// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
 /// format because it needs to be compatible with Anthropic/OpenAI APIs which
@@ -389,71 +364,37 @@ impl From<&MessageId> for RecordId {
     }
 }
 
-/// Marker type for Memory Block IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct MemoryIdType;
-
-impl IdType for MemoryIdType {
-    const PREFIX: &'static str = "mem";
-}
+// More ID types using the macro
+define_id_type!(MemoryIdType, "mem");
+define_id_type!(EventIdType, "event");
+define_id_type!(SessionIdType, "session");
 
 /// Type alias for Memory Block IDs
 pub type MemoryId = Id<MemoryIdType>;
 
-/// Marker type for Event IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct EventIdType;
-
-impl IdType for EventIdType {
-    const PREFIX: &'static str = "event";
-}
-
 /// Type alias for Event IDs
 pub type EventId = Id<EventIdType>;
-
-/// Marker type for Session IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct SessionIdType;
-
-impl IdType for SessionIdType {
-    const PREFIX: &'static str = "session";
-}
 
 /// Type alias for Session IDs
 pub type SessionId = Id<SessionIdType>;
 
-/// Marker type for Session IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct ModelIdType;
+// Define new ID types using the macro
+define_id_type!(ModelIdType, "model");
+define_id_type!(RequestIdType, "request");
+define_id_type!(GroupIdType, "group");
+define_id_type!(ConstellationIdType, "const");
 
-impl IdType for ModelIdType {
-    const PREFIX: &'static str = "model";
-}
+/// Type alias for Model IDs
+pub type ModelId = Id<ModelIdType>;
 
-/// Type alias for Session IDs
-pub type ModelId = Id<RequestIdType>;
-
-/// Marker type for Session IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct RequestIdType;
-
-impl IdType for RequestIdType {
-    const PREFIX: &'static str = "request";
-}
-
-/// Type alias for Session IDs
+/// Type alias for Request IDs
 pub type RequestId = Id<RequestIdType>;
-
-/// Marker type for Group IDs
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct GroupIdType;
-
-impl IdType for GroupIdType {
-    const PREFIX: &'static str = "group";
-}
 
 /// Type alias for Group IDs
 pub type GroupId = Id<GroupIdType>;
+
+/// Type alias for Constellation IDs
+pub type ConstellationId = Id<ConstellationIdType>;
 
 #[cfg(test)]
 mod tests {

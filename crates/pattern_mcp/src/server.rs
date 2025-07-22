@@ -5,6 +5,7 @@ use crate::{Result, ToolRegistry, Transport};
 
 /// The main MCP server that handles client connections and tool execution
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct McpServer {
     registry: Arc<RwLock<ToolRegistry>>,
     transport: Arc<dyn Transport>,
