@@ -319,3 +319,32 @@ Leverage Letta's 4-tier memory with local storage:
 - **Archival**: SQLite + HNSW for unlimited storage with vector search
 - **Message**: Recent history in Sled cache
 - **Recall**: Semantic search via HNSW index
+
+### Built-in Agent Tools
+
+Pattern agents come with built-in tools for core functionality:
+
+```rust
+// Tool registration happens automatically
+let builtin = BuiltinTools::default_for_agent(agent_handle);
+builtin.register_all(&tool_registry);
+```
+
+**Standard Tools**:
+- `update_memory`: Create/update persistent memory blocks
+- `send_message`: Send to users, agents, groups, or channels
+- `search_memory`: Semantic search across memory (planned)
+- `schedule_reminder`: Time-based reminders (planned)
+
+**Customization**:
+```rust
+// Replace with custom implementations
+let builtin = BuiltinTools::builder()
+    .with_memory_tool(RedisMemoryTool::new(redis))
+    .build_for_agent(handle);
+```
+
+**AgentHandle Architecture**:
+- Lightweight, cloneable access to agent internals
+- Separates cheap data (ID, memory) from expensive (messages)
+- Thread-safe with Arc<DashMap> for memory storage

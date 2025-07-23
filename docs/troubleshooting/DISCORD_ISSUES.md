@@ -4,7 +4,7 @@ This document tracks known issues with Discord integration and their solutions.
 
 ## Inter-Agent Communication Issues & Fixes
 
-**Critical Issues Discovered (2025-01-03)**
+**Critical Issues Discovered (2025-07-03)**
 
 We discovered several critical issues with inter-agent communication that can cause infinite loops and confusing behavior:
 
@@ -178,7 +178,7 @@ async fn handle_analysis_command(
 }
 ```
 
-## Agent Messaging Loops (Fixed 2025-01-04)
+## Agent Messaging Loops (Fixed 2025-07-04)
 
 ### The Name Prefix Bug
 Agents would get stuck in infinite loops when asked to prefix their messages with their names:

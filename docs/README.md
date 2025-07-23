@@ -27,6 +27,11 @@ Pattern is a multi-agent cognitive support system designed specifically for ADHD
 
 ### 📖 API References
 - [Letta API Reference](api/LETTA_API_REFERENCE.md) - Common Letta API patterns and gotchas
+- [Database API](api/DATABASE_API.md) - Database operations and schema
+
+### 🐛 Troubleshooting
+- [Discord Issues](troubleshooting/DISCORD_ISSUES.md) - Known Discord integration issues
+- [SurrealDB Issues](troubleshooting/SURREAL_ISSUES.md) - Common SurrealDB problems and solutions
 
 ### 🎯 Feature Concepts
 - [Bluesky Shame Feature](BLUESKY_SHAME_FEATURE.md) - Public accountability posts concept
