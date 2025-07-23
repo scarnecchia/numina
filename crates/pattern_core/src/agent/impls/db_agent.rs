@@ -7,30 +7,33 @@ use std::sync::Arc;
 use surrealdb::Surreal;
 use tokio::sync::RwLock;
 
-// use crate::tool::builtin::BuiltinTools;
+use crate::tool::builtin::BuiltinTools;
 
 use crate::{
-    CoreError, MemoryBlock, ModelProvider, Result, UserId,
-    agent::{Agent, AgentMemoryRelation, AgentState, AgentType, MemoryAccessLevel},
+    CoreError, MemoryBlock, MessageId, ModelProvider, Result, UserId,
+    agent::{Agent, AgentMemoryRelation, AgentState, AgentType},
     context::{AgentContext, ContextConfig},
     db::{DatabaseError, ops, schema},
     embeddings::EmbeddingProvider,
     id::AgentId,
     memory::Memory,
-    message::{Message, Request, Response},
+    message::{
+        ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Request, Response,
+    },
     model::ResponseOptions,
     tool::{DynamicTool, ToolRegistry},
 };
+use chrono::Utc;
 
 /// A concrete agent implementation backed by the database
 pub struct DatabaseAgent<C, M, E>
 where
-    C: surrealdb::Connection,
+    C: surrealdb::Connection + Clone,
 {
     /// The user who owns this agent
     pub user_id: UserId,
     /// The agent's context (includes all state)
-    context: Arc<RwLock<AgentContext>>,
+    context: Arc<RwLock<AgentContext<C>>>,
 
     /// model provider
     model: Arc<RwLock<M>>,
@@ -38,7 +41,7 @@ where
     /// model configuration
     pub chat_options: Arc<RwLock<Option<ResponseOptions>>>,
     /// Database connection
-    db: Arc<Surreal<C>>,
+    db: Surreal<C>,
 
     /// Embedding provider for semantic search
     embeddings: Option<Arc<E>>,
@@ -46,7 +49,7 @@ where
 
 impl<C, M, E> DatabaseAgent<C, M, E>
 where
-    C: surrealdb::Connection,
+    C: surrealdb::Connection + Clone + std::fmt::Debug,
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
@@ -62,7 +65,7 @@ where
         name: String,
         system_prompt: String,
         memory: Memory,
-        db: Arc<Surreal<C>>,
+        db: Surreal<C>,
         model: Arc<RwLock<M>>,
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
@@ -80,10 +83,13 @@ where
             AgentContext::new(agent_id, name, agent_type, memory, tools, context_config);
         context.handle.state = AgentState::Ready;
 
+        // Wire up database connection to handle for archival memory tools
+        context.handle = context.handle.with_db(db.clone());
+
         // Register built-in tools
         // TODO: Fix tool schema for Gemini compatibility
-        // let builtin = BuiltinTools::default_for_agent(context.handle());
-        // builtin.register_all(&context.tools);
+        let builtin = BuiltinTools::default_for_agent(context.handle());
+        builtin.register_all(&context.tools);
 
         Self {
             user_id,
@@ -101,7 +107,7 @@ where
     /// The model provider, tools, and embeddings are injected at runtime.
     pub async fn from_record(
         record: crate::agent::AgentRecord,
-        db: Arc<Surreal<C>>,
+        db: Surreal<C>,
         model: Arc<RwLock<M>>,
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
@@ -273,12 +279,12 @@ where
     }
 
     /// Start background task to sync memory updates via live queries
-    pub async fn start_memory_sync(self: Arc<Self>) -> Result<()> {
+    pub async fn start_memory_sync(&self) -> Result<()> {
         let (agent_id, memory) = {
             let context = self.context.read().await;
             (context.handle.agent_id, context.handle.memory.clone())
         };
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
 
         // Spawn background task to handle updates
         tokio::spawn(async move {
@@ -331,7 +337,7 @@ where
                         // Update other fields if present
                         if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
                             block.id = memory_block.id;
-                            // owner_id is now managed via RELATE, not stored on the entity
+                            block.owner_id = memory_block.owner_id;
                             block.description = memory_block.description;
                             block.metadata = memory_block.metadata;
                             block.embedding_model = memory_block.embedding_model;
@@ -381,7 +387,7 @@ where
                         // Update other fields if present
                         if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
                             block.id = memory_block.id;
-                            // owner_id is now managed via RELATE, not stored on the entity
+                            block.owner_id = memory_block.owner_id;
                             block.description = memory_block.description;
                             block.metadata = memory_block.metadata;
                             block.embedding_model = memory_block.embedding_model;
@@ -415,7 +421,7 @@ where
 
     /// Start background task to sync agent stats updates with UI
     pub async fn start_stats_sync(&self) -> Result<()> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let (agent_id, metadata, history) = {
             let context = self.context.read().await;
             (
@@ -594,7 +600,7 @@ where
                 }
 
                 // Also update the agent record's message summary in background
-                let db = Arc::clone(&self.db);
+                let db = self.db.clone();
                 let agent_id = context.handle.agent_id;
                 let summary = new_summary;
                 tokio::spawn(async move {
@@ -628,7 +634,7 @@ where
 
         // Persist archived message IDs to database in background
         if !archived_ids.is_empty() {
-            let db = Arc::clone(&self.db);
+            let db = self.db.clone();
             let agent_id = {
                 let context = self.context.read().await;
                 context.handle.agent_id
@@ -650,11 +656,84 @@ where
 
         Ok(())
     }
+
+    /// Persist memory changes to database
+    async fn persist_memory_changes(&self) -> Result<()> {
+        let context = self.context.read().await;
+        let memory = &context.handle.memory;
+
+        // Get the lists of blocks that need persistence
+        let new_blocks = memory.get_new_blocks();
+        let dirty_blocks = memory.get_dirty_blocks();
+
+        tracing::debug!(
+            "Persisting memory changes: {} new blocks, {} dirty blocks",
+            new_blocks.len(),
+            dirty_blocks.len()
+        );
+
+        // Handle new blocks - need to create and attach to agent
+        for block_id in &new_blocks {
+            if let Some(block) = memory
+                .get_all_blocks()
+                .into_iter()
+                .find(|b| &b.id == block_id)
+            {
+                tracing::debug!("Creating new memory block {} in database", block.label);
+
+                // Store the new block
+                let stored = block.store_with_relations(&self.db).await?;
+
+                // Attach to agent
+                match ops::attach_memory_to_agent(
+                    &self.db,
+                    context.handle.agent_id.clone(),
+                    stored.id,
+                    block.permission,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        tracing::debug!("Attached memory block {} to agent", stored.label);
+                    }
+                    Err(e) => {
+                        // This shouldn't happen for new blocks
+                        tracing::warn!(
+                            "Failed to attach new memory block {} to agent: {}",
+                            stored.label,
+                            e
+                        );
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
+        // Handle dirty blocks - just need to update
+        for block_id in &dirty_blocks {
+            if let Some(block) = memory
+                .get_all_blocks()
+                .into_iter()
+                .find(|b| &b.id == block_id)
+            {
+                tracing::debug!("Updating dirty memory block {} in database", block.label);
+
+                // Update the block (store_with_relations will upsert)
+                block.store_with_relations(&self.db).await?;
+            }
+        }
+
+        // Clear the tracking sets after successful persistence
+        memory.clear_new_blocks();
+        memory.clear_dirty_blocks();
+
+        Ok(())
+    }
 }
 
 impl<C, M, E> std::fmt::Debug for DatabaseAgent<C, M, E>
 where
-    C: surrealdb::Connection,
+    C: surrealdb::Connection + Clone,
     M: ModelProvider,
     E: EmbeddingProvider,
 {
@@ -683,7 +762,7 @@ where
 #[async_trait]
 impl<C, M, E> Agent for DatabaseAgent<C, M, E>
 where
-    C: surrealdb::Connection + std::fmt::Debug + 'static,
+    C: surrealdb::Connection + std::fmt::Debug + 'static + Clone,
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
@@ -707,7 +786,7 @@ where
             context.handle.state = AgentState::Processing;
 
             // Clone what we need for the background task
-            let db = Arc::clone(&self.db);
+            let db = self.db.clone();
             let agent_id = context.handle.agent_id;
             let message_clone = message.clone();
 
@@ -743,16 +822,21 @@ where
         );
         for (i, msg) in memory_context.messages.iter().enumerate() {
             let content_preview = match &msg.content {
-                crate::message::MessageContent::Text(text) => {
-                    text.chars().take(50).collect::<String>()
+                MessageContent::Text(text) => {
+                    format!("Text: {}", text.chars().take(50).collect::<String>())
                 }
-                _ => format!("{:?}", msg.content)
-                    .chars()
-                    .take(50)
-                    .collect::<String>(),
+                MessageContent::ToolCalls(calls) => {
+                    format!("ToolCalls: {} calls", calls.len())
+                }
+                MessageContent::ToolResponses(responses) => {
+                    format!("ToolResponses: {} responses", responses.len())
+                }
+                MessageContent::Parts(parts) => {
+                    format!("Parts: {} parts", parts.len())
+                }
             };
             tracing::debug!(
-                "  Message[{}]: role={:?}, content_preview={:?}",
+                "  Message[{}]: role={:?}, content={:?}",
                 i,
                 msg.role,
                 content_preview
@@ -772,38 +856,37 @@ where
             request.tools.as_ref().map(|t| t.len()).unwrap_or(0)
         );
 
-        let model = self.model.read().await;
-
-        let options = self.chat_options.read().await;
+        let options = self
+            .chat_options
+            .read()
+            .await
+            .clone()
+            .expect("should have options or default");
 
         // Note: this will usually make a network request and will need to wait for generated tokens from the LLM. it's the slowest bit.
-        let response = match model
-            .complete(
-                &options.clone().expect("should have options or default"),
-                request,
-            )
-            .await
-        {
-            Ok(response) => {
-                tracing::debug!(
-                    "Got response from LLM: {} content parts, {} tool calls",
-                    response.content.len(),
-                    response.tool_calls.len()
-                );
-                response
-            }
-            Err(e) => {
-                tracing::error!("Failed to get response from model: {:?}", e);
-
-                // Check if it's a specific Gemini error about missing candidates
-                let error_str = e.to_string();
-                if error_str.contains("candidates/0/content/parts") {
-                    tracing::warn!(
-                        "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
+        let response = {
+            let model = self.model.read().await;
+            match model.complete(&options, request).await {
+                Ok(response) => {
+                    tracing::debug!(
+                        "Got response from LLM: {} content parts, {} tool calls",
+                        response.content.len(),
+                        response.tool_calls.len()
                     );
+                    response
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get response from model: {:?}", e);
 
-                    // Create a fallback response when Gemini blocks content
-                    Response {
+                    // Check if it's a specific Gemini error about missing candidates
+                    let error_str = e.to_string();
+                    if error_str.contains("candidates/0/content/parts") {
+                        tracing::warn!(
+                            "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
+                        );
+
+                        // Create a fallback response when Gemini blocks content
+                        Response {
                         content: vec![crate::message::MessageContent::Text(
                             "I apologize, but I'm unable to process that request at the moment. This might be due to content filters or rate limits. Please try rephrasing your message or try again later.".to_string()
                         )],
@@ -811,21 +894,169 @@ where
                         tool_calls: vec![],
                         metadata: crate::message::ResponseMetadata::default(),
                     }
-                } else {
-                    // For other errors, return them
-                    return Err(e);
+                    } else {
+                        // For other errors, return them
+                        return Err(e);
+                    }
                 }
             }
+        };
+
+        // Check if the response contains tool calls
+        let final_response = if !response.tool_calls.is_empty() {
+            tracing::debug!(
+                "Response contains {} tool calls, executing them",
+                response.tool_calls.len()
+            );
+
+            // Execute the tool calls and get responses
+            let responses = {
+                let context = self.context.read().await;
+                context.process_response(response).await?
+            };
+
+            // Persist any memory changes from tool execution
+            self.persist_memory_changes().await?;
+
+            // Process each response and convert to messages
+            for response in responses {
+                let message = {
+                    let context = self.context.read().await;
+
+                    // Determine role based on content - if it has ToolResponses, it's a Tool message
+                    let is_tool_response = response
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, MessageContent::ToolResponses(_)));
+
+                    if is_tool_response {
+                        // Create a Tool role message
+                        Message {
+                            id: MessageId::generate(),
+                            role: ChatRole::Tool,
+                            content: response.content[0].clone(), // Tool responses are the only content
+                            owner_id: None,
+                            metadata: MessageMetadata {
+                                user_id: Some(context.handle.agent_id.to_string()),
+                                ..Default::default()
+                            },
+                            options: MessageOptions::default(),
+                            has_tool_calls: false,
+                            word_count: 0,
+                            created_at: Utc::now(),
+                            embedding: None,
+                            embedding_model: None,
+                        }
+                    } else {
+                        // Regular assistant message
+                        Message::from_response(&response, context.handle.agent_id)
+                    }
+                };
+
+                tracing::debug!(
+                    "Created message with role: {:?}, content type: {:?}",
+                    message.role,
+                    match &message.content {
+                        MessageContent::Text(_) => "Text",
+                        MessageContent::Parts(_) => "Parts",
+                        MessageContent::ToolCalls(_) => "ToolCalls",
+                        MessageContent::ToolResponses(_) => "ToolResponses",
+                    }
+                );
+
+                // Add the message to context
+                {
+                    let context = self.context.read().await;
+                    context.add_message(message.clone()).await;
+                }
+
+                // Persist the message in background
+                let db_clone = self.db.clone();
+                let msg_clone = message.clone();
+                let agent_id_clone = agent_id;
+                tokio::spawn(async move {
+                    if let Err(e) = crate::db::ops::persist_agent_message(
+                        &db_clone,
+                        agent_id_clone,
+                        &msg_clone,
+                        crate::message::MessageRelationType::Active,
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to persist message: {:?}", e);
+                    }
+                });
+            }
+
+            // Build context again with the tool responses included
+            let memory_context = {
+                let context = self.context.read().await;
+                context.build_context().await?
+            };
+
+            // Create a new request with the updated context (including tool responses)
+            let request_with_tools = Request {
+                system: Some(vec![memory_context.system_prompt.clone()]),
+                messages: memory_context.messages,
+                tools: Some(memory_context.tools),
+            };
+
+            tracing::debug!(
+                "Sending second request to LLM with tool results: {} messages",
+                request_with_tools.messages.len()
+            );
+
+            // Get the final response from the LLM that incorporates the tool results
+            let final_response = {
+                let model = self.model.read().await;
+                match model.complete(&options, request_with_tools).await {
+                    Ok(response) => {
+                        tracing::debug!(
+                            "Got final response from LLM after tool execution: {} content parts",
+                            response.content.len()
+                        );
+                        response
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to get final response from model: {:?}", e);
+
+                        // Check if it's a specific Gemini error about missing candidates
+                        let error_str = e.to_string();
+                        if error_str.contains("candidates/0/content/parts") {
+                            tracing::warn!(
+                                "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
+                            );
+
+                            // Create a fallback response when Gemini blocks content
+                            Response {
+                            content: vec![crate::message::MessageContent::Text(
+                                "I apologize, but I'm unable to process that request at the moment. This might be due to content filters or rate limits. Please try rephrasing your message or try again later.".to_string()
+                            )],
+                            reasoning: None,
+                            tool_calls: vec![],
+                            metadata: crate::message::ResponseMetadata::default(),
+                        }
+                        } else {
+                            // For other errors, return them
+                            return Err(e);
+                        }
+                    }
+                }
+            };
+
+            final_response
+        } else {
+            response
         };
 
         // Convert Response to Message
         let response_message = {
             let context = self.context.read().await;
-            Message::from_response(&response, context.handle.agent_id)
+            Message::from_response(&final_response, context.handle.agent_id)
         };
 
         // Clone for background persistence
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let response_msg_clone = response_message.clone();
 
         // Fire off response persistence in background
@@ -841,21 +1072,18 @@ where
                 tracing::error!("Failed to persist response message: {:?}", e);
             }
         });
-
-        // Add response message to context immediately
+        // Add response message to context
         {
             let context = self.context.write().await;
             context.add_message(response_message).await;
         }
 
-        // Process response and update state
+        // Update stats in background
         let (stats, db) = {
             let context = self.context.read().await;
-            context.process_response(&response)?;
-
-            // Update stats in background
-            (context.get_stats().await, Arc::clone(&self.db))
+            (context.get_stats().await, self.db.clone())
         };
+
         let _handle3 = tokio::spawn(async move {
             if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id, &stats).await {
                 tracing::error!("Failed to update agent stats: {:?}", e);
@@ -868,7 +1096,7 @@ where
             context.handle.state = AgentState::Ready;
         }
 
-        Ok(response)
+        Ok(final_response)
     }
 
     async fn get_memory(&self, key: &str) -> Result<Option<MemoryBlock>> {
@@ -892,7 +1120,7 @@ where
         };
 
         // Persist memory block in background
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let agent_id = {
             let context = self.context.read().await;
             context.handle.agent_id
@@ -904,7 +1132,7 @@ where
                 &db,
                 agent_id,
                 &memory_clone,
-                MemoryAccessLevel::Write, // Agent has write access to its own memory
+                crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
             )
             .await
             {
@@ -966,7 +1194,7 @@ where
         };
 
         // Persist tool call in background
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let _handle = tokio::spawn(async move {
             if let Err(e) = crate::db::ops::create_entity(&db, &tool_call).await {
                 tracing::error!("Failed to persist tool call: {:?}", e);
@@ -1018,7 +1246,7 @@ where
         &self,
         memory_key: &str,
         target_agent_id: AgentId,
-        access_level: MemoryAccessLevel,
+        access_level: crate::memory::MemoryPermission,
     ) -> Result<()> {
         // First verify the memory block exists
         let memory_block = {
@@ -1038,7 +1266,7 @@ where
         };
 
         // Create the memory relation for the target agent
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let memory_id = memory_block.id.clone();
         let relation = AgentMemoryRelation {
             id: None,
@@ -1067,7 +1295,7 @@ where
     }
 
     async fn get_shared_memories(&self) -> Result<Vec<(AgentId, CompactString, MemoryBlock)>> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let agent_id = {
             let context = self.context.read().await;
             context.handle.agent_id
@@ -1164,7 +1392,7 @@ where
         }
 
         // Persist the state update in background
-        let db = Arc::clone(&self.db);
+        let db = self.db.clone();
         let agent_id = {
             let context = self.context.read().await;
             context.handle.agent_id

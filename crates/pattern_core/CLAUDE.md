@@ -101,10 +101,72 @@ Core agent framework, memory management, and coordination system for Pattern's m
    - Stored as String in `position` field
    - Guarantees order even with rapid message creation
 
+## Tool System Refactoring (In Progress)
+
+Following Letta/MemGPT patterns, tools are being refactored into domain-based multi-operation tools:
+
+### Completed Tools
+1. **manage_core_memory** ✅ - Operations on core memory blocks
+   - `append` - Add content to existing memory
+   - `replace` - Replace specific content within memory
+
+### Completed Tools
+2. **manage_archival_memory** ✅ - Long-term storage operations
+   - `insert` - Add new memories to archival storage (creates MemoryBlock with MemoryType::Archival)
+   - `search` - Search through archived memories (uses DB when available, falls back to DashMap)
+   - `delete` - Remove archived memories
+   - `read` - Read specific archival memory by label
+
+   **Implementation Notes**:
+   - Archival memories are stored as regular MemoryBlocks with `MemoryType::Archival`
+   - AgentHandle now has private DB connection with controlled access methods
+   - DB methods: `search_archival_memories`, `insert_archival_memory`, `delete_archival_memory`, `count_archival_memories`
+   - Graceful fallback: tries DB first, falls back to in-memory if unavailable
+   - Full-text search working with SurrealDB's @@ operator and BM25 analyzer
+   - Uses computed field `archival_memories` on agent table for efficient access
+   - Search uses: `SELECT archival_memories FROM agent WHERE id = $agent_id AND archival_memories.*.value @@ $search_term`
+   - List uses: `SELECT *, ->agent_memories->mem AS memories FROM $agent_id FETCH memories`
+   - Successfully tested with CLI debug tools
+
+3. **search_conversations** ✅ - Query message history
+   - Filters: time range, participant, content search, role
+   - Returns relevant messages with optional context
+   - Uses database full-text search when available
+   - Graceful fallback if no DB connection
+   - CLI debug tool implemented for testing
+
+4. **interact_with_files** - File system operations
+   - `read` - Read file contents
+   - `search` - Search within files
+   - `edit` (optional) - Modify files
+
+5. **swap_memory** - Memory management between core and archival
+   ```rust
+   pub struct SwapMemoryInput {
+       pub swap_out: Vec<String>,  // Labels to move from core to archival
+       pub swap_in: Vec<String>,   // Labels to move from archival to core
+       pub reason: String,         // Why the swap is needed
+   }
+   ```
+
+### Implementation Notes
+- Each tool has a single entry point with operation selection
+- Tool usage rules are bundled with tools (via `usage_rule()` trait method)
+- ToolRegistry automatically provides rules to context builder
+- Operations use enums for type safety
+
 ## Next Priorities
-1. Implement message compression with archival when context window fills
-2. Add live query for agent stats updates
-3. Complete task CRUD operations using Entity system
+1. ~~Implement search_conversations tool with database queries~~ ✅
+2. Implement swap_memory tool for memory management
+3. Add vector search for archival memory using embeddings
+4. Implement message compression with archival when context window fills
+
+
+## Eventually
+ - Add provider capability flags to ModelProvider trait for multi-modal support
+   - Currently using lowest-common-denominator approach (converting Parts to Text)
+   - Some providers support multi-modal assistant responses, others don't
+   - Would allow smarter content conversion based on provider capabilities
 
 ## Core Principles
 

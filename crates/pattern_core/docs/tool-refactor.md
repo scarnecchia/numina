@@ -19,7 +19,7 @@ pub trait AiTool: Send + Sync + Debug {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     async fn execute(&self, params: Self::Input) -> Result<Self::Output>;
-    
+
     // New: to_genai_tool() method directly on AiTool trait
     fn to_genai_tool(&self) -> genai::chat::Tool {
         genai::chat::Tool::new(self.name())
@@ -41,7 +41,7 @@ fn parameters_schema(&self) -> Value {
 
     let generator = SchemaGenerator::new(settings);
     let schema = generator.into_root_schema_for::<Self::Input>();
-    
+
     serde_json::to_value(schema).unwrap_or_else(|_| {
         serde_json::json!({
             "type": "object",
@@ -64,10 +64,10 @@ pub trait DynamicTool: Send + Sync + Debug {
     fn parameters_schema(&self) -> Value;
     fn output_schema(&self) -> Value;
     async fn execute(&self, params: Value) -> Result<Value>;
-    
+
     // New: validate_params() method for parameter validation
     fn validate_params(&self, params: &Value) -> Result<()>;
-    
+
     // Also has to_genai_tool() method
     fn to_genai_tool(&self) -> genai::chat::Tool;
 }
@@ -83,14 +83,14 @@ The `ToolRegistry` now supports both typed and dynamic tools with thread-safe co
 impl ToolRegistry {
     // Uses DashMap internally for concurrent access
     tools: DashMap<CompactString, Box<dyn DynamicTool>>,
-    
+
     // Register a typed tool - automatically wrapped in DynamicToolAdapter
     // Note: &self instead of &mut self for concurrent access
     pub fn register<T: AiTool + 'static>(&self, tool: T);
-    
+
     // Register a pre-wrapped dynamic tool
     pub fn register_dynamic(&self, tool: Box<dyn DynamicTool>);
-    
+
     // Execute any tool by name with JSON parameters
     pub async fn execute(&self, tool_name: &str, params: Value) -> Result<Value>;
 }
@@ -203,7 +203,6 @@ let builtin = BuiltinTools::builder()
 ## Technical Notes
 
 - We use `schemars` with `inline_subschemas = true` to ensure MCP compatibility
-- The `r#gen` module syntax is required because `gen` is a reserved keyword in Rust 2024 (once we move to a newer crate version, this will change to `generate`)
 - Input types must implement `Serialize` for the tool examples feature
 - The `DynamicToolAdapter` handles all serialization/deserialization errors gracefully
 - Both `AiTool` and `DynamicTool` now have `to_genai_tool()` methods for direct conversion to genai tools

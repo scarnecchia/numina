@@ -359,6 +359,11 @@ impl From<DatabaseError> for CoreError {
                 table: "unknown".to_string(),
                 cause: e,
             },
+            DatabaseError::SurrealJsonValueError { original, help } => Self::DatabaseQueryFailed {
+                query: help,
+                table: "".to_string(),
+                cause: original,
+            },
             DatabaseError::Other(msg) => Self::DatabaseQueryFailed {
                 query: "unknown".to_string(),
                 table: "unknown".to_string(),

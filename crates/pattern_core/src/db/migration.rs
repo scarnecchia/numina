@@ -164,20 +164,54 @@ impl MigrationRunner {
 
         // Create full-text search analyzer and index for messages
         let message_analyzer = format!(
-            "DEFINE ANALYZER {}_content_analyzer TOKENIZERS class FILTERS lowercase, ascii",
+            "DEFINE ANALYZER {}_content_analyzer TOKENIZERS class FILTERS lowercase, snowball(english)",
             MessageIdType::PREFIX
         );
         db.query(&message_analyzer)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let message_search_index = format!(
-            "DEFINE INDEX {}_content_search ON {} FIELDS content SEARCH ANALYZER {}_content_analyzer BM25",
-            MessageIdType::PREFIX,
-            MessageIdType::PREFIX,
-            MessageIdType::PREFIX
-        );
+        let message_search_index =
+            "DEFINE FIELD OVERWRITE conversation_history
+                  ON TABLE agent
+                  VALUE <future> {
+                      (SELECT VALUE ->agent_messages->msg.*
+                       FROM ONLY $this)
+                  };
+            DEFINE INDEX OVERWRITE msg_content_search ON msg FIELDS content SEARCH ANALYZER msg_content_analyzer BM25;
+            DEFINE INDEX OVERWRITE idx_agent_conversation_search
+              ON TABLE agent
+              COLUMNS conversation_history.*.content
+              SEARCH ANALYZER msg_content_analyzer
+              BM25;
+            ".to_string();
         db.query(&message_search_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Create full-text search analyzer and index for memory blocks
+        let memory_analyzer = format!(
+            "DEFINE ANALYZER {}_value_analyzer TOKENIZERS class FILTERS lowercase, snowball(english)",
+            MemoryIdType::PREFIX
+        );
+        db.query(&memory_analyzer)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let memory_search_index =
+            "DEFINE FIELD OVERWRITE archival_memories
+                  ON TABLE agent
+                  VALUE <future> {
+                      (SELECT VALUE ->agent_memories->(mem WHERE memory_type = 'archival')
+                       FROM ONLY $this FETCH mem)
+                  };
+            DEFINE INDEX OVERWRITE mem_value_search ON mem FIELDS value SEARCH ANALYZER mem_value_analyzer BM25;
+            DEFINE INDEX OVERWRITE idx_agent_archival_search
+              ON TABLE agent
+              FIELDS archival_memories.*.value
+              SEARCH ANALYZER mem_value_analyzer
+              BM25;".to_string();
+        db.query(&memory_search_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 

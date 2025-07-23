@@ -5,12 +5,12 @@ use pattern_core::{
     ModelProvider,
     agent::{AgentRecord, AgentState, AgentType, DatabaseAgent},
     db::{
-        DatabaseConfig,
+        DatabaseConfig, DbEntity,
         client::{self, DB},
         ops,
     },
     id::{AgentId, UserId},
-    memory::Memory,
+    memory::{Memory, MemoryBlock},
     model::GenAiClient,
     tool::ToolRegistry,
 };
@@ -63,6 +63,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: DbCommands,
     },
+    /// Debug tools
+    Debug {
+        #[command(subcommand)]
+        cmd: DebugCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -85,6 +90,60 @@ enum DbCommands {
     Stats,
     /// Run a query
     Query { sql: String },
+}
+
+#[derive(Subcommand)]
+enum DebugCommands {
+    /// Search archival memory as if you were an agent
+    SearchArchival {
+        /// Agent name to search as
+        #[arg(long)]
+        agent: String,
+        /// Search query
+        query: String,
+        /// Maximum number of results
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// List all archival memories for an agent
+    ListArchival {
+        /// Agent name
+        #[arg(long)]
+        agent: String,
+    },
+    /// List all core memory blocks for an agent
+    ListCore {
+        /// Agent name
+        #[arg(long)]
+        agent: String,
+    },
+    /// List all memory blocks for an agent (core + archival)
+    ListAllMemory {
+        /// Agent name
+        #[arg(long)]
+        agent: String,
+    },
+    /// Search conversation history
+    SearchConversations {
+        /// Agent name to search as
+        #[arg(long)]
+        agent: String,
+        /// Optional search query for message content
+        #[arg(long)]
+        query: Option<String>,
+        /// Filter by role (system, user, assistant, tool)
+        #[arg(long)]
+        role: Option<String>,
+        /// Start time (ISO 8601, e.g., 2024-01-20T00:00:00Z)
+        #[arg(long)]
+        start_time: Option<String>,
+        /// End time (ISO 8601, e.g., 2024-01-20T23:59:59Z)
+        #[arg(long)]
+        end_time: Option<String>,
+        /// Maximum number of results
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 /// Format agent state for display
@@ -540,10 +599,246 @@ async fn main() -> Result<()> {
                 }
             }
             DbCommands::Query { sql } => {
-                println!("Running query: {}", sql);
-                // TODO: Execute SQL query
+                println!("Running query: {}", sql.bright_cyan());
+                println!();
+
+                // Execute the query
+                let response = DB.query(&sql).await.into_diagnostic()?;
+
+                println!("Results: {:?}", response);
             }
         },
+        Commands::Debug { cmd } => match cmd {
+            DebugCommands::SearchArchival {
+                agent,
+                query,
+                limit,
+            } => {
+                search_archival_memory(&agent, &query, limit).await?;
+            }
+            DebugCommands::ListArchival { agent } => {
+                list_archival_memory(&agent).await?;
+            }
+            DebugCommands::ListCore { agent } => {
+                list_core_memory(&agent).await?;
+            }
+            DebugCommands::ListAllMemory { agent } => {
+                list_all_memory(&agent).await?;
+            }
+            DebugCommands::SearchConversations {
+                agent,
+                query,
+                role,
+                start_time,
+                end_time,
+                limit,
+            } => {
+                search_conversations(
+                    &agent,
+                    query.as_deref(),
+                    role.as_deref(),
+                    start_time.as_deref(),
+                    end_time.as_deref(),
+                    limit,
+                )
+                .await?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// Search conversation history for an agent
+async fn search_conversations(
+    agent_name: &str,
+    query: Option<&str>,
+    role: Option<&str>,
+    start_time: Option<&str>,
+    end_time: Option<&str>,
+    limit: usize,
+) -> Result<()> {
+    use chrono::DateTime;
+    use pattern_core::context::AgentHandle;
+    use pattern_core::message::ChatRole;
+
+    println!("{} Searching conversation history", "🔍".bright_blue());
+    println!("{}", "─".repeat(50).dimmed());
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        println!(
+            "Agent: {} (ID: {})",
+            agent_record.name.bright_cyan(),
+            agent_record.id.to_string().dimmed()
+        );
+        println!("Owner: {}", agent_record.owner_id.to_string().dimmed());
+
+        // Display search parameters
+        if let Some(q) = query {
+            println!("Query: \"{}\"", q.bright_yellow());
+        }
+        if let Some(r) = role {
+            println!("Role filter: {}", r.bright_yellow());
+        }
+        if let Some(st) = start_time {
+            println!("Start time: {}", st.bright_yellow());
+        }
+        if let Some(et) = end_time {
+            println!("End time: {}", et.bright_yellow());
+        }
+        println!("Limit: {}", limit.to_string().bright_white());
+        println!();
+
+        // Parse role if provided
+        let role_filter = if let Some(role_str) = role {
+            match role_str.to_lowercase().as_str() {
+                "system" => Some(ChatRole::System),
+                "user" => Some(ChatRole::User),
+                "assistant" => Some(ChatRole::Assistant),
+                "tool" => Some(ChatRole::Tool),
+                _ => {
+                    println!(
+                        "{} Invalid role: {}. Using no role filter.",
+                        "⚠️".yellow(),
+                        role_str
+                    );
+                    println!("Valid roles: system, user, assistant, tool");
+                    println!();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Parse timestamps if provided
+        let start_dt = if let Some(st) = start_time {
+            match DateTime::parse_from_rfc3339(st) {
+                Ok(dt) => Some(dt.to_utc()),
+                Err(e) => {
+                    println!("{} Invalid start time format: {}", "⚠️".yellow(), e);
+                    println!("Expected ISO 8601 format: 2024-01-20T00:00:00Z");
+                    println!();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let end_dt = if let Some(et) = end_time {
+            match DateTime::parse_from_rfc3339(et) {
+                Ok(dt) => Some(dt.to_utc()),
+                Err(e) => {
+                    println!("{} Invalid end time format: {}", "⚠️".yellow(), e);
+                    println!("Expected ISO 8601 format: 2024-01-20T23:59:59Z");
+                    println!();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Create a minimal agent handle for searching
+        let memory = Memory::with_owner(agent_record.owner_id.clone());
+        let mut handle = AgentHandle::default();
+        handle.name = agent_record.name.clone();
+        handle.agent_id = agent_record.id.clone();
+        handle.agent_type = agent_record.agent_type.clone();
+        handle.memory = memory;
+        handle.state = AgentState::Ready;
+        let handle = handle.with_db(DB.clone());
+
+        // Perform the search
+        match handle
+            .search_conversations(query, role_filter, start_dt, end_dt, limit)
+            .await
+        {
+            Ok(messages) => {
+                println!(
+                    "Found {} messages:",
+                    messages.len().to_string().bright_green()
+                );
+                println!();
+
+                for (i, msg) in messages.iter().enumerate() {
+                    println!(
+                        "{} Message {} {}",
+                        match msg.role {
+                            ChatRole::System => "🔧",
+                            ChatRole::User => "👤",
+                            ChatRole::Assistant => "🤖",
+                            ChatRole::Tool => "🔨",
+                        },
+                        (i + 1).to_string().bright_white(),
+                        format!("({})", msg.id.0).dimmed()
+                    );
+                    println!("  Role: {}", format!("{:?}", msg.role).bright_yellow());
+                    println!("  Time: {}", msg.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+
+                    // Extract and display content
+                    if let Some(text) = msg.text_content() {
+                        let preview = if text.len() > 200 {
+                            format!("{}...", &text[..200])
+                        } else {
+                            text.to_string()
+                        };
+                        println!("  Content:");
+                        for line in preview.lines() {
+                            println!("    {}", line.dimmed());
+                        }
+                    } else {
+                        println!("  Content: [Non-text content]");
+                    }
+
+                    println!();
+                }
+
+                if messages.is_empty() {
+                    println!(
+                        "{} No messages found matching the search criteria",
+                        "ℹ".yellow()
+                    );
+                    println!();
+                    println!("Try:");
+                    println!("  • Using broader search terms");
+                    println!("  • Removing filters to see all messages");
+                    println!("  • Checking if the agent has any messages in the database");
+                }
+            }
+            Err(e) => {
+                println!("{} Search failed: {}", "❌".bright_red(), e);
+                println!();
+                println!("This might mean:");
+                println!("  • The database connection is not available");
+                println!("  • There was an error in the query");
+                println!("  • The message table or indexes are not set up");
+            }
+        }
+    } else {
+        println!("{} Agent '{}' not found", "❌".bright_red(), agent_name);
+        println!();
+        println!("Available agents:");
+        let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
+        for agent in all_agents {
+            println!("  • {}", agent.name.bright_cyan());
+        }
     }
 
     Ok(())
@@ -588,11 +883,29 @@ async fn load_or_create_agent(
             "After loading message history: {} messages",
             existing_agent.messages.len()
         );
+        println!(
+            "{} Loaded {} messages from history",
+            "📨".bright_blue(),
+            existing_agent.messages.len()
+        );
 
         // Also manually load memory blocks using the ops function
         let memory_tuples = ops::get_agent_memories(&DB, agent_id)
             .await
             .map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
+
+        println!(
+            "{} Found {} memory blocks in database",
+            "🧠".bright_blue(),
+            memory_tuples.len()
+        );
+        for (block, _) in &memory_tuples {
+            println!(
+                "  • {} ({} chars)",
+                block.label.bright_yellow(),
+                block.value.len()
+            );
+        }
 
         // Convert to the format expected by AgentRecord
         existing_agent.memories = memory_tuples
@@ -715,7 +1028,7 @@ async fn create_agent_from_record(
     let response_options = ResponseOptions {
         model_info: model_info.clone(),
         temperature: Some(0.7),
-        max_tokens: Some(120000),
+        max_tokens: Some(1000000), // for gemini models
         capture_content: Some(true),
         capture_tool_calls: Some(enable_tools),
         top_p: None,
@@ -731,7 +1044,7 @@ async fn create_agent_from_record(
     // Create agent from the record
     let agent = DatabaseAgent::from_record(
         record,
-        Arc::new(DB.clone()),
+        DB.clone(),
         model_provider,
         tools,
         embedding_provider,
@@ -743,6 +1056,8 @@ async fn create_agent_from_record(
         let mut options = agent.chat_options.write().await;
         *options = Some(response_options);
     }
+    agent.start_stats_sync().await?;
+    agent.start_memory_sync().await?;
 
     Ok(Box::new(agent))
 }
@@ -833,7 +1148,7 @@ async fn create_agent(
     let response_options = ResponseOptions {
         model_info: model_info.clone(),
         temperature: Some(0.7),
-        max_tokens: Some(1000),
+        max_tokens: Some(1000000), // for gemini models
         capture_content: Some(true),
         capture_tool_calls: Some(enable_tools),
         top_p: None,
@@ -854,7 +1169,7 @@ async fn create_agent(
         name.to_string(),
         String::new(),
         memory,
-        Arc::new(DB.clone()),
+        DB.clone(),
         model_provider,
         tools,
         embedding_provider,
@@ -886,6 +1201,9 @@ async fn create_agent(
             println!();
         }
     }
+
+    agent.start_stats_sync().await?;
+    agent.start_memory_sync().await?;
 
     Ok(Box::new(agent))
 }
@@ -935,10 +1253,59 @@ async fn chat_with_agent(agent: Box<dyn pattern_core::Agent>) -> Result<()> {
                         // Print response
                         let agent_name = agent.name();
                         for content in &response.content {
-                            if let MessageContent::Text(text) = content {
-                                println!("{} {}", agent_name.bright_cyan().bold(), text);
+                            match content {
+                                MessageContent::Text(text) => {
+                                    println!("{} {}", agent_name.bright_cyan().bold(), text);
+                                }
+                                MessageContent::ToolCalls(calls) => {
+                                    for call in calls {
+                                        println!(
+                                            "{} Using tool: {}",
+                                            "🔧".bright_blue(),
+                                            call.fn_name.bright_yellow()
+                                        );
+                                        println!(
+                                            "   Args: {}",
+                                            serde_json::to_string_pretty(&call.fn_arguments)
+                                                .unwrap_or_else(|_| call.fn_arguments.to_string())
+                                        );
+                                    }
+                                }
+                                MessageContent::ToolResponses(responses) => {
+                                    for resp in responses {
+                                        println!(
+                                            "{} Tool result: {}",
+                                            "✓".bright_green(),
+                                            resp.content.dimmed()
+                                        );
+                                    }
+                                }
+                                MessageContent::Parts(_) => {
+                                    // Multi-part content, just show text parts for now
+                                    println!(
+                                        "{} [Multi-part content]",
+                                        agent_name.bright_cyan().bold()
+                                    );
+                                }
                             }
                         }
+
+                        // Also show tool calls from the response object
+                        if !response.tool_calls.is_empty() {
+                            for call in &response.tool_calls {
+                                println!(
+                                    "{} Tool call: {}",
+                                    "🔧".bright_blue(),
+                                    call.fn_name.bright_yellow()
+                                );
+                                println!(
+                                    "   Args: {}",
+                                    serde_json::to_string_pretty(&call.fn_arguments)
+                                        .unwrap_or_else(|_| call.fn_arguments.to_string())
+                                );
+                            }
+                        }
+
                         println!();
                     }
                     Err(e) => {
@@ -959,6 +1326,501 @@ async fn chat_with_agent(agent: Box<dyn pattern_core::Agent>) -> Result<()> {
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Search archival memory as if we were the agent
+async fn search_archival_memory(agent_name: &str, query: &str, limit: usize) -> Result<()> {
+    use pattern_core::context::AgentHandle;
+
+    println!("{} Searching archival memory", "🔍".bright_blue());
+    println!("{}", "─".repeat(50).dimmed());
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        println!(
+            "Agent: {} (ID: {})",
+            agent_record.name.bright_cyan(),
+            agent_record.id.to_string().dimmed()
+        );
+        println!("Owner: {}", agent_record.owner_id.to_string().dimmed());
+        println!("Query: \"{}\"", query.bright_yellow());
+        println!("Limit: {}", limit.to_string().bright_white());
+
+        // Debug: Let's check what memories exist for this owner
+        let debug_query = format!(
+            "SELECT id, label, memory_type FROM mem WHERE owner_id = user:⟨{}⟩",
+            agent_record
+                .owner_id
+                .to_string()
+                .trim_start_matches("user_")
+        );
+        println!("Debug - checking memories for owner...");
+        let debug_response = DB.query(&debug_query).await.into_diagnostic()?;
+        println!("Debug response: {:?}", debug_response);
+        println!();
+
+        // Create a minimal agent handle for searching
+        // IMPORTANT: Use the actual owner_id from the database so the search will match
+        let memory = Memory::with_owner(agent_record.owner_id.clone());
+        let mut handle = AgentHandle::default();
+        handle.name = agent_record.name.clone();
+        handle.agent_id = agent_record.id.clone();
+        handle.agent_type = agent_record.agent_type.clone();
+        handle.memory = memory;
+        handle.state = AgentState::Ready;
+        let handle = handle.with_db(DB.clone());
+
+        // Perform the search
+        match handle.search_archival_memories(query, limit).await {
+            Ok(results) => {
+                println!(
+                    "Found {} results:",
+                    results.len().to_string().bright_green()
+                );
+                println!();
+
+                for (i, block) in results.iter().enumerate() {
+                    println!(
+                        "{} Result {} {}",
+                        "📄".bright_blue(),
+                        (i + 1).to_string().bright_white(),
+                        format!("({})", block.id).dimmed()
+                    );
+                    println!("  Label: {}", block.label.bright_yellow());
+                    println!("  Type: {:?}", block.memory_type);
+                    println!(
+                        "  Created: {}",
+                        block.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
+                    println!("  Content preview:");
+
+                    // Show first 200 chars of content
+                    let preview = if block.value.len() > 200 {
+                        format!("{}...", &block.value[..200])
+                    } else {
+                        block.value.clone()
+                    };
+
+                    for line in preview.lines() {
+                        println!("    {}", line.dimmed());
+                    }
+                    println!();
+                }
+
+                if results.is_empty() {
+                    println!(
+                        "{} No archival memories found matching '{}'",
+                        "ℹ".yellow(),
+                        query
+                    );
+                    println!();
+                    println!("Try:");
+                    println!("  • Using broader search terms");
+                    println!(
+                        "  • Checking if the agent has any archival memories with: pattern-cli debug list-archival --agent {}",
+                        agent_name
+                    );
+                    println!("  • Verifying the full-text search index exists in the database");
+                }
+            }
+            Err(e) => {
+                println!("{} Search failed: {}", "❌".bright_red(), e);
+                println!();
+                println!("This might mean:");
+                println!("  • The database connection is not available");
+                println!("  • The full-text search index is not set up");
+                println!("  • There was an error in the query");
+            }
+        }
+    } else {
+        println!("{} Agent '{}' not found", "❌".bright_red(), agent_name);
+        println!();
+        println!("Available agents:");
+        let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
+        for agent in all_agents {
+            println!("  • {}", agent.name.bright_cyan());
+        }
+    }
+
+    Ok(())
+}
+
+/// List all archival memories for an agent
+async fn list_archival_memory(agent_name: &str) -> Result<()> {
+    println!("{} Listing archival memories", "📚".bright_blue());
+    println!("{}", "─".repeat(50).dimmed());
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    println!("response: {:?}", response);
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        println!(
+            "Agent: {} (ID: {})",
+            agent_record.name.bright_cyan(),
+            agent_record.id.to_string().dimmed()
+        );
+        println!();
+
+        // Query for all archival memories this agent has access to
+        // Note: SurrealDB requires fields in ORDER BY to be explicitly selected or use no prefix
+        let mem_query = r#"
+            SELECT *, ->agent_memories->mem AS memories FROM $agent_id FETCH memories
+        "#;
+
+        let mut mem_response = DB
+            .query(mem_query)
+            .bind(("agent_id", RecordId::from(&agent_record.id)))
+            .await
+            .into_diagnostic()?;
+
+        println!("Debug - mem_response: {:?}", mem_response);
+
+        let memories: Vec<Vec<<MemoryBlock as DbEntity>::DbModel>> =
+            mem_response.take("memories").into_diagnostic()?;
+
+        let memories: Vec<_> = memories
+            .concat()
+            .into_iter()
+            .map(|m| MemoryBlock::from_db_model(m).expect("db model"))
+            .collect();
+
+        println!(
+            "Found {} archival memories",
+            memories.len().to_string().bright_green()
+        );
+        println!();
+
+        for (i, block) in memories.iter().enumerate() {
+            println!(
+                "{} Memory {} {}",
+                "🧠".bright_blue(),
+                (i + 1).to_string().bright_white(),
+                format!("({})", block.id).dimmed()
+            );
+            println!("  Label: {}", block.label.bright_yellow());
+            println!("  Owner: {}", block.owner_id.to_string().dimmed());
+            println!(
+                "  Created: {}",
+                block.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            println!(
+                "  Size: {} chars",
+                block.value.len().to_string().bright_white()
+            );
+
+            if let Some(desc) = &block.description {
+                println!("  Description: {}", desc.dimmed());
+            }
+
+            // Show first 100 chars
+            let preview = if block.value.len() > 100 {
+                format!("{}...", &block.value[..100])
+            } else {
+                block.value.clone()
+            };
+            println!("  Preview: {}", preview.dimmed());
+            println!();
+        }
+
+        if memories.is_empty() {
+            println!("{} No archival memories found for this agent", "ℹ".yellow());
+            println!();
+            println!("Archival memories can be created:");
+            println!("  • By the agent using the manage_archival_memory tool");
+            println!("  • Through the API");
+            println!("  • By importing from external sources");
+        }
+    } else {
+        println!("{} Agent '{}' not found", "❌".bright_red(), agent_name);
+    }
+
+    Ok(())
+}
+
+/// List all core memory blocks for an agent
+async fn list_core_memory(agent_name: &str) -> Result<()> {
+    println!("{} Listing core memory blocks", "🧠".bright_blue());
+    println!("{}", "─".repeat(50).dimmed());
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        println!(
+            "Agent: {} (ID: {})",
+            agent_record.name.bright_cyan(),
+            agent_record.id.to_string().dimmed()
+        );
+        println!();
+
+        // Query for all core memory blocks this agent has access to
+        // Core memories are memory_type = 'core' or NULL (default)
+        let mem_query = r#"
+            SELECT * FROM mem
+            WHERE id IN (
+                SELECT out FROM agent_memories
+                WHERE in = $agent_id
+            )
+            AND (memory_type = 'core' OR memory_type = NULL)
+            ORDER BY created_at DESC
+        "#;
+
+        let mut mem_response = DB
+            .query(mem_query)
+            .bind(("agent_id", RecordId::from(&agent_record.id)))
+            .await
+            .into_diagnostic()?;
+
+        let memories: Vec<MemoryBlock> = mem_response.take(0).into_diagnostic()?;
+
+        println!(
+            "Found {} core memory blocks",
+            memories.len().to_string().bright_green()
+        );
+        println!();
+
+        for (i, block) in memories.iter().enumerate() {
+            println!(
+                "{} Memory {} {}",
+                "📝".bright_blue(),
+                (i + 1).to_string().bright_white(),
+                format!("({})", block.id).dimmed()
+            );
+            println!("  Label: {}", block.label.bright_yellow());
+            println!("  Type: {:?}", block.memory_type);
+            println!("  Permission: {:?}", block.permission);
+            println!("  Owner: {}", block.owner_id.to_string().dimmed());
+            println!(
+                "  Created: {}",
+                block.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            println!(
+                "  Updated: {}",
+                block.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            println!(
+                "  Size: {} chars",
+                block.value.len().to_string().bright_white()
+            );
+
+            if let Some(desc) = &block.description {
+                println!("  Description: {}", desc.dimmed());
+            }
+
+            // Show full content for core memories (they're usually smaller)
+            println!("  Content:");
+            for line in block.value.lines() {
+                println!("    {}", line.dimmed());
+            }
+            println!();
+        }
+
+        if memories.is_empty() {
+            println!(
+                "{} No core memory blocks found for this agent",
+                "ℹ".yellow()
+            );
+            println!();
+            println!("Core memory blocks are usually created:");
+            println!("  • Automatically when an agent is initialized");
+            println!("  • By the agent using the manage_core_memory tool");
+            println!("  • Through direct API calls");
+        }
+    } else {
+        println!("{} Agent '{}' not found", "❌".bright_red(), agent_name);
+    }
+
+    Ok(())
+}
+
+/// List all memory blocks for an agent (both core and archival)
+async fn list_all_memory(agent_name: &str) -> Result<()> {
+    println!("{} Listing all memory blocks", "🗂️".bright_blue());
+    println!("{}", "─".repeat(50).dimmed());
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        println!(
+            "Agent: {} (ID: {})",
+            agent_record.name.bright_cyan(),
+            agent_record.id.to_string().dimmed()
+        );
+        println!("Owner: {}", agent_record.owner_id.to_string().dimmed());
+        println!();
+
+        // Query for all memory blocks this agent has access to
+        let mem_query = r#"
+            SELECT * FROM mem
+            WHERE id IN (
+                SELECT out FROM agent_memories
+                WHERE in = $agent_id
+            )
+            ORDER BY memory_type, created_at DESC
+        "#;
+
+        let mut mem_response = DB
+            .query(mem_query)
+            .bind(("agent_id", RecordId::from(&agent_record.id)))
+            .await
+            .into_diagnostic()?;
+
+        let memories: Vec<MemoryBlock> = mem_response.take(0).into_diagnostic()?;
+
+        // Group by memory type
+        let mut core_memories = Vec::new();
+        let mut archival_memories = Vec::new();
+        let mut other_memories = Vec::new();
+
+        for memory in memories {
+            match memory.memory_type {
+                pattern_core::memory::MemoryType::Core => core_memories.push(memory),
+                pattern_core::memory::MemoryType::Archival => archival_memories.push(memory),
+                _ => other_memories.push(memory),
+            }
+        }
+
+        let total = core_memories.len() + archival_memories.len() + other_memories.len();
+        println!(
+            "Found {} total memory blocks",
+            total.to_string().bright_green()
+        );
+        println!();
+
+        // Display core memories
+        if !core_memories.is_empty() {
+            println!(
+                "{} Core Memory Blocks ({})",
+                "📝".bright_blue(),
+                core_memories.len()
+            );
+            println!("{}", "─".repeat(30).dimmed());
+            for (i, block) in core_memories.iter().enumerate() {
+                println!(
+                    "  {} {} - {}",
+                    (i + 1).to_string().bright_white(),
+                    block.label.bright_yellow(),
+                    format!("{} chars", block.value.len()).dimmed()
+                );
+                if let Some(desc) = &block.description {
+                    println!("     {}", desc.dimmed());
+                }
+            }
+            println!();
+        }
+
+        // Display archival memories
+        if !archival_memories.is_empty() {
+            println!(
+                "{} Archival Memory Blocks ({})",
+                "📚".bright_blue(),
+                archival_memories.len()
+            );
+            println!("{}", "─".repeat(30).dimmed());
+            for (i, block) in archival_memories.iter().enumerate() {
+                println!(
+                    "  {} {} - {}",
+                    (i + 1).to_string().bright_white(),
+                    block.label.bright_yellow(),
+                    format!("{} chars", block.value.len()).dimmed()
+                );
+                // Show preview for archival memories
+                let preview = if block.value.len() > 50 {
+                    format!("{}...", &block.value[..50])
+                } else {
+                    block.value.clone()
+                };
+                println!("     {}", preview.dimmed());
+            }
+            println!();
+        }
+
+        // Display other memories
+        if !other_memories.is_empty() {
+            println!(
+                "{} Other Memory Blocks ({})",
+                "📋".bright_blue(),
+                other_memories.len()
+            );
+            println!("{}", "─".repeat(30).dimmed());
+            for (i, block) in other_memories.iter().enumerate() {
+                println!(
+                    "  {} {} ({:?}) - {}",
+                    (i + 1).to_string().bright_white(),
+                    block.label.bright_yellow(),
+                    block.memory_type,
+                    format!("{} chars", block.value.len()).dimmed()
+                );
+            }
+            println!();
+        }
+
+        if total == 0 {
+            println!("{} No memory blocks found for this agent", "ℹ".yellow());
+            println!();
+            println!("Memory blocks are created:");
+            println!("  • Automatically when an agent is used in chat");
+            println!("  • By the agent using memory management tools");
+            println!("  • Through direct API calls");
+        }
+    } else {
+        println!("{} Agent '{}' not found", "❌".bright_red(), agent_name);
     }
 
     Ok(())

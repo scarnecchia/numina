@@ -237,7 +237,7 @@ impl ModelProvider for GenAiClient {
 
         // Log the full request
         let chat_request = request.as_chat_request();
-        tracing::trace!("Chat Request:\n{:#?}", chat_request);
+        tracing::debug!("Chat Request:\n{:#?}", chat_request);
 
         let response = match self
             .client

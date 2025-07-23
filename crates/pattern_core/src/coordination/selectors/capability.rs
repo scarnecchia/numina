@@ -83,9 +83,10 @@ impl CapabilitySelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{Agent, AgentState, AgentType, MemoryAccessLevel};
+    use crate::agent::{Agent, AgentState, AgentType};
     use crate::coordination::groups::GroupMembership;
     use crate::coordination::types::GroupMemberRole;
+    use crate::memory::MemoryPermission;
     use crate::{
         AgentId, UserId,
         message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
@@ -156,7 +157,7 @@ mod tests {
             &self,
             _memory_key: &str,
             _target_agent_id: AgentId,
-            _access_level: MemoryAccessLevel,
+            _access_level: MemoryPermission,
         ) -> Result<()> {
             unimplemented!("Test agent")
         }

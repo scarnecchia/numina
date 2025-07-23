@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use crate::{
     AgentId, AgentState, AgentType, CoreError, Result,
-    memory::Memory,
-    message::{Message, Response},
+    db::{DatabaseError, DbEntity},
+    memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
+    message::{Message, MessageContent, Response, ToolResponse},
     tool::ToolRegistry,
 };
 
@@ -23,7 +24,7 @@ use super::{
 
 /// Cheap handle to agent internals that built-in tools can hold
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentHandle {
+pub struct AgentHandle<C: surrealdb::Connection + Clone = surrealdb::engine::any::Any> {
     /// The agent's display name
     pub name: String,
     /// Unique identifier for this agent
@@ -35,7 +36,244 @@ pub struct AgentHandle {
     pub memory: Memory,
     /// The agent's current state
     pub state: AgentState,
+
+    /// Private database connection for controlled access
+    #[serde(skip)]
+    db: Option<surrealdb::Surreal<C>>,
     // TODO: Add message_sender when we implement it
+}
+
+impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
+    /// Create a new handle with a database connection
+    pub fn with_db(mut self, db: surrealdb::Surreal<C>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// Check if this handle has a database connection
+    pub fn has_db_connection(&self) -> bool {
+        self.db.is_some()
+    }
+
+    /// Search archival memories directly from the database
+    /// This avoids loading all archival memories into RAM
+    pub async fn search_archival_memories(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryBlock>> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for archival search".into(),
+                ),
+            ))
+        })?;
+
+        // Single-step query using graph traversal
+        // Need to construct the full record reference inline
+        let sql = format!(
+            r#"
+            SELECT * FROM mem
+            WHERE (<-agent_memories<-agent:⟨{}⟩..)
+            AND memory_type = 'archival'
+            AND value @@ $search_term
+            LIMIT $limit
+        "#,
+            self.agent_id.uuid()
+        );
+
+        tracing::debug!(
+            "Executing search with query='{}' for agent={}",
+            query,
+            self.agent_id
+        );
+
+        let mut result = db
+            .query(&sql)
+            .bind(("search_term", query.to_string()))
+            .bind(("limit", limit))
+            .await
+            .map_err(|e| {
+                tracing::error!("Search query failed: {:?}", e);
+                crate::db::DatabaseError::QueryFailed(e)
+            })?;
+
+        tracing::debug!("search results: {:#?}", result);
+
+        let blocks: Vec<<MemoryBlock as DbEntity>::DbModel> =
+            result.take(0).map_err(DatabaseError::from)?;
+
+        let blocks: Vec<MemoryBlock> = blocks
+            .into_iter()
+            .map(|b| MemoryBlock::from_db_model(b).expect("model type should convert"))
+            .collect();
+
+        Ok(blocks)
+    }
+
+    /// Insert a new archival memory to in-memory storage
+    /// Database persistence happens automatically via persist_memory_changes
+    pub async fn insert_archival_memory(&self, label: &str, content: &str) -> Result<MemoryBlock> {
+        // Create the memory block in the DashMap
+        self.memory.create_block(label, content)?;
+
+        // Update it to be archival type
+        if let Some(mut block) = self.memory.get_block_mut(label) {
+            block.memory_type = MemoryType::Archival;
+            block.permission = MemoryPermission::ReadWrite;
+        }
+
+        // Get the created block
+        let block = self
+            .memory
+            .get_block(label)
+            .ok_or_else(|| crate::CoreError::MemoryNotFound {
+                agent_id: self.agent_id.to_string(),
+                block_name: label.to_string(),
+                available_blocks: self.memory.list_blocks(),
+            })?
+            .clone();
+
+        Ok(block)
+    }
+
+    /// Delete an archival memory from the database
+    pub async fn delete_archival_memory(&self, label: &str) -> Result<()> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for archival delete".into(),
+                ),
+            ))
+        })?;
+
+        // First find the memory with this label
+        let sql = r#"
+            DELETE FROM mem
+            WHERE owner_id = $owner_id
+            AND label = $label
+            AND memory_type = $memory_type
+        "#;
+
+        db.query(sql)
+            .bind(("owner_id", surrealdb::RecordId::from(&self.memory.owner_id)))
+            .bind(("label", label.to_string()))
+            .bind(("memory_type", "archival"))
+            .await
+            .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+        Ok(())
+    }
+
+    /// Count archival memories for this agent
+    pub async fn count_archival_memories(&self) -> Result<usize> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams("No database connection available".into()),
+            ))
+        })?;
+
+        let sql = r#"
+            SELECT count() as count FROM mem
+            WHERE owner_id = $owner_id
+            AND memory_type = $memory_type
+            GROUP ALL
+        "#;
+
+        let mut result = db
+            .query(sql)
+            .bind(("owner_id", surrealdb::RecordId::from(&self.memory.owner_id)))
+            .bind(("memory_type", "archival"))
+            .await
+            .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+        let count_result: Option<serde_json::Value> = result
+            .take("count")
+            .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+        match count_result {
+            Some(serde_json::Value::Number(n)) => Ok(n.as_u64().unwrap_or(0) as usize),
+            _ => Ok(0),
+        }
+    }
+
+    /// Search conversation messages with filters
+    pub async fn search_conversations(
+        &self,
+        query: Option<&str>,
+        role_filter: Option<crate::message::ChatRole>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<crate::message::Message>> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for conversation search".into(),
+                ),
+            ))
+        })?;
+
+        // Build the query dynamically using graph traversal
+        let mut sql = format!(
+            "SELECT * FROM message WHERE (<-agent_messages<-agent:⟨{}⟩..)",
+            self.agent_id.uuid()
+        );
+
+        // Add optional filters
+        if query.is_some() {
+            sql.push_str(" AND content @@ $query");
+        }
+
+        if role_filter.is_some() {
+            sql.push_str(" AND role = $role");
+        }
+
+        if start_time.is_some() {
+            sql.push_str(" AND created_at >= $start_time");
+        }
+
+        if end_time.is_some() {
+            sql.push_str(" AND created_at <= $end_time");
+        }
+
+        sql.push_str(" ORDER BY created_at DESC LIMIT $limit");
+
+        // Build query and bind all parameters
+        let mut query_builder = db.query(&sql).bind(("limit", limit));
+
+        if let Some(search_query) = query {
+            query_builder = query_builder.bind(("query", search_query.to_string()));
+        }
+
+        if let Some(role) = &role_filter {
+            query_builder = query_builder.bind(("role", role.to_string()));
+        }
+
+        if let Some(start) = start_time {
+            query_builder =
+                query_builder.bind(("start_time", surrealdb::sql::Datetime::from(start)));
+        }
+
+        if let Some(end) = end_time {
+            query_builder = query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
+        }
+
+        let db_messages: Vec<<Message as DbEntity>::DbModel> = query_builder
+            .await
+            .map_err(DatabaseError::from)?
+            .take(0)
+            .map_err(DatabaseError::from)?;
+
+        // Convert from DbModel to domain type
+        let messages: Vec<Message> = db_messages
+            .into_iter()
+            .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
+            .collect();
+
+        Ok(messages)
+    }
 }
 
 impl Default for AgentHandle {
@@ -46,6 +284,22 @@ impl Default for AgentHandle {
             memory: Memory::new(),
             state: AgentState::Ready,
             agent_type: AgentType::Generic,
+            db: None,
+        }
+    }
+}
+
+impl AgentHandle {
+    /// Create a test handle with custom memory
+    #[cfg(test)]
+    pub fn test_with_memory(memory: Memory) -> Self {
+        Self {
+            name: "test_agent".to_string(),
+            agent_id: AgentId::generate(),
+            memory,
+            state: AgentState::Ready,
+            agent_type: AgentType::Generic,
+            db: None,
         }
     }
 }
@@ -80,10 +334,10 @@ impl MessageHistory {
 }
 
 /// Represents the complete state of an agent
-#[derive(Clone, Default)]
-pub struct AgentContext {
+#[derive(Clone)]
+pub struct AgentContext<C: surrealdb::Connection + Clone = surrealdb::engine::any::Any> {
     /// Cheap, frequently accessed stuff
-    pub handle: AgentHandle,
+    pub handle: AgentHandle<C>,
 
     /// Tools available to this agent
     pub tools: ToolRegistry,
@@ -122,7 +376,7 @@ impl Default for AgentContextMetadata {
     }
 }
 
-impl AgentContext {
+impl<C: surrealdb::Connection + Clone> AgentContext<C> {
     /// Create a new agent state
     pub fn new(
         agent_id: AgentId,
@@ -137,7 +391,8 @@ impl AgentContext {
             memory,
             name,
             agent_type,
-            ..Default::default()
+            state: AgentState::Ready,
+            db: None,
         };
 
         Self {
@@ -159,7 +414,7 @@ impl AgentContext {
     }
 
     /// Get a cheap handle to agent internals
-    pub fn handle(&self) -> AgentHandle {
+    pub fn handle(&self) -> AgentHandle<C> {
         self.handle.clone()
     }
 
@@ -226,8 +481,91 @@ impl AgentContext {
     }
 
     /// Process a chat response and update state
-    pub fn process_response(&self, _response: &Response) -> Result<()> {
-        Ok(())
+    /// Returns a vec of responses: the original (minus tool calls) and a separate tool response if needed
+    pub async fn process_response(&self, response: Response) -> Result<Vec<Response>> {
+        let mut tool_responses = Vec::with_capacity(response.tool_calls.len());
+        let mut first_error = None;
+        let mut memory_updates = Vec::new();
+
+        // Execute all tools, collecting responses or errors
+        for call in &response.tool_calls {
+            tracing::debug!(
+                "Executing tool: {} with args: {:?}",
+                call.fn_name,
+                call.fn_arguments
+            );
+
+            match self
+                .tools
+                .execute(&call.fn_name, call.fn_arguments.clone())
+                .await
+            {
+                Ok(tool_response) => {
+                    tracing::debug!("✅ Tool {} executed successfully", call.fn_name);
+
+                    // Track memory tool calls for persistence
+                    if call.fn_name.contains("memory") {
+                        memory_updates.push((call.fn_name.clone(), call.fn_arguments.clone()));
+                    }
+
+                    tool_responses.push(ToolResponse {
+                        call_id: call.call_id.clone(),
+                        content: serde_json::to_string_pretty(&tool_response)
+                            .unwrap_or("Error serializing tool response".to_string()),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("❌ Tool execution failed for {}: {}", call.fn_name, e);
+                    // Store first error but continue executing other tools
+                    if first_error.is_none() {
+                        first_error = Some(CoreError::tool_execution_error(
+                            call.fn_name.clone(),
+                            format!("{}", e),
+                        ));
+                    }
+                    // Add error response for this tool
+                    tool_responses.push(ToolResponse {
+                        call_id: call.call_id.clone(),
+                        content: format!("Error: Failed to execute tool '{}': {}", call.fn_name, e),
+                    });
+                }
+            }
+        }
+
+        // If any tool failed, return the first error
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+
+        let mut results = Vec::new();
+
+        // Add the original response if it has content (text/parts)
+        // Don't include tool calls in this response
+        if !response.content.is_empty() {
+            results.push(Response {
+                content: response.content,
+                reasoning: response.reasoning,
+                tool_calls: vec![], // Tool calls handled separately
+                metadata: response.metadata.clone(),
+            });
+        }
+
+        // Create a separate response for tool responses with Tool role
+        if !tool_responses.is_empty() {
+            results.push(Response {
+                content: vec![MessageContent::ToolResponses(tool_responses)],
+                reasoning: None,
+                tool_calls: vec![],
+                metadata: response.metadata,
+            });
+        }
+
+        tracing::debug!(
+            "✅ process_response complete: returning {} responses",
+            results.len()
+        );
+
+        Ok(results)
     }
 
     /// Update a memory block

@@ -2,7 +2,7 @@ pub mod builtin;
 
 use async_trait::async_trait;
 use compact_str::{CompactString, ToCompactString};
-use schemars::{JsonSchema, r#gen::SchemaGenerator, r#gen::SchemaSettings};
+use schemars::{JsonSchema, generate::SchemaGenerator, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fmt::Debug, sync::Arc};
@@ -68,6 +68,11 @@ pub trait AiTool: Send + Sync + Debug {
         })
     }
 
+    /// Get the usage rule for this tool (e.g., "requires continuing your response when called")
+    fn usage_rule(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Convert to a genai Tool
     fn to_genai_tool(&self) -> genai::chat::Tool {
         genai::chat::Tool::new(self.name())
@@ -106,6 +111,9 @@ pub trait DynamicTool: Send + Sync + Debug {
 
     /// Get usage examples for this tool
     fn examples(&self) -> Vec<DynamicToolExample>;
+
+    /// Get the usage rule for this tool
+    fn usage_rule(&self) -> Option<&'static str>;
 
     /// Convert to a genai Tool
     fn to_genai_tool(&self) -> genai::chat::Tool {
@@ -192,6 +200,10 @@ where
                     .map(|o| serde_json::to_value(o).unwrap_or(Value::Null)),
             })
             .collect()
+    }
+
+    fn usage_rule(&self) -> Option<&'static str> {
+        self.inner.usage_rule()
     }
 }
 
@@ -282,6 +294,20 @@ impl ToolRegistry {
         self.tools
             .iter()
             .map(|entry| entry.value().clone_box())
+            .collect()
+    }
+
+    /// Get tool usage rules for all registered tools
+    pub fn get_tool_rules(&self) -> Vec<crate::context::ToolRule> {
+        self.tools
+            .iter()
+            .filter_map(|entry| {
+                let tool = entry.value();
+                tool.usage_rule().map(|rule| crate::context::ToolRule {
+                    tool_name: tool.name().to_string(),
+                    rule: rule.to_string(),
+                })
+            })
             .collect()
     }
 }

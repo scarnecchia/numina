@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::memory::{MemoryPermission, MemoryType};
     use compact_str::ToCompactString;
     use std::sync::Arc;
     use std::time::Duration;
@@ -10,7 +11,7 @@ mod tests {
     #[allow(unused_imports)]
     use crate::utils::debug::ResponseDebug;
     use crate::{
-        agent::{Agent, AgentRecord, AgentState, AgentType, DatabaseAgent, MemoryAccessLevel},
+        agent::{Agent, AgentRecord, AgentState, AgentType, DatabaseAgent},
         db::{
             client,
             ops::{attach_memory_to_agent, create_entity, get_agent_memories},
@@ -68,7 +69,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn test_shared_memory_between_agents() {
-        let db = Arc::new(client::create_test_db().await.unwrap());
+        let db = client::create_test_db().await.unwrap();
 
         // Create a mock model provider
         let model = Arc::new(RwLock::new(MockModelProvider {
@@ -156,6 +157,9 @@ mod tests {
             label: "shared_context".to_compact_string(),
             value: "Test context".to_string(),
             description: Some("Shared context for testing".to_string()),
+            memory_type: MemoryType::Core,
+            pinned: false,
+            permission: MemoryPermission::ReadWrite,
             metadata: serde_json::json!({}),
             embedding_model: None,
             embedding: None,
@@ -172,7 +176,7 @@ mod tests {
             &db,
             pattern_record.id,
             shared_memory.id,
-            MemoryAccessLevel::Write,
+            MemoryPermission::ReadWrite,
         )
         .await
         .unwrap();
@@ -181,7 +185,7 @@ mod tests {
             &db,
             entropy_record.id,
             shared_memory.id,
-            MemoryAccessLevel::Read,
+            MemoryPermission::ReadOnly,
         )
         .await
         .unwrap();
@@ -210,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_persistence() {
-        let db = Arc::new(client::create_test_db().await.unwrap());
+        let db = client::create_test_db().await.unwrap();
         let model = Arc::new(RwLock::new(MockModelProvider {
             response: "Test".to_string(),
         }));
@@ -263,6 +267,9 @@ mod tests {
             label: "persistent_context".to_compact_string(),
             value: "This should persist".to_string(),
             description: Some("Memory that persists across conversations".to_string()),
+            memory_type: MemoryType::Core,
+            pinned: true,
+            permission: MemoryPermission::ReadWrite,
             metadata: serde_json::json!({}),
             embedding_model: None,
             embedding: None,
@@ -278,7 +285,7 @@ mod tests {
             &db,
             agent_id,
             persistent_memory.id,
-            MemoryAccessLevel::Write,
+            MemoryPermission::ReadWrite,
         )
         .await
         .unwrap();
@@ -289,6 +296,9 @@ mod tests {
             label: "temp_context".to_compact_string(),
             value: "This is temporary".to_string(),
             description: Some("Temporary memory for conversation".to_string()),
+            memory_type: MemoryType::Working,
+            pinned: false,
+            permission: MemoryPermission::ReadWrite,
             metadata: serde_json::json!({}),
             embedding_model: None,
             embedding: None,
@@ -300,9 +310,14 @@ mod tests {
             .await
             .unwrap();
 
-        attach_memory_to_agent(&db, agent_id, deletable_memory.id, MemoryAccessLevel::Write)
-            .await
-            .unwrap();
+        attach_memory_to_agent(
+            &db,
+            agent_id,
+            deletable_memory.id,
+            MemoryPermission::ReadWrite,
+        )
+        .await
+        .unwrap();
 
         // Start memory sync
         // Start memory sync (method not available in current implementation)
@@ -371,20 +386,20 @@ mod tests {
         let agent_id = agent.id;
 
         // Test different access levels
-        attach_memory_to_agent(&db, agent_id, memory.id, MemoryAccessLevel::Read)
+        attach_memory_to_agent(&db, agent_id, memory.id, MemoryPermission::ReadOnly)
             .await
             .unwrap();
 
         let memories = get_agent_memories(&db, agent_id).await.unwrap();
         assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].1, MemoryAccessLevel::Read);
+        assert_eq!(memories[0].1, MemoryPermission::ReadOnly);
         assert_eq!(memories[0].0.label, "test_memory");
     }
 
     #[tokio::test]
     #[traced_test]
     async fn test_agent_state_transitions() {
-        let db = Arc::new(client::create_test_db().await.unwrap());
+        let db = client::create_test_db().await.unwrap();
         let model = Arc::new(RwLock::new(MockModelProvider {
             response: "Test".to_string(),
         }));

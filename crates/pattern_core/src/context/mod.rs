@@ -88,12 +88,10 @@ impl Default for ContextConfig {
             enable_thinking: true,
             tool_rules: vec![
                 ToolRule {
-                    tool_name: "core_memory_replace".to_string(),
-                    rule: "requires continuing your response when called".to_string(),
-                },
-                ToolRule {
-                    tool_name: "core_memory_append".to_string(),
-                    rule: "requires continuing your response when called".to_string(),
+                    tool_name: "manage_core_memory".to_string(),
+                    rule:
+                        "requires continuing your response when called (except for read operations)"
+                            .to_string(),
                 },
                 ToolRule {
                     tool_name: "send_message".to_string(),
@@ -183,6 +181,26 @@ impl ContextBuilder {
             .into_iter()
             .filter_map(|name| registry.get(&name).map(|entry| entry.value().clone()))
             .collect();
+
+        // Also get tool rules from the registry
+        let registry_rules = registry.get_tool_rules();
+
+        // Merge with existing rules (registry rules take precedence)
+        for registry_rule in registry_rules {
+            if let Some(existing_rule) = self
+                .config
+                .tool_rules
+                .iter_mut()
+                .find(|r| r.tool_name == registry_rule.tool_name)
+            {
+                // Update existing rule
+                existing_rule.rule = registry_rule.rule;
+            } else {
+                // Add new rule
+                self.config.tool_rules.push(registry_rule);
+            }
+        }
+
         self
     }
 
@@ -469,7 +487,7 @@ You should use your inner monologue to plan actions or think privately before ta
 
 Memory management:
 You have access to core memory blocks that persist between conversations.
-You can edit these blocks to remember important information about users and yourself.
+Core memory is always in context. It shapes you and provides important information. - use manage_core_memory with append/replace/read operations to manage information.
 When context gets full, older messages are moved to recall storage but remain searchable.
 
 Tool usage:
@@ -547,5 +565,42 @@ mod tests {
         // Should show the actual character count even if over limit
         assert!(context.system_prompt.contains("chars_current=150"));
         assert!(context.system_prompt.contains("chars_limit=100"));
+    }
+
+    #[test]
+    fn test_tool_rules_from_registry() {
+        use crate::{
+            context::AgentHandle,
+            tool::{ToolRegistry, builtin::BuiltinTools},
+        };
+
+        // Create a tool registry with builtin tools
+        let registry = ToolRegistry::new();
+        let handle = AgentHandle::default();
+        let builtin = BuiltinTools::default_for_agent(handle);
+        builtin.register_all(&registry);
+
+        // Create a context builder with empty tool rules
+        let config = ContextConfig {
+            tool_rules: vec![], // Start with no rules
+            ..Default::default()
+        };
+
+        let builder =
+            ContextBuilder::new(AgentId::generate(), config).with_tools_from_registry(&registry);
+
+        let context = builder.build().unwrap();
+
+        // Check that tool rules were loaded from the registry
+        assert!(
+            context
+                .system_prompt
+                .contains("manage_core_memory requires continuing your response when called")
+        );
+        assert!(
+            context
+                .system_prompt
+                .contains("send_message ends your response (yields control) when called")
+        );
     }
 }

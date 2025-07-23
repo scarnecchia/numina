@@ -284,7 +284,7 @@ mod tests {
             &self,
             _memory_key: &str,
             _target_agent_id: AgentId,
-            _access_level: crate::agent::MemoryAccessLevel,
+            _access_level: crate::memory::MemoryPermission,
         ) -> Result<()> {
             unimplemented!("Test agent")
         }

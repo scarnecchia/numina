@@ -4,9 +4,8 @@ mod tests {
     use crate::{
         UserId,
         context::AgentHandle,
-        memory::Memory,
-        tool::builtin::memory::{UpdateMemoryInput, UpdateMemoryOutput, UpdateMemoryTool},
-        tool::{AiTool, ToolRegistry},
+        memory::{Memory, MemoryPermission, MemoryType},
+        tool::ToolRegistry,
     };
 
     #[tokio::test]
@@ -15,10 +14,7 @@ mod tests {
         let memory = Memory::with_owner(UserId::generate());
         memory.create_block("test", "initial value").unwrap();
 
-        let handle = AgentHandle {
-            memory,
-            ..Default::default()
-        };
+        let handle = AgentHandle::test_with_memory(memory);
 
         // Create a tool registry
         let registry = ToolRegistry::new();
@@ -29,43 +25,52 @@ mod tests {
 
         // Verify tools are registered
         let tool_names = registry.list_tools();
-        assert!(tool_names.iter().any(|name| name == "update_memory"));
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "manage_archival_memory")
+        );
+        assert!(tool_names.iter().any(|name| name == "manage_core_memory"));
         assert!(tool_names.iter().any(|name| name == "send_message"));
     }
 
     #[tokio::test]
-    async fn test_update_memory_through_registry() {
+    async fn test_manage_core_memory_append_through_registry() {
         // Create a memory and handle
         let memory = Memory::with_owner(UserId::generate());
         memory.create_block("test", "initial value").unwrap();
 
-        let handle = AgentHandle {
-            memory: memory.clone(),
-            ..Default::default()
-        };
+        // Make it a core memory block with append permission
+        if let Some(mut block) = memory.get_block_mut("test") {
+            block.memory_type = MemoryType::Core;
+            block.permission = MemoryPermission::Append;
+        }
+
+        let handle = AgentHandle::test_with_memory(memory.clone());
 
         // Create and register tools
         let registry = ToolRegistry::new();
         let builtin = BuiltinTools::default_for_agent(handle);
         builtin.register_all(&registry);
 
-        // Execute update_memory tool through registry
+        // Execute manage_core_memory tool with append operation
         let params = serde_json::json!({
-            "label": "test",
-            "value": "updated value",
-            "description": "Test block"
+            "operation": "append",
+            "name": "test",
+            "content": " appended content"
         });
 
-        let result = registry.execute("update_memory", params).await.unwrap();
+        let result = registry
+            .execute("manage_core_memory", params)
+            .await
+            .unwrap();
 
         // Verify the result
         assert_eq!(result["success"], true);
-        assert_eq!(result["previous_value"], "initial value");
 
         // Verify the memory was actually updated
         let block = memory.get_block("test").unwrap();
-        assert_eq!(block.value, "updated value");
-        assert_eq!(block.description, Some("Test block".to_string()));
+        assert_eq!(block.value, "initial value\n appended content");
     }
 
     #[tokio::test]
@@ -81,7 +86,7 @@ mod tests {
         // Execute send_message tool
         let params = serde_json::json!({
             "target": {
-                "type": "user"
+                "target_type": "user"
             },
             "content": "Hello from test!"
         });
@@ -94,70 +99,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_custom_memory_tool() {
-        use crate::tool::DynamicToolAdapter;
-
-        // Create a custom memory tool that adds a prefix
-        #[derive(Debug, Clone)]
-        struct PrefixedMemoryTool {
-            handle: AgentHandle,
-            prefix: String,
-        }
-
-        #[async_trait::async_trait]
-        impl AiTool for PrefixedMemoryTool {
-            type Input = UpdateMemoryInput;
-            type Output = UpdateMemoryOutput;
-
-            fn name(&self) -> &str {
-                "update_memory"
-            }
-
-            fn description(&self) -> &str {
-                "Update memory with a prefix"
-            }
-
-            async fn execute(&self, mut params: Self::Input) -> crate::Result<Self::Output> {
-                params.value = format!("{}: {}", self.prefix, params.value);
-                UpdateMemoryTool {
-                    handle: self.handle.clone(),
-                }
-                .execute(params)
-                .await
-            }
-        }
-
-        // Create memory and handle
+    async fn test_manage_core_memory_replace_through_registry() {
+        // Create a memory and handle
         let memory = Memory::with_owner(UserId::generate());
-        let handle = AgentHandle {
-            memory: memory.clone(),
-            ..Default::default()
-        };
+        memory
+            .create_block("persona", "I am a helpful AI assistant.")
+            .unwrap();
 
-        // Use builder to replace default memory tool
-        let custom_tool = PrefixedMemoryTool {
-            handle: handle.clone(),
-            prefix: "PREFIXED".to_string(),
-        };
+        // Make it a core memory block with ReadWrite permission
+        if let Some(mut block) = memory.get_block_mut("persona") {
+            block.memory_type = MemoryType::Core;
+            block.permission = MemoryPermission::ReadWrite;
+        }
 
-        let builtin = BuiltinTools::builder()
-            .with_memory_tool(DynamicToolAdapter::new(custom_tool))
-            .build_for_agent(handle);
+        let handle = AgentHandle::test_with_memory(memory.clone());
 
-        // Register tools
+        // Create and register tools
         let registry = ToolRegistry::new();
+        let builtin = BuiltinTools::default_for_agent(handle);
         builtin.register_all(&registry);
 
-        // Execute the custom tool
+        // Execute manage_core_memory tool with replace operation
         let params = serde_json::json!({
-            "label": "test",
-            "value": "hello world"
+            "operation": "replace",
+            "name": "persona",
+            "old_content": "helpful AI assistant",
+            "new_content": "knowledgeable AI companion"
         });
 
-        registry.execute("update_memory", params).await.unwrap();
+        let result = registry
+            .execute("manage_core_memory", params)
+            .await
+            .unwrap();
 
-        // Verify the prefix was added
-        let block = memory.get_block("test").unwrap();
-        assert_eq!(block.value, "PREFIXED: hello world");
+        // Verify the result
+        assert_eq!(result["success"], true);
+
+        // Verify the memory was actually updated
+        let block = memory.get_block("persona").unwrap();
+        assert_eq!(block.value, "I am a knowledgeable AI companion.");
+    }
+
+    #[tokio::test]
+    async fn test_manage_archival_memory_through_registry() {
+        // Create a memory and handle
+        let memory = Memory::with_owner(UserId::generate());
+
+        let handle = AgentHandle::test_with_memory(memory.clone());
+
+        // Create and register tools
+        let registry = ToolRegistry::new();
+        let builtin = BuiltinTools::default_for_agent(handle);
+        builtin.register_all(&registry);
+
+        // Test inserting archival memory
+        let insert_params = serde_json::json!({
+            "operation": "insert",
+            "content": "The user mentioned they enjoy hiking in the mountains.",
+            "label": "user_hobbies"
+        });
+
+        let result = registry
+            .execute("manage_archival_memory", insert_params)
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("Created archival memory")
+        );
+
+        // Test searching archival memory
+        let search_params = serde_json::json!({
+            "operation": "search",
+            "query": "hiking",
+            "limit": 5
+        });
+
+        let result = registry
+            .execute("manage_archival_memory", search_params)
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["label"], "user_hobbies");
     }
 }

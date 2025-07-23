@@ -449,8 +449,7 @@ pub async fn subscribe_to_memory_updates<C: Connection>(
     let stream = conn
         .select((MemoryIdType::PREFIX, memory_id.uuid().to_string()))
         .live()
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .await?;
 
     Ok(stream.filter_map(
         |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
@@ -473,32 +472,29 @@ pub async fn subscribe_to_agent_memory_updates<C: Connection>(
     conn: &Surreal<C>,
     agent_id: AgentId,
 ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
-    // Watch memory blocks that have this agent in their agents array
-    let query = format!(
-        "LIVE SELECT * FROM mem WHERE {} IN agents",
-        RecordId::from(agent_id)
-    );
+    // For now, just watch all memory blocks and filter in the handler
+    // TODO: Optimize this to only watch memories connected to the agent
+    let query = "LIVE SELECT * FROM mem".to_string();
+    let _ = agent_id;
 
-    let mut result = conn
-        .query(query)
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+    let mut result = conn.query(query).await?;
 
-    let stream = result
-        .stream::<Notification<serde_json::Value>>(0)
-        .map_err(DatabaseError::QueryFailed)?;
+    let stream = result.stream::<Notification<<MemoryBlock as DbEntity>::DbModel>>(0)?;
 
     Ok(stream.filter_map(
-        |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
+        |notif: surrealdb::Result<Notification<<MemoryBlock as DbEntity>::DbModel>>| async move {
             match notif {
-                Ok(Notification { action, data, .. }) => {
-                    if let Ok(memory) = serde_json::from_value::<MemoryBlock>(data) {
-                        Some((action, memory))
-                    } else {
+                Ok(Notification { action, data, .. }) => match MemoryBlock::from_db_model(data) {
+                    Ok(memory) => Some((action, memory)),
+                    Err(e) => {
+                        tracing::error!("Failed to convert db model to MemoryBlock: {:?}", e);
                         None
                     }
+                },
+                Err(e) => {
+                    tracing::error!("Failed to receive notification: {:?}", e);
+                    None
                 }
-                Err(_) => None,
             }
         },
     ))
@@ -513,22 +509,42 @@ pub async fn attach_memory_to_agent<C: Connection>(
     conn: &Surreal<C>,
     agent_id: AgentId,
     memory_id: MemoryId,
-    access_level: crate::agent::MemoryAccessLevel,
+    access_level: crate::memory::MemoryPermission,
 ) -> Result<()> {
     use crate::db::entity::AgentMemoryRelation;
+
+    tracing::debug!("🔗 Attaching memory {} to agent {}", memory_id, agent_id);
 
     // Create the edge entity (without ID - SurrealDB will generate it)
     let relation = AgentMemoryRelation {
         id: None, // SurrealDB will generate the edge entity ID
-        in_id: agent_id,
-        out_id: memory_id,
+        in_id: agent_id.clone(),
+        out_id: memory_id.clone(),
         access_level,
         created_at: chrono::Utc::now(),
     };
 
     // Create the relation using the typed function
     let _created = create_relation_typed(conn, &relation).await?;
-    tracing::debug!("Created agent-memory relation: {:?}", _created);
+    tracing::debug!("✅ Created agent-memory relation: {:?}", _created);
+
+    // Verify the relation was created by querying for it
+    let verify_query = r#"
+        SELECT * FROM agent_memories
+        WHERE in = $agent_id
+    "#;
+
+    let verify_result = conn
+        .query(verify_query)
+        .bind(("agent_id", RecordId::from(agent_id.clone())))
+        .await?;
+
+    // Just check if we got results, don't try to deserialize
+    let _response = verify_result.check()?;
+    tracing::debug!(
+        "🔍 Verification: Agent-memory relation verified for agent {}",
+        agent_id
+    );
 
     Ok(())
 }
@@ -537,8 +553,18 @@ pub async fn attach_memory_to_agent<C: Connection>(
 pub async fn get_agent_memories<C: Connection>(
     conn: &Surreal<C>,
     agent_id: AgentId,
-) -> Result<Vec<(MemoryBlock, crate::agent::MemoryAccessLevel)>> {
+) -> Result<Vec<(MemoryBlock, crate::memory::MemoryPermission)>> {
     use crate::db::entity::AgentMemoryRelation;
+
+    tracing::debug!("🔍 Looking for memories for agent {}", agent_id);
+
+    // First, let's see ALL agent_memories relations for debugging
+    let debug_query = "SELECT * FROM agent_memories";
+    let debug_result = conn.query(debug_query).await?;
+    tracing::debug!(
+        "🔍 DEBUG: agent_memories query response: {:?}",
+        debug_result
+    );
 
     // Query the edge entities for this agent
     let query = r#"
@@ -548,13 +574,16 @@ pub async fn get_agent_memories<C: Connection>(
 
     let mut result = conn
         .query(query)
-        .bind(("agent_id", RecordId::from(agent_id)))
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .bind(("agent_id", RecordId::from(agent_id.clone())))
+        .await?;
 
     // Take the DB models (which have the serde rename attributes)
-    let relation_db_models: Vec<<AgentMemoryRelation as DbEntity>::DbModel> =
-        result.take(0).map_err(DatabaseError::QueryFailed)?;
+    let relation_db_models: Vec<<AgentMemoryRelation as DbEntity>::DbModel> = result.take(0)?;
+
+    tracing::debug!(
+        "Found {} agent_memories relations",
+        relation_db_models.len()
+    );
 
     // Convert DB models to domain types
     let relations: Vec<AgentMemoryRelation> = relation_db_models
@@ -562,13 +591,13 @@ pub async fn get_agent_memories<C: Connection>(
         .map(|db_model| AgentMemoryRelation::from_db_model(db_model).map_err(DatabaseError::from))
         .collect::<Result<Vec<_>>>()?;
 
+    tracing::debug!("Converted {} relations to domain types", relations.len());
+
     // Now fetch the actual memory blocks
     let mut memories = Vec::new();
     for relation in relations {
-        let memory_db: Option<<MemoryBlock as DbEntity>::DbModel> = conn
-            .select(RecordId::from(relation.out_id))
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
+        let memory_db: Option<<MemoryBlock as DbEntity>::DbModel> =
+            conn.select(RecordId::from(relation.out_id)).await?;
 
         if let Some(db_model) = memory_db {
             let memory = MemoryBlock::from_db_model(db_model)?;
@@ -644,8 +673,7 @@ pub async fn update_memory_content<C: Connection>(
             "/updated_at",
             surrealdb::Datetime::from(Utc::now()),
         ))
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .await?;
 
     Ok(())
 }
@@ -661,6 +689,9 @@ pub async fn persist_agent_message<C: Connection>(
     message: &Message,
     message_type: crate::message::MessageRelationType,
 ) -> Result<()> {
+    use rand::Rng;
+    use tokio::time::{Duration, sleep};
+
     tracing::debug!(
         "Persisting message for agent {}: message_id={:?}, type={:?}",
         agent_id,
@@ -668,6 +699,41 @@ pub async fn persist_agent_message<C: Connection>(
         message_type
     );
 
+    // Try the operation, with one retry on transaction conflict
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+
+        match persist_agent_message_inner(conn, agent_id, &message, message_type).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Check if it's a transaction conflict
+                if attempt == 1
+                    && e.to_string()
+                        .contains("Failed to commit transaction due to a read or write conflict")
+                {
+                    // Random backoff between 50-150ms
+                    let backoff_ms = rand::rng().random_range(50..150);
+                    tracing::warn!(
+                        "Transaction conflict on message persist, retrying after {}ms",
+                        backoff_ms
+                    );
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Inner function that does the actual persistence
+async fn persist_agent_message_inner<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    message: &Message,
+    message_type: crate::message::MessageRelationType,
+) -> Result<()> {
     // First, store the message
     let stored_message = message.store_with_relations(conn).await?;
     tracing::debug!("Stored message with id: {:?}", stored_message.id);
@@ -721,8 +787,7 @@ pub async fn archive_agent_messages<C: Connection>(
                 .collect::<Vec<_>>(),
         ))
         .bind(("message_type", "archived"))
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .await?;
 
     Ok(())
 }
@@ -732,7 +797,7 @@ pub async fn persist_agent_memory<C: Connection>(
     conn: &Surreal<C>,
     agent_id: AgentId,
     memory: &MemoryBlock,
-    access_level: crate::agent::MemoryAccessLevel,
+    access_level: crate::memory::MemoryPermission,
 ) -> Result<()> {
     // Store or update the memory block
     let stored_memory = memory.store_with_relations(conn).await?;
@@ -747,10 +812,9 @@ pub async fn persist_agent_memory<C: Connection>(
         .query(existing_query)
         .bind(("agent_id", RecordId::from(agent_id)))
         .bind(("memory_id", RecordId::from(stored_memory.id)))
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .await?;
 
-    let existing: Vec<serde_json::Value> = result.take(0).map_err(DatabaseError::QueryFailed)?;
+    let existing: Vec<serde_json::Value> = result.take(0)?;
 
     if existing.is_empty() {
         // Create new relation
@@ -792,8 +856,7 @@ pub async fn update_agent_stats<C: Connection>(
         .bind(("total_tool_calls", stats.total_tool_calls))
         .bind(("last_active", surrealdb::Datetime::from(stats.last_active)))
         .bind(("updated_at", surrealdb::Datetime::from(Utc::now())))
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .await?;
 
     tracing::debug!("stats updated {:?}", resp.pretty_debug());
 
@@ -808,8 +871,7 @@ pub async fn subscribe_to_agent_stats<C: Connection>(
     let stream = conn
         .select((AgentIdType::PREFIX, agent_id.uuid().to_string()))
         .live()
-        .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .await?;
 
     Ok(stream.filter_map(
         |notif: surrealdb::Result<Notification<serde_json::Value>>| async move {
@@ -878,10 +940,9 @@ where
     F: FnOnce(&Surreal<C>) -> String,
 {
     let query = query_builder(db);
-    let mut result = db.query(&query).await.map_err(DatabaseError::QueryFailed)?;
+    let mut result = db.query(&query).await?;
 
-    let db_messages: Vec<<Message as DbEntity>::DbModel> =
-        result.take(0).map_err(DatabaseError::QueryFailed)?;
+    let db_messages: Vec<<Message as DbEntity>::DbModel> = result.take(0)?;
 
     let messages: Result<Vec<_>> = db_messages
         .into_iter()

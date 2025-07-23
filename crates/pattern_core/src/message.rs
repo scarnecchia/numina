@@ -87,9 +87,62 @@ impl Message {
 
     /// Convert this message to a genai ChatMessage
     pub fn as_chat_message(&self) -> genai::chat::ChatMessage {
+        // Handle Gemini's requirement that ToolResponses must have Tool role
+        // If we have ToolResponses with a non-Tool role, fix it
+        let role = match (&self.role, &self.content) {
+            (role, MessageContent::ToolResponses(_)) if !role.is_tool() => {
+                tracing::warn!(
+                    "Found ToolResponses with incorrect role {:?}, converting to Tool role",
+                    role
+                );
+                ChatRole::Tool
+            }
+            _ => self.role.clone(),
+        };
+
+        // Debug log to track what content types are being sent
+        let content = match &self.content {
+            MessageContent::Text(_) => {
+                tracing::trace!("Converting Text message with role {:?}", role);
+                self.content.clone()
+            }
+            MessageContent::ToolCalls(_) => {
+                tracing::trace!("Converting ToolCalls message with role {:?}", role);
+                self.content.clone()
+            }
+            MessageContent::ToolResponses(_) => {
+                tracing::debug!("Converting ToolResponses message with role {:?}", role);
+                self.content.clone()
+            }
+            MessageContent::Parts(parts) => match role {
+                ChatRole::System | ChatRole::Assistant | ChatRole::Tool => {
+                    tracing::debug!("Combining Parts message with role {:?}", role);
+                    let string = parts
+                        .into_iter()
+                        .map(|part| match part {
+                            ContentPart::Text(text) => text.clone(),
+                            ContentPart::Image {
+                                content_type,
+                                source,
+                            } => {
+                                let source_as_text = match source {
+                                    ImageSource::Url(st) => st,
+                                    ImageSource::Base64(st) => &st.to_string(),
+                                };
+                                format!("{}: {}", content_type, source_as_text)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+                    MessageContent::Text(string)
+                }
+                ChatRole::User => self.content.clone(),
+            },
+        };
+
         genai::chat::ChatMessage {
-            role: self.role.clone().into(),
-            content: self.content.clone().into(),
+            role: role.into(),
+            content: content.into(),
             options: Some(self.options.clone().into()),
         }
     }
@@ -528,18 +581,28 @@ impl Message {
         let content = if !response.content.is_empty() {
             // If there's only one content item, use it directly
             if response.content.len() == 1 {
-                response.content[0].clone()
+                // Special case: if it's Parts with a single Text, flatten to Text
+                match &response.content[0] {
+                    MessageContent::Parts(parts) if parts.len() == 1 => match &parts[0] {
+                        ContentPart::Text(text) => MessageContent::Text(text.clone()),
+                        _ => response.content[0].clone(),
+                    },
+                    _ => response.content[0].clone(),
+                }
             } else {
-                // Multiple content items - convert to parts
-                let parts: Vec<ContentPart> = response
+                // Multiple content items - concatenate all text into a single string
+                // This ensures compatibility with models like Gemini that don't support Parts
+                let combined_text: String = response
                     .content
                     .iter()
                     .filter_map(|c| match c {
-                        MessageContent::Text(text) => Some(ContentPart::Text(text.clone())),
+                        MessageContent::Text(text) => Some(text.clone()),
                         _ => None, // Skip non-text content for now
                     })
-                    .collect();
-                MessageContent::Parts(parts)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
+                MessageContent::Text(combined_text)
             }
         } else if !response.tool_calls.is_empty() {
             // Tool calls response
@@ -552,12 +615,24 @@ impl Message {
             MessageContent::Text(String::new())
         };
 
+        // Determine role based on content type to ensure provider compatibility
+        // If response contains ToolResponses, it MUST be a Tool role message
+        let role = if response
+            .content
+            .iter()
+            .any(|c| matches!(c, MessageContent::ToolResponses(_)))
+        {
+            ChatRole::Tool
+        } else {
+            ChatRole::Assistant
+        };
+
         let has_tool_calls = !response.tool_calls.is_empty();
         let word_count = Self::estimate_word_count(&content);
 
         Self {
             id: MessageId::generate(),
-            role: ChatRole::Assistant,
+            role,
             content,
             metadata: MessageMetadata {
                 user_id: Some(agent_id.to_string()),

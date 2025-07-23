@@ -67,6 +67,13 @@ pub enum DatabaseError {
     #[diagnostic(help("Ensure all embeddings use the same model and dimensions"))]
     InvalidVectorDimensions { expected: usize, actual: usize },
 
+    #[error("SurrealDB JSON deserialization error")]
+    #[diagnostic(code(pattern_core::surreal_json_value_error), help("{help}"))]
+    SurrealJsonValueError {
+        #[source]
+        original: surrealdb::Error,
+        help: String,
+    },
     #[error("Error: {0}")]
     Other(String),
 }
@@ -91,6 +98,25 @@ impl From<entity::EntityError> for DatabaseError {
             EntityError::RequiredFieldMissing { field, entity_type } => DatabaseError::Other(
                 format!("Missing required field '{}' for {}", field, entity_type),
             ),
+        }
+    }
+}
+
+impl From<surrealdb::Error> for DatabaseError {
+    fn from(err: surrealdb::Error) -> Self {
+        // Check if it's the dreaded json::Value error
+        let error_str = err.to_string();
+        if error_str.contains("invalid type: enum")
+            && error_str.contains("expected any valid JSON value")
+        {
+            DatabaseError::SurrealJsonValueError {
+                original: err,
+                help: "Cannot .take(0) from a SurrealDB response as a serde_json::Value. \
+                                 Take the actual type (the DbModel type if this derives Entity) or print the raw Response for debugging."
+                    .to_string(),
+            }
+        } else {
+            DatabaseError::QueryFailed(err)
         }
     }
 }

@@ -298,7 +298,7 @@ impl AgentRecord {
 ///
 /// This is already defined in base.rs but included here for reference.
 /// It stores metadata about how an agent relates to a memory block.
-use crate::agent::MemoryAccessLevel;
+use crate::memory::MemoryPermission;
 use surrealdb::RecordId;
 
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
@@ -307,7 +307,7 @@ pub struct AgentMemoryRelation {
     pub id: Option<RecordId>,
     pub in_id: AgentId,
     pub out_id: MemoryId,
-    pub access_level: MemoryAccessLevel,
+    pub access_level: MemoryPermission,
     pub created_at: DateTime<Utc>,
 }
 
@@ -424,7 +424,7 @@ impl AgentRecord {
         base_instructions: String,
     ) -> Self
     where
-        C: surrealdb::Connection + std::fmt::Debug + 'static,
+        C: surrealdb::Connection + Clone + std::fmt::Debug + 'static,
         M: crate::ModelProvider + 'static,
         E: crate::embeddings::EmbeddingProvider + 'static,
     {

@@ -125,7 +125,7 @@ impl Default for BaseEvent {
 // AgentMemoryRelation - Edge Entity for Agent-Memory Relationships
 // ============================================================================
 
-use crate::agent::MemoryAccessLevel;
+use crate::memory::MemoryPermission;
 use surrealdb::RecordId;
 
 /// Edge entity for agent-memory relationships with access levels
@@ -135,7 +135,7 @@ pub struct AgentMemoryRelation {
     pub id: Option<RecordId>,
     pub in_id: AgentId,
     pub out_id: MemoryId,
-    pub access_level: MemoryAccessLevel,
+    pub access_level: MemoryPermission,
     pub created_at: DateTime<Utc>,
 }
 
@@ -145,7 +145,7 @@ impl Default for AgentMemoryRelation {
             id: None,
             in_id: AgentId::nil(),
             out_id: MemoryId::nil(),
-            access_level: MemoryAccessLevel::Read,
+            access_level: MemoryPermission::default(), // Uses Append as default
             created_at: Utc::now(),
         }
     }

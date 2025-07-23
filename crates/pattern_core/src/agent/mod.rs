@@ -71,7 +71,7 @@ pub trait Agent: Send + Sync + Debug {
         &self,
         memory_key: &str,
         target_agent_id: AgentId,
-        access_level: MemoryAccessLevel,
+        access_level: crate::memory::MemoryPermission,
     ) -> Result<()>;
 
     /// Get all memory blocks shared with this agent
@@ -88,18 +88,6 @@ pub trait Agent: Send + Sync + Debug {
 
     /// Update the agent's state
     async fn set_state(&self, state: AgentState) -> Result<()>;
-}
-
-/// Access levels for shared memory
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MemoryAccessLevel {
-    /// Can only read the memory block
-    Read,
-    /// Can read and update the memory block
-    Write,
-    /// Can read, update, and manage sharing of the memory block
-    Admin,
 }
 
 /// Types of agents in the system

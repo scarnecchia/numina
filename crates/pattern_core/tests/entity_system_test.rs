@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use pattern_core::{
-    agent::{AgentRecord, AgentType, MemoryAccessLevel},
+    agent::{AgentRecord, AgentType},
     db::{
         DatabaseError,
         entity::{AgentMemoryRelation, DbEntity},
@@ -571,7 +571,7 @@ async fn test_edge_entity_relations() {
         id: None, // SurrealDB will generate the edge ID
         in_id: agent.id,
         out_id: stored_memory1.id,
-        access_level: MemoryAccessLevel::Write,
+        access_level: pattern_core::memory::MemoryPermission::ReadWrite,
         created_at: Utc::now(),
     };
 
@@ -579,7 +579,7 @@ async fn test_edge_entity_relations() {
         id: None, // SurrealDB will generate the edge ID
         in_id: agent.id,
         out_id: stored_memory2.id,
-        access_level: MemoryAccessLevel::Write,
+        access_level: pattern_core::memory::MemoryPermission::ReadWrite,
         created_at: Utc::now(),
     };
 
@@ -618,7 +618,10 @@ async fn test_edge_entity_relations() {
     // Check edge entity data (access levels)
     for (_memory, edge) in &loaded_agent.memories {
         // Both should have Write access as that's what we set when creating them
-        assert_eq!(edge.access_level, MemoryAccessLevel::Write);
+        assert_eq!(
+            edge.access_level,
+            pattern_core::memory::MemoryPermission::ReadWrite
+        );
     }
 
     // TODO: Once edge entity fields are fully implemented,

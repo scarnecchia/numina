@@ -119,13 +119,14 @@ mod tests {
     use super::*;
     use crate::{
         AgentId, MemoryBlock, UserId,
-        agent::{Agent, AgentState, AgentType, MemoryAccessLevel},
+        agent::{Agent, AgentState, AgentType},
         coordination::{
             AgentGroup,
             groups::{AgentWithMembership, GroupMembership},
             types::GroupMemberRole,
         },
         id::GroupId,
+        memory::MemoryPermission,
         message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
         tool::DynamicTool,
     };
@@ -200,7 +201,7 @@ mod tests {
             &self,
             _memory_key: &str,
             _target_agent_id: AgentId,
-            _access_level: MemoryAccessLevel,
+            _access_level: MemoryPermission,
         ) -> Result<()> {
             unimplemented!("Test agent")
         }

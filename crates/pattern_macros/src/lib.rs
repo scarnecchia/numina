@@ -353,7 +353,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             ::surrealdb::RecordId::from(self.id), #relation_name,
                             ::surrealdb::RecordId::from(related_id)
                         );
-                        db.query(&query).await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        db.query(&query).await?;
                     }
                 }
             } else {
@@ -368,8 +368,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         let e: Option<<#inner_type as #crate_path::db::entity::DbEntity>::DbModel> = db
                             .upsert(db_model.id.clone())
                             .content(db_model)
-                            .await
-                            .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            .await?;
 
                         println!("upserted: {:?}", e);
 
@@ -379,7 +378,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             ::surrealdb::RecordId::from(self.id), #relation_name,
                             ::surrealdb::RecordId::from(related_entity.id())
                         );
-                        db.query(&query).await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        db.query(&query).await?;
                     }
                 }
             }
@@ -393,7 +392,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         ::surrealdb::RecordId::from(self.id), #relation_name,
                         ::surrealdb::RecordId::from(self.#field_name)
                     );
-                    db.query(&query).await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    db.query(&query).await?;
                 }
             }
         } else {
@@ -410,7 +409,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             .upsert(db_model.id.clone())
                             .content(db_model)
                             .await
-                            .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            ?;
 
                         println!("upserted: {:?}", e);
                         // Create the relation
@@ -419,7 +418,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             ::surrealdb::RecordId::from(self.id), #relation_name,
                             ::surrealdb::RecordId::from(related_entity.id())
                         );
-                        db.query(&query).await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        db.query(&query).await?;
                     }
                 }
             } else {
@@ -431,7 +430,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         .upsert(db_model.id.clone())
                         .content(db_model)
                         .await
-                        .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        ?;
 
                     println!("upserted: {:?}", e);
 
@@ -441,7 +440,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         ::surrealdb::RecordId::from(self.id), #relation_name,
                         ::surrealdb::RecordId::from(self.#field_name.id())
                     );
-                    db.query(&query).await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    db.query(&query).await?;
                 }
             }
         }
@@ -467,12 +466,12 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     println!("id vec query: {}", query);
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                        .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        .await?;
 
                     println!("vec result {:?}", result);
 
                     let db_models: Vec<Vec<::surrealdb::RecordId>> =
-                        result.take("related_entitites").map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        result.take("related_entitites")?;
 
                     println!("vec db models: {:?}", db_models);
 
@@ -493,12 +492,12 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                        .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        .await?;
 
                     println!("vec result {:?}", result);
 
                     let db_models: Vec<Vec<<#inner_type as #crate_path::db::entity::DbEntity>::DbModel>> =
-                        result.take("related_entitites").map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        result.take("related_entitites")?;
 
                     println!("vec db models: {:?}", db_models);
 
@@ -525,10 +524,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 println!("single id query: {}", query);
                 let mut result = db.query(&query)
                     .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                    .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    .await?;
 
                 let record_ids: Vec<Vec<::surrealdb::RecordId>> =
-                    result.take("related_entity").map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    result.take("related_entity")?;
 
                 self.#field_name = record_ids.concat().into_iter().next()
                     .map(|record_id| #field_type::from_record(record_id))
@@ -547,10 +546,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                        .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        .await?;
 
                     let db_models: Vec<Vec<<#inner_type as #crate_path::db::entity::DbEntity>::DbModel>> =
-                        result.take("related_entity").map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        result.take("related_entity")?;
 
                     // Convert from db model to domain model
                     self.#field_name = if let Some(db_model) = db_models.concat().into_iter().next() {
@@ -571,10 +570,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                        .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        .await?;
 
                     let db_models: Vec<Vec<<#field_type as #crate_path::db::entity::DbEntity>::DbModel>> =
-                        result.take("related_entity").map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        result.take("related_entity")?;
 
                     // Convert from db model to domain model
                     self.#field_name = if let Some(db_model) = db_models.concat().into_iter().next() {
@@ -613,7 +612,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             .upsert(related_id.to_record_id())
                             .content(db_model)
                             .await
-                            .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            ?;
 
                         // Use create_relation_typed to store the edge entity
                         let _edge_stored = #crate_path::db::ops::create_relation_typed(db, edge_data).await
@@ -653,7 +652,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             .upsert(db_model.id.clone())
                             .content(db_model)
                             .await
-                            .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            ?;
 
                         // Use create_relation_typed to store the edge entity
                         let _edge_stored = #crate_path::db::ops::create_relation_typed(db, edge_data).await
@@ -691,7 +690,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         .upsert(db_model.id.clone())
                         .content(db_model)
                         .await
-                        .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        ?;
 
                     // Use create_relation_typed to store the edge entity
                     let _edge_stored = #crate_path::db::ops::create_relation_typed(db, edge_data).await
@@ -732,11 +731,11 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                        .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        .await?;
 
                     // Extract edge records - we need to get them as the DbModel type
                     let edge_db_models: Vec<<#edge_type as #crate_path::db::entity::DbEntity>::DbModel> = result.take(0)
-                        .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        ?;
 
                     // Process the edge records with related data
                     let mut entities = Vec::<(#entity_type, #edge_type)>::new();
@@ -754,7 +753,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                        .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                        .await?;
 
                     // For now, initialize as empty with proper type annotation
                     // We need to default to an empty Vec but Rust can't infer the type
@@ -774,11 +773,11 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                         let mut result = db.query(&query)
                             .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                            .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            .await?;
 
                         // Extract the edge entity
                         let edge_records: Vec<serde_json::Value> = result.take(0)
-                            .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            ?;
 
                         if let Some(record) = edge_records.into_iter().next() {
                             // Extract the edge entity fields
@@ -845,11 +844,11 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                         let mut result = db.query(&query)
                             .bind(("parent", ::surrealdb::RecordId::from(self.id)))
-                            .await.map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            .await?;
 
                         // Extract the edge entity
                         let edge_records: Vec<serde_json::Value> = result.take(0)
-                            .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                            ?;
 
                         let record = edge_records.into_iter().next()
                             .ok_or_else(|| #crate_path::db::DatabaseError::QueryFailed(
@@ -958,7 +957,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     .upsert((<Self as #crate_path::db::entity::DbEntity>::table_name(), self.id.to_record_id()))
                     .content(<Self as #crate_path::db::entity::DbEntity>::to_db_model(self))
                     .await
-                    .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    ?;
 
                 let stored_db_model = stored_db_model
                     .ok_or_else(|| #crate_path::db::DatabaseError::QueryFailed(
@@ -1012,8 +1011,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 // First load the entity - MessageId already has to_record_id() method
                 let db_model: Option<#db_model_name> = db
                     .select((<Self as #crate_path::db::entity::DbEntity>::table_name(), id.to_record_id()))
-                    .await
-                    .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    .await?;
 
                 if let Some(db_model) = db_model {
                     let mut entity = <Self as #crate_path::db::entity::DbEntity>::from_db_model(db_model)
@@ -1041,8 +1039,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 // First load the entity
                 let db_model: Option<#db_model_name> = db
                     .select((<Self as #crate_path::db::entity::DbEntity>::table_name(), id.to_record_id()))
-                    .await
-                    .map_err(#crate_path::db::DatabaseError::QueryFailed)?;
+                    .await?;
 
                 if let Some(db_model) = db_model {
                     let mut entity = <Self as #crate_path::db::entity::DbEntity>::from_db_model(db_model)
