@@ -77,6 +77,23 @@ pub struct ResponseOptions {
 }
 
 impl ResponseOptions {
+    pub fn new(model_info: ModelInfo) -> Self {
+        Self {
+            model_info,
+            temperature: Some(0.7),
+            max_tokens: Some(100000),
+            top_p: None,
+            stop_sequences: vec![],
+            capture_usage: None,
+            capture_content: None,
+            capture_reasoning_content: None,
+            capture_tool_calls: None,
+            capture_raw_body: None,
+            response_format: None,
+            normalize_reasoning_content: None,
+            reasoning_effort: None,
+        }
+    }
     /// Convert ResponseOptions to a tuple of (ModelInfo, ChatOptions) for use with genai
     pub fn to_chat_options_tuple(&self) -> (ModelInfo, ChatOptions) {
         (

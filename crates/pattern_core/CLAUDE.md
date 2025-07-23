@@ -2,7 +2,7 @@
 
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support. Inspired by MemGPT architecture for stateful agents.
 
-## Current Status (2025-07-21)
+## Current Status (2025-07-23)
 
 ### Entity System ✅ COMPLETE
 - Proc macro-based entities with `#[derive(Entity)]`
@@ -19,7 +19,14 @@ Core agent framework, memory management, and coordination system for Pattern's m
 ### Agent Groups ✅ COMPLETE
 - Dynamic, round-robin, sleeptime, pipeline managers
 - Selector registry with load balancing, random, etc.
-- All tests passing (92/92)
+- All tests passing (107/107) ✅
+
+### Tool System Refactoring ✅ COMPLETE
+- All core tools refactored to follow Letta/MemGPT patterns
+- Domain-based multi-operation tools implemented
+- Unified search tool consolidates all search operations
+- Context builder includes archival memory labels
+- Full test coverage with realistic scenarios
 
 ## Critical Implementation Notes
 
@@ -101,21 +108,28 @@ Core agent framework, memory management, and coordination system for Pattern's m
    - Stored as String in `position` field
    - Guarantees order even with rapid message creation
 
-## Tool System Refactoring (In Progress)
+4. **Concurrent Memory Access**:
+   - Use `alter_block` for atomic updates to avoid deadlocks
+   - Never hold refs across async boundaries
+   - Extract data and drop locks immediately
 
-Following Letta/MemGPT patterns, tools are being refactored into domain-based multi-operation tools:
+## Tool System ✅ COMPLETE
+
+Following Letta/MemGPT patterns, all tools have been refactored into domain-based multi-operation tools:
 
 ### Completed Tools
-1. **manage_core_memory** ✅ - Operations on core memory blocks
-   - `append` - Add content to existing memory
+1. **context** ✅ - Operations on context blocks
+   - `append` - Add content to existing memory (always uses \n separator)
    - `replace` - Replace specific content within memory
+   - `archive` - Move a core memory block to archival storage
+   - `load_from_archival` - Load an archival memory block into core
+   - `swap` - Atomic operation to archive one block and load another
 
-### Completed Tools
-2. **manage_archival_memory** ✅ - Long-term storage operations
-   - `insert` - Add new memories to archival storage (creates MemoryBlock with MemoryType::Archival)
-   - `search` - Search through archived memories (uses DB when available, falls back to DashMap)
-   - `delete` - Remove archived memories
+2. **recall** ✅ - Long-term storage operations
+   - `insert` - Add new memories to archival storage
+   - `append` - Add content to existing archival memory (always uses \n separator)
    - `read` - Read specific archival memory by label
+   - `delete` - Remove archived memories
 
    **Implementation Notes**:
    - Archival memories are stored as regular MemoryBlocks with `MemoryType::Archival`
@@ -123,31 +137,26 @@ Following Letta/MemGPT patterns, tools are being refactored into domain-based mu
    - DB methods: `search_archival_memories`, `insert_archival_memory`, `delete_archival_memory`, `count_archival_memories`
    - Graceful fallback: tries DB first, falls back to in-memory if unavailable
    - Full-text search working with SurrealDB's @@ operator and BM25 analyzer
-   - Uses computed field `archival_memories` on agent table for efficient access
-   - Search uses: `SELECT archival_memories FROM agent WHERE id = $agent_id AND archival_memories.*.value @@ $search_term`
-   - List uses: `SELECT *, ->agent_memories->mem AS memories FROM $agent_id FETCH memories`
-   - Successfully tested with CLI debug tools
 
-3. **search_conversations** ✅ - Query message history
-   - Filters: time range, participant, content search, role
-   - Returns relevant messages with optional context
-   - Uses database full-text search when available
-   - Graceful fallback if no DB connection
-   - CLI debug tool implemented for testing
+3. **search** ✅ - Unified search across domains
+   - `domain` - Where to search: "archival_memory", "conversations", "all"
+   - `query` - Search text
+   - `limit` - Maximum results
+   - Domain-specific filters (role for conversations, time ranges, etc.)
+   
+   **Implementation Notes**:
+   - Single interface for all search operations
+   - Extensible to add new domains (files, tasks, etc.)
+   - Uses appropriate indexes/methods per domain
 
-4. **interact_with_files** - File system operations
+4. **search_conversations** ✅ - Query message history
+   - DEPRECATED: Use unified `search` tool with domain="conversations"
+   - Legacy implementation remains for compatibility
+
+5. **interact_with_files** - File system operations
    - `read` - Read file contents
    - `search` - Search within files
    - `edit` (optional) - Modify files
-
-5. **swap_memory** - Memory management between core and archival
-   ```rust
-   pub struct SwapMemoryInput {
-       pub swap_out: Vec<String>,  // Labels to move from core to archival
-       pub swap_in: Vec<String>,   // Labels to move from archival to core
-       pub reason: String,         // Why the swap is needed
-   }
-   ```
 
 ### Implementation Notes
 - Each tool has a single entry point with operation selection
@@ -155,11 +164,30 @@ Following Letta/MemGPT patterns, tools are being refactored into domain-based mu
 - ToolRegistry automatically provides rules to context builder
 - Operations use enums for type safety
 
+### Memory Context Management
+The context builder includes archival memory labels to enable intelligent memory management:
+- All archival labels included if under 50 entries
+- Above 50, shows most recently accessed + most frequently accessed
+- Labels grouped by prefix for organization (e.g., all "meeting_notes_*" together)
+- Format: `label: description` to provide semantic hints
+
+This allows agents to make informed decisions about memory swapping without needing to search first.
+
 ## Next Priorities
 1. ~~Implement search_conversations tool with database queries~~ ✅
-2. Implement swap_memory tool for memory management
-3. Add vector search for archival memory using embeddings
-4. Implement message compression with archival when context window fills
+2. ~~Implement swap_memory tool for memory management~~ ✅ (integrated into manage_core_memory)
+3. ~~Refactor tools to match new design~~ ✅
+   - ~~Remove `search` from manage_archival_memory~~ ✅
+   - ~~Add `append` to manage_archival_memory~~ ✅
+   - ~~Add `archive`, `load_from_archival`, `swap` to manage_core_memory~~ ✅
+   - ~~Create unified `search` tool~~ ✅
+   - ~~Update context builder to include archival labels~~ ✅
+4. ~~Implement message compression with archival when context window fills~~ ✅
+   - Added Gemini-compatible message sequence validation
+   - Multiple compression strategies (truncate, time-decay, importance-based, recursive summarization)
+   - Comprehensive test coverage with realistic message counts
+5. Add vector search for archival memory using embeddings
+6. Create basic binary (CLI/TUI) for user testing
 
 
 ## Eventually

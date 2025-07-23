@@ -13,13 +13,15 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 - **Message system**: Full persistence with edge relationships and compression
 - **Agent coordination**: Dynamic, round-robin, sleeptime patterns implemented
 - **Database**: SurrealDB with vector search, migrations, and embedding support
-- **Testing**: 92 tests passing, comprehensive test coverage
+- **Tool system**: Letta/MemGPT-style domain-based tools with unified search
+- **Message compression**: Multiple strategies with Gemini compatibility
+- **Testing**: 107 tests passing, comprehensive test coverage
 
 ### 🚧 Current Development Priorities
 1. **Task Management System** - ADHD-aware task breakdown and tracking
 2. **MCP Tools Integration** - Task-related tools and agent communication
 3. **Agent Groups** - Main, crisis, planning, memory group implementations
-4. **Message Compression** - Context window management with archival
+4. **Basic Binary** - CLI/TUI for user testing and interaction
 
 ## Development Principles
 
@@ -61,9 +63,9 @@ cargo run --features full    # Discord + MCP + background monitoring
 
 ### Agent Framework
 - **DatabaseAgent**: Generic over ModelProvider and EmbeddingProvider
-- **Built-in tools**: update_memory, send_message with type-safe registry
+- **Built-in tools**: context, recall, search, send_message
 - **Message persistence**: RELATE edges with Snowflake ID ordering
-- **Memory system**: Thread-safe with semantic search capabilities
+- **Memory system**: Thread-safe with semantic search, archival support, and atomic updates
 
 ### Coordination Patterns
 - **Dynamic**: Selector-based routing (random, capability, load-balancing)

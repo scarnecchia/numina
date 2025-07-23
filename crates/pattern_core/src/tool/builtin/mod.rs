@@ -3,8 +3,9 @@
 //! This module provides the standard tools that all agents have access to,
 //! including memory management and inter-agent communication.
 
-mod manage_archival_memory;
-mod manage_core_memory;
+mod context;
+mod recall;
+mod search;
 mod search_conversations;
 mod send_message;
 #[cfg(test)]
@@ -12,14 +13,12 @@ mod test_schemas;
 
 use std::fmt::Debug;
 
-pub use manage_archival_memory::{
-    ArchivalMemoryOperationType, ArchivalSearchResult, ManageArchivalMemoryInput,
-    ManageArchivalMemoryOutput, ManageArchivalMemoryTool,
-};
-pub use manage_core_memory::{
-    CoreMemoryOperationType, ManageCoreMemoryInput, ManageCoreMemoryOutput, ManageCoreMemoryTool,
+pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationType};
+pub use recall::{
+    ArchivalMemoryOperationType, ArchivalSearchResult, RecallInput, RecallOutput, RecallTool,
 };
 use schemars::JsonSchema;
+pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
 pub use search_conversations::{
     ConversationResult, MessageSummary, SearchConversationsInput, SearchConversationsOutput,
     SearchConversationsTool,
@@ -35,9 +34,9 @@ use crate::{
 /// Registry specifically for built-in tools
 #[derive(Clone)]
 pub struct BuiltinTools {
-    manage_archival_memory_tool: Box<dyn DynamicTool>,
-    manage_core_memory_tool: Box<dyn DynamicTool>,
-    search_conversations_tool: Box<dyn DynamicTool>,
+    recall_tool: Box<dyn DynamicTool>,
+    context_tool: Box<dyn DynamicTool>,
+    search_tool: Box<dyn DynamicTool>,
     send_message_tool: Box<dyn DynamicTool>,
 }
 
@@ -47,17 +46,16 @@ impl BuiltinTools {
         handle: AgentHandle<C>,
     ) -> Self {
         Self {
-            manage_archival_memory_tool: Box::new(DynamicToolAdapter::new(
-                ManageArchivalMemoryTool {
-                    handle: handle.clone(),
-                },
-            )),
-            manage_core_memory_tool: Box::new(DynamicToolAdapter::new(ManageCoreMemoryTool {
+            recall_tool: Box::new(DynamicToolAdapter::new(RecallTool {
                 handle: handle.clone(),
             })),
-            search_conversations_tool: Box::new(DynamicToolAdapter::new(SearchConversationsTool {
+            context_tool: Box::new(DynamicToolAdapter::new(ContextTool {
                 handle: handle.clone(),
             })),
+            search_tool: Box::new(DynamicToolAdapter::new(SearchTool {
+                handle: handle.clone(),
+            })),
+
             send_message_tool: Box::new(DynamicToolAdapter::new(SendMessageTool {
                 handle: handle.clone(),
             })),
@@ -66,9 +64,9 @@ impl BuiltinTools {
 
     /// Register all tools to a registry
     pub fn register_all(&self, registry: &ToolRegistry) {
-        registry.register_dynamic(self.manage_archival_memory_tool.clone_box());
-        registry.register_dynamic(self.manage_core_memory_tool.clone_box());
-        registry.register_dynamic(self.search_conversations_tool.clone_box());
+        registry.register_dynamic(self.recall_tool.clone_box());
+        registry.register_dynamic(self.context_tool.clone_box());
+        registry.register_dynamic(self.search_tool.clone_box());
         registry.register_dynamic(self.send_message_tool.clone_box());
     }
 
@@ -81,22 +79,28 @@ impl BuiltinTools {
 /// Builder for customizing built-in tools
 #[derive(Default)]
 pub struct BuiltinToolsBuilder {
-    manage_archival_memory_tool: Option<Box<dyn DynamicTool>>,
-    manage_core_memory_tool: Option<Box<dyn DynamicTool>>,
-    search_conversations_tool: Option<Box<dyn DynamicTool>>,
+    recall_tool: Option<Box<dyn DynamicTool>>,
+    context_tool: Option<Box<dyn DynamicTool>>,
+    search_tool: Option<Box<dyn DynamicTool>>,
     send_message_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinToolsBuilder {
     /// Replace the default manage archival memory tool
-    pub fn with_manage_archival_memory_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.manage_archival_memory_tool = Some(Box::new(tool));
+    pub fn with_recall_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.recall_tool = Some(Box::new(tool));
         self
     }
 
     /// Replace the default manage core memory tool
-    pub fn with_manage_core_memory_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.manage_core_memory_tool = Some(Box::new(tool));
+    pub fn with_context_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.context_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default search tool
+    pub fn with_search_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.search_tool = Some(Box::new(tool));
         self
     }
 
@@ -113,15 +117,9 @@ impl BuiltinToolsBuilder {
     ) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(handle);
         BuiltinTools {
-            manage_archival_memory_tool: self
-                .manage_archival_memory_tool
-                .unwrap_or(defaults.manage_archival_memory_tool),
-            manage_core_memory_tool: self
-                .manage_core_memory_tool
-                .unwrap_or(defaults.manage_core_memory_tool),
-            search_conversations_tool: self
-                .search_conversations_tool
-                .unwrap_or(defaults.search_conversations_tool),
+            recall_tool: self.recall_tool.unwrap_or(defaults.recall_tool),
+            context_tool: self.context_tool.unwrap_or(defaults.context_tool),
+            search_tool: self.search_tool.unwrap_or(defaults.search_tool),
             send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
         }
     }

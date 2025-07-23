@@ -481,6 +481,28 @@ impl Response {
             metadata,
         }
     }
+
+    pub fn only_text(&self) -> String {
+        let mut text = String::new();
+        for content in &self.content {
+            match content {
+                MessageContent::Text(txt) => text.push_str(txt),
+                MessageContent::Parts(content_parts) => {
+                    for part in content_parts {
+                        match part {
+                            ContentPart::Text(txt) => text.push_str(txt),
+                            ContentPart::Image { .. } => {}
+                        }
+                        text.push('\n');
+                    }
+                }
+                MessageContent::ToolCalls(_) => {}
+                MessageContent::ToolResponses(_) => {}
+            }
+            text.push('\n');
+        }
+        text
+    }
 }
 
 /// Metadata for a response

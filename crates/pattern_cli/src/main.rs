@@ -1557,7 +1557,7 @@ async fn list_archival_memory(agent_name: &str) -> Result<()> {
             println!("{} No archival memories found for this agent", "ℹ".yellow());
             println!();
             println!("Archival memories can be created:");
-            println!("  • By the agent using the manage_archival_memory tool");
+            println!("  • By the agent using the recall tool");
             println!("  • Through the API");
             println!("  • By importing from external sources");
         }
@@ -1666,7 +1666,7 @@ async fn list_core_memory(agent_name: &str) -> Result<()> {
             println!();
             println!("Core memory blocks are usually created:");
             println!("  • Automatically when an agent is initialized");
-            println!("  • By the agent using the manage_core_memory tool");
+            println!("  • By the agent using the context tool");
             println!("  • Through direct API calls");
         }
     } else {

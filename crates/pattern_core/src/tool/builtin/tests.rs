@@ -25,17 +25,14 @@ mod tests {
 
         // Verify tools are registered
         let tool_names = registry.list_tools();
-        assert!(
-            tool_names
-                .iter()
-                .any(|name| name == "manage_archival_memory")
-        );
-        assert!(tool_names.iter().any(|name| name == "manage_core_memory"));
+        assert!(tool_names.iter().any(|name| name == "recall"));
+        assert!(tool_names.iter().any(|name| name == "context"));
+        assert!(tool_names.iter().any(|name| name == "search"));
         assert!(tool_names.iter().any(|name| name == "send_message"));
     }
 
     #[tokio::test]
-    async fn test_manage_core_memory_append_through_registry() {
+    async fn test_context_append_through_registry() {
         // Create a memory and handle
         let memory = Memory::with_owner(UserId::generate());
         memory.create_block("test", "initial value").unwrap();
@@ -53,24 +50,21 @@ mod tests {
         let builtin = BuiltinTools::default_for_agent(handle);
         builtin.register_all(&registry);
 
-        // Execute manage_core_memory tool with append operation
+        // Execute context tool with append operation
         let params = serde_json::json!({
             "operation": "append",
             "name": "test",
             "content": " appended content"
         });
 
-        let result = registry
-            .execute("manage_core_memory", params)
-            .await
-            .unwrap();
+        let result = registry.execute("context", params).await.unwrap();
 
         // Verify the result
         assert_eq!(result["success"], true);
 
         // Verify the memory was actually updated
         let block = memory.get_block("test").unwrap();
-        assert_eq!(block.value, "initial value\n appended content");
+        assert_eq!(block.value, "initial value\n\n appended content");
     }
 
     #[tokio::test]
@@ -99,7 +93,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manage_core_memory_replace_through_registry() {
+    async fn test_context_replace_through_registry() {
         // Create a memory and handle
         let memory = Memory::with_owner(UserId::generate());
         memory
@@ -119,7 +113,7 @@ mod tests {
         let builtin = BuiltinTools::default_for_agent(handle);
         builtin.register_all(&registry);
 
-        // Execute manage_core_memory tool with replace operation
+        // Execute context tool with replace operation
         let params = serde_json::json!({
             "operation": "replace",
             "name": "persona",
@@ -127,10 +121,7 @@ mod tests {
             "new_content": "knowledgeable AI companion"
         });
 
-        let result = registry
-            .execute("manage_core_memory", params)
-            .await
-            .unwrap();
+        let result = registry.execute("context", params).await.unwrap();
 
         // Verify the result
         assert_eq!(result["success"], true);
@@ -141,7 +132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manage_archival_memory_through_registry() {
+    async fn test_recall_through_registry() {
         // Create a memory and handle
         let memory = Memory::with_owner(UserId::generate());
 
@@ -159,34 +150,50 @@ mod tests {
             "label": "user_hobbies"
         });
 
-        let result = registry
-            .execute("manage_archival_memory", insert_params)
-            .await
-            .unwrap();
+        let result = registry.execute("recall", insert_params).await.unwrap();
 
         assert_eq!(result["success"], true);
         assert!(
             result["message"]
                 .as_str()
                 .unwrap()
-                .contains("Created archival memory")
+                .contains("Created recall memory")
         );
 
-        // Test searching archival memory
-        let search_params = serde_json::json!({
-            "operation": "search",
-            "query": "hiking",
-            "limit": 5
+        // Test appending to archival memory
+        let append_params = serde_json::json!({
+            "operation": "append",
+            "label": "user_hobbies",
+            "content": " They also enjoy rock climbing."
         });
 
-        let result = registry
-            .execute("manage_archival_memory", search_params)
-            .await
-            .unwrap();
+        let result = registry.execute("recall", append_params).await.unwrap();
+
+        assert_eq!(result["success"], true);
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("Appended to recall memory")
+        );
+
+        // Verify the append worked by reading
+        let read_params = serde_json::json!({
+            "operation": "read",
+            "label": "user_hobbies"
+        });
+
+        let result = registry.execute("recall", read_params).await.unwrap();
 
         assert_eq!(result["success"], true);
         let results = result["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["label"], "user_hobbies");
+        assert!(results[0]["content"].as_str().unwrap().contains("hiking"));
+        assert!(
+            results[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("rock climbing")
+        );
     }
 }

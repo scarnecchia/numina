@@ -88,7 +88,7 @@ impl Default for ContextConfig {
             enable_thinking: true,
             tool_rules: vec![
                 ToolRule {
-                    tool_name: "manage_core_memory".to_string(),
+                    tool_name: "context".to_string(),
                     rule:
                         "requires continuing your response when called (except for read operations)"
                             .to_string(),
@@ -333,7 +333,14 @@ impl ContextBuilder {
 
         let mut blocks_text = Vec::new();
 
-        for block in &self.memory_blocks {
+        // Separate core and archival blocks
+        let (core_blocks, archival_blocks): (Vec<_>, Vec<_>) = self
+            .memory_blocks
+            .iter()
+            .partition(|b| b.memory_type == crate::memory::MemoryType::Core);
+
+        // Add core memory blocks
+        for block in &core_blocks {
             let char_count = block.value.chars().count();
             let char_limit = self.config.memory_char_limit;
 
@@ -377,20 +384,48 @@ Content:
             }
         }
 
+        // Add archival memory labels section if we have any
+        let archival_section = if !archival_blocks.is_empty() {
+            let labels: Vec<String> = archival_blocks
+                .iter()
+                .take(50) // Limit to 50 most recent
+                .map(|b| {
+                    if let Some(desc) = &b.description {
+                        format!("{}: {}", b.label, desc)
+                    } else {
+                        b.label.to_string()
+                    }
+                })
+                .collect();
+
+            if self.config.model_adjustments.use_xml_tags {
+                format!(
+                    "\n\n<archival_memory_labels>\nAvailable archival memories (use context to load):\n{}\n</archival_memory_labels>",
+                    labels.join("\n")
+                )
+            } else {
+                format!("\n\nArchival Memory Labels:\n{}", labels.join("\n"))
+            }
+        } else {
+            String::new()
+        };
+
         if self.config.model_adjustments.use_xml_tags {
             format!(
                 "<memory_blocks>
 The following memory blocks are currently engaged in your core memory unit:
 
 {}
-</memory_blocks>",
-                blocks_text.join("\n\n")
+</memory_blocks>{}",
+                blocks_text.join("\n\n"),
+                archival_section
             )
         } else {
             format!(
                 "Core Memory Blocks:
-{}",
-                blocks_text.join("\n\n")
+{}{}",
+                blocks_text.join("\n\n"),
+                archival_section
             )
         }
     }
@@ -487,7 +522,7 @@ You should use your inner monologue to plan actions or think privately before ta
 
 Memory management:
 You have access to core memory blocks that persist between conversations.
-Core memory is always in context. It shapes you and provides important information. - use manage_core_memory with append/replace/read operations to manage information.
+Core memory is always in context. It shapes you and provides important information. - use context with append/replace/read operations to manage information.
 When context gets full, older messages are moved to recall storage but remain searchable.
 
 Tool usage:
@@ -595,7 +630,7 @@ mod tests {
         assert!(
             context
                 .system_prompt
-                .contains("manage_core_memory requires continuing your response when called")
+                .contains("context requires continuing your response when called")
         );
         assert!(
             context

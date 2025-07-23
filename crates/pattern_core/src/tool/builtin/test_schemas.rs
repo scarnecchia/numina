@@ -4,8 +4,8 @@
 mod tests {
     use crate::tool::builtin::send_message::SendMessageInput;
     use crate::tool::builtin::{
-        ArchivalMemoryOperationType, CoreMemoryOperationType, ManageArchivalMemoryInput,
-        ManageCoreMemoryInput, MessageTarget, TargetType,
+        ArchivalMemoryOperationType, ContextInput, CoreMemoryOperationType, MessageTarget,
+        RecallInput, TargetType,
     };
     use schemars::schema_for;
 
@@ -50,17 +50,17 @@ mod tests {
     }
 
     #[test]
-    fn test_manage_core_memory_input_schema() {
-        let schema = schema_for!(ManageCoreMemoryInput);
+    fn test_context_input_schema() {
+        let schema = schema_for!(ContextInput);
         let json = serde_json::to_string_pretty(&schema).unwrap();
-        println!("ManageCoreMemoryInput schema:\n{}", json);
+        println!("ContextInput schema:\n{}", json);
 
         // Check for problematic patterns
         if json.contains("oneOf") {
-            eprintln!("WARNING: ManageCoreMemoryInput contains oneOf!");
+            eprintln!("WARNING: ContextInput contains oneOf!");
         }
         if json.contains("const") {
-            eprintln!("WARNING: ManageCoreMemoryInput contains const!");
+            eprintln!("WARNING: ContextInput contains const!");
         }
     }
 
@@ -78,17 +78,17 @@ mod tests {
     }
 
     #[test]
-    fn test_manage_archival_memory_input_schema() {
-        let schema = schema_for!(ManageArchivalMemoryInput);
+    fn test_recall_input_schema() {
+        let schema = schema_for!(RecallInput);
         let json = serde_json::to_string_pretty(&schema).unwrap();
-        println!("ManageArchivalMemoryInput schema:\n{}", json);
+        println!("RecallInput schema:\n{}", json);
 
         // Check for problematic patterns
         if json.contains("oneOf") {
-            eprintln!("WARNING: ManageArchivalMemoryInput contains oneOf!");
+            eprintln!("WARNING: RecallInput contains oneOf!");
         }
         if json.contains("const") {
-            eprintln!("WARNING: ManageArchivalMemoryInput contains const!");
+            eprintln!("WARNING: RecallInput contains const!");
         }
     }
 }

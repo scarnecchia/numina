@@ -217,13 +217,13 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
 
         // Build the query dynamically using graph traversal
         let mut sql = format!(
-            "SELECT * FROM message WHERE (<-agent_messages<-agent:⟨{}⟩..)",
+            "SELECT * FROM msg WHERE (<-agent_messages<-agent:⟨{}⟩..)",
             self.agent_id.uuid()
         );
 
         // Add optional filters
         if query.is_some() {
-            sql.push_str(" AND content @@ $query");
+            sql.push_str(" AND content @@ $search_query");
         }
 
         if role_filter.is_some() {
@@ -244,7 +244,7 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
         let mut query_builder = db.query(&sql).bind(("limit", limit));
 
         if let Some(search_query) = query {
-            query_builder = query_builder.bind(("query", search_query.to_string()));
+            query_builder = query_builder.bind(("search_query", search_query.to_string()));
         }
 
         if let Some(role) = &role_filter {
