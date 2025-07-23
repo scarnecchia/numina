@@ -175,11 +175,11 @@ This allows agents to make informed decisions about memory swapping without need
 
 ## Next Priorities
 1. ~~Implement search_conversations tool with database queries~~ ✅
-2. ~~Implement swap_memory tool for memory management~~ ✅ (integrated into manage_core_memory)
+2. ~~Implement swap_memory tool for memory management~~ ✅ (integrated into context tool)
 3. ~~Refactor tools to match new design~~ ✅
-   - ~~Remove `search` from manage_archival_memory~~ ✅
-   - ~~Add `append` to manage_archival_memory~~ ✅
-   - ~~Add `archive`, `load_from_archival`, `swap` to manage_core_memory~~ ✅
+   - ~~Remove `search` from recall tool~~ ✅
+   - ~~Add `append` to recall tool~~ ✅
+   - ~~Add `archive`, `load_from_archival`, `swap` to context tool~~ ✅
    - ~~Create unified `search` tool~~ ✅
    - ~~Update context builder to include archival labels~~ ✅
 4. ~~Implement message compression with archival when context window fills~~ ✅
