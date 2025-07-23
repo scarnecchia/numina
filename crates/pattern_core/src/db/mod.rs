@@ -124,7 +124,7 @@ impl From<surrealdb::Error> for DatabaseError {
 pub type Result<T> = std::result::Result<T, DatabaseError>;
 
 /// Configuration for database backends
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DatabaseConfig {
     /// Embedded database using SurrealKV

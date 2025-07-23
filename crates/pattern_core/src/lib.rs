@@ -5,6 +5,7 @@
 //! cognitive support system.
 
 pub mod agent;
+pub mod config;
 pub mod context;
 pub mod coordination;
 pub mod db;

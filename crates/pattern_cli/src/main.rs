@@ -2,14 +2,15 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use miette::{IntoDiagnostic, Result};
 use pattern_core::{
-    ModelProvider,
+    Agent, ModelProvider,
     agent::{AgentRecord, AgentState, AgentType, DatabaseAgent},
+    config::{self, PatternConfig},
     db::{
         DatabaseConfig, DbEntity,
         client::{self, DB},
         ops,
     },
-    id::{AgentId, UserId},
+    id::AgentId,
     memory::{Memory, MemoryBlock},
     model::GenAiClient,
     tool::ToolRegistry,
@@ -28,9 +29,13 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Database file path
-    #[arg(long, default_value = "pattern-cli.db")]
-    db_path: PathBuf,
+    /// Configuration file path
+    #[arg(long, short = 'c')]
+    config: Option<PathBuf>,
+
+    /// Database file path (overrides config)
+    #[arg(long)]
+    db_path: Option<PathBuf>,
 
     /// Enable debug logging
     #[arg(long)]
@@ -68,6 +73,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: DebugCommands,
     },
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -90,6 +100,18 @@ enum DbCommands {
     Stats,
     /// Run a query
     Query { sql: String },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Show current configuration
+    Show,
+    /// Save current configuration to file
+    Save {
+        /// Path to save configuration
+        #[arg(default_value = "pattern.toml")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -222,19 +244,32 @@ async fn main() -> Result<()> {
 
     fmt().with_env_filter(filter).init();
 
-    info!("Starting pattern-cli with database: {:?}", cli.db_path);
-
-    // Initialize database
-    let db_config = DatabaseConfig::Embedded {
-        path: cli.db_path.to_string_lossy().to_string(),
-        strict_mode: false,
+    // Load configuration
+    let mut config = if let Some(config_path) = &cli.config {
+        info!("Loading config from: {:?}", config_path);
+        config::load_config(config_path).await?
+    } else {
+        info!("Loading config from standard locations");
+        config::load_config_from_standard_locations().await?
     };
 
+    // Apply CLI overrides
+    if let Some(db_path) = &cli.db_path {
+        info!("Overriding database path with: {:?}", db_path);
+        config.database = DatabaseConfig::Embedded {
+            path: db_path.to_string_lossy().to_string(),
+            strict_mode: false,
+        };
+    }
+
+    info!("Using database config: {:?}", config.database);
+
+    // Initialize database
     info!("Initializing database...");
-    client::init_db(db_config).await?;
+    client::init_db(config.database.clone()).await?;
     info!("Database initialized successfully");
 
-    match cli.command {
+    match &cli.command {
         Commands::Chat {
             agent,
             model,
@@ -245,12 +280,12 @@ async fn main() -> Result<()> {
             if let Some(model_name) = &model {
                 println!("Model: {}", model_name.bright_yellow());
             }
-            if tools {
+            if *tools {
                 println!("Tools: {}", "enabled".bright_green());
             }
 
             // Try to load existing agent or create new one
-            let agent = load_or_create_agent(&agent, model, tools).await?;
+            let agent = load_or_create_agent(agent, model.clone(), *tools, &config).await?;
             chat_with_agent(agent).await?;
         }
         Commands::Agent { cmd } => match cmd {
@@ -322,20 +357,31 @@ async fn main() -> Result<()> {
                     AgentType::Generic
                 };
 
-                // Create agent record
-                let user_id = UserId::generate(); // TODO: Get from config or auth
+                // Create agent record using user from config
+                let user_id = config.user.id.clone();
                 let now = chrono::Utc::now();
 
-                let agent = AgentRecord {
-                    id: AgentId::generate(),
-                    name: name.clone(),
-                    agent_type: parsed_type.clone(),
-                    state: AgentState::Ready,
-                    base_instructions: format!(
+                // Use agent ID from config if available
+                let agent_id = config.agent.id.clone().unwrap_or_else(AgentId::generate);
+
+                // Use system prompt from config or generate default
+                let base_instructions = if let Some(system_prompt) = &config.agent.system_prompt {
+                    system_prompt.clone()
+                } else {
+                    // Use default system prompt
+                    format!(
                         "You are {}, a {} agent in the Pattern ADHD support system.",
                         name,
                         parsed_type.as_str()
-                    ),
+                    )
+                };
+
+                let agent = AgentRecord {
+                    id: agent_id.clone(),
+                    name: name.clone(),
+                    agent_type: parsed_type.clone(),
+                    state: AgentState::Ready,
+                    base_instructions,
                     owner_id: user_id,
                     created_at: now,
                     updated_at: now,
@@ -361,6 +407,24 @@ async fn main() -> Result<()> {
                             format!("{:?}", stored_agent.agent_type).bright_yellow()
                         );
                         println!();
+
+                        // Save the agent ID back to config if it was generated
+                        if config.agent.id.is_none() {
+                            println!("Saving agent ID to config for future sessions...");
+                            let mut updated_config = config.clone();
+                            updated_config.agent.id = Some(stored_agent.id.clone());
+                            if let Err(e) =
+                                config::save_config(&updated_config, &config::config_paths()[0])
+                                    .await
+                            {
+                                println!(
+                                    "{} Failed to save agent ID to config: {}",
+                                    "Warning:".yellow(),
+                                    e
+                                );
+                            }
+                        }
+
                         println!(
                             "Start chatting with: {} chat --agent {}",
                             "pattern-cli".bright_green(),
@@ -582,20 +646,30 @@ async fn main() -> Result<()> {
                 println!(
                     "  {} {}",
                     "File:".dimmed(),
-                    cli.db_path.display().to_string().bright_white()
+                    match &config.database {
+                        DatabaseConfig::Embedded { path, .. } => path.bright_white(),
+                        //DatabaseConfig::Remote { url, .. } => url.bright_white(),
+                        #[allow(unreachable_patterns)]
+                        _ => {
+                            "".bright_yellow()
+                        }
+                    }
                 );
 
-                // Get file size if possible
-                if let Ok(metadata) = std::fs::metadata(&cli.db_path) {
-                    let size = metadata.len();
-                    let size_str = if size < 1024 {
-                        format!("{} bytes", size)
-                    } else if size < 1024 * 1024 {
-                        format!("{:.2} KB", size as f64 / 1024.0)
-                    } else {
-                        format!("{:.2} MB", size as f64 / (1024.0 * 1024.0))
-                    };
-                    println!("  {} {}", "Size:".dimmed(), size_str.bright_white());
+                // Get file size if possible for embedded databases
+                #[allow(irrefutable_let_patterns)]
+                if let DatabaseConfig::Embedded { path, .. } = &config.database {
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        let size = metadata.len();
+                        let size_str = if size < 1024 {
+                            format!("{} bytes", size)
+                        } else if size < 1024 * 1024 {
+                            format!("{:.2} KB", size as f64 / 1024.0)
+                        } else {
+                            format!("{:.2} MB", size as f64 / (1024.0 * 1024.0))
+                        };
+                        println!("  {} {}", "Size:".dimmed(), size_str.bright_white());
+                    }
                 }
             }
             DbCommands::Query { sql } => {
@@ -603,7 +677,7 @@ async fn main() -> Result<()> {
                 println!();
 
                 // Execute the query
-                let response = DB.query(&sql).await.into_diagnostic()?;
+                let response = DB.query(sql).await.into_diagnostic()?;
 
                 println!("Results: {:?}", response);
             }
@@ -614,7 +688,7 @@ async fn main() -> Result<()> {
                 query,
                 limit,
             } => {
-                search_archival_memory(&agent, &query, limit).await?;
+                search_archival_memory(agent, query, *limit).await?;
             }
             DebugCommands::ListArchival { agent } => {
                 list_archival_memory(&agent).await?;
@@ -639,9 +713,39 @@ async fn main() -> Result<()> {
                     role.as_deref(),
                     start_time.as_deref(),
                     end_time.as_deref(),
-                    limit,
+                    *limit,
                 )
                 .await?;
+            }
+        },
+        Commands::Config { cmd } => match cmd {
+            ConfigCommands::Show => {
+                println!("{} Current Configuration", "⚙️".bright_blue());
+                println!("{}", "═".repeat(50).dimmed());
+                println!();
+
+                // Display the current config in TOML format
+                let toml_str = toml::to_string_pretty(&config).into_diagnostic()?;
+                println!("{}", toml_str);
+            }
+            ConfigCommands::Save { path } => {
+                println!(
+                    "{} Saving configuration to: {}",
+                    "💾".bright_blue(),
+                    path.display()
+                );
+
+                // Save the current config
+                config::save_config(&config, path).await?;
+
+                println!("{} Configuration saved successfully!", "✓".bright_green());
+                println!();
+                println!("To use this configuration, run:");
+                println!(
+                    "  {} --config {}",
+                    "pattern-cli".bright_green(),
+                    path.display()
+                );
             }
         },
     }
@@ -849,6 +953,7 @@ async fn load_or_create_agent(
     name: &str,
     model_name: Option<String>,
     enable_tools: bool,
+    config: &PatternConfig,
 ) -> Result<Box<dyn pattern_core::Agent>> {
     // First, try to find an existing agent with this name
     let query = "SELECT id FROM agent WHERE name = $name LIMIT 1";
@@ -949,7 +1054,7 @@ async fn load_or_create_agent(
         println!();
 
         // Create runtime agent from the stored record
-        create_agent_from_record(existing_agent.clone(), model_name, enable_tools).await
+        create_agent_from_record(existing_agent.clone(), model_name, enable_tools, config).await
     } else {
         println!(
             "{} Creating new agent '{}'",
@@ -959,7 +1064,7 @@ async fn load_or_create_agent(
         println!();
 
         // Create a new agent
-        create_agent(name, model_name, enable_tools).await
+        create_agent(name, model_name, enable_tools, config).await
     }
 }
 
@@ -968,6 +1073,7 @@ async fn create_agent_from_record(
     record: AgentRecord,
     model_name: Option<String>,
     enable_tools: bool,
+    _config: &PatternConfig,
 ) -> Result<Box<dyn pattern_core::Agent>> {
     use pattern_core::{embeddings::cloud::OpenAIEmbedder, model::ResponseOptions};
 
@@ -1067,6 +1173,7 @@ async fn create_agent(
     name: &str,
     model_name: Option<String>,
     enable_tools: bool,
+    config: &PatternConfig,
 ) -> Result<Box<dyn pattern_core::Agent>> {
     use pattern_core::{embeddings::cloud::OpenAIEmbedder, model::ResponseOptions};
 
@@ -1134,15 +1241,15 @@ async fn create_agent(
         None
     };
 
-    // Create memory
-    let memory = Memory::new();
+    // Create memory with the configured user as owner
+    let memory = Memory::with_owner(config.user.id.clone());
 
     // Create tool registry
     let tools = ToolRegistry::new();
 
-    // Generate IDs
-    let agent_id = AgentId::generate();
-    let user_id = UserId::generate();
+    // Use IDs from config or generate new ones
+    let agent_id = config.agent.id.clone().unwrap_or_else(AgentId::generate);
+    let user_id = config.user.id.clone();
 
     // Create response options with the selected model
     let response_options = ResponseOptions {
@@ -1167,6 +1274,7 @@ async fn create_agent(
         user_id,
         AgentType::Generic,
         name.to_string(),
+        // Empty base instructions - will be set later from context
         String::new(),
         memory,
         DB.clone(),
@@ -1204,6 +1312,52 @@ async fn create_agent(
 
     agent.start_stats_sync().await?;
     agent.start_memory_sync().await?;
+
+    // Add persona as a core memory block if configured
+    if let Some(persona) = &config.agent.persona {
+        println!("Adding persona to agent's core memory...");
+        let persona_block = MemoryBlock::owned(config.user.id.clone(), "persona", persona.clone())
+            .with_description("Agent's persona and identity")
+            .with_permission(pattern_core::memory::MemoryPermission::ReadOnly);
+
+        if let Err(e) = agent.update_memory("persona", persona_block).await {
+            println!(
+                "{} Failed to add persona memory: {}",
+                "Warning:".yellow(),
+                e
+            );
+        }
+    }
+
+    // Add any pre-configured memory blocks
+    for (label, block_config) in &config.agent.memory {
+        println!(
+            "Adding memory block '{}' to agent...",
+            label.bright_yellow()
+        );
+        let memory_block = MemoryBlock::owned(
+            config.user.id.clone(),
+            label.clone(),
+            block_config.content.clone(),
+        )
+        .with_memory_type(block_config.memory_type)
+        .with_permission(block_config.permission);
+
+        let memory_block = if let Some(desc) = &block_config.description {
+            memory_block.with_description(desc.clone())
+        } else {
+            memory_block
+        };
+
+        if let Err(e) = agent.update_memory(label, memory_block).await {
+            println!(
+                "{} Failed to add memory block '{}': {}",
+                "Warning:".yellow(),
+                label,
+                e
+            );
+        }
+    }
 
     Ok(Box::new(agent))
 }

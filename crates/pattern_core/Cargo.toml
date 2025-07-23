@@ -12,6 +12,7 @@ description = "Core agent framework and memory system for Pattern"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 miette = { workspace = true }
 pattern-macros = { path = "../pattern_macros" }
 thiserror = { workspace = true }
@@ -22,6 +23,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
+dirs = { workspace = true }
 
 # Database
 surrealdb = { workspace = true }
