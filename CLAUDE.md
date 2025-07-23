@@ -36,13 +36,13 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 ```
 pattern/
 ├── crates/
+│   ├── pattern_cli/      # Command-line testing tool
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
-│   ├── pattern_nd/       # ADHD-specific tools and agent personalities
+│   ├── pattern_nd/       # Tools and agent personalities specific to the neurodivergent support constellation
 │   ├── pattern_mcp/      # MCP server implementation
 │   ├── pattern_discord/  # Discord bot integration
-│   └── pattern_main/     # Main orchestrator binary
+│   └── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
 ├── docs/                 # Architecture and integration guides
-└── migrations/           # Database schema migrations
 ```
 
 **Each crate has its own `CLAUDE.md` with specific implementation guidelines.**
