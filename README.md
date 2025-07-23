@@ -60,7 +60,6 @@ Create custom agent configurations through the builder API or configuration file
 
 ```
 pattern/
-pattern/
 ├── crates/
 │   ├── pattern_cli/      # Command-line testing tool
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
