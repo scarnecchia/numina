@@ -55,41 +55,40 @@ Pattern automatically implements `DynamicTool` for any type that implements `AiT
 
 ```mermaid
 flowchart TB
-    subgraph top ["Development Time"]
-        A[Custom Tool struct]
-        B[impl AiTool<br/>Input + Output types]
-        C[Auto-generated<br/>impl DynamicTool]
+    subgraph row1 [" "]
+        subgraph dev ["Development"]
+            A[Custom Tool] --> B[impl AiTool]
+            B --> C[Auto impl<br/>DynamicTool]
+        end
         
-        A --> B
-        B --> C
+        subgraph reg ["Registration"]
+            D[Box tool] --> E[Registry]
+            E --> F[DashMap]
+        end
     end
     
-    subgraph middle ["Registration"]
-        D["Box::new(tool)"]
-        E[ToolRegistry]
-        F["DashMap&lt;String, Box&lt;dyn DynamicTool&gt;&gt;"]
+    subgraph row2 [" "]
+        subgraph run1 ["Discovery"]
+            G[Agent] --> H[Get schemas]
+            H --> I[Send to LLM]
+        end
         
-        C --> D
-        D --> E
-        E --> F
+        subgraph run2 ["Execution"]
+            J[LLM call] --> K[JSON params]
+            K --> L[Find tool]
+            L --> M[Convert types]
+            M --> N[Execute]
+            N --> O[Return JSON]
+        end
     end
     
-    subgraph bottom ["Runtime Execution"]
-        G[Agent requests tools] --> H[JSON schemas to LLM]
-        I[LLM tool call] --> J[JSON parameters]
-        K[Registry lookup] --> L[Type conversion]
-        M[Execute tool] --> N[Return JSON result]
-        
-        H --> I
-        J --> K
-        L --> M
-    end
-    
-    F --> G
+    dev -.-> reg
+    reg ==> run1
+    run1 -.-> run2
     
     style A fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style I fill:#ed8936,stroke:#c05621,color:#fff
-    style N fill:#48bb78,stroke:#2f855a,color:#fff
+    style J fill:#ed8936,stroke:#c05621,color:#fff
+    style O fill:#48bb78,stroke:#2f855a,color:#fff
 ```
 
 ## Creating a Custom Tool
