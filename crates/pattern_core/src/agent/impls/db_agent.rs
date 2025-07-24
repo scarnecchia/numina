@@ -782,23 +782,17 @@ where
             let mut context = self.context.write().await;
             context.handle.state = AgentState::Processing;
 
-            // Clone what we need for the background task
-            let db = self.db.clone();
             let agent_id = context.handle.agent_id;
-            let message_clone = message.clone();
 
-            // Fire off message persistence in background
-            let _handle1 = tokio::spawn(async move {
-                if let Err(e) = crate::db::ops::persist_agent_message(
-                    &db,
-                    agent_id,
-                    &message_clone,
-                    crate::message::MessageRelationType::Active,
-                )
-                .await
-                {
-                    crate::log_error!("Failed to persist incoming message", e);
-                }
+            let _ = crate::db::ops::persist_agent_message(
+                &self.db,
+                agent_id,
+                &message,
+                crate::message::MessageRelationType::Active,
+            )
+            .await
+            .inspect_err(|e| {
+                crate::log_error!("Failed to persist incoming message", e);
             });
 
             // Add message to context immediately
@@ -967,21 +961,15 @@ where
                     context.add_message(message.clone()).await;
                 }
 
-                // Persist the message in background
-                let db_clone = self.db.clone();
-                let msg_clone = message.clone();
-                let agent_id_clone = agent_id;
-                tokio::spawn(async move {
-                    if let Err(e) = crate::db::ops::persist_agent_message(
-                        &db_clone,
-                        agent_id_clone,
-                        &msg_clone,
-                        crate::message::MessageRelationType::Active,
-                    )
-                    .await
-                    {
-                        crate::log_error!("Failed to persist message", e);
-                    }
+                let _ = crate::db::ops::persist_agent_message(
+                    &self.db,
+                    agent_id,
+                    &message,
+                    crate::message::MessageRelationType::Active,
+                )
+                .await
+                .inspect_err(|e| {
+                    crate::log_error!("Failed to persist incoming message", e);
                 });
             }
 
@@ -1052,22 +1040,15 @@ where
             Message::from_response(&final_response, context.handle.agent_id)
         };
 
-        // Clone for background persistence
-        let db = self.db.clone();
-        let response_msg_clone = response_message.clone();
-
-        // Fire off response persistence in background
-        let _handle2 = tokio::spawn(async move {
-            if let Err(e) = crate::db::ops::persist_agent_message(
-                &db,
-                agent_id,
-                &response_msg_clone,
-                crate::message::MessageRelationType::Active,
-            )
-            .await
-            {
-                crate::log_error!("Failed to persist response message", e);
-            }
+        let _ = crate::db::ops::persist_agent_message(
+            &self.db,
+            agent_id,
+            &response_message,
+            crate::message::MessageRelationType::Active,
+        )
+        .await
+        .inspect_err(|e| {
+            crate::log_error!("Failed to persist message", e);
         });
         // Add response message to context
         {
@@ -1081,7 +1062,7 @@ where
             (context.get_stats().await, self.db.clone())
         };
 
-        let _handle3 = tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id, &stats).await {
                 crate::log_error!("Failed to update agent stats", e);
             }
@@ -1183,13 +1164,11 @@ where
             created_at,
         };
 
-        // Persist tool call in background
-        let db = self.db.clone();
-        let _handle = tokio::spawn(async move {
-            if let Err(e) = crate::db::ops::create_entity(&db, &tool_call).await {
+        let _ = crate::db::ops::create_entity(&db, &tool_call)
+            .await
+            .inspect_err(|e| {
                 crate::log_error!("Failed to persist tool call", e);
-            }
-        });
+            });
 
         // Return the result
         result
@@ -1387,19 +1366,16 @@ where
             let context = self.context.read().await;
             context.handle.agent_id
         };
-        let _handle = tokio::spawn(async move {
-            let query =
-                "UPDATE agent SET state = $state, last_active = $last_active WHERE id = $id";
-            if let Err(e) = db
-                .query(query)
-                .bind(("id", surrealdb::RecordId::from(&agent_id)))
-                .bind(("state", serde_json::to_value(&state).unwrap()))
-                .bind(("last_active", surrealdb::Datetime::from(chrono::Utc::now())))
-                .await
-            {
+
+        let _ = db
+            .query("UPDATE agent SET state = $state, last_active = $last_active WHERE id = $id")
+            .bind(("id", surrealdb::RecordId::from(&agent_id)))
+            .bind(("state", serde_json::to_value(&state).unwrap()))
+            .bind(("last_active", surrealdb::Datetime::from(chrono::Utc::now())))
+            .await
+            .inspect_err(|e| {
                 crate::log_error!("Failed to persist agent state update", e);
-            }
-        });
+            });
 
         Ok(())
     }

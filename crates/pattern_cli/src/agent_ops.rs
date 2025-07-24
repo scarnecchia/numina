@@ -142,10 +142,25 @@ pub async fn create_agent_from_record(
         let models = provider.list_models().await?;
 
         // If a specific model was requested, try to find it
+        // Priority: CLI arg > config > stored preference > defaults
         let selected_model = if let Some(requested_model) = &model_name {
             models
                 .iter()
-                .find(|m| m.id.contains(requested_model) || m.name.contains(requested_model))
+                .find(|m| {
+                    let model_lower = requested_model.to_lowercase();
+                    m.id.to_lowercase().contains(&model_lower)
+                        || m.name.to_lowercase().contains(&model_lower)
+                })
+                .cloned()
+        } else if let Some(config_model) = &_config.model.model {
+            // Use model from config
+            models
+                .iter()
+                .find(|m| {
+                    let model_lower = config_model.to_lowercase();
+                    m.id.to_lowercase().contains(&model_lower)
+                        || m.name.to_lowercase().contains(&model_lower)
+                })
                 .cloned()
         } else if let Some(stored_model) = &record.model_id {
             // Try to use the agent's stored model preference
@@ -154,12 +169,16 @@ pub async fn create_agent_from_record(
             // Default to Gemini models with free tier
             models
                 .iter()
-                .find(|m| m.provider == "Gemini" && m.id.contains("gemini-2.5-flash"))
+                .find(|m| {
+                    m.provider.to_lowercase() == "gemini" && m.id.contains("gemini-2.5-flash")
+                })
                 .cloned()
                 .or_else(|| {
                     models
                         .iter()
-                        .find(|m| m.provider == "Gemini" && m.id.contains("gemini-2.5-pro"))
+                        .find(|m| {
+                            m.provider.to_lowercase() == "gemini" && m.id.contains("gemini-2.5-pro")
+                        })
                         .cloned()
                 })
                 .or_else(|| models.into_iter().next())
@@ -253,10 +272,25 @@ pub async fn create_agent(
         }
 
         // If a specific model was requested, try to find it
+        // First check CLI arg, then config, then defaults
         let selected_model = if let Some(requested_model) = &model_name {
             models
                 .iter()
-                .find(|m| m.id.contains(requested_model) || m.name.contains(requested_model))
+                .find(|m| {
+                    let model_lower = requested_model.to_lowercase();
+                    m.id.to_lowercase().contains(&model_lower)
+                        || m.name.to_lowercase().contains(&model_lower)
+                })
+                .cloned()
+        } else if let Some(config_model) = &config.model.model {
+            // Use model from config
+            models
+                .iter()
+                .find(|m| {
+                    let model_lower = config_model.to_lowercase();
+                    m.id.to_lowercase().contains(&model_lower)
+                        || m.name.to_lowercase().contains(&model_lower)
+                })
                 .cloned()
         } else {
             // Default to Gemini models with free tier, prioritizing Flash for better rate limits
@@ -267,7 +301,10 @@ pub async fn create_agent(
                 .or_else(|| {
                     models
                         .iter()
-                        .find(|m| m.provider == "Gemini" && m.id.contains("gemini-2.5-flash"))
+                        .find(|m| {
+                            m.provider.to_lowercase() == "gemini"
+                                && m.id.contains("gemini-2.5-flash")
+                        })
                         .cloned()
                 })
                 .or_else(|| models.into_iter().next())
