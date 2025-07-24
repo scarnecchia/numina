@@ -353,6 +353,9 @@ mod tests {
 
         let merged = merge_configs(base, overlay);
         assert_eq!(merged.agent.name, "Custom Agent");
-        assert_eq!(merged.agent.persona, "You are a helpful AI assistant.");
+        assert_eq!(
+            merged.agent.persona,
+            Some("You are a helpful AI assistant.".to_string())
+        );
     }
 }

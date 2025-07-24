@@ -32,11 +32,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Database
-surrealdb = { version = "2.3", features = [
+surrealdb = { version = "2.3", default-features = false, features = [
     "kv-surrealkv",
     "kv-mem",
     "protocol-ws",
-    "protocol-http",
     "rustls",
     "jwks",
 ] }
@@ -57,7 +56,16 @@ dirs = "5.0"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "http2",
+    "charset",
+    #"native-tls-vendored",
+    "json",
+    "rustls-tls",
+] }
+#hyper-tls = { version = "0.6", features = ["vendored"] }
+ureq = { version = "*" } #features = ["vendored"] }
+
 
 # Discord
 serenity = { version = "0.12", default-features = false, features = [

@@ -22,6 +22,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
+#hyper-tls.workspace = true
+ureq.workspace = true
 
 # Discord
 serenity = { workspace = true }

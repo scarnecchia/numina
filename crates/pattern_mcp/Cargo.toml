@@ -32,6 +32,8 @@ tower-http = { workspace = true }
 
 # Core framework
 pattern-core = { path = "../pattern_core" }
+#hyper-tls.workspace = true
+ureq.workspace = true
 
 # SSE support
 tokio-stream = "0.1"
@@ -41,7 +43,7 @@ futures-util = "0.3"
 tokio-test = "0.4"
 mockall = "0.13"
 pretty_assertions = "1.4"
-hyper = "1.5"
+hyper = { version = "1.5", features = [] }
 tower = { version = "0.5", features = ["util"] }
 
 [features]
