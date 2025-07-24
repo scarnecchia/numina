@@ -54,39 +54,38 @@ Pattern automatically implements `DynamicTool` for any type that implements `AiT
 ## Flow Diagram
 
 ```mermaid
-graph TB
-    subgraph "Tool Definition"
-        A[Custom Tool struct] --> B[impl AiTool]
-        B --> C[Automatic impl DynamicTool]
-    end
+graph TD
+    A[Custom Tool struct]
+    A --> B[impl AiTool]
+    B --> C[Auto impl DynamicTool]
     
-    subgraph "Registration"
-        C --> D["Box&lt;dyn DynamicTool&gt;"]
-        D --> E[ToolRegistry::register]
-        E --> F["DashMap&lt;String, Box&lt;dyn DynamicTool&gt;&gt;"]
-    end
+    C --> D["Box&lt;dyn DynamicTool&gt;"]
+    D --> E[ToolRegistry::register]
+    E --> F[Stored in DashMap]
     
-    subgraph "Agent Usage"
-        G[Agent] --> H["available_tools()"]
-        H --> I["Vec&lt;Box&lt;dyn DynamicTool&gt;&gt;"]
-        I --> J[Tool schemas sent to LLM]
-    end
+    F --> G[Agent requests tools]
+    G --> H["available_tools()"]
+    H --> I[Tool schemas]
+    I --> J[Sent to LLM]
     
-    subgraph "Execution Flow"
-        K[LLM generates tool call] --> L[JSON parameters]
-        L --> M[ToolRegistry::execute]
-        M --> N[Find tool by name]
-        N --> O["tool.execute_dynamic(params)"]
-        O --> P[Deserialize to Input type]
-        P --> Q["tool.execute(typed_params)"]
-        Q --> R[Serialize Output to JSON]
-        R --> S[Return to agent]
-    end
+    J --> K[LLM tool call]
+    K --> L[JSON params]
+    L --> M[Registry lookup]
+    M --> N["execute_dynamic()"]
+    
+    N --> O[Deserialize JSON]
+    O --> P[Type-safe Input]
+    P --> Q["execute()"]
+    Q --> R[Type-safe Output]
+    R --> S[Serialize JSON]
+    S --> T[Return to agent]
     
     style A fill:#e1f5e1
     style B fill:#e1f5e1
+    style C fill:#e1f5e1
     style K fill:#ffe1e1
     style L fill:#ffe1e1
+    style T fill:#e1ffe1
 ```
 
 ## Creating a Custom Tool
