@@ -190,7 +190,10 @@ pub async fn create_agent_from_record(
     let response_options = ResponseOptions {
         model_info: model_info.clone(),
         temperature: Some(0.7),
-        max_tokens: Some(1000000), // for gemini models
+        max_tokens: Some(pattern_core::model::defaults::calculate_max_tokens(
+            &model_info,
+            None,
+        )),
         capture_content: Some(true),
         capture_tool_calls: Some(enable_tools),
         top_p: None,
@@ -311,7 +314,10 @@ pub async fn create_agent(
     let response_options = ResponseOptions {
         model_info: model_info.clone(),
         temperature: Some(0.7),
-        max_tokens: Some(1000000), // for gemini models
+        max_tokens: Some(pattern_core::model::defaults::calculate_max_tokens(
+            &model_info,
+            None,
+        )),
         capture_content: Some(true),
         capture_tool_calls: Some(enable_tools),
         top_p: None,

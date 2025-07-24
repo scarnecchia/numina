@@ -1130,7 +1130,7 @@ pub async fn update_group_state<C: Connection>(
 // Constellation Operations
 // ============================================================================
 
-use crate::id::{ConstellationId, ConstellationIdType};
+use crate::id::ConstellationId;
 
 /// Get or create a constellation for a user
 pub async fn get_or_create_constellation<C: Connection>(

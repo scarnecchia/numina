@@ -80,10 +80,13 @@ pub struct ResponseOptions {
 
 impl ResponseOptions {
     pub fn new(model_info: ModelInfo) -> Self {
+        // Calculate appropriate max_tokens based on model
+        let max_tokens = Some(defaults::calculate_max_tokens(&model_info, None));
+
         Self {
             model_info,
             temperature: Some(0.7),
-            max_tokens: Some(100000),
+            max_tokens,
             top_p: None,
             stop_sequences: vec![],
             capture_usage: None,
@@ -230,20 +233,21 @@ impl ModelProvider for GenAiClient {
                     .resolve_service_target(&model)
                     .await
                     .expect("Fix error handling here");
-                model_strings.push(ModelInfo {
+
+                // Create basic ModelInfo from provider
+                let model_info = ModelInfo {
                     provider: endpoint.to_string(),
-                    id: model.clone(), // Use the clean model name, not the formatted one
+                    id: model.clone(),
                     name: model,
-                    capabilities: vec![
-                        ModelCapability::FunctionCalling,
-                        ModelCapability::TextGeneration,
-                        ModelCapability::SystemPrompt,
-                    ],
+                    capabilities: vec![],
                     max_output_tokens: None,
                     cost_per_1k_completion_tokens: None,
                     cost_per_1k_prompt_tokens: None,
-                    context_window: 200000,
-                });
+                    context_window: 0, // Will be fixed by enhance_model_info
+                };
+
+                // Enhance with proper defaults
+                model_strings.push(defaults::enhance_model_info(model_info));
             }
         }
 

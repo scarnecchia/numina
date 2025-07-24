@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_enhance_anthropic_model() {
-        let mut model_info = ModelInfo {
+        let model_info = ModelInfo {
             id: "claude-3-opus-20240229".to_string(),
             name: "Claude 3 Opus".to_string(),
             provider: "Anthropic".to_string(),
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_enhance_gemini_model() {
-        let mut model_info = ModelInfo {
+        let model_info = ModelInfo {
             id: "gemini-2.5-flash".to_string(),
             name: "Gemini 2.5 Flash".to_string(),
             provider: "Gemini".to_string(),
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_provider_fallback() {
-        let mut model_info = ModelInfo {
+        let model_info = ModelInfo {
             id: "unknown-anthropic-model".to_string(),
             name: "Unknown Model".to_string(),
             provider: "Anthropic".to_string(),
