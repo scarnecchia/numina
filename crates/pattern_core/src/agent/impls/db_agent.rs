@@ -289,12 +289,12 @@ where
         // Spawn background task to handle updates
         tokio::spawn(async move {
             use futures::StreamExt;
-            tracing::info!("Memory sync task started for agent {}", agent_id);
+            tracing::debug!("Memory sync task started for agent {}", agent_id);
 
             // Subscribe to all memory changes for this agent
             let stream = match ops::subscribe_to_agent_memory_updates(&db, agent_id).await {
                 Ok(s) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Successfully subscribed to memory updates for agent {} - live query active",
                         agent_id
                     );
@@ -309,7 +309,7 @@ where
             futures::pin_mut!(stream);
 
             while let Some((action, memory_block)) = stream.next().await {
-                tracing::info!(
+                tracing::debug!(
                     "🔔 Agent {} received live query notification: {:?} for block '{}' with content: '{}'",
                     agent_id,
                     action,
@@ -319,7 +319,7 @@ where
 
                 match action {
                     surrealdb::Action::Create => {
-                        tracing::info!(
+                        tracing::debug!(
                             "Agent {} creating memory block '{}'",
                             agent_id,
                             memory_block.label
@@ -349,7 +349,7 @@ where
                     surrealdb::Action::Update => {
                         // Update or create the block
                         if memory.get_block(&memory_block.label).is_some() {
-                            tracing::info!(
+                            tracing::debug!(
                                 "✅ Agent {} updating existing memory '{}' with content: '{}'",
                                 agent_id,
                                 memory_block.label,
@@ -365,7 +365,7 @@ where
                                 );
                             }
                         } else {
-                            tracing::info!(
+                            tracing::debug!(
                                 "Agent {} creating new memory block '{}' (from update)",
                                 agent_id,
                                 memory_block.label
@@ -394,7 +394,7 @@ where
                         }
                     }
                     surrealdb::Action::Delete => {
-                        tracing::info!(
+                        tracing::debug!(
                             "🗑️ Agent {} received DELETE for memory block '{}'",
                             agent_id,
                             memory_block.label
@@ -437,7 +437,7 @@ where
                 }
             };
 
-            tracing::info!("📊 Agent {} stats sync task started", agent_id);
+            tracing::debug!("📊 Agent {} stats sync task started", agent_id);
 
             tokio::pin!(stream);
             while let Some((action, agent_record)) = stream.next().await {
@@ -642,7 +642,7 @@ where
                 {
                     crate::log_error!("Failed to archive messages in database", e);
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "Successfully archived {} messages for agent {} in database",
                         archived_ids.len(),
                         agent_id

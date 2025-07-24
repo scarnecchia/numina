@@ -60,9 +60,6 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        tracing::debug!("🔧 SendMessageTool: Sending message to {:?}", params.target);
-        tracing::debug!("    Content: {}", params.content);
-
         // TODO: Implement actual message sending logic
         // This will need to integrate with the message bus/sender in the AgentHandle
 
@@ -104,7 +101,6 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
             }
         };
 
-        tracing::debug!("✅ SendMessageTool execution complete");
         result
     }
 

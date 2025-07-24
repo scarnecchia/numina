@@ -262,12 +262,10 @@ async fn main() -> Result<()> {
         };
     }
 
-    info!("Using database config: {:?}", config.database);
+    tracing::debug!("Using database config: {:?}", config.database);
 
     // Initialize database
-    info!("Initializing database...");
     client::init_db(config.database.clone()).await?;
-    info!("Database initialized successfully");
 
     match &cli.command {
         Commands::Chat {
