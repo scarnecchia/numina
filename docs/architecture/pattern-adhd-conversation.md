@@ -48,24 +48,18 @@ Pattern runs background checks every 20-30 minutes:
 
 ### Shared Memory Blocks
 
-```python
-shared_blocks = [
-    CreateBlock(
-        label="current_state",
-        value="energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration",
-        limit=200
-    ),
-    CreateBlock(
-        label="active_context", 
-        value="task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear",
-        limit=400
-    ),
-    CreateBlock(
-        label="bond_evolution",
-        value="trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']",
-        limit=600
-    )
-]
+```toml
+[memory.current_state]
+value = "energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration"
+limit = 200
+
+[memory.active_context]
+value = "task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear"
+limit = 400
+
+[memory.bond_evolution]
+value = "trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']"
+limit = 600
 ```
 
 ## The Stormlight Archive Connection

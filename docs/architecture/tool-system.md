@@ -1,10 +1,10 @@
-# Tool System Refactor: Type-Safe Tools with MCP-Compatible Schemas
+# Pattern Tool System: Type-Safe Tools with MCP-Compatible Schemas
 
 ## Overview
 
-We've refactored the `AiTool` trait to use generics instead of `serde_json::Value`, providing compile-time type safety while maintaining compatibility with MCP's requirement for reference-free JSON schemas. This system now supports both external tools and built-in agent tools.
+Pattern's tool system uses a generic `AiTool` trait that provides compile-time type safety while maintaining compatibility with MCP's requirement for reference-free JSON schemas. The system supports both external tools and built-in agent tools, with a unified registry for tool management.
 
-## Key Changes
+## Architecture
 
 ### 1. Generic AiTool Trait
 

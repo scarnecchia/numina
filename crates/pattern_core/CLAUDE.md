@@ -150,15 +150,13 @@ Following Letta/MemGPT patterns, all tools have been refactored into domain-base
    - `query` - Search text
    - `limit` - Maximum results
    - Domain-specific filters (role for conversations, time ranges, etc.)
-   
+
    **Implementation Notes**:
    - Single interface for all search operations
    - Extensible to add new domains (files, tasks, etc.)
    - Uses appropriate indexes/methods per domain
 
-4. **search_conversations** ✅ - Query message history
-   - DEPRECATED: Use unified `search` tool with domain="conversations"
-   - Legacy implementation remains for compatibility
+### Remaining core tools
 
 5. **interact_with_files** - File system operations
    - `read` - Read file contents

@@ -2,6 +2,8 @@
 
 This document describes the database backend implementation for Pattern Core, including the data model, embedding support, and migration system.
 
+**Status**: Core functionality implemented. Embeddings and vector search still need to be completed.
+
 ## Architecture Overview
 
 The database backend is designed with flexibility in mind, supporting both embedded and remote databases through a trait-based abstraction layer.
@@ -36,55 +38,53 @@ The database backend is designed with flexibility in mind, supporting both embed
 
 ## Data Model
 
+The database uses the Entity macro system to define tables. Core entities are defined using `#[derive(Entity)]` which automatically generates the schema.
+
 ### Core Tables
 
 #### System Metadata
 ```sql
-DEFINE TABLE system_metadata SCHEMAFULL;
+DEFINE TABLE system_metadata SCHEMALESS;
 DEFINE FIELD embedding_model ON system_metadata TYPE string;
 DEFINE FIELD embedding_dimensions ON system_metadata TYPE int;
 DEFINE FIELD schema_version ON system_metadata TYPE int;
+DEFINE FIELD created_at ON system_metadata TYPE datetime;
+DEFINE FIELD updated_at ON system_metadata TYPE datetime;
 ```
 
-#### Users (Partners)
-```sql
-DEFINE TABLE users SCHEMAFULL;
-DEFINE FIELD id ON users TYPE string;
-DEFINE FIELD settings ON users TYPE object;
-DEFINE FIELD metadata ON users TYPE object;
-```
+#### Primary Entities (via Entity macro)
 
-#### Agents
-```sql
-DEFINE TABLE agents SCHEMAFULL;
-DEFINE FIELD id ON agents TYPE string;
-DEFINE FIELD user_id ON agents TYPE string;
-DEFINE FIELD agent_type ON agents TYPE string;
-DEFINE FIELD name ON agents TYPE string;
-DEFINE FIELD system_prompt ON agents TYPE string;
-DEFINE FIELD config ON agents TYPE object;
-DEFINE FIELD state ON agents TYPE object;
-DEFINE FIELD is_active ON agents TYPE bool DEFAULT true;
-```
+**Users**
+- Generated from `User` struct in `users` module
+- Fields: id, username, email, settings, metadata, created_at, updated_at
+- Relations: owns agents, owns constellations
 
-#### Memory Blocks (with embeddings)
-```sql
-DEFINE TABLE memory_blocks SCHEMAFULL;
-DEFINE FIELD id ON memory_blocks TYPE string;
-DEFINE FIELD agent_id ON memory_blocks TYPE string;
-DEFINE FIELD label ON memory_blocks TYPE string;
-DEFINE FIELD content ON memory_blocks TYPE string;
-DEFINE FIELD embedding ON memory_blocks TYPE array<float>;
-DEFINE FIELD embedding_model ON memory_blocks TYPE string;
-DEFINE INDEX memory_embedding ON memory_blocks FIELDS embedding 
-  HNSW DIMENSION 384 DIST COSINE;
-```
+**Agents** 
+- Generated from `AgentRecord` struct
+- Fields: id, name, agent_type, state, model config, context settings, statistics
+- Relations: owned by user, has memories, has messages, assigned tasks
 
-#### Additional Tables
-- **conversations**: Message threads between users and agents
-- **messages**: Individual messages with optional embeddings
-- **tool_calls**: Audit trail of tool usage
-- **tasks**: ADHD-aware task management with embeddings
+**Memory Blocks**
+- Generated from `MemoryBlock` struct  
+- Fields: id, owner_id, label, value, description, memory_type, permission, embedding
+- Memory types: Core (always in context), Working (swappable), Archival (searchable)
+- Permissions: ReadOnly, Partner, Human, Append, ReadWrite, Admin
+
+**Messages**
+- Generated from `Message` struct
+- Fields: id, role, content, metadata, embedding, created_at
+- Content types: Text, Parts (multimodal), ToolCalls, ToolResponses
+- Snowflake ID positioning for distributed ordering
+
+**Tasks**
+- Generated from `BaseTask` struct
+- Fields: id, title, description, status, priority, due_date, creator_id
+- Relations: parent/subtasks, assigned agent
+
+**Tool Calls**
+- Generated from `ToolCall` struct
+- Fields: id, agent_id, tool_name, parameters, result, error, duration_ms
+- Audit trail for all tool executions
 
 ## Embedding Support
 
@@ -113,22 +113,17 @@ The database backend integrates with the embeddings module to provide semantic s
 - Cosine distance metric for text embeddings
 - Automatic re-embedding on content updates
 
-### Vector Search
+### Vector Search (TODO)
 
 ```rust
-// Semantic memory search using direct operations
-let results = db::ops::search_memories(
-    &db, 
-    &embeddings,
-    agent_id, 
-    "query text", 
+// Planned: Semantic memory search
+// Currently embeddings are stored but search is not implemented
+let results = db::ops::search_archival_memories(
+    &db,
+    agent_id,
+    "query text",
     10
 ).await?;
-
-// Results include similarity scores
-for (memory, score) in results {
-    println!("{}: {}", memory.label, score);
-}
 ```
 
 ## Direct Operations
@@ -136,19 +131,28 @@ for (memory, score) in results {
 All database operations are exposed as simple functions in `db::ops`:
 
 ### User Operations
-- `create_user()` - Create a new user
-- `get_user()` - Get user by ID
-- `get_user_with_agents()` - Get user and their agents in one query
+- `create_user()` - Create a new user with constellation
+- `get_user_by_id()` - Get user by ID
+- `get_user_by_username()` - Get user by username
 
-### Agent Operations
-- `create_agent()` - Create a new agent
-- `get_user_agents()` - Get all agents for a user
-- `update_agent_state()` - Update agent state
+### Agent Operations  
+- `create_agent_for_user()` - Create agent in user's constellation
+- `get_agent_with_relations()` - Get agent with memories and messages
+- `persist_agent()` - Save full agent state
+- `persist_agent_message()` - Save message with relation type
 
 ### Memory Operations
-- `create_memory()` - Create memory block with automatic embedding
-- `search_memories()` - Semantic search with embeddings
-- `get_memory_by_label()` - Direct label lookup
+- `create_memory_block()` - Create memory with permissions
+- `get_agent_memories()` - Get all memories for an agent
+- `search_archival_memories()` - Full-text search (BM25)
+- `insert_archival_memory()` - Add to archival storage
+- `delete_archival_memory()` - Remove from archival
+
+### Group Operations
+- `create_group_for_user()` - Create agent group
+- `add_agent_to_group()` - Add member with role
+- `get_group_members()` - List group agents
+- `list_groups_for_user()` - User's groups
 
 This approach keeps the code simple and direct without unnecessary abstraction layers.
 

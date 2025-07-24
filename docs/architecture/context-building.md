@@ -46,7 +46,7 @@ let context = ContextBuilder::new("agent_123", ContextConfig::default())
     })
     .with_tools_from_registry(&tool_registry)
     .with_messages(conversation_history)
-    .build()?;
+    .build().await?;
 
 // The context is now ready to use with genai
 let request = genai::ChatRequest::new(context.system_prompt, context.messages)
@@ -56,17 +56,17 @@ let request = genai::ChatRequest::new(context.system_prompt, context.messages)
 ### Stateful Agent Management
 
 ```rust
-use pattern_core::context::{AgentStateBuilder, CompressionStrategy};
+use pattern_core::context::{AgentContextBuilder, CompressionStrategy};
 
-// Create a stateful agent
-let agent_state = AgentStateBuilder::new("user_123_agent", AgentType::Generic)
+// Create a stateful agent context
+let agent_context = AgentContextBuilder::new(agent_id, AgentType::Generic)
     .with_memory_block(
         "persona",
         "I am Pattern, an AI assistant specializing in ADHD support.",
         Some("Agent personality and capabilities")
     )
     .with_memory_block(
-        "human", 
+        "human",
         "User has ADHD and prefers structured communication.",
         Some("User preferences and needs")
     )
@@ -81,43 +81,55 @@ let agent_state = AgentStateBuilder::new("user_123_agent", AgentType::Generic)
         chunk_size: 10,
         summarization_model: "gpt-3.5-turbo".to_string(),
     })
-    .build()?;
-
-// Use the agent
-let mut agent = agent_state;
+    .build().await?;
 
 // Process a user message
-agent.add_message(ChatMessage::user("I need help organizing my tasks"));
+agent_context.add_message(Message::user("I need help organizing my tasks")).await;
 
 // Build context for the LLM
-let context = agent.build_context().await?;
+let context = agent_context.build_context().await?;
 
 // After getting response from LLM
-agent.process_response(chat_response)?;
+let responses = agent_context.process_response(chat_response).await?;
 
 // Update memory based on conversation
-agent.update_memory_block("human", "User struggles with task organization")?;
+agent_context.update_memory_block("human", "User struggles with task organization").await?;
 ```
 
 ## Memory Management
 
 ### Memory Blocks
 
-Memory blocks follow the MemGPT pattern with character limits and descriptions:
+Memory blocks follow the MemGPT pattern with permissions and memory types:
 
 ```rust
 pub struct MemoryBlock {
-    /// Label like "persona", "human", "context"
-    pub label: String,
+    /// Unique identifier
+    pub id: MemoryId,
     
+    /// The user who owns this memory
+    pub owner_id: UserId,
+    
+    /// Label like "persona", "human", "context"
+    pub label: CompactString,
+
     /// The actual memory content
     pub value: String,
-    
+
     /// Description of what this block contains
     pub description: Option<String>,
     
-    /// When last modified
-    pub last_modified: Option<DateTime<Utc>>,
+    /// Type: Core (always in context), Working (swappable), Archival (searchable)
+    pub memory_type: MemoryType,
+    
+    /// Permission level (ReadOnly, Partner, Human, Append, ReadWrite, Admin)
+    pub permission: MemoryPermission,
+    
+    /// Whether pinned (can't be swapped out)
+    pub pinned: bool,
+    
+    /// Embedding for semantic search (if any)
+    pub embedding: Option<Vec<f32>>,
 }
 ```
 
@@ -179,19 +191,19 @@ The `ContextConfig` struct provides fine-grained control:
 pub struct ContextConfig {
     /// Base system instructions
     pub base_instructions: String,
-    
+
     /// Max characters per memory block
     pub memory_char_limit: usize,
-    
+
     /// Max messages before compression
     pub max_context_messages: usize,
-    
+
     /// Enable thinking/reasoning
     pub enable_thinking: bool,
-    
+
     /// Tool usage rules
     pub tool_rules: Vec<ToolRule>,
-    
+
     /// Model-specific adjustments
     pub model_adjustments: ModelAdjustments,
 }

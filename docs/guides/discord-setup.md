@@ -8,15 +8,6 @@ The Pattern Discord bot provides a natural language interface to the multi-agent
 2. Copy `.env.discord` to `.env` and add your bot token
 3. Invite the bot to your server with appropriate permissions (Send Messages, Read Messages, Use Slash Commands)
 
-## Running the Bot
-
-```bash
-# With local Letta server
-cargo run --bin discord_bot
-
-# Or with environment variables
-DISCORD_TOKEN=your_token LETTA_BASE_URL=http://localhost:8000 cargo run --bin discord_bot
-```
 
 ## Usage
 
@@ -34,7 +25,7 @@ The bot supports flexible agent routing in DMs and channels:
 #### Default Agents (configurable)
 - `pattern` - Orchestrator/sleeptime agent
 - `entropy` - Task management
-- `flux` - Time management  
+- `flux` - Time management
 - `archive` - Memory/search
 - `momentum` - Energy tracking
 - `anchor` - Habits

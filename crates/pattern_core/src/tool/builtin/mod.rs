@@ -6,7 +6,6 @@
 mod context;
 mod recall;
 mod search;
-mod search_conversations;
 mod send_message;
 #[cfg(test)]
 mod test_schemas;
@@ -19,10 +18,7 @@ pub use recall::{
 };
 use schemars::JsonSchema;
 pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
-pub use search_conversations::{
-    ConversationResult, MessageSummary, SearchConversationsInput, SearchConversationsOutput,
-    SearchConversationsTool,
-};
+
 pub use send_message::SendMessageTool;
 use serde::{Deserialize, Serialize};
 

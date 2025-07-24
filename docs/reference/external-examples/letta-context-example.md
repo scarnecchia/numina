@@ -1,4 +1,8 @@
 
+# Letta Context Example (Reference)
+
+**Note**: This is a reference example from Letta/MemGPT showing their context structure. Pattern uses a similar but adapted approach - see our context-building.md for Pattern's implementation.
+
 ## Sample Letta Context
 
 

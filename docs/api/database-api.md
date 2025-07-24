@@ -319,70 +319,6 @@ match create_user(&db, None, settings, metadata).await {
 4. **Keep embeddings consistent**: Use the same model throughout
 5. **Index frequently searched fields**: Use appropriate indexes for performance
 
-## Common Patterns
-
-### Initialize User with Agents
-
-```rust
-async fn initialize_user(
-    db: &impl VectorStore,
-    discord_id: &str,
-) -> Result<(User, Vec<Agent>)> {
-    // Create user
-    let user = create_user(
-        db,
-        None,
-        serde_json::json!({}),
-        serde_json::json!({ "discord_id": discord_id }),
-    ).await?;
-    
-    // Create agents
-    let mut agents = Vec::new();
-    
-    for (agent_type, name, prompt) in [
-        (AgentType::Pattern, "Pattern", "You are Pattern..."),
-        (AgentType::Entropy, "Entropy", "You are Entropy..."),
-        // ... other agents
-    ] {
-        let agent = create_agent(
-            db,
-            user.id,
-            agent_type,
-            name.to_string(),
-            prompt.to_string(),
-            serde_json::json!({}),
-            AgentState::Ready,
-        ).await?;
-        agents.push(agent);
-    }
-    
-    Ok((user, agents))
-}
-```
-
-### Search Agent Context
-
-```rust
-async fn search_context(
-    db: &impl VectorStore,
-    embedder: &impl EmbeddingProvider,
-    agent_id: AgentId,
-    query: &str,
-) -> Result<String> {
-    let memories = search_memories(db, embedder, agent_id, query, 5).await?;
-    
-    let context = memories
-        .into_iter()
-        .map(|(memory, score)| {
-            format!("[{:.2}] {}: {}", score, memory.label, memory.content)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    
-    Ok(context)
-}
-```
-
 ## SurrealDB Query Patterns
 
 ### Full-Text Search
@@ -456,9 +392,9 @@ SELECT
     ->agent.id AS agent_id,
     ->agent.name AS agent_name,
     tool_name,
-    array::group(RETURN { 
-        status: status, 
-        count: count() 
+    array::group(RETURN {
+        status: status,
+        count: count()
     }) AS status_breakdown
 FROM tool_call
 GROUP BY agent_id, agent_name, tool_name;

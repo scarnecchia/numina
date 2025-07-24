@@ -22,24 +22,20 @@ Pattern runs background checks every 20-30 minutes:
 
 ## Shared Memory Architecture
 
-```python
-shared_blocks = [
-    CreateBlock(
-        label="current_state",
-        value="energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration",
-        limit=200
-    ),
-    CreateBlock(
-        label="active_context", 
-        value="task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear",
-        limit=400
-    ),
-    CreateBlock(
-        label="bond_evolution",
-        value="trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']",
-        limit=600
-    )
-]
+```toml
+# Core memory blocks shared across all agents
+
+[memory.current_state]
+value = "energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration"
+limit = 200
+
+[memory.active_context]
+value = "task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear"
+limit = 400
+
+[memory.bond_evolution]
+value = "trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']"
+limit = 600
 ```
 
 ## Agent Personality Prompts
@@ -126,22 +122,31 @@ evolution: learn what anchors actually work for them vs what they think should w
 
 All agents can access these core functions:
 
-```python
-def check_vibe() -> dict:
-    """any agent can pulse-check current state"""
-    return {"energy": int, "focus": str, "last_break": int, "mood": str}
+```rust
+// Any agent can pulse-check current state
+fn check_vibe() -> VibeCheck {
+    VibeCheck {
+        energy: u8,        // 0-10 scale
+        focus: String,     // "sharp", "fragmenting", "scattered", etc
+        last_break: u32,   // minutes since break
+        mood: String,      // current emotional state
+    }
+}
 
-def context_snapshot() -> str:
-    """capture current state for later recovery"""
-    # saves what they're doing, thinking, progress made
+// Capture current state for later recovery
+fn context_snapshot() -> String {
+    // Saves what they're doing, thinking, progress made
+}
 
-def find_pattern(query: str) -> list:
-    """search across all memory for patterns/connections"""
-    # archive's special sauce but everyone can use it
+// Search across all memory for patterns/connections
+fn find_pattern(query: &str) -> Vec<MemoryMatch> {
+    // Archive's special sauce but everyone can use it
+}
 
-def suggest_pivot() -> str:
-    """when current task/energy mismatch detected"""
-    # momentum's toolkit shared with squad
+// When current task/energy mismatch detected
+fn suggest_pivot() -> String {
+    // Momentum's toolkit shared with squad
+}
 ```
 
 ## Implementation Notes

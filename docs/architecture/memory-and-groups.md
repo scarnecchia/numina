@@ -232,7 +232,7 @@ This isn't a fixed architecture - it's a toolkit for building whatever coordinat
 
 ## Custom Tiered Sleeptime Architecture
 
-While Letta provides sleeptime managers, Pattern also implements a custom tiered approach for cost optimization:
+Pattern also implements a custom tiered approach for cost optimization:
 
 ### Tier 1: Lightweight Monitor (Every 20min)
 ```rust
@@ -341,7 +341,7 @@ fn write_to_shared_insights(category: &str, content: &str) {
 
 ## Implementation Priority
 
-1. **Refactor to use Letta groups** (eliminates custom routing)
+1. **Rebuild with new backends**
 2. **Implement shared source writing** (passive knowledge sharing)
 3. **Create overlapping group configurations** (context-specific coordination)
 4. **Build lightweight monitor** (tier 1 sleeptime)

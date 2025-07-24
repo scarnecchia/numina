@@ -60,7 +60,7 @@ Pattern: Hello! I'm here to help coordinate your cognitive support. What do you 
 
 2. **Agent names are dynamic** - based on what's configured in MultiAgentSystemBuilder
 
-### Next Steps: Letta Groups Integration
+### Next Steps: Reimplement in pattern
 
 1. **Migrate to Groups API**
    - Replace individual routing with group-based coordination

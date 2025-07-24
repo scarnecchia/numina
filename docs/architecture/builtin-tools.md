@@ -1,77 +1,113 @@
 # Built-in Tools Architecture
 
-This document describes the built-in tools system in Pattern, which provides standard agent capabilities like memory management and inter-agent communication.
+This document describes the built-in tools system in Pattern, which provides standard agent capabilities following the Letta/MemGPT pattern for stateful memory management.
 
 ## Overview
 
-Pattern agents come with a set of built-in tools that provide core functionality. These tools are implemented using the same `AiTool` trait as external tools, ensuring consistency and allowing customization.
+Pattern agents come with a set of built-in tools that provide core functionality for memory management, archival storage, and communication. These tools are implemented using the same `AiTool` trait as external tools, ensuring consistency and allowing customization.
 
 ## Architecture
 
 ### AgentHandle
 
-The `AgentHandle` is a lightweight, cheaply-cloneable struct that provides built-in tools with access to agent internals:
+The `AgentHandle` is a lightweight, cheaply-cloneable struct that provides built-in tools with controlled access to agent internals:
 
 ```rust
 #[derive(Clone)]
 pub struct AgentHandle {
     pub agent_id: AgentId,
     pub memory: Memory,  // Memory uses Arc<DashMap> internally
+    db: Option<Arc<SurrealEmbedded>>,  // Private DB access for archival operations
     // Future: message_sender for inter-agent communication
 }
 ```
 
-### AgentContext Separation
-
-To support efficient built-in tools, `AgentContext` is split into:
-
-1. **AgentHandle**: Cheap, frequently accessed data
-2. **MessageHistory**: Large message vectors behind `Arc<RwLock<_>>`
-3. **Metadata**: Agent statistics behind `Arc<RwLock<_>>` for concurrent updates
-
-This separation allows built-in tools to clone the handle without copying large message histories.
+Built-in tools access the database through controlled methods on AgentHandle:
+- `search_archival_memories()` - Full-text search with BM25
+- `insert_archival_memory()` - Add new archival memories
+- `delete_archival_memory()` - Remove archival memories
+- `count_archival_memories()` - Get archival memory count
 
 ## Built-in Tools
 
-### UpdateMemoryTool
+### 1. Context Tool
 
-Updates or creates memory blocks for persistent agent state:
+Manages core memory blocks following the Letta/MemGPT pattern. Each operation modifies memory and requires the agent to continue their response.
+
+**Operations:**
+- `append` - Add content to existing memory (always uses \n separator)
+- `replace` - Replace specific content within memory
+- `archive` - Move a core memory block to archival storage
+- `load_from_archival` - Load an archival memory block into core
+- `swap` - Atomic operation to archive one block and load another
 
 ```rust
-// Input
+// Example: Append to memory
 {
+    "operation": "append",
     "label": "human",
-    "value": "The user's name is Alice",
-    "description": "Information about the user" // optional
+    "content": "Prefers morning meetings"
 }
 
-// Output
+// Example: Swap memory blocks
 {
-    "success": true,
-    "previous_value": "The user's name is unknown", // if updating
-    "message": null // or "Created new memory block 'human'"
+    "operation": "swap",
+    "archive_label": "old_project",
+    "load_label": "new_project"
 }
 ```
 
-### SendMessageTool
+### 2. Recall Tool
 
-Sends messages to various targets (currently a stub, to be implemented):
+Manages long-term archival storage with full-text search capabilities.
+
+**Operations:**
+- `insert` - Add new memories to archival storage
+- `append` - Add content to existing archival memory
+- `read` - Read specific archival memory by label
+- `delete` - Remove archived memories
+
+```rust
+// Example: Insert new archival memory
+{
+    "operation": "insert",
+    "label": "meeting_notes_2024_01",
+    "content": "Discussed project timeline..."
+}
+```
+
+### 3. Search Tool
+
+Unified search interface across different domains.
+
+**Domains:**
+- `archival_memory` - Search archival storage
+- `conversations` - Search message history
+- `all` - Search everything
+
+```rust
+// Example: Search archival memory
+{
+    "domain": "archival_memory",
+    "query": "project deadline",
+    "limit": 10
+}
+```
+
+### 4. Send Message Tool
+
+Sends messages to the user (required for agents to yield control):
 
 ```rust
 // Input
 {
-    "target": {
-        "type": "user" // or "agent", "group", "channel"
-    },
-    "content": "Hello! How can I help?",
-    "metadata": {} // optional
+    "message": "I've updated your preferences. How else can I help?"
 }
 
 // Output
 {
     "success": true,
-    "message_id": "msg_1234567890",
-    "details": "Message sent to user"
+    "message": "Message sent successfully"
 }
 ```
 
@@ -101,9 +137,9 @@ struct RedisMemoryTool {
 impl AiTool for RedisMemoryTool {
     type Input = UpdateMemoryInput;
     type Output = UpdateMemoryOutput;
-    
+
     fn name(&self) -> &str { "update_memory" }
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         // Store in Redis instead of local memory
         self.redis.set(&params.label, &params.value).await?;
@@ -153,7 +189,7 @@ Built-in tools use the generic `AiTool` trait for type safety:
 impl AiTool for UpdateMemoryTool {
     type Input = UpdateMemoryInput;   // Strongly typed, deserializable
     type Output = UpdateMemoryOutput; // Strongly typed, serializable
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         // Compile-time type checking
     }
@@ -224,9 +260,9 @@ struct LoggingMemoryTool {
 impl AiTool for LoggingMemoryTool {
     type Input = UpdateMemoryInput;
     type Output = UpdateMemoryOutput;
-    
+
     fn name(&self) -> &str { "update_memory" }
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         self.logger.info(&format!("Updating memory: {}", params.label));
         let result = self.inner.execute(params).await?;
@@ -264,15 +300,15 @@ async fn test_update_memory_tool() {
         agent_id: AgentId::generate(),
         memory: memory.clone(),
     };
-    
+
     let tool = UpdateMemoryTool { handle };
-    
+
     let result = tool.execute(UpdateMemoryInput {
         label: "test".to_string(),
         value: "test value".to_string(),
         description: None,
     }).await.unwrap();
-    
+
     assert!(result.success);
     assert_eq!(memory.get_block("test").unwrap().content, "test value");
 }

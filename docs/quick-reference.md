@@ -22,7 +22,7 @@ pattern/
 All IDs use underscore format: `prefix_uuid`
 
 - `user_12345678-...` - User IDs
-- `agent_12345678-...` - Agent IDs  
+- `agent_12345678-...` - Agent IDs
 - `task_12345678-...` - Task IDs
 - `mem_12345678-...` - Memory IDs (note: "mem" not "memory")
 - `group_12345678-...` - Group IDs
@@ -116,10 +116,10 @@ struct MyTool;
 impl AiTool for MyTool {
     type Input = MyInput;   // Must impl JsonSchema + Deserialize
     type Output = MyOutput; // Must impl JsonSchema + Serialize
-    
+
     fn name(&self) -> &str { "my_tool" }
     fn description(&self) -> &str { "Does something" }
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         // Implementation
     }
@@ -206,21 +206,7 @@ Available features:
 - `embed-cloud` - OpenAI/Cohere embeddings
 - `embed-ollama` - Ollama embeddings (stub)
 
-## Running Pattern
 
-```bash
-# Full system (Discord + MCP + monitoring)
-cargo run --features full
-
-# Just Discord
-cargo run --features binary,discord
-
-# Just MCP
-cargo run --features binary,mcp
-
-# Development with auto-reload
-just watch
-```
 
 ## Key Commands
 
@@ -251,7 +237,7 @@ prefix = "!"
 [models]
 default = "claude-3-5-sonnet-latest"
 
-[models.mapping]
+[models.mapping] # need to re-add this with the new system
 routine = "claude-3-5-haiku-latest"
 interactive = "claude-3-5-sonnet-latest"
 
@@ -267,14 +253,3 @@ model = "jinaai/jina-embeddings-v2-small-en"
 3. **Tools must be Clone**: Required for registry storage
 4. **Use MockProviders**: For testing without API calls
 5. **Check feature flags**: Some functionality requires specific features
-
-## Recent Changes (2025-07-09)
-
-- Built-in tools system implemented
-- AgentContext refactored for efficiency
-- DatabaseAgent now generic over providers
-- All IDs use underscore format
-- Memory uses Arc<DashMap> for thread safety
-- Tool schemas auto-inlined for MCP
-- Cross-agent memory sharing implemented
-- MockProviders added for testing
