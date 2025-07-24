@@ -364,13 +364,13 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                         let db_model = related_entity.to_db_model();
                         // Upsert the related entity
-                        println!("upserting: {:?}", db_model);
+                        tracing::trace!("upserting: {:?}", db_model);
                         let e: Option<<#inner_type as #crate_path::db::entity::DbEntity>::DbModel> = db
                             .upsert(db_model.id.clone())
                             .content(db_model)
                             .await?;
 
-                        println!("upserted: {:?}", e);
+                        tracing::trace!("upserted: {:?}", e);
 
                         // Create the relation
                         let query = format!(
@@ -411,7 +411,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             .await
                             ?;
 
-                        println!("upserted: {:?}", e);
+                        tracing::trace!("upserted: {:?}", e);
                         // Create the relation
                         let query = format!(
                             "RELATE {}->{}->{} SET created_at = time::now()",
@@ -432,7 +432,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         .await
                         ?;
 
-                    println!("upserted: {:?}", e);
+                    tracing::trace!("upserted: {:?}", e);
 
                     // Create the relation
                     let query = format!(
@@ -463,17 +463,17 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         #relation_name,
                         Self::related_table_from_id_type(stringify!(#inner_type)));
 
-                    println!("id vec query: {}", query);
+                    tracing::trace!("id vec query: {}", query);
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
                         .await?;
 
-                    println!("vec result {:?}", result);
+                    tracing::trace!("vec result {:?}", result);
 
                     let db_models: Vec<Vec<::surrealdb::RecordId>> =
                         result.take("related_entitites")?;
 
-                    println!("vec db models: {:?}", db_models);
+                    tracing::trace!("vec db models: {:?}", db_models);
 
                     // Convert from db models to domain models
                     self.#field_name = db_models.concat().into_iter()
@@ -488,18 +488,18 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         #relation_name,
                         Self::related_table_from_type(stringify!(#inner_type)));
 
-                    println!("full vec query: {}", query);
+                    tracing::trace!("full vec query: {}", query);
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id)))
                         .await?;
 
-                    println!("vec result {:?}", result);
+                    tracing::trace!("vec result {:?}", result);
 
                     let db_models: Vec<Vec<<#inner_type as #crate_path::db::entity::DbEntity>::DbModel>> =
                         result.take("related_entitites")?;
 
-                    println!("vec db models: {:?}", db_models);
+                    tracing::trace!("vec db models: {:?}", db_models);
 
                     // Convert from db models to domain models
                     self.#field_name = db_models.concat().into_iter()
@@ -509,7 +509,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                             ::surrealdb::Error::Api(::surrealdb::error::Api::Query(format!("Failed to convert relation: {:?}", e)))
                         ))?;
 
-                    println!("object: {:?}", self);
+                    tracing::trace!("object: {:?}", self);
                 }
             }
         } else if is_id {
@@ -521,7 +521,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     #relation_name,
                     Self::related_table_from_id_type(stringify!(#field_type)));
 
-                println!("single id query: {}", query);
+                tracing::trace!("single id query: {}", query);
                 let mut result = db.query(&query)
                     .bind(("parent", ::surrealdb::RecordId::from(self.id)))
                     .await?;

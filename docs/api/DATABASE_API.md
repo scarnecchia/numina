@@ -382,3 +382,140 @@ async fn search_context(
     Ok(context)
 }
 ```
+
+## SurrealDB Query Patterns
+
+### Full-Text Search
+
+Pattern uses SurrealDB's `@@` operator for full-text search with BM25 ranking:
+
+```sql
+-- Search archival memories
+SELECT * FROM mem
+WHERE (<-agent_memories<-agent:⟨agent_uuid⟩..)
+AND memory_type = 'archival'
+AND value @@ $search_term
+LIMIT $limit;
+
+-- Search messages by content
+SELECT * FROM message
+WHERE (<-agent_messages<-agent:⟨agent_uuid⟩..)
+AND content @@ $search_query
+AND created_at >= $start_time
+ORDER BY position DESC
+LIMIT $limit;
+```
+
+### Graph Traversal
+
+Use SurrealDB's graph notation for relationship queries:
+
+```sql
+-- Get all memories for an agent (through edge entity)
+SELECT * FROM mem
+WHERE (<-agent_memories<-agent:⟨agent_uuid⟩..);
+
+-- Get agent's conversations
+SELECT * FROM conversation
+WHERE (<-agent_conversations<-agent:⟨agent_uuid⟩..);
+```
+
+### Pre-Computed Table Views
+
+SurrealDB's pre-computed views provide event-based, incrementally updating materialized views:
+
+```sql
+-- Agent activity statistics (auto-updates on message insert)
+DEFINE TABLE agent_activity TYPE NORMAL AS
+SELECT
+    count() AS message_count,
+    time::max(created_at) AS last_active,
+    ->agent.id AS agent_id,
+    ->agent.name AS agent_name,
+    array::distinct(->conversation.id) AS active_conversations
+FROM message
+GROUP BY agent_id, agent_name;
+
+-- Memory usage analytics (auto-updates on memory access)
+DEFINE TABLE memory_usage TYPE NORMAL AS
+SELECT
+    count() AS access_count,
+    time::max(accessed_at) AS last_accessed,
+    ->agent.id AS agent_id,
+    ->agent.name AS agent_name,
+    label,
+    memory_type
+FROM mem
+WHERE accessed_at IS NOT NULL
+GROUP BY agent_id, agent_name, label, memory_type;
+
+-- Tool usage patterns (auto-updates on tool call)
+DEFINE TABLE tool_usage TYPE NORMAL AS
+SELECT
+    count() AS call_count,
+    ->agent.id AS agent_id,
+    ->agent.name AS agent_name,
+    tool_name,
+    array::group(RETURN { 
+        status: status, 
+        count: count() 
+    }) AS status_breakdown
+FROM tool_call
+GROUP BY agent_id, agent_name, tool_name;
+
+-- Conversation summary view
+DEFINE TABLE conversation_summary TYPE NORMAL AS
+SELECT
+    count() AS message_count,
+    time::min(created_at) AS started_at,
+    time::max(created_at) AS last_message_at,
+    ->conversation.id AS conversation_id,
+    ->agent.id AS agent_id,
+    ->agent.name AS agent_name,
+    array::group(RETURN {
+        role: role,
+        count: count()
+    }) AS message_breakdown
+FROM message
+GROUP BY conversation_id, agent_id, agent_name;
+```
+
+### Query Examples
+
+```rust
+// Use pre-computed views for fast statistics
+let agent_stats: Vec<Value> = db
+    .query("SELECT * FROM agent_activity WHERE agent_id = $agent_id")
+    .bind(("agent_id", agent_id))
+    .await?
+    .take(0)?;
+
+// Search with filters
+let messages: Vec<Message> = db
+    .query(r#"
+        SELECT * FROM message
+        WHERE agent_id = $agent_id
+        AND content @@ $query
+        AND role = $role
+        AND created_at BETWEEN $start AND $end
+        ORDER BY position DESC
+        LIMIT $limit
+    "#)
+    .bind(("agent_id", agent_id))
+    .bind(("query", search_query))
+    .bind(("role", "assistant"))
+    .bind(("start", start_time))
+    .bind(("end", end_time))
+    .bind(("limit", 50))
+    .await?
+    .take(0)?;
+```
+
+### Important Notes
+
+1. **Pre-computed views update automatically** - No triggers needed
+2. **Views only trigger on FROM table changes** - Deleting an agent won't update agent_activity
+3. **Initial view creation can be slow** - Index appropriately
+4. **Use parameter binding** - Never concatenate SQL strings
+5. **Graph notation `<-relation<-` is powerful** - Traverses relationships efficiently
+```

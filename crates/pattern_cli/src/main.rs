@@ -1632,7 +1632,7 @@ async fn list_archival_memory(agent_name: &str) -> Result<()> {
         .await
         .into_diagnostic()?;
 
-    println!("response: {:?}", response);
+    tracing::trace!("response: {:?}", response);
 
     let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
     let agents: Vec<_> = agents
@@ -1660,7 +1660,7 @@ async fn list_archival_memory(agent_name: &str) -> Result<()> {
             .await
             .into_diagnostic()?;
 
-        println!("Debug - mem_response: {:?}", mem_response);
+        tracing::trace!("Debug - mem_response: {:?}", mem_response);
 
         let memories: Vec<Vec<<MemoryBlock as DbEntity>::DbModel>> =
             mem_response.take("memories").into_diagnostic()?;

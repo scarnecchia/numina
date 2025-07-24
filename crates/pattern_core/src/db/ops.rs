@@ -262,7 +262,7 @@ pub async fn create_relation<C: Connection>(
         .query(query)
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
-    println!("response: {:#?}", response);
+    tracing::trace!("Query response: {:#?}", response);
 
     let mut output = json!({});
 
@@ -487,12 +487,12 @@ pub async fn subscribe_to_agent_memory_updates<C: Connection>(
                 Ok(Notification { action, data, .. }) => match MemoryBlock::from_db_model(data) {
                     Ok(memory) => Some((action, memory)),
                     Err(e) => {
-                        tracing::error!("Failed to convert db model to MemoryBlock: {:?}", e);
+                        crate::log_error!("Failed to convert db model to MemoryBlock", e);
                         None
                     }
                 },
                 Err(e) => {
-                    tracing::error!("Failed to receive notification: {:?}", e);
+                    crate::log_error!("Failed to receive notification", e);
                     None
                 }
             }

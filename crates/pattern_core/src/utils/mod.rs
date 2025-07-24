@@ -1,6 +1,7 @@
 //! Utility functions and helpers for pattern-core
 
 pub mod debug;
+pub mod error_logging;
 
 /// Serde helpers for serializing `Option<Duration>` as milliseconds
 pub mod duration_millis {

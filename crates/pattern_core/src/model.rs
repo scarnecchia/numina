@@ -266,7 +266,7 @@ impl ModelProvider for GenAiClient {
                 response
             }
             Err(e) => {
-                tracing::error!("GenAI API error: {:?}", e);
+                crate::log_error!("GenAI API error", e);
                 return Err(crate::CoreError::model_error("genai", &model_info.id, e));
             }
         };

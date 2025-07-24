@@ -74,6 +74,7 @@ serial_test = "3.1"
 tracing-test = "0.2"
 trybuild = "1.0"
 proc-macro2-diagnostics = "0.10"
+miette = { workspace = true, features = ["fancy"] }
 
 [features]
 default = ["surreal-embedded", "embed-candle", "embed-cloud"]

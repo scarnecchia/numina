@@ -301,7 +301,7 @@ where
                     s
                 }
                 Err(e) => {
-                    tracing::error!("Failed to subscribe to memory updates: {:?}", e);
+                    crate::log_error!("Failed to subscribe to memory updates", e);
                     return;
                 }
             };
@@ -328,9 +328,8 @@ where
                         if let Err(e) =
                             memory.create_block(memory_block.label.clone(), &memory_block.value)
                         {
-                            tracing::error!(
-                                "Failed to create memory block {}: {}",
-                                memory_block.label,
+                            crate::log_error!(
+                                format!("Failed to create memory block {}", memory_block.label),
                                 e
                             );
                         }
@@ -360,9 +359,8 @@ where
                             if let Err(e) =
                                 memory.update_block_value(&memory_block.label, &memory_block.value)
                             {
-                                tracing::error!(
-                                    "Failed to update memory block {}: {}",
-                                    memory_block.label,
+                                crate::log_error!(
+                                    format!("Failed to update memory block {}", memory_block.label),
                                     e
                                 );
                             }
@@ -376,9 +374,8 @@ where
                             if let Err(e) =
                                 memory.create_block(memory_block.label.clone(), &memory_block.value)
                             {
-                                tracing::error!(
-                                    "Failed to create memory block {}: {}",
-                                    memory_block.label,
+                                crate::log_error!(
+                                    format!("Failed to create memory block {}", memory_block.label),
                                     e
                                 );
                             }
@@ -435,7 +432,7 @@ where
             let stream = match crate::db::ops::subscribe_to_agent_stats(&db, agent_id).await {
                 Ok(stream) => stream,
                 Err(e) => {
-                    tracing::error!("Failed to subscribe to agent stats updates: {}", e);
+                    crate::log_error!("Failed to subscribe to agent stats updates", e);
                     return;
                 }
             };
@@ -617,7 +614,7 @@ where
                         .bind(("summary", summary))
                         .await
                     {
-                        tracing::error!("Failed to update agent message summary: {:?}", e);
+                        crate::log_error!("Failed to update agent message summary", e);
                     }
                 });
             }
@@ -643,7 +640,7 @@ where
                 if let Err(e) =
                     crate::db::ops::archive_agent_messages(&db, agent_id, &archived_ids).await
                 {
-                    tracing::error!("Failed to archive messages in database: {:?}", e);
+                    crate::log_error!("Failed to archive messages in database", e);
                 } else {
                     tracing::info!(
                         "Successfully archived {} messages for agent {} in database",
@@ -800,7 +797,7 @@ where
                 )
                 .await
                 {
-                    tracing::error!("Failed to persist incoming message: {:?}", e);
+                    crate::log_error!("Failed to persist incoming message", e);
                 }
             });
 
@@ -876,7 +873,7 @@ where
                     response
                 }
                 Err(e) => {
-                    tracing::error!("Failed to get response from model: {:?}", e);
+                    crate::log_error!("Failed to get response from model", e);
 
                     // Check if it's a specific Gemini error about missing candidates
                     let error_str = e.to_string();
@@ -983,7 +980,7 @@ where
                     )
                     .await
                     {
-                        tracing::error!("Failed to persist message: {:?}", e);
+                        crate::log_error!("Failed to persist message", e);
                     }
                 });
             }
@@ -1018,7 +1015,7 @@ where
                         response
                     }
                     Err(e) => {
-                        tracing::error!("Failed to get final response from model: {:?}", e);
+                        crate::log_error!("Failed to get final response from model", e);
 
                         // Check if it's a specific Gemini error about missing candidates
                         let error_str = e.to_string();
@@ -1069,7 +1066,7 @@ where
             )
             .await
             {
-                tracing::error!("Failed to persist response message: {:?}", e);
+                crate::log_error!("Failed to persist response message", e);
             }
         });
         // Add response message to context
@@ -1086,7 +1083,7 @@ where
 
         let _handle3 = tokio::spawn(async move {
             if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id, &stats).await {
-                tracing::error!("Failed to update agent stats: {:?}", e);
+                crate::log_error!("Failed to update agent stats", e);
             }
         });
 
@@ -1136,7 +1133,7 @@ where
             )
             .await
             {
-                tracing::error!("Failed to persist memory block: {:?}", e);
+                crate::log_error!("Failed to persist memory block", e);
             }
         });
 
@@ -1197,7 +1194,7 @@ where
         let db = self.db.clone();
         let _handle = tokio::spawn(async move {
             if let Err(e) = crate::db::ops::create_entity(&db, &tool_call).await {
-                tracing::error!("Failed to persist tool call: {:?}", e);
+                crate::log_error!("Failed to persist tool call", e);
             }
         });
 
@@ -1280,7 +1277,7 @@ where
         let target_id_clone = target_agent_id.clone();
         let _handle = tokio::spawn(async move {
             if let Err(e) = crate::db::ops::create_relation_typed(&db, &relation).await {
-                tracing::error!("Failed to share memory block: {:?}", e);
+                crate::log_error!("Failed to share memory block", e);
             } else {
                 tracing::info!(
                     "Shared memory block {} with agent {} (access: {:?})",
@@ -1407,7 +1404,7 @@ where
                 .bind(("last_active", surrealdb::Datetime::from(chrono::Utc::now())))
                 .await
             {
-                tracing::error!("Failed to persist agent state update: {:?}", e);
+                crate::log_error!("Failed to persist agent state update", e);
             }
         });
 

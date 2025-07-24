@@ -95,7 +95,7 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
             .bind(("limit", limit))
             .await
             .map_err(|e| {
-                tracing::error!("Search query failed: {:?}", e);
+                crate::log_error!("Search query failed", e);
                 crate::db::DatabaseError::QueryFailed(e)
             })?;
 
@@ -515,7 +515,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
                     });
                 }
                 Err(e) => {
-                    tracing::error!("❌ Tool execution failed for {}: {}", call.fn_name, e);
+                    crate::log_error!(format!("❌ Tool execution failed for {}", call.fn_name), e);
                     // Store first error but continue executing other tools
                     if first_error.is_none() {
                         first_error = Some(CoreError::tool_execution_error(

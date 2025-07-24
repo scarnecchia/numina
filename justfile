@@ -12,3 +12,6 @@ run *ARGS:
 # Run 'bacon' to run the project (auto-recompiles)
 watch *ARGS:
 	bacon --job run -- -- {{ ARGS }}
+
+cli *ARGS:
+    cargo run --bin pattern-cli -- {{ARGS}}

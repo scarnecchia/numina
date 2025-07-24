@@ -149,10 +149,10 @@ pub enum CoreError {
         cause: serde_json::Error,
     },
 
-    #[error("Configuration error")]
+    #[error("Configuration error for field '{field}'")]
     #[diagnostic(
         code(pattern_core::configuration_error),
-        help("Check configuration file at {config_path}")
+        help("Check configuration file at {config_path}\nExpected: {expected}")
     )]
     ConfigurationError {
         config_path: String,
