@@ -61,14 +61,14 @@ graph TB
     end
     
     subgraph "Registration"
-        C --> D[Box<dyn DynamicTool>]
+        C --> D["Box&lt;dyn DynamicTool&gt;"]
         D --> E[ToolRegistry::register]
-        E --> F[DashMap<String, Box<dyn DynamicTool>>]
+        E --> F["DashMap&lt;String, Box&lt;dyn DynamicTool&gt;&gt;"]
     end
     
     subgraph "Agent Usage"
-        G[Agent] --> H[available_tools()]
-        H --> I[Vec<Box<dyn DynamicTool>>]
+        G[Agent] --> H["available_tools()"]
+        H --> I["Vec&lt;Box&lt;dyn DynamicTool&gt;&gt;"]
         I --> J[Tool schemas sent to LLM]
     end
     
@@ -76,9 +76,9 @@ graph TB
         K[LLM generates tool call] --> L[JSON parameters]
         L --> M[ToolRegistry::execute]
         M --> N[Find tool by name]
-        N --> O[tool.execute_dynamic(params)]
+        N --> O["tool.execute_dynamic(params)"]
         O --> P[Deserialize to Input type]
-        P --> Q[tool.execute(typed_params)]
+        P --> Q["tool.execute(typed_params)"]
         Q --> R[Serialize Output to JSON]
         R --> S[Return to agent]
     end

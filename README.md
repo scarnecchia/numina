@@ -119,43 +119,94 @@ use tokio::sync::RwLock;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     let db = SurrealEmbedded::new("./my_pattern.db").await?;
-    
-    // Create model provider
-    let model_config = ModelConfig {
-        provider: ModelProvider::Gemini,
-        model_name: "gemini-2.0-flash".to_string(),
-        api_key: std::env::var("GEMINI_API_KEY")?,
-        ..Default::default()
+
+    let model_provider = Arc::new(RwLock::new(GenAiClient::new().await?));
+
+    let model_info = {
+        let provider = model_provider.read().await;
+        let models = provider.list_models().await?;
+
+        models
+            .iter()
+            .find(|m| {
+                let model = "gemini-2.5-flash"
+                m.id.to_lowercase().contains(&model)
+                    || m.name.to_lowercase().contains(&model)
+            })
+            .cloned()
     };
-    let provider = Arc::new(RwLock::new(
-        GeminiProvider::from_config(&model_config).await?
-    ));
-    
-    // Create agent
-    let agent_id = AgentId::generate();
+
+    let embedding_provider = Some(Arc::new(OpenAIEmbedder::new(
+        "text-embedding-3-small".to_string(),
+        "OPENAI_API_KEY".to_string(),
+        None,
+    )));
+
     let user_id = UserId::generate();
+
+    // Create memory with the configured user as owner
     let memory = Memory::with_owner(user_id);
+
+    // Create tool registry
     let tools = ToolRegistry::new();
-    
+
+    // Create response options with the selected model
+    let response_options = ResponseOptions {
+        model_info: model_info.clone(),
+        temperature: Some(0.7),
+        max_tokens: Some(pattern_core::model::defaults::calculate_max_tokens(
+            &model_info,
+            None,
+        )),
+        capture_content: Some(true),
+        capture_tool_calls: Some(true),
+        top_p: None,
+        stop_sequences: vec![],
+        capture_usage: Some(true),
+        capture_reasoning_content: None,
+        capture_raw_body: None,
+        response_format: None,
+        normalise_reasoning_content: Some(true),
+        reasoning_effort:Some(genai::chat::ReasoningEffort::Medium),
+    };
+
+    // Create agent
     let agent = DatabaseAgent::new(
-        agent_id,
+        AgentId::generate(),
         user_id,
         AgentType::Generic,
-        "MyAssistant".to_string(),
-        "You are a helpful AI assistant.".to_string(),
+        name.to_string(),
+        // Empty base instructions, default will be provided
+        String::new(),
         memory,
-        db.clone(),
-        provider,
+        DB.clone(),
+        model_provider,
         tools,
-        None, // No embeddings provider
+        embedding_provider,
     );
-    
+
+    // Set the chat options with our selected model
+    {
+        let mut options = agent.chat_options.write().await;
+        *options = Some(response_options);
+    }
+
+    agent.store().await?;
+    agent.start_stats_sync().await?;
+    agent.start_memory_sync().await?;
+
+    // Add persona as a core memory block
+    let persona_block = MemoryBlock::owned(config.user.id.clone(), "persona", persona.clone())
+        .with_description("Agent's persona and identity")
+        .with_permission(pattern_core::memory::MemoryPermission::ReadOnly);
+    agent.update_memory("persona", persona_block).await?;
+
     // Send a message
     use pattern_core::message::{Message, ChatRole};
     let message = Message::new(ChatRole::User, "Hello! How can you help me today?");
     let response = agent.process_message(message).await?;
     println!("Agent: {:?}", response);
-    
+
     Ok(())
 }
 ```
