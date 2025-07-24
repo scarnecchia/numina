@@ -1108,12 +1108,11 @@ where
         };
         tracing::info!("🔧 Agent {} updating memory key '{}'", agent_id, key);
 
-        // Update in context immediately
+        // Update in context immediately - upsert the complete block
         {
             let context = self.context.write().await;
-            context
-                .update_memory_block(key, memory.value.clone())
-                .await?
+            context.handle.memory.upsert_block(key, memory.clone())?;
+            context.metadata.write().await.last_active = Utc::now();
         };
 
         // Persist memory block in background

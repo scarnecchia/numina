@@ -276,6 +276,37 @@ impl Memory {
         });
     }
 
+    /// Add or update a complete memory block
+    pub fn upsert_block(
+        &self,
+        label: impl Into<CompactString>,
+        mut block: MemoryBlock,
+    ) -> Result<()> {
+        let label = label.into();
+
+        // Ensure the block has the correct owner
+        block.owner_id = self.owner_id.clone();
+        block.label = label.clone();
+        block.updated_at = Utc::now();
+
+        if self.blocks.contains_key(&label) {
+            // Update existing block
+            let block_id = block.id.clone();
+            self.blocks.insert(label, block);
+
+            // Mark as dirty if not new
+            if !self.new_blocks.contains(&block_id) {
+                self.dirty_blocks.insert(block_id);
+            }
+        } else {
+            // New block
+            self.new_blocks.insert(block.id.clone());
+            self.blocks.insert(label, block);
+        }
+
+        Ok(())
+    }
+
     /// Get the set of newly created block IDs
     pub fn get_new_blocks(&self) -> Vec<MemoryId> {
         self.new_blocks.iter().map(|entry| entry.clone()).collect()
