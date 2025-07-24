@@ -84,18 +84,18 @@ export OPENAI_API_KEY=your-key-here
 cargo run --bin pattern-cli -- agent list
 
 # Create an agent
-cargo run --bin pattern-cli -- agent create "MyAssistant"
+cargo run --bin pattern-cli -- agent create "Entropy"
 # Chat with an agent
-cargo run --bin pattern-cli -- chat --agent MyAssistant
+cargo run --bin pattern-cli -- chat --agent Archive
 # or with the default from the config file
 cargo run --bin pattern-cli -- chat
 
 
 # Show agent status
-cargo run --bin pattern-cli -- agent status MyAssistant
+cargo run --bin pattern-cli -- agent status Pattern
 
 # Search conversation history
-cargo run --bin pattern-cli -- debug search-conversations --agent MyAssistant "previous conversation"
+cargo run --bin pattern-cli -- debug search-conversations --agent Flux "previous conversation"
 
 # Raw database queries for debugging
 cargo run --bin pattern-cli -- db query "SELECT * from mem"
