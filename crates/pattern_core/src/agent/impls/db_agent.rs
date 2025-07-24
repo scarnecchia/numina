@@ -1115,26 +1115,20 @@ where
             context.metadata.write().await.last_active = Utc::now();
         };
 
-        // Persist memory block in background
-        let db = self.db.clone();
+        // Persist memory block synchronously during initial setup
+        // TODO: Consider spawning background task for updates after agent is initialized
         let agent_id = {
             let context = self.context.read().await;
             context.handle.agent_id
         };
-        let memory_clone = memory.clone();
 
-        let _handle = tokio::spawn(async move {
-            if let Err(e) = crate::db::ops::persist_agent_memory(
-                &db,
-                agent_id,
-                &memory_clone,
-                crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
-            )
-            .await
-            {
-                crate::log_error!("Failed to persist memory block", e);
-            }
-        });
+        crate::db::ops::persist_agent_memory(
+            &self.db,
+            agent_id,
+            &memory,
+            crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
+        )
+        .await?;
 
         Ok(())
     }
