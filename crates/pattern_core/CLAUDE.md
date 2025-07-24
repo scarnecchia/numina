@@ -186,17 +186,38 @@ This allows agents to make informed decisions about memory swapping without need
 
 2. **Redundant Arc Wrapping**: DatabaseAgent contains internal Arc fields, so wrapping it in Arc<dyn Agent> is redundant. Consider implementing Clone for DatabaseAgent to allow direct ownership while maintaining shared internal state.
 
+## Model Configuration ✅ COMPLETE (2025-07-24)
+
+### What We Fixed
+1. **Created `model/defaults.rs`** with comprehensive registry:
+   - Accurate July 2025 model specifications
+   - Context windows: Anthropic (200k), Gemini (1M/2M), OpenAI (128k-1M)
+   - Max output tokens: Model-specific limits (4k-100k)
+   - Pricing information for all major models
+   - Embedding model defaults (dimensions, max tokens, pricing)
+
+2. **Smart Token Management**:
+   - `enhance_model_info()` fixes provider-supplied ModelInfo
+   - `calculate_max_tokens()` respects model-specific limits
+   - Dynamic calculation: user config > model max > context/4
+   - Case-insensitive matching with fuzzy fallback
+
+3. **Context Compression** ✅:
+   - Integrated `MessageCompressor` with multiple strategies
+   - `CompressionStrategy`: Truncate, RecursiveSummarization, ImportanceBased, TimeDecay
+   - Made `ContextBuilder::build()` async for proper compression
+   - Maintains Gemini API compatibility (valid message sequences)
+
+4. **Smart Caching** ✅:
+   - Added `CacheControl::Ephemeral` to optimize Anthropic token usage
+   - Applied to first message and every 20th message
+   - Works with all compression strategies
+
 ## Next Priorities
-1. ~~**Model Configuration**: Fix hardcoded context window limits~~ ✅ COMPLETE (2025-07-24)
-   - Created model defaults registry with accurate limits
-   - Added enhance_model_info() for provider data enrichment
-   - Dynamic max_tokens calculation based on model
-   - Case-insensitive model/provider matching
-   - Config model selection now respected
-2. **Fix failing tests**: `test_load_balancing_selector` and `test_round_robin_skip_inactive`
+1. **Fix failing tests**: `test_load_balancing_selector` and `test_round_robin_skip_inactive`
    - Both failing after dyn-compatibility refactor
-3. Add vector search for archival memory using embeddings
-4. ~~Create basic binary (CLI/TUI) for user testing~~ ✅ (pattern-cli complete)
+2. Add vector search for archival memory using embeddings
+3. ~~Create basic binary (CLI/TUI) for user testing~~ ✅ (pattern-cli complete)
 
 
 ## Eventually

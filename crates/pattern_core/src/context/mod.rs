@@ -10,7 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
-    message::Message,
+    message::{CacheControl, Message},
     tool::{DynamicTool, ToolRegistry},
 };
 
@@ -146,6 +146,7 @@ pub struct ContextBuilder {
     tools: Vec<Box<dyn DynamicTool>>,
     messages: Vec<Message>,
     current_time: DateTime<Utc>,
+    compression_strategy: CompressionStrategy,
 }
 
 impl ContextBuilder {
@@ -158,6 +159,7 @@ impl ContextBuilder {
             tools: Vec::new(),
             messages: Vec::new(),
             current_time: Utc::now(),
+            compression_strategy: CompressionStrategy::default(),
         }
     }
 
@@ -222,8 +224,14 @@ impl ContextBuilder {
         self
     }
 
+    /// Set the compression strategy
+    pub fn with_compression_strategy(mut self, strategy: CompressionStrategy) -> Self {
+        self.compression_strategy = strategy;
+        self
+    }
+
     /// Build the final context
-    pub fn build(self) -> Result<MemoryContext> {
+    pub async fn build(self) -> Result<MemoryContext> {
         // Build system prompt
         let system_prompt = self.build_system_prompt()?;
 
@@ -231,7 +239,7 @@ impl ContextBuilder {
         let tools = self.tools.iter().map(|t| t.to_genai_tool()).collect();
 
         // Process messages (compress if needed)
-        let (messages, compressed_count) = self.process_messages()?;
+        let (messages, compressed_count) = self.process_messages().await?;
 
         // Estimate token count
         let total_tokens_estimate = self.estimate_tokens(&system_prompt, &messages);
@@ -373,12 +381,14 @@ impl ContextBuilder {
                     "=== {} ===
 Description: {}
 Characters: {}/{}
+Permissions: {}
 Content:
 {}",
                     block.label,
                     block.description.as_deref().unwrap_or("No description"),
                     char_count,
                     char_limit,
+                    block.permission.to_string(),
                     block.value
                 ));
             }
@@ -467,23 +477,42 @@ The following constraints define rules for tool usage and guide desired behavior
         }
     }
 
-    /// Process messages, compressing if needed
-    fn process_messages(&self) -> Result<(Vec<Message>, usize)> {
-        if self.messages.len() <= self.config.max_context_messages {
-            return Ok((self.messages.clone(), 0));
+    /// Process messages, compressing if needed and adding cache control
+    async fn process_messages(&self) -> Result<(Vec<Message>, usize)> {
+        let (mut messages, compressed_count) =
+            if self.messages.len() <= self.config.max_context_messages {
+                (self.messages.clone(), 0)
+            } else {
+                // Use MessageCompressor with configured strategy
+                let compressor = MessageCompressor::new(self.compression_strategy.clone());
+
+                let compression_result = compressor
+                    .compress(self.messages.clone(), self.config.max_context_messages)
+                    .await?;
+
+                // Return the active messages and the count of compressed messages
+                (
+                    compression_result.active_messages,
+                    compression_result.metadata.compressed_count,
+                )
+            };
+
+        // Add cache control to optimize token usage (especially for Anthropic)
+        // Cache the first message (system prompt will be cached separately)
+        if let Some(first_msg) = messages.first_mut() {
+            first_msg.options.cache_control = Some(CacheControl::Ephemeral);
         }
 
-        // For now, simple truncation. In the future, we'd implement
-        // recursive summarization as described in the MemGPT paper
-        let compressed_count = self.messages.len() - self.config.max_context_messages;
-        let recent_messages = self
-            .messages
-            .iter()
-            .skip(compressed_count)
-            .cloned()
-            .collect();
+        // Add cache control periodically throughout the conversation
+        // Every 20 messages to create cache breakpoints
+        const CACHE_INTERVAL: usize = 20;
+        for (i, msg) in messages.iter_mut().enumerate() {
+            if i > 0 && i % CACHE_INTERVAL == 0 {
+                msg.options.cache_control = Some(CacheControl::Ephemeral);
+            }
+        }
 
-        Ok((recent_messages, compressed_count))
+        Ok((messages, compressed_count))
     }
 
     /// Estimate token count for the context
@@ -540,8 +569,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_context_builder_basic() {
+    #[tokio::test]
+    async fn test_context_builder_basic() {
         let config = ContextConfig::default();
         let builder = ContextBuilder::new(AgentId::generate(), config);
 
@@ -560,6 +589,7 @@ mod tests {
                 ..Default::default()
             })
             .build()
+            .await
             .unwrap();
 
         assert!(
@@ -570,8 +600,8 @@ mod tests {
         assert_eq!(context.metadata.memory_blocks_count, 1);
     }
 
-    #[test]
-    fn test_memory_char_limits() {
+    #[tokio::test]
+    async fn test_memory_char_limits() {
         let config = ContextConfig {
             memory_char_limit: 100,
             ..Default::default()
@@ -595,6 +625,7 @@ mod tests {
                 ..Default::default()
             })
             .build()
+            .await
             .unwrap();
 
         // Should show the actual character count even if over limit
@@ -602,8 +633,8 @@ mod tests {
         assert!(context.system_prompt.contains("chars_limit=100"));
     }
 
-    #[test]
-    fn test_tool_rules_from_registry() {
+    #[tokio::test]
+    async fn test_tool_rules_from_registry() {
         use crate::{
             context::AgentHandle,
             tool::{ToolRegistry, builtin::BuiltinTools},
@@ -624,7 +655,7 @@ mod tests {
         let builder =
             ContextBuilder::new(AgentId::generate(), config).with_tools_from_registry(&registry);
 
-        let context = builder.build().unwrap();
+        let context = builder.build().await.unwrap();
 
         // Check that tool rules were loaded from the registry
         assert!(

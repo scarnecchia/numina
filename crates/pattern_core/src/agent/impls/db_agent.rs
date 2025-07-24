@@ -901,6 +901,30 @@ where
                 response.tool_calls.len()
             );
 
+            // First, add the assistant message with tool calls to context
+            // This is critical for the API to see the tool_use blocks before the tool_result blocks
+            {
+                let tool_call_message = Message::from_response(&response, agent_id);
+                tracing::debug!(
+                    "Adding assistant message with tool calls to context before execution"
+                );
+
+                let context = self.context.read().await;
+                context.add_message(tool_call_message.clone()).await;
+
+                // Also persist to DB
+                let _ = crate::db::ops::persist_agent_message(
+                    &self.db,
+                    agent_id,
+                    &tool_call_message,
+                    crate::message::MessageRelationType::Active,
+                )
+                .await
+                .inspect_err(|e| {
+                    crate::log_error!("Failed to persist tool call message", e);
+                });
+            }
+
             // Execute the tool calls and get responses
             let responses = {
                 let context = self.context.read().await;

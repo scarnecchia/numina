@@ -452,7 +452,8 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
                 .with_memory_blocks(memory_blocks)
                 .with_tools_from_registry(&self.tools)
                 .with_messages(history.messages.clone())
-                .build()?;
+                .build()
+                .await?;
 
         tracing::debug!(
             "Built context with {} messages, system_prompt length={} chars",

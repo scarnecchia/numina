@@ -7,21 +7,18 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 **Current Status**: Core foundation complete, ready for feature development
 
 ### 🚧 Current Development Priorities
-1. **Model Configuration** - 🚨 URGENT - Fix hardcoded context limits breaking non-Gemini models
-   - Currently hardcoding 1M tokens in `agent_ops.rs` (lines 193, 314)
-   - Breaks Anthropic (200k limit) and other providers
-   
-   **Implementation Plan:**
-   - Create `pattern_core/src/model/defaults.rs` with static registry
-   - Use `std::sync::OnceLock` for model ID -> proper defaults mapping
-   - `enhance_model_info()` function to fix provider-supplied ModelInfo
-   - Apply user's ModelConfig overrides from config file
-   - Update agent_ops.rs to use: `config.model.max_tokens.or(Some(model_info.context_window / 4))`
-   - Remove hardcoded 1M value, use model-specific limits
+1. **Model Configuration** - ✅ COMPLETE (2025-07-24)
+   - Created `pattern_core/src/model/defaults.rs` with comprehensive model registry
+   - Implemented `enhance_model_info()` to fix provider-supplied ModelInfo
+   - Added accurate July 2025 model specifications for all major providers
+   - Dynamic `calculate_max_tokens()` respects model-specific limits
+   - Smart caching with CacheControl::Ephemeral for Anthropic optimization
+   - Integrated MessageCompressor with multiple compression strategies
 
 2. **Agent Groups** - ✅ COMPLETE (needs user testing) - Fully usable via CLI
-3. **Task Management System** - ADHD-aware task breakdown and tracking
-4. **MCP Tools Integration** - Task-related tools and agent communication
+3. **Fix failing tests** - `test_load_balancing_selector` and `test_round_robin_skip_inactive`
+4. **Task Management System** - ADHD-aware task breakdown and tracking
+5. **MCP Tools Integration** - Task-related tools and agent communication
 
 ## Agent Groups Implementation ✅ COMPLETE (needs user testing)
 
@@ -158,7 +155,7 @@ pub struct User {
 - [X] Create basic binary (CLI/TUI) for user testing - COMPLETE
 
 ### Medium Priority
-- [ ] Make agent groups usable via CLI and config system
+- [X] Make agent groups usable via CLI and config system - COMPLETE
 - [ ] Complete pattern-specific agent groups implementation (main, crisis, planning, memory)
 - [ ] Implement task CRUD operations in pattern-core or pattern-nd
 - [ ] Create ADHD-aware task manager with breakdown (pattern-nd)
@@ -166,6 +163,7 @@ pub struct User {
 - [ ] Add Discord context tools to MCP
 - [ ] Implement time tracking with ADHD multipliers
 - [ ] Add energy/attention monitoring
+- [ ] Add vector search for archival memory using embeddings
 
 ### Documentation
 Each major component has dedicated docs in `docs/`:

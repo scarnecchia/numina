@@ -13,7 +13,7 @@ static MODEL_DEFAULTS: OnceLock<HashMap<&'static str, ModelDefaults>> = OnceLock
 
 /// Default configuration for a specific model
 #[derive(Debug, Clone)]
-struct ModelDefaults {
+pub struct ModelDefaults {
     /// Maximum context window (input + output tokens)
     context_window: usize,
     /// Maximum output tokens (if different from context_window/4)
@@ -618,6 +618,12 @@ fn apply_provider_defaults(model_info: &mut ModelInfo) {
     }
 }
 
+/// Get raw model defaults
+pub fn get_model_defaults(model_id: &str) -> Option<ModelDefaults> {
+    let defaults = MODEL_DEFAULTS.get_or_init(init_defaults);
+    defaults.get(model_id).cloned()
+}
+
 /// Calculate appropriate max_tokens based on model info and user config
 pub fn calculate_max_tokens(model_info: &ModelInfo, user_max_tokens: Option<u32>) -> u32 {
     // If user specified a value, use it (but cap at model's limit)
@@ -632,6 +638,127 @@ pub fn calculate_max_tokens(model_info: &ModelInfo, user_max_tokens: Option<u32>
     model_info
         .max_output_tokens
         .unwrap_or(model_info.context_window / 4) as u32
+}
+
+/// Default configuration for embedding models
+#[derive(Debug, Clone)]
+pub struct EmbeddingDefaults {
+    /// Maximum input tokens
+    pub max_input_tokens: usize,
+    /// Output dimensions
+    pub dimensions: usize,
+    /// Cost per 1k tokens
+    pub cost_per_1k_tokens: Option<f64>,
+}
+
+/// Static registry of embedding model defaults
+static EMBEDDING_DEFAULTS: OnceLock<HashMap<&'static str, EmbeddingDefaults>> = OnceLock::new();
+
+/// Initialize the embedding model defaults registry
+fn init_embedding_defaults() -> HashMap<&'static str, EmbeddingDefaults> {
+    let mut defaults = HashMap::new();
+
+    // OpenAI embedding models
+    defaults.insert(
+        "text-embedding-3-small",
+        EmbeddingDefaults {
+            max_input_tokens: 8_191,
+            dimensions: 1_536,
+            cost_per_1k_tokens: Some(0.00002),
+        },
+    );
+
+    defaults.insert(
+        "text-embedding-3-large",
+        EmbeddingDefaults {
+            max_input_tokens: 8_191,
+            dimensions: 3_072,
+            cost_per_1k_tokens: Some(0.00013),
+        },
+    );
+
+    defaults.insert(
+        "text-embedding-ada-002",
+        EmbeddingDefaults {
+            max_input_tokens: 8_191,
+            dimensions: 1_536,
+            cost_per_1k_tokens: Some(0.0001),
+        },
+    );
+
+    // Cohere embedding models
+    defaults.insert(
+        "embed-english-v3.0",
+        EmbeddingDefaults {
+            max_input_tokens: 512,
+            dimensions: 1_024,
+            cost_per_1k_tokens: Some(0.0001),
+        },
+    );
+
+    defaults.insert(
+        "embed-multilingual-v3.0",
+        EmbeddingDefaults {
+            max_input_tokens: 512,
+            dimensions: 1_024,
+            cost_per_1k_tokens: Some(0.0001),
+        },
+    );
+
+    // Voyage embedding models
+    defaults.insert(
+        "voyage-large-2",
+        EmbeddingDefaults {
+            max_input_tokens: 16_000,
+            dimensions: 1_536,
+            cost_per_1k_tokens: Some(0.00012),
+        },
+    );
+
+    defaults.insert(
+        "voyage-code-2",
+        EmbeddingDefaults {
+            max_input_tokens: 16_000,
+            dimensions: 1_536,
+            cost_per_1k_tokens: Some(0.00012),
+        },
+    );
+
+    // Google Gemini embedding models
+    defaults.insert(
+        "gemini-embedding-001",
+        EmbeddingDefaults {
+            max_input_tokens: 2_048,
+            dimensions: 1_536, // Flexible 128-3072, but 1,536 is middle ground default
+            cost_per_1k_tokens: Some(0.000025), // Estimated based on Gemini pricing tiers
+        },
+    );
+
+    defaults.insert(
+        "gemini-embedding-exp-03-07",
+        EmbeddingDefaults {
+            max_input_tokens: 8_000,
+            dimensions: 3_072,
+            cost_per_1k_tokens: Some(0.000025),
+        },
+    );
+
+    defaults.insert(
+        "text-embedding-004",
+        EmbeddingDefaults {
+            max_input_tokens: 3_000,
+            dimensions: 768,
+            cost_per_1k_tokens: Some(0.000025), // Legacy model
+        },
+    );
+
+    defaults
+}
+
+/// Get embedding model defaults
+pub fn get_embedding_defaults(model_id: &str) -> Option<EmbeddingDefaults> {
+    let defaults = EMBEDDING_DEFAULTS.get_or_init(init_embedding_defaults);
+    defaults.get(model_id).cloned()
 }
 
 #[cfg(test)]
@@ -654,7 +781,7 @@ mod tests {
         let enhanced = enhance_model_info(model_info);
 
         assert_eq!(enhanced.context_window, 200_000);
-        assert_eq!(enhanced.max_output_tokens, Some(4_096));
+        assert_eq!(enhanced.max_output_tokens, Some(8_192));
         assert!(
             enhanced
                 .capabilities
@@ -679,7 +806,7 @@ mod tests {
         let enhanced = enhance_model_info(model_info);
 
         assert_eq!(enhanced.context_window, 1_048_576);
-        assert_eq!(enhanced.max_output_tokens, Some(8_192));
+        assert_eq!(enhanced.max_output_tokens, Some(65_536));
         assert!(enhanced.capabilities.contains(&ModelCapability::JsonMode));
     }
 

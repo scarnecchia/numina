@@ -5,6 +5,7 @@ use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -29,6 +30,19 @@ pub enum MemoryPermission {
     ReadWrite,
     /// Total control, can delete
     Admin,
+}
+
+impl Display for MemoryPermission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryPermission::ReadOnly => write!(f, "Read Only"),
+            MemoryPermission::Partner => write!(f, "Requires Partner permission to write"),
+            MemoryPermission::Human => write!(f, "Requires Human permission to write"),
+            MemoryPermission::Append => write!(f, "Append Only"),
+            MemoryPermission::ReadWrite => write!(f, "Read, Append, Write"),
+            MemoryPermission::Admin => write!(f, "Read, Write, Delete"),
+        }
+    }
 }
 
 /// Type of memory storage
