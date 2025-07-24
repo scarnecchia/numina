@@ -54,38 +54,62 @@ Pattern automatically implements `DynamicTool` for any type that implements `AiT
 ## Flow Diagram
 
 ```mermaid
-graph TD
-    A[Custom Tool struct]
-    A --> B[impl AiTool]
-    B --> C[Auto impl DynamicTool]
+flowchart TD
+    subgraph define ["1. Define Tool"]
+        A[Custom Tool struct]
+        B[impl AiTool with Input/Output types]
+        C[Auto-generated impl DynamicTool]
+        A --> B
+        B --> C
+    end
     
-    C --> D["Box&lt;dyn DynamicTool&gt;"]
-    D --> E[ToolRegistry::register]
-    E --> F[Stored in DashMap]
+    subgraph register ["2. Register Tool"]
+        D["Box::new(tool)"]
+        E[ToolRegistry::register]
+        F["Stored as Box&lt;dyn DynamicTool&gt;"]
+        D --> E
+        E --> F
+    end
     
-    F --> G[Agent requests tools]
-    G --> H["available_tools()"]
-    H --> I[Tool schemas]
-    I --> J[Sent to LLM]
+    subgraph discover ["3. Agent Discovery"]
+        G[Agent calls available_tools]
+        H[Registry returns tool list]
+        I[Generate JSON schemas]
+        J[Send schemas to LLM]
+        G --> H
+        H --> I
+        I --> J
+    end
     
-    J --> K[LLM tool call]
-    K --> L[JSON params]
-    L --> M[Registry lookup]
-    M --> N["execute_dynamic()"]
+    subgraph execute ["4. Tool Execution"]
+        K[LLM requests tool call]
+        L[JSON parameters]
+        M[Registry finds tool by name]
+        N[execute_dynamic called]
+        K --> L
+        L --> M
+        M --> N
+    end
     
-    N --> O[Deserialize JSON]
-    O --> P[Type-safe Input]
-    P --> Q["execute()"]
-    Q --> R[Type-safe Output]
-    R --> S[Serialize JSON]
-    S --> T[Return to agent]
+    subgraph convert ["5. Type Conversion"]
+        O[JSON → Rust type]
+        P[Call tool.execute]
+        Q[Rust type → JSON]
+        R[Return result]
+        N --> O
+        O --> P
+        P --> Q
+        Q --> R
+    end
     
-    style A fill:#e1f5e1
-    style B fill:#e1f5e1
-    style C fill:#e1f5e1
-    style K fill:#ffe1e1
-    style L fill:#ffe1e1
-    style T fill:#e1ffe1
+    define --> register
+    register --> discover
+    discover --> execute
+    execute --> convert
+    
+    style A fill:#2d3748,stroke:#1a202c,color:#fff
+    style K fill:#e53e3e,stroke:#c53030,color:#fff
+    style R fill:#38a169,stroke:#2f855a,color:#fff
 ```
 
 ## Creating a Custom Tool
