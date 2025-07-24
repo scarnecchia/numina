@@ -40,12 +40,16 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
+                ModelCapability::CodeExecution,
+                ModelCapability::ComputerUse,
                 ModelCapability::VisionInput,
+                ModelCapability::TextEdit,
                 ModelCapability::LongContext,
+                ModelCapability::WebSearch,
                 ModelCapability::ExtendedThinking,
             ],
             cost_per_1k_prompt: Some(0.015),
-            cost_per_1k_completion: Some(0.015),
+            cost_per_1k_completion: Some(0.075),
         },
     );
 
@@ -57,8 +61,12 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
             capabilities: vec![
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
+                ModelCapability::CodeExecution,
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
+                ModelCapability::ComputerUse,
+                ModelCapability::TextEdit,
+                ModelCapability::WebSearch,
                 ModelCapability::LongContext,
                 ModelCapability::ExtendedThinking,
             ],
@@ -74,12 +82,16 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
             capabilities: vec![
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
+                ModelCapability::CodeExecution,
                 ModelCapability::SystemPrompt,
+                ModelCapability::ComputerUse,
                 ModelCapability::VisionInput,
+                ModelCapability::TextEdit,
+                ModelCapability::WebSearch,
                 ModelCapability::LongContext,
                 ModelCapability::ExtendedThinking,
             ],
-            cost_per_1k_prompt: Some(0.03),
+            cost_per_1k_prompt: Some(0.003),
             cost_per_1k_completion: Some(0.015),
         },
     );
@@ -144,6 +156,8 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
+                ModelCapability::ComputerUse,
+                ModelCapability::TextEdit,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
             ],
@@ -161,11 +175,12 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
+                ModelCapability::CodeExecution,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
             ],
-            cost_per_1k_prompt: Some(0.0008),
-            cost_per_1k_completion: Some(0.004),
+            cost_per_1k_prompt: Some(0.001),
+            cost_per_1k_completion: Some(0.005),
         },
     );
 
@@ -185,6 +200,24 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
             ],
             cost_per_1k_prompt: Some(0.01),
             cost_per_1k_completion: Some(0.03),
+        },
+    );
+
+    defaults.insert(
+        "gpt-4.1",
+        ModelDefaults {
+            context_window: 1_047_576, // 1M tokens
+            max_output_tokens: Some(32_768),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::SystemPrompt,
+                ModelCapability::VisionInput,
+                ModelCapability::LongContext,
+                ModelCapability::JsonMode,
+            ],
+            cost_per_1k_prompt: Some(0.002),
+            cost_per_1k_completion: Some(0.008),
         },
     );
 
@@ -228,28 +261,64 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
     defaults.insert(
         "o1",
         ModelDefaults {
-            context_window: 200_000,
+            context_window: 128_000,
             max_output_tokens: Some(100_000),
             capabilities: vec![
                 ModelCapability::TextGeneration,
+                ModelCapability::ExtendedThinking,
                 ModelCapability::LongContext,
             ],
             cost_per_1k_prompt: Some(0.015),
             cost_per_1k_completion: Some(0.06),
         },
     );
-
     defaults.insert(
-        "o1-mini",
+        "o4-mini",
         ModelDefaults {
-            context_window: 128_000,
-            max_output_tokens: Some(65_536),
+            context_window: 200_000,
+            max_output_tokens: Some(100_000),
             capabilities: vec![
                 ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::VisionInput,
                 ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
             ],
-            cost_per_1k_prompt: Some(0.003),
-            cost_per_1k_completion: Some(0.012),
+            cost_per_1k_prompt: Some(0.0011),
+            cost_per_1k_completion: Some(0.0044),
+        },
+    );
+
+    defaults.insert(
+        "o3-mini",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(100_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::VisionInput,
+                ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.0011),
+            cost_per_1k_completion: Some(0.0044),
+        },
+    );
+    defaults.insert(
+        "o3",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(100_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::VisionInput,
+                ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.002),
+            cost_per_1k_completion: Some(0.008),
         },
     );
 
@@ -312,19 +381,21 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
     defaults.insert(
         "gemini-2.5-pro",
         ModelDefaults {
-            context_window: 2_097_152, // 2M context
-            max_output_tokens: Some(8_192),
+            context_window: 1_048_576, // 1M context
+            max_output_tokens: Some(65_536),
             capabilities: vec![
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
+                ModelCapability::WebSearch,
                 ModelCapability::JsonMode,
                 ModelCapability::CodeExecution,
+                ModelCapability::ExtendedThinking,
             ],
-            cost_per_1k_prompt: Some(0.0035),
-            cost_per_1k_completion: Some(0.014),
+            cost_per_1k_prompt: Some(0.00125),
+            cost_per_1k_completion: Some(0.005),
         },
     );
 
@@ -332,7 +403,7 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
         "gemini-2.5-flash",
         ModelDefaults {
             context_window: 1_048_576, // 1M context
-            max_output_tokens: Some(8_192),
+            max_output_tokens: Some(65_536),
             capabilities: vec![
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
@@ -340,9 +411,10 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
                 ModelCapability::JsonMode,
+                ModelCapability::ExtendedThinking,
             ],
-            cost_per_1k_prompt: Some(0.00035),
-            cost_per_1k_completion: Some(0.0014),
+            cost_per_1k_prompt: Some(0.00015),
+            cost_per_1k_completion: Some(0.0006),
         },
     );
 
@@ -388,7 +460,7 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
                 ModelCapability::LongContext,
-                ModelCapability::WebBrowsing,
+                ModelCapability::WebSearch,
             ],
             cost_per_1k_prompt: Some(0.003),
             cost_per_1k_completion: Some(0.015),
@@ -405,7 +477,7 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
                 ModelCapability::LongContext,
-                ModelCapability::WebBrowsing,
+                ModelCapability::WebSearch,
             ],
             cost_per_1k_prompt: Some(0.0005),
             cost_per_1k_completion: Some(0.0015),
@@ -525,7 +597,7 @@ fn apply_provider_defaults(model_info: &mut ModelInfo) {
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
                 ModelCapability::LongContext,
-                ModelCapability::WebBrowsing,
+                ModelCapability::WebSearch,
             ];
         }
         _ => {

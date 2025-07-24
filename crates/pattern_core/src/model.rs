@@ -150,8 +150,17 @@ pub enum ModelCapability {
     /// Supports JSON mode for structured output
     JsonMode,
 
-    /// Can do web browsing
-    WebBrowsing,
+    /// Bash tool
+    BashTool,
+
+    /// Can search the web
+    WebSearch,
+
+    /// Text editor tool
+    TextEdit,
+
+    /// Computer use
+    ComputerUse,
 
     /// Can execute code
     CodeExecution,
