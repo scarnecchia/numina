@@ -33,6 +33,17 @@ pub async fn init_db_instance<C: Connection>(
             let path = if path.is_empty() {
                 "memory".to_string()
             } else {
+                // Ensure parent directory exists for file-based storage
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            DatabaseError::Other(format!(
+                                "Failed to create database directory: {}",
+                                e
+                            ))
+                        })?;
+                    }
+                }
                 format!("surrealkv://{}", path)
             };
             // Connect to the embedded database
@@ -99,6 +110,17 @@ pub async fn init_db(config: DatabaseConfig) -> Result<()> {
             let path = if path.is_empty() {
                 "memory".to_string()
             } else {
+                // Ensure parent directory exists for file-based storage
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            DatabaseError::Other(format!(
+                                "Failed to create database directory: {}",
+                                e
+                            ))
+                        })?;
+                    }
+                }
                 format!("surrealkv://{}", path)
             };
             // Connect to the embedded database

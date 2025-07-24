@@ -209,14 +209,15 @@ fn format_relative_time(time: chrono::DateTime<chrono::Utc>) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv().into_diagnostic()?;
+    // Load .env file if it exists
+    let _ = dotenvy::dotenv();
     miette::set_hook(Box::new(|_| {
         Box::new(
             miette::MietteHandlerOpts::new()
                 .terminal_links(true)
-                //.rgb_colors(miette::RgbColors::)
+                .rgb_colors(miette::RgbColors::Preferred)
                 .with_cause_chain()
-                //.with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
+                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
                 .color(true)
                 .context_lines(5)
                 .tab_width(2)
