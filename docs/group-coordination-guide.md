@@ -67,7 +67,7 @@ graph LR
     A1 --> A2[Agent 2]
     A2 --> A3[Agent 3]
     A3 --> A1
-    style M fill:#ffe1e1
+    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
 ```
 
 **Use Cases:**
@@ -84,8 +84,8 @@ graph TB
     S -->|Capability Match| A1[Expert Agent]
     S -->|Random| A2[Any Agent]
     S -->|Load Balance| A3[Least Busy]
-    style M fill:#ffe1e1
-    style S fill:#fff1e1
+    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style S fill:#ed8936,stroke:#c05621,color:#fff
 ```
 
 **Available Selectors:**
@@ -102,8 +102,8 @@ graph LR
     S1 --> S2[Planner Agent]
     S2 --> S3[Executor Agent]
     S3 --> R[Combined Result]
-    style M fill:#ffe1e1
-    style R fill:#e1ffe1
+    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style R fill:#48bb78,stroke:#2f855a,color:#fff
 ```
 
 **Use Cases:**
@@ -120,8 +120,8 @@ graph TB
     W --> S{Supervisor}
     S -->|Approved| R1[Final Response]
     S -->|Modified| R2[Edited Response]
-    style M fill:#ffe1e1
-    style S fill:#fff1e1
+    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style S fill:#ed8936,stroke:#c05621,color:#fff
 ```
 
 **Use Cases:**
@@ -141,8 +141,8 @@ graph TB
     A2 --> V
     A3 --> V
     V --> R[Consensus Result]
-    style M fill:#ffe1e1
-    style V fill:#fff1e1
+    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style V fill:#ed8936,stroke:#c05621,color:#fff
 ```
 
 **Use Cases:**
@@ -159,8 +159,8 @@ graph TB
     C -->|Threshold Met| A[Alert Agent]
     C -->|Normal| T
     A --> I[Intervention]
-    style T fill:#e1e1ff
-    style C fill:#fff1e1
+    style T fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style C fill:#ed8936,stroke:#c05621,color:#fff
 ```
 
 **Use Cases:**
@@ -268,8 +268,8 @@ graph TB
     C --> F[Format Group Response]
     F --> R[Return to User]
     
-    style U fill:#ffe1e1
-    style R fill:#e1ffe1
+    style U fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style R fill:#48bb78,stroke:#2f855a,color:#fff
 ```
 
 ### Detailed Flow:

@@ -54,62 +54,42 @@ Pattern automatically implements `DynamicTool` for any type that implements `AiT
 ## Flow Diagram
 
 ```mermaid
-flowchart TD
-    subgraph define ["1. Define Tool"]
+flowchart TB
+    subgraph top ["Development Time"]
         A[Custom Tool struct]
-        B[impl AiTool with Input/Output types]
-        C[Auto-generated impl DynamicTool]
+        B[impl AiTool<br/>Input + Output types]
+        C[Auto-generated<br/>impl DynamicTool]
+        
         A --> B
         B --> C
     end
     
-    subgraph register ["2. Register Tool"]
+    subgraph middle ["Registration"]
         D["Box::new(tool)"]
-        E[ToolRegistry::register]
-        F["Stored as Box&lt;dyn DynamicTool&gt;"]
+        E[ToolRegistry]
+        F["DashMap&lt;String, Box&lt;dyn DynamicTool&gt;&gt;"]
+        
+        C --> D
         D --> E
         E --> F
     end
     
-    subgraph discover ["3. Agent Discovery"]
-        G[Agent calls available_tools]
-        H[Registry returns tool list]
-        I[Generate JSON schemas]
-        J[Send schemas to LLM]
-        G --> H
+    subgraph bottom ["Runtime Execution"]
+        G[Agent requests tools] --> H[JSON schemas to LLM]
+        I[LLM tool call] --> J[JSON parameters]
+        K[Registry lookup] --> L[Type conversion]
+        M[Execute tool] --> N[Return JSON result]
+        
         H --> I
-        I --> J
-    end
-    
-    subgraph execute ["4. Tool Execution"]
-        K[LLM requests tool call]
-        L[JSON parameters]
-        M[Registry finds tool by name]
-        N[execute_dynamic called]
-        K --> L
+        J --> K
         L --> M
-        M --> N
     end
     
-    subgraph convert ["5. Type Conversion"]
-        O[JSON → Rust type]
-        P[Call tool.execute]
-        Q[Rust type → JSON]
-        R[Return result]
-        N --> O
-        O --> P
-        P --> Q
-        Q --> R
-    end
+    F --> G
     
-    define --> register
-    register --> discover
-    discover --> execute
-    execute --> convert
-    
-    style A fill:#2d3748,stroke:#1a202c,color:#fff
-    style K fill:#e53e3e,stroke:#c53030,color:#fff
-    style R fill:#38a169,stroke:#2f855a,color:#fff
+    style A fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style I fill:#ed8936,stroke:#c05621,color:#fff
+    style N fill:#48bb78,stroke:#2f855a,color:#fff
 ```
 
 ## Creating a Custom Tool
