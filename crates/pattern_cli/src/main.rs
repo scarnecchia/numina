@@ -54,9 +54,9 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
 
-        /// Enable tool usage
+        /// Disable tool usage
         #[arg(long)]
-        tools: bool,
+        no_tools: bool,
     },
     /// Agent management
     Agent {
@@ -151,7 +151,6 @@ enum DebugCommands {
         #[arg(long)]
         agent: String,
         /// Optional search query for message content
-        #[arg(long)]
         query: Option<String>,
         /// Filter by role (system, user, assistant, tool)
         #[arg(long)]
@@ -274,19 +273,21 @@ async fn main() -> Result<()> {
         Commands::Chat {
             agent,
             model,
-            tools,
+            no_tools,
         } => {
             println!("{}", "Starting chat mode...".bright_green());
             println!("Agent: {}", agent.bright_cyan());
             if let Some(model_name) = &model {
                 println!("Model: {}", model_name.bright_yellow());
             }
-            if *tools {
+            if !*no_tools {
                 println!("Tools: {}", "enabled".bright_green());
+            } else {
+                println!("Tools: {}", "disabled".bright_red());
             }
 
             // Try to load existing agent or create new one
-            let agent = load_or_create_agent(agent, model.clone(), *tools, &config).await?;
+            let agent = load_or_create_agent(agent, model.clone(), !*no_tools, &config).await?;
             chat_with_agent(agent).await?;
         }
         Commands::Agent { cmd } => match cmd {

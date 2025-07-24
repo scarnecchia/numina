@@ -1,6 +1,6 @@
 # Pattern - Agent Platform and Support Constellation
 
-Pattern is two things. 
+Pattern is two things.
 
 ## Pattern Platform:
 
@@ -53,6 +53,69 @@ Pattern understands that neurodivergent brains are different, not broken:
 ### Custom Agents
 
 Create custom agent configurations through the builder API or configuration files. See [Architecture docs](docs/architecture/) for details.
+
+## Quick Start
+
+### Prerequisites
+- Rust 1.85+ (required for 2024 edition) (or use the Nix flake)
+- An LLM API key (Anthropic, OpenAI, Google, etc.)
+  - I currently recommend Gemini and OpenAI API keys, because it defaults to using OpenAI for embedding, and I've tested most extensively with Gemini
+
+### CLI Tool
+
+The `pattern-cli` tool lets you interact with agents directly:
+
+```bash
+# Build the CLI
+cargo build --bin pattern-cli
+
+# Create a basic config file (optional)
+cp pattern.toml.example pattern.toml
+# Edit pattern.toml with your preferences
+
+# Create a .env file for API keys (optional)
+echo "GEMINI_API_KEY=your-key-here\nOPENAI_API_KEY=your-key-here" > .env
+
+# Or use environment variables directly
+export GEMINI_API_KEY=your-key-here
+export OPENAI_API_KEY=your-key-here
+
+# List agents
+cargo run --bin pattern-cli -- agent list
+
+# Create an agent
+cargo run --bin pattern-cli -- agent create "MyAssistant"
+# Chat with an agent
+cargo run --bin pattern-cli -- chat --agent MyAssistant
+# or with the default from the config file
+cargo run --bin pattern-cli -- chat
+
+
+# Show agent status
+cargo run --bin pattern-cli -- agent status MyAssistant
+
+# Search conversation history
+cargo run --bin pattern-cli -- debug search-conversations --agent MyAssistant "previous conversation"
+
+# Raw database queries for debugging
+cargo run --bin pattern-cli -- db query "SELECT * from mem"
+
+# Or run from the crate directory
+cd ./crates/pattern-cli
+cargo run -- chat
+```
+
+The CLI stores its database in `./pattern.db` by default. You can override this with `--db-path` or in the config file.
+
+### Configuration
+
+Pattern looks for configuration in these locations (first found wins):
+1. `pattern.toml` in the current directory
+2. `~/Library/Application Support/pattern/config.toml` (macOS)
+3. `~/.config/pattern/config.toml` (Linux)
+4. `~/.pattern/config.toml` (fallback)
+
+See `pattern.toml.example` for all available options.
 
 ## Development
 
