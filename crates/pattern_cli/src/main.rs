@@ -182,27 +182,31 @@ async fn main() -> Result<()> {
     // Initialize tracing
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let filter = if cli.debug {
+    if cli.debug {
         // Only show debug output from pattern crates
-        EnvFilter::new(
-            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug",
-        )
+        fmt()
+            .with_env_filter(EnvFilter::new(
+                "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug",
+            ))
+            .with_file(true)
+            .with_line_number(true) // Show target module
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()) // Local time in RFC 3339 format
+            .pretty()
+            .init();
     } else {
         // Show info level for pattern crates, warn for everything else
-        EnvFilter::new(
-            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,warn",
-        )
+        fmt()
+            .with_env_filter( EnvFilter::new(
+                "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,warn",
+            ))
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .compact()
+            .init();
     };
-
-    fmt()
-        .with_env_filter(filter)
-        .with_file(true)
-        .with_line_number(true) // Show target module
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()) // Local time in RFC 3339 format
-        .compact()
-        .init();
 
     // Load configuration
     let mut config = if let Some(config_path) = &cli.config {
@@ -233,15 +237,16 @@ async fn main() -> Result<()> {
             model,
             no_tools,
         } => {
-            println!("{}", "Starting chat mode...".bright_green());
-            println!("Agent: {}", agent.bright_cyan());
+            let output = crate::output::Output::new();
+            output.success("Starting chat mode...");
+            output.info("Agent:", &agent.bright_cyan().to_string());
             if let Some(model_name) = &model {
-                println!("Model: {}", model_name.bright_yellow());
+                output.info("Model:", &model_name.bright_yellow().to_string());
             }
             if !*no_tools {
-                println!("Tools: {}", "enabled".bright_green());
+                output.info("Tools:", &"enabled".bright_green().to_string());
             } else {
-                println!("Tools: {}", "disabled".bright_red());
+                output.info("Tools:", &"disabled".bright_red().to_string());
             }
 
             // Try to load existing agent or create new one

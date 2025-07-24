@@ -6,22 +6,47 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 **Current Status**: Core foundation complete, ready for feature development
 
-### ✅ Completed Infrastructure
-- **Multi-crate workspace**: pattern-core, pattern-nd, pattern-mcp, pattern-discord, pattern-main
-- **Entity system**: Macro-based with SurrealDB graph relationships
-- **Agent framework**: Generic DatabaseAgent with tool system and memory management
-- **Message system**: Full persistence with edge relationships and compression
-- **Agent coordination**: Dynamic, round-robin, sleeptime patterns implemented
-- **Database**: SurrealDB with vector search, migrations, and embedding support
-- **Tool system**: Letta/MemGPT-style domain-based tools with unified search
-- **Message compression**: Multiple strategies with Gemini compatibility
-- **Testing**: 107 tests passing, comprehensive test coverage
-
 ### 🚧 Current Development Priorities
-1. **Task Management System** - ADHD-aware task breakdown and tracking
-2. **MCP Tools Integration** - Task-related tools and agent communication
-3. **Agent Groups** - Main, crisis, planning, memory group implementations
-4. **Basic Binary** - CLI/TUI for user testing and interaction
+1. **Agent Groups** - Make existing implementation usable via CLI and config
+2. **Task Management System** - ADHD-aware task breakdown and tracking
+3. **MCP Tools Integration** - Task-related tools and agent communication
+
+## Agent Groups Implementation Plan
+
+### Phase 1: Configuration Structure
+Add group configuration to the existing config system:
+- Add `GroupConfig` struct to `pattern_core/src/config.rs`
+- Define `GroupMemberConfig` for agent membership with roles
+- Integrate into main `PatternConfig` structure
+
+### Phase 2: Database Operations
+Implement CRUD operations in `pattern_core/src/db/ops.rs`:
+- `create_group()` - Create a new agent group
+- `get_group_by_name()` - Find group by name for a user
+- `add_agent_to_group()` - Add an agent with a role
+- `list_groups_for_user()` - List all groups owned by a user
+- `get_group_members()` - Get all agents in a group
+
+### Phase 3: CLI Commands
+Add group management commands:
+- `pattern-cli group list` - Show all groups
+- `pattern-cli group create <name> --pattern <type>` - Create a group
+- `pattern-cli group add-member <group> <agent> --role <role>` - Add agent to group
+- `pattern-cli group status <name>` - Show group details
+- `pattern-cli chat --group <name>` - Chat with a group
+
+### Phase 4: ADHD-Specific Templates
+Create predefined group configurations in `pattern_nd`:
+- **Main Group**: Round-robin between executive function agents
+- **Crisis Group**: Dynamic selection based on urgency
+- **Planning Group**: Pipeline pattern for task breakdown
+- **Memory Group**: Supervisor pattern for memory management
+
+### Phase 5: Runtime Integration
+Make groups work in chat:
+- Group message routing through coordination patterns
+- State persistence between messages
+- Coordination pattern execution
 
 ## Development Principles
 
@@ -100,16 +125,17 @@ pub struct User {
 ## Current TODO List
 
 ### High Priority
-- [X] Implement message compression with archival
+- [X] Implement message compression with archival - COMPLETE
 - [X] Add live query support for agent stats
-- [X] Built agent groups framework
-- [ ] Create basic binary (CLI/TUI) for user testing
+- [X] Build agent groups framework
+- [X] Create basic binary (CLI/TUI) for user testing - COMPLETE
 
 ### Medium Priority
+- [ ] Make agent groups usable via CLI and config system
+- [ ] Complete pattern-specific agent groups implementation (main, crisis, planning, memory)
 - [ ] Implement task CRUD operations in pattern-core or pattern-nd
 - [ ] Create ADHD-aware task manager with breakdown (pattern-nd)
 - [ ] Add task-related MCP tools (create, update, list, breakdown)
-- [ ] Complete more pattern-specific agent groups implementation (main, crisis, planning, memory)
 - [ ] Add Discord context tools to MCP
 - [ ] Implement time tracking with ADHD multipliers
 - [ ] Add energy/attention monitoring

@@ -14,7 +14,8 @@ pub async fn show(config: &PatternConfig) -> Result<()> {
 
     // Display the current config in TOML format
     let toml_str = toml::to_string_pretty(config).into_diagnostic()?;
-    println!("{}", toml_str);
+    // Print the TOML directly without indentation since it's already formatted
+    print!("{}", toml_str);
 
     Ok(())
 }
@@ -33,12 +34,12 @@ pub async fn save(config: &PatternConfig, path: &PathBuf) -> Result<()> {
 
     output.success("Configuration saved successfully!");
     println!();
-    println!("To use this configuration, run:");
-    println!(
-        "  {} --config {}",
+    output.status("To use this configuration, run:");
+    output.status(&format!(
+        "{} --config {}",
         "pattern-cli".bright_green(),
         path.display()
-    );
+    ));
 
     Ok(())
 }

@@ -20,7 +20,7 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
         .await
         .into_diagnostic()?;
 
-    println!("Agent count response: {:?}", agent_response);
+    output.status(&format!("Agent count response: {:?}", agent_response));
 
     let agent_count = 0; // TODO: Parse properly
     let message_count = 0; // TODO: Parse properly
@@ -28,26 +28,22 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
     let tool_call_count = 0; // TODO: Parse properly
 
     // Entity counts
-    println!("{}", "Entity Counts:".bright_cyan());
-    println!(
-        "  {} {} agents",
-        "👥".bright_blue(),
-        agent_count.to_string().bright_white()
+    output.section("Entity Counts");
+    output.kv(
+        "Agents",
+        &agent_count.to_string().bright_white().to_string(),
     );
-    println!(
-        "  {} {} messages",
-        "💬".bright_blue(),
-        message_count.to_string().bright_white()
+    output.kv(
+        "Messages",
+        &message_count.to_string().bright_white().to_string(),
     );
-    println!(
-        "  {} {} memory blocks",
-        "🧠".bright_blue(),
-        memory_count.to_string().bright_white()
+    output.kv(
+        "Memory blocks",
+        &memory_count.to_string().bright_white().to_string(),
     );
-    println!(
-        "  {} {} tool calls",
-        "🔧".bright_blue(),
-        tool_call_count.to_string().bright_white()
+    output.kv(
+        "Tool calls",
+        &tool_call_count.to_string().bright_white().to_string(),
     );
     println!();
 
@@ -64,41 +60,35 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
     let active_agents: Vec<serde_json::Value> = response.take(0).into_diagnostic()?;
 
     if !active_agents.is_empty() {
-        println!("{}", "Most Active Agents:".bright_cyan());
+        output.section("Most Active Agents");
         for agent in active_agents {
             if let (Some(name), Some(messages), Some(tools)) = (
                 agent.get("name").and_then(|v| v.as_str()),
                 agent.get("total_messages").and_then(|v| v.as_u64()),
                 agent.get("total_tool_calls").and_then(|v| v.as_u64()),
             ) {
-                println!(
-                    "  {} {} - {} messages, {} tool calls",
-                    "•".bright_blue(),
+                output.list_item(&format!(
+                    "{} - {} messages, {} tool calls",
                     name.bright_yellow(),
                     messages.to_string().bright_white(),
                     tools.to_string().bright_white()
-                );
+                ));
             }
         }
         println!();
     }
 
     // Database info
-    println!("{}", "Database Info:".bright_cyan());
-    println!(
-        "  {} {}",
-        "Type:".dimmed(),
-        "SurrealDB (embedded)".bright_white()
-    );
-    println!(
-        "  {} {}",
-        "File:".dimmed(),
-        match &config.database {
+    output.section("Database Info");
+    output.kv("Type", &"SurrealDB (embedded)".bright_white().to_string());
+    output.kv(
+        "File",
+        &match &config.database {
             DatabaseConfig::Embedded { path, .. } => path.bright_white().to_string(),
             //DatabaseConfig::Remote { url, .. } => url.bright_white(),
             #[allow(unreachable_patterns)]
             _ => "".bright_yellow().to_string(),
-        }
+        },
     );
 
     // Get file size if possible for embedded databases
@@ -113,7 +103,7 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
             } else {
                 format!("{:.2} MB", size as f64 / (1024.0 * 1024.0))
             };
-            println!("  {} {}", "Size:".dimmed(), size_str.bright_white());
+            output.kv("Size", &size_str.bright_white().to_string());
         }
     }
 
@@ -130,7 +120,7 @@ pub async fn query(sql: &str) -> Result<()> {
     // Execute the query
     let response = DB.query(sql).await.into_diagnostic()?;
 
-    println!("Results: {:?}", response);
+    output.status(&format!("Results: {:?}", response));
 
     Ok(())
 }

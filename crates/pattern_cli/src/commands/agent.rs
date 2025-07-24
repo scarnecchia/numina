@@ -16,38 +16,33 @@ pub async fn list() -> Result<()> {
 
     if agents.is_empty() {
         output.status("No agents found");
-        println!(
+        output.status(&format!(
             "Create an agent with: {} agent create <name>",
             "pattern-cli".bright_green()
-        );
+        ));
     } else {
         output.success(&format!("Found {} agent(s):", agents.len()));
         println!();
 
         for agent in agents {
             output.info("•", &agent.name.bright_cyan().to_string());
-            println!("  {} {}", "ID:".dimmed(), agent.id.to_string().dimmed());
-            println!(
-                "  {} {}",
-                "Type:".dimmed(),
-                format!("{:?}", agent.agent_type).bright_yellow()
+            output.kv("ID", &agent.id.to_string().dimmed().to_string());
+            output.kv(
+                "Type",
+                &format!("{:?}", agent.agent_type)
+                    .bright_yellow()
+                    .to_string(),
             );
-            println!(
-                "  {} {}",
-                "State:".dimmed(),
-                format_agent_state(&agent.state)
+            output.kv("State", &format_agent_state(&agent.state));
+            output.kv(
+                "Stats",
+                &format!(
+                    "{} messages, {} tool calls",
+                    agent.total_messages.to_string().bright_blue(),
+                    agent.total_tool_calls.to_string().bright_blue()
+                ),
             );
-            println!(
-                "  {} {} messages, {} tool calls",
-                "Stats:".dimmed(),
-                agent.total_messages.to_string().bright_white(),
-                agent.total_tool_calls.to_string().bright_white()
-            );
-            println!(
-                "  {} {}",
-                "Last active:".dimmed(),
-                format_relative_time(agent.last_active)
-            );
+            output.kv("Last active", &format_relative_time(agent.last_active));
             println!();
         }
     }
@@ -88,12 +83,7 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
     let base_instructions = if let Some(system_prompt) = &config.agent.system_prompt {
         system_prompt.clone()
     } else {
-        // Use default system prompt
-        format!(
-            "You are {}, a {} agent in the Pattern ADHD support system.",
-            name,
-            parsed_type.as_str()
-        )
+        String::new() // blank to use the existing default prompt
     };
 
     let agent = AgentRecord {
@@ -113,17 +103,15 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
     match agent.store_with_relations(&DB).await {
         Ok(stored_agent) => {
             println!();
-            output.success("Created agent successfully!");
-            println!();
+            output.success("Created agent successfully!\n");
             output.info("Name:", &stored_agent.name.bright_cyan().to_string());
             output.info("ID:", &stored_agent.id.to_string().dimmed().to_string());
             output.info(
                 "Type:",
-                &format!("{:?}", stored_agent.agent_type)
+                &format!("{:?}\n", stored_agent.agent_type)
                     .bright_yellow()
                     .to_string(),
             );
-            println!();
 
             // Save the agent ID back to config if it was generated
             if config.agent.id.is_none() {
@@ -137,11 +125,11 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
                 }
             }
 
-            println!(
+            output.status(&format!(
                 "Start chatting with: {} chat --agent {}",
                 "pattern-cli".bright_green(),
                 name
-            );
+            ));
         }
         Err(e) => {
             output.error(&format!("Failed to create agent: {}", e));
@@ -170,72 +158,46 @@ pub async fn status(name: &str) -> Result<()> {
         println!();
 
         // Basic info
-        println!(
-            "{} {}",
-            "Name:".bright_cyan(),
-            agent.name.bright_white().bold()
+        output.info("Name:", &agent.name.bright_cyan().bold().to_string());
+        output.kv("ID", &agent.id.to_string().dimmed().to_string());
+        output.kv(
+            "Type",
+            &format!("{:?}", agent.agent_type)
+                .bright_yellow()
+                .to_string(),
         );
-        println!("{} {}", "ID:".bright_cyan(), agent.id.to_string().dimmed());
-        println!(
-            "{} {}",
-            "Type:".bright_cyan(),
-            format!("{:?}", agent.agent_type).bright_yellow()
-        );
-        println!(
-            "{} {}",
-            "State:".bright_cyan(),
-            format_agent_state(&agent.state)
-        );
+        output.kv("State", &format_agent_state(&agent.state));
         println!();
 
         // Instructions
-        println!("{}", "Instructions:".bright_cyan());
-        println!("{}", agent.base_instructions.dimmed());
+        output.section("Instructions");
+        output.status(&agent.base_instructions);
         println!();
 
         // Statistics
-        println!("{}", "Statistics:".bright_cyan());
-        println!(
-            "  {} {}",
-            "Messages:".dimmed(),
-            agent.total_messages.to_string().bright_white()
-        );
-        println!(
-            "  {} {}",
-            "Tool calls:".dimmed(),
-            agent.total_tool_calls.to_string().bright_white()
-        );
-        println!(
-            "  {} {}",
-            "Context rebuilds:".dimmed(),
-            agent.context_rebuilds.to_string().bright_white()
-        );
-        println!(
-            "  {} {}",
-            "Compression events:".dimmed(),
-            agent.compression_events.to_string().bright_white()
-        );
+        output.section("Statistics");
+        output.kv("Messages", &agent.total_messages.to_string());
+        output.kv("Tool calls", &agent.total_tool_calls.to_string());
+        output.kv("Context rebuilds", &agent.context_rebuilds.to_string());
+        output.kv("Compression events", &agent.compression_events.to_string());
         println!();
 
         // Memory blocks
-        println!(
-            "{} {} memory blocks",
-            "Memory:".bright_cyan(),
-            agent.memories.len().to_string().bright_white()
-        );
+        output.section("Memory");
+        output.kv("Total blocks", &agent.memories.len().to_string());
         if !agent.memories.is_empty() {
             for (memory, _relation) in &agent.memories {
-                println!(
-                    "  • {} ({})",
+                output.list_item(&format!(
+                    "{} ({})",
                     memory.label.bright_yellow(),
                     format!("{} chars", memory.value.len()).dimmed()
-                );
+                ));
             }
         }
         println!();
 
         // Timestamps
-        println!("{}", "Timestamps:".bright_cyan());
+        output.section("Timestamps");
         println!(
             "  {} {}",
             "Created:".dimmed(),

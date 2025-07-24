@@ -41,27 +41,33 @@ pub async fn search_conversations(
         .collect();
 
     if let Some(agent_record) = agents.first() {
-        println!(
-            "Agent: {} (ID: {})",
-            agent_record.name.bright_cyan(),
-            agent_record.id.to_string().dimmed()
+        output.info(
+            "Agent:",
+            &format!(
+                "{} (ID: {})",
+                agent_record.name.bright_cyan(),
+                agent_record.id.to_string().dimmed()
+            ),
         );
-        println!("Owner: {}", agent_record.owner_id.to_string().dimmed());
+        output.kv(
+            "Owner",
+            &agent_record.owner_id.to_string().dimmed().to_string(),
+        );
 
         // Display search parameters
         if let Some(q) = query {
-            println!("Query: \"{}\"", q.bright_yellow());
+            output.kv("Query", &format!("\"{}\"", q.bright_yellow()));
         }
         if let Some(r) = role {
-            println!("Role filter: {}", r.bright_yellow());
+            output.kv("Role filter", &r.bright_yellow().to_string());
         }
         if let Some(st) = start_time {
-            println!("Start time: {}", st.bright_yellow());
+            output.kv("Start time", &st.bright_yellow().to_string());
         }
         if let Some(et) = end_time {
-            println!("End time: {}", et.bright_yellow());
+            output.kv("End time", &et.bright_yellow().to_string());
         }
-        println!("Limit: {}", limit.to_string().bright_white());
+        output.kv("Limit", &limit.to_string().bright_white().to_string());
         println!();
 
         // Parse role if provided
@@ -76,7 +82,7 @@ pub async fn search_conversations(
                         "Invalid role: {}. Using no role filter.",
                         role_str
                     ));
-                    println!("Valid roles: system, user, assistant, tool");
+                    output.status("Valid roles: system, user, assistant, tool");
                     println!();
                     None
                 }
@@ -91,7 +97,7 @@ pub async fn search_conversations(
                 Ok(dt) => Some(dt.to_utc()),
                 Err(e) => {
                     output.warning(&format!("Invalid start time format: {}", e));
-                    println!("Expected ISO 8601 format: 2024-01-20T00:00:00Z");
+                    output.status("Expected ISO 8601 format: 2024-01-20T00:00:00Z");
                     println!();
                     None
                 }
@@ -105,7 +111,7 @@ pub async fn search_conversations(
                 Ok(dt) => Some(dt.to_utc()),
                 Err(e) => {
                     output.warning(&format!("Invalid end time format: {}", e));
-                    println!("Expected ISO 8601 format: 2024-01-20T23:59:59Z");
+                    output.status("Expected ISO 8601 format: 2024-01-20T23:59:59Z");
                     println!();
                     None
                 }
@@ -135,18 +141,24 @@ pub async fn search_conversations(
 
                 for (i, msg) in messages.iter().enumerate() {
                     println!(
-                        "{} Message {} {}",
+                        "  {} Message {} {}",
                         match msg.role {
-                            ChatRole::System => "🔧",
-                            ChatRole::User => "👤",
-                            ChatRole::Assistant => "🤖",
-                            ChatRole::Tool => "🔨",
+                            ChatRole::System => "[system]   ".bright_blue().to_string(),
+                            ChatRole::User => "[user]     ".bright_green().to_string(),
+                            ChatRole::Assistant => "[assistant]".bright_cyan().to_string(),
+                            ChatRole::Tool => "[tool]     ".bright_yellow().to_string(),
                         },
                         (i + 1).to_string().bright_white(),
                         format!("({})", msg.id.0).dimmed()
                     );
-                    println!("  Role: {}", format!("{:?}", msg.role).bright_yellow());
-                    println!("  Time: {}", msg.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                    output.kv(
+                        "Role",
+                        &format!("{:?}", msg.role).bright_yellow().to_string(),
+                    );
+                    output.kv(
+                        "Time",
+                        &msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    );
 
                     // Extract and display content
                     if let Some(text) = msg.text_content() {
@@ -155,12 +167,12 @@ pub async fn search_conversations(
                         } else {
                             text.to_string()
                         };
-                        println!("  Content:");
+                        output.status("Content:");
                         for line in preview.lines() {
-                            println!("    {}", line.dimmed());
+                            println!("      {}", line.dimmed());
                         }
                     } else {
-                        println!("  Content: [Non-text content]");
+                        output.status("Content: [Non-text content]");
                     }
 
                     println!();
@@ -169,25 +181,25 @@ pub async fn search_conversations(
                 if messages.is_empty() {
                     output.status("No messages found matching the search criteria");
                     println!();
-                    println!("Try:");
-                    println!("  • Using broader search terms");
-                    println!("  • Removing filters to see all messages");
-                    println!("  • Checking if the agent has any messages in the database");
+                    output.status("Try:");
+                    output.list_item("Using broader search terms");
+                    output.list_item("Removing filters to see all messages");
+                    output.list_item("Checking if the agent has any messages in the database");
                 }
             }
             Err(e) => {
                 output.error(&format!("Search failed: {}", e));
                 println!();
-                println!("This might mean:");
-                println!("  • The database connection is not available");
-                println!("  • There was an error in the query");
-                println!("  • The message table or indexes are not set up");
+                output.status("This might mean:");
+                output.list_item("The database connection is not available");
+                output.list_item("There was an error in the query");
+                output.list_item("The message table or indexes are not set up");
             }
         }
     } else {
         output.error(&format!("Agent '{}' not found", agent_name));
         println!();
-        println!("Available agents:");
+        output.status("Available agents:");
         let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
         for agent in all_agents {
             output.list_item(&agent.name.bright_cyan().to_string());
@@ -219,14 +231,20 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
         .collect();
 
     if let Some(agent_record) = agents.first() {
-        println!(
-            "Agent: {} (ID: {})",
-            agent_record.name.bright_cyan(),
-            agent_record.id.to_string().dimmed()
+        output.info(
+            "Agent:",
+            &format!(
+                "{} (ID: {})",
+                agent_record.name.bright_cyan(),
+                agent_record.id.to_string().dimmed()
+            ),
         );
-        println!("Owner: {}", agent_record.owner_id.to_string().dimmed());
-        println!("Query: \"{}\"", query.bright_yellow());
-        println!("Limit: {}", limit.to_string().bright_white());
+        output.kv(
+            "Owner",
+            &agent_record.owner_id.to_string().dimmed().to_string(),
+        );
+        output.kv("Query", &format!("\"{}\"", query.bright_yellow()));
+        output.kv("Limit", &limit.to_string().bright_white().to_string());
 
         // Debug: Let's check what memories exist for this owner
         let debug_query = format!(
@@ -236,9 +254,9 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
                 .to_string()
                 .trim_start_matches("user_")
         );
-        println!("Debug - checking memories for owner...");
+        output.status("Debug - checking memories for owner...");
         let debug_response = DB.query(&debug_query).await.into_diagnostic()?;
-        println!("Debug response: {:?}", debug_response);
+        output.status(&format!("Debug response: {:?}", debug_response));
         println!();
 
         // Create a minimal agent handle for searching
@@ -260,18 +278,18 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
 
                 for (i, block) in results.iter().enumerate() {
                     println!(
-                        "{} Result {} {}",
-                        "📄".bright_blue(),
+                        "  {} Result {} {}",
+                        "[DOC]".bright_blue(),
                         (i + 1).to_string().bright_white(),
                         format!("({})", block.id).dimmed()
                     );
-                    println!("  Label: {}", block.label.bright_yellow());
-                    println!("  Type: {:?}", block.memory_type);
-                    println!(
-                        "  Created: {}",
-                        block.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    output.kv("Label", &block.label.bright_yellow().to_string());
+                    output.kv("Type", &format!("{:?}", block.memory_type));
+                    output.kv(
+                        "Created",
+                        &block.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                     );
-                    println!("  Content preview:");
+                    output.status("Content preview:");
 
                     // Show first 200 chars of content
                     let preview = if block.value.len() > 200 {
@@ -281,7 +299,7 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
                     };
 
                     for line in preview.lines() {
-                        println!("    {}", line.dimmed());
+                        println!("      {}", line.dimmed());
                     }
                     println!();
                 }
@@ -289,28 +307,28 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
                 if results.is_empty() {
                     output.status(&format!("No archival memories found matching '{}'", query));
                     println!();
-                    println!("Try:");
-                    println!("  • Using broader search terms");
-                    println!(
-                        "  • Checking if the agent has any archival memories with: pattern-cli debug list-archival --agent {}",
+                    output.status("Try:");
+                    output.list_item("Using broader search terms");
+                    output.list_item(&format!(
+                        "Checking if the agent has any archival memories with: pattern-cli debug list-archival --agent {}",
                         agent_name
-                    );
-                    println!("  • Verifying the full-text search index exists in the database");
+                    ));
+                    output.list_item("Verifying the full-text search index exists in the database");
                 }
             }
             Err(e) => {
                 output.error(&format!("Search failed: {}", e));
                 println!();
-                println!("This might mean:");
-                println!("  • The database connection is not available");
-                println!("  • The full-text search index is not set up");
-                println!("  • There was an error in the query");
+                output.status("This might mean:");
+                output.list_item("The database connection is not available");
+                output.list_item("The full-text search index is not set up");
+                output.list_item("There was an error in the query");
             }
         }
     } else {
         output.error(&format!("Agent '{}' not found", agent_name));
         println!();
-        println!("Available agents:");
+        output.status("Available agents:");
         let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
         for agent in all_agents {
             output.list_item(&agent.name.bright_cyan().to_string());

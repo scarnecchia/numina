@@ -62,23 +62,15 @@ pub async fn load_or_create_agent(
             existing_agent.messages.len()
         );
 
-        output.info(
-            "📨",
-            &format!(
-                "Loaded {} messages from history",
-                existing_agent.messages.len()
-            ),
-        );
-
         // Also manually load memory blocks using the ops function
         let memory_tuples = ops::get_agent_memories(&DB, agent_id)
             .await
             .map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
 
-        output.info(
-            "🧠",
-            &format!("Found {} memory blocks in database", memory_tuples.len()),
-        );
+        output.status(&format!(
+            "Found {} memory blocks in database",
+            memory_tuples.len().to_string().bright_blue()
+        ));
 
         for (block, _) in &memory_tuples {
             output.list_item(&format!(
@@ -87,6 +79,7 @@ pub async fn load_or_create_agent(
                 block.value.len()
             ));
         }
+        println!();
 
         // Convert to the format expected by AgentRecord
         existing_agent.memories = memory_tuples
@@ -108,16 +101,15 @@ pub async fn load_or_create_agent(
             existing_agent.memories.len()
         );
 
-        output.success(&format!("Found existing agent '{}'", name.bright_cyan()));
-        output.info("  ID:", &existing_agent.id.to_string().dimmed().to_string());
-        output.info(
-            "  Type:",
+        output.kv("ID", &existing_agent.id.to_string().dimmed().to_string());
+        output.kv(
+            "Type",
             &format!("{:?}", existing_agent.agent_type)
                 .bright_yellow()
                 .to_string(),
         );
-        output.info(
-            "  History:",
+        output.kv(
+            "History",
             &format!("{} messages", existing_agent.total_messages),
         );
         println!();
@@ -430,7 +422,7 @@ pub async fn chat_with_agent(agent: Box<dyn Agent>) -> Result<()> {
                 }
 
                 if line.trim() == "quit" || line.trim() == "exit" {
-                    output.success("Goodbye!");
+                    output.status("Goodbye!");
                     break;
                 }
 

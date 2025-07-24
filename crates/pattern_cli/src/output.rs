@@ -73,24 +73,65 @@ impl Output {
 
     /// Print a list item (already indented)
     pub fn list_item(&self, item: &str) {
-        println!("  • {}", item);
+        println!("    • {}", item);
     }
 
     /// Print a tool call
     pub fn tool_call(&self, tool_name: &str, args: &str) {
         println!(
-            "{} Using tool: {}",
-            "🔧".bright_blue(),
+            "  {} Using tool: {}",
+            ">>".bright_blue(),
             tool_name.bright_yellow()
         );
         if !args.is_empty() {
-            println!("   Args: {}", args.dimmed());
+            println!("     Args: {}", args.dimmed());
         }
     }
 
     /// Print a tool result
     pub fn tool_result(&self, result: &str) {
-        println!("{} Tool result: {}", "→".bright_green(), result.dimmed());
+        println!("  {} Tool result: {}", "=>".bright_green(), result.dimmed());
+    }
+
+    /// Print a "working on it" status message
+    /// For actual progress bars, use indicatif directly
+    #[allow(dead_code)]
+    pub fn working(&self, label: &str) {
+        println!("  {} {}...", "[...]".dimmed(), label);
+    }
+
+    /// Print a key-value pair (indented)
+    pub fn kv(&self, key: &str, value: &str) {
+        println!("  {} {}", format!("{}:", key).dimmed(), value);
+    }
+
+    /// Print a prompt for user input
+    #[allow(dead_code)]
+    pub fn prompt(&self, prompt: &str) {
+        print!("  {} ", prompt.bright_cyan());
+        use std::io::{self, Write};
+        io::stdout().flush().unwrap();
+    }
+
+    /// Print markdown content (not from agent)
+    #[allow(dead_code)]
+    pub fn markdown(&self, content: &str) {
+        self.skin.print_text(content);
+    }
+
+    /// Print a table-like header
+    #[allow(dead_code)]
+    pub fn table_header(&self, columns: &[&str]) {
+        let header = columns.join(" | ");
+        println!("  {}", header.bright_white().bold());
+        println!("  {}", "─".repeat(header.len()).dimmed());
+    }
+
+    /// Print a table row
+    #[allow(dead_code)]
+    pub fn table_row(&self, cells: &[&str]) {
+        let row = cells.join(" | ");
+        println!("  {}", row);
     }
 }
 
