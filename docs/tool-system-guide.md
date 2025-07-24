@@ -1,14 +1,10 @@
-# Pattern Tool System Guide
-
-This guide explains how Pattern's tool system works, from trait definitions to execution flow.
-
-## Overview
+# Pattern Tool System Development
 
 Pattern's tool system enables agents to perform actions through a type-safe, extensible framework. Tools are functions that agents can call during conversations to interact with memory, send messages, search data, or perform custom operations.
 
 ## Core Components
 
-### 1. The `AiTool` Trait (Type-Safe Foundation)
+### 1. The `AiTool` Trait
 
 ```rust
 #[async_trait]
@@ -18,9 +14,9 @@ pub trait AiTool: Send + Sync {
 
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output>;
-    
+
     // Optional: Usage rules for context
     fn usage_rule(&self) -> Option<String> { None }
 }
@@ -28,7 +24,7 @@ pub trait AiTool: Send + Sync {
 
 This trait provides compile-time type safety for tool inputs and outputs.
 
-### 2. The `DynamicTool` Trait (Runtime Flexibility)
+### 2. The `DynamicTool` Trait
 
 ```rust
 #[async_trait]
@@ -37,7 +33,7 @@ pub trait DynamicTool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     fn usage_rule(&self) -> Option<String>;
-    
+
     async fn execute_dynamic(&self, params: Value) -> Result<Value>;
 }
 ```
@@ -60,19 +56,19 @@ flowchart TB
             A[Custom Tool] --> B[impl AiTool]
             B --> C[Auto impl<br/>DynamicTool]
         end
-        
+
         subgraph reg ["Registration"]
             D[Box tool] --> E[Registry]
             E --> F[DashMap]
         end
     end
-    
+
     subgraph row2 [" "]
         subgraph run1 ["Discovery"]
             G[Agent] --> H[Get schemas]
             H --> I[Send to LLM]
         end
-        
+
         subgraph run2 ["Execution"]
             J[LLM call] --> K[JSON params]
             K --> L[Find tool]
@@ -81,11 +77,11 @@ flowchart TB
             N --> O[Return JSON]
         end
     end
-    
+
     dev -.-> reg
     reg ==> run1
     run1 -.-> run2
-    
+
     style A fill:#4299e1,stroke:#2b6cb0,color:#fff
     style J fill:#ed8936,stroke:#c05621,color:#fff
     style O fill:#48bb78,stroke:#2f855a,color:#fff
@@ -158,14 +154,6 @@ registry.register(Box::new(weather_tool))?;
 let agent = DatabaseAgent::new(..., registry);
 ```
 
-## How Type Erasure Works
-
-1. **Concrete Type**: `WeatherTool` implements `AiTool<Input=WeatherInput, Output=WeatherOutput>`
-2. **Auto Bridge**: Compiler generates `impl DynamicTool for WeatherTool`
-3. **Boxing**: `Box::new(weather_tool)` creates `Box<WeatherTool>`
-4. **Trait Object**: Coerced to `Box<dyn DynamicTool>` for storage
-5. **Runtime**: JSON ↔ Rust type conversion happens in the bridge impl
-
 ## Built-in Tools
 
 Pattern includes several built-in tools following the Letta/MemGPT pattern:
@@ -195,7 +183,7 @@ Pattern includes several built-in tools following the Letta/MemGPT pattern:
 
 ### Multi-Operation Tools
 
-Following Letta's design, tools often support multiple operations:
+Tools often support multiple operations:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -240,27 +228,27 @@ async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
 
 ### "Tool not found" Errors
 
-1. Check tool is registered: `registry.list_tools()`
-2. Verify name matches exactly (case-sensitive)
-3. Ensure tool is in agent's `available_tools()`
+- Check tool is registered: `registry.list_tools()`
+- Verify name matches exactly (case-sensitive)
+- Ensure tool is in agent's `available_tools()`
 
 ### Schema Generation Issues
 
-1. All fields must implement `JsonSchema`
-2. Use `#[serde(default)]` for optional fields
-3. Avoid complex generic types in Input/Output
+- All fields must implement `JsonSchema`
+- Use `#[schemars(default, with = "InnerType")]` for optional fields
+- Avoid complex generic types in Input/Output
 
-### Async Execution Problems
+### Concurrent Execution Problems
 
-1. Tools must be `Send + Sync`
-2. Avoid holding locks across await points
-3. Use `Arc<Mutex<_>>` for shared state, not `Rc<RefCell<_>>`
+- Tools must be `Send + Sync`
+- Watch out for deadlocks when making tools that handle agent memory, it uses a DashMap internally. Make sure you don't try and hold two simultaneous references to a memory block. The default tools illustrate reasonable behaviour.
+- The same is true for the registry itself.
 
 ### Type Conversion Errors
 
-1. Test JSON serialization separately
-2. Use `#[serde(rename_all = "snake_case")]` consistently
-3. Handle null/missing fields with `Option<T>` or defaults
+- Test JSON serialization separately
+- Use `#[serde(rename_all = "snake_case")]` consistently
+- Handle null/missing fields with `Option<T>` or defaults correctly
 
 ## Advanced Topics
 
@@ -277,7 +265,7 @@ async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
             "query": params.topic
         }))
         .await?;
-    
+
     // Then process the results
     // ...
 }
@@ -285,7 +273,7 @@ async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
 
 ### Context-Aware Tools
 
-Tools receive an `AgentHandle` for context:
+Tools can receive an `AgentHandle` for context:
 
 ```rust
 impl ContextTool {
@@ -300,19 +288,7 @@ This provides access to:
 - Database connection (with restrictions)
 - Agent metadata
 
-### Performance Considerations
 
-1. **Tool Registry**: Uses `DashMap` for concurrent access
-2. **JSON Conversion**: Happens once per call, minimal overhead
-3. **Schema Generation**: Cached after first generation
-4. **Async Execution**: Non-blocking, allows concurrent tool calls
+## Future plans
 
-## Summary
-
-Pattern's tool system provides:
-- **Type Safety**: Compile-time checking for tool implementations
-- **Flexibility**: Runtime tool discovery and dynamic dispatch
-- **Extensibility**: Easy to add custom tools
-- **Integration**: Built-in tools follow established patterns
-
-The key insight is the automatic bridge from `AiTool` to `DynamicTool`, which gives you both type safety during development and flexibility at runtime.
+- WASM-based custom tool loading at runtime

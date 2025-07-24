@@ -1,8 +1,4 @@
-# Pattern Group Coordination System Guide
-
-This guide explains how Pattern's agent group coordination system works, enabling multiple agents to collaborate using different patterns.
-
-## Overview
+# Pattern Group Coordination
 
 Pattern's group coordination system allows multiple agents to work together, routing messages through various coordination patterns. This enables complex multi-agent behaviors like round-robin discussions, dynamic expertise selection, and pipeline processing.
 
@@ -267,7 +263,7 @@ graph TB
     E --> C[Collect Responses]
     C --> F[Format Group Response]
     F --> R[Return to User]
-    
+
     style U fill:#4299e1,stroke:#2b6cb0,color:#fff
     style R fill:#48bb78,stroke:#2f855a,color:#fff
 ```
@@ -410,14 +406,3 @@ Planned improvements include:
 - Group templates for common ADHD support patterns
 - Inter-group communication protocols
 - Group performance analytics
-
-## Summary
-
-Pattern's group coordination system provides flexible multi-agent collaboration through:
-- Multiple coordination patterns for different use cases
-- Dynamic agent selection based on capabilities
-- State management for complex workflows
-- Easy CLI and configuration-based setup
-- Extensible architecture for custom patterns
-
-The key is choosing the right pattern for your use case and composing agents with complementary capabilities.
