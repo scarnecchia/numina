@@ -312,6 +312,16 @@ impl<C: surrealdb::Connection + Clone> RecallTool<C> {
         // Check if block exists and get type
         let block_type = if let Some(block) = self.handle.memory.get_block(&label) {
             let memory_type = block.memory_type;
+            if block.permission != MemoryPermission::Admin {
+                return Ok(RecallOutput {
+                    success: false,
+                    message: Some(format!(
+                        "Insufficient permission to delete block '{}' (requires Admin, has {:?})",
+                        label, block.permission
+                    )),
+                    results: vec![],
+                });
+            }
             drop(block); // Release lock immediately
             Some(memory_type)
         } else {
@@ -366,6 +376,18 @@ impl<C: surrealdb::Connection + Clone> RecallTool<C> {
                     message: Some(format!(
                         "Block '{}' is not recall memory (type: {:?})",
                         label, block.memory_type
+                    )),
+                    results: vec![],
+                });
+                return block;
+            }
+
+            if block.permission < MemoryPermission::Append {
+                validation_result = Some(RecallOutput {
+                    success: false,
+                    message: Some(format!(
+                        "Insufficient permission to append to block '{}' (requires Append or higher, has {:?})",
+                        label, block.permission
                     )),
                     results: vec![],
                 });
@@ -463,6 +485,7 @@ mod tests {
             .unwrap();
         if let Some(mut block) = memory.get_block_mut("to_delete") {
             block.memory_type = MemoryType::Archival;
+            block.permission = MemoryPermission::Admin;
         }
 
         let handle = AgentHandle::test_with_memory(memory.clone());
@@ -487,11 +510,14 @@ mod tests {
     async fn test_cannot_delete_non_archival() {
         let memory = Memory::with_owner(UserId::generate());
 
-        // Create a core memory block
+        // Create a core memory block with Admin permission
         memory
             .create_block("core_block", "Core information")
             .unwrap();
-        // Default type is Core
+        if let Some(mut block) = memory.get_block_mut("core_block") {
+            // Default type is Core, but set Admin permission so we test the right error
+            block.permission = MemoryPermission::Admin;
+        }
 
         let handle = AgentHandle::test_with_memory(memory.clone());
 

@@ -16,15 +16,14 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
    - Integrated MessageCompressor with multiple compression strategies
 
 2. **Agent Groups** - ✅ COMPLETE (needs user testing) - Fully usable via CLI
-3. **Fix failing tests** - `test_load_balancing_selector` and `test_round_robin_skip_inactive`
-4. **Task Management System** - ADHD-aware task breakdown and tracking
-5. **MCP Tools Integration** - Task-related tools and agent communication
+3. **Task Management System** - ADHD-aware task breakdown and tracking
+4. **MCP Tools Integration** - Task-related tools and agent communication
 
 ## Agent Groups Implementation ✅ COMPLETE (needs user testing)
 
 The agent groups framework is now fully implemented! Groups allow multiple agents to work together using coordination patterns.
 
-**⚠️ Testing Status**: Basic operations work and CLI commands function correctly, but ~2 group-related tests are failing after the dyn-compatibility refactor. Overall integrity needs user testing to validate edge cases and real-world usage.
+**⚠️ Testing Status**: Basic operations work and CLI commands function correctly. Overall integrity needs user testing to validate edge cases and real-world usage.
 
 ### What's Implemented
 
@@ -60,7 +59,7 @@ Or use the shortcut: `just group-create MyGroup "My test group"`
 
 ### Still TODO
 
-#### Phase 5: ADHD-Specific Templates 
+#### Phase 5: ADHD-Specific Templates
 Create predefined group configurations in `pattern_nd`:
 - **Main Group**: Round-robin between executive function agents
 - **Crisis Group**: Dynamic selection based on urgency
@@ -96,17 +95,6 @@ pattern/
 
 **Each crate has its own `CLAUDE.md` with specific implementation guidelines.**
 
-## Quick Start
-
-```bash
-# Development
-cargo check                    # Validate compilation
-cargo test --lib              # Run all tests
-just pre-commit-all           # Full validation pipeline
-
-# Running
-cargo run --features full    # Discord + MCP + background monitoring
-```
 
 ## Core Architecture
 

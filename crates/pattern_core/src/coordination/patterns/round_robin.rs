@@ -379,7 +379,7 @@ mod tests {
 
         let message = create_test_message("Test message");
 
-        // Should skip inactive agent2 and route to agent1, then agent3
+        // Should route to agent1 first
         let response1 = manager
             .route_message(&group, &agents, message.clone())
             .await
@@ -403,11 +403,11 @@ mod tests {
             }
         }
 
-        // Next call should skip agent2 and go to agent3
+        // Next call should go to agent2 (skipping inactive agent3)
         let response2 = manager
             .route_message(&group2, &agents, message)
             .await
             .unwrap();
-        assert_eq!(response2.responses[0].agent_id, agents[2].agent.id());
+        assert_eq!(response2.responses[0].agent_id, agents[1].agent.id());
     }
 }

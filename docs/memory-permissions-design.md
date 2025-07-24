@@ -1,5 +1,7 @@
 # Memory Permissions Design
 
+**Note**: This document describes planned memory permission features that are not yet implemented. These concepts are being considered for future development to enhance agent memory protection and user control.
+
 ## Permission Levels (Most to Least Restrictive)
 
 ```rust
@@ -63,14 +65,28 @@ Example: If block has `ReadWrite` but relation has `ReadOnly`, effective permiss
 - **Create Core**: Check against max_core_blocks constraint
 
 
-  - manage_core_memory (append, replace, read operations)
-  - manage_archival_memory (insert, search, delete)
-  - search_conversations (could include filters for time, participant, etc)
-  - interact_with_files (read, search, edit - your existing tools)
+## Current Tools (Following Letta/MemGPT Patterns)
 
-   #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-    pub struct SwapMemoryInput {
-        pub swap_out: Vec<String>,  // Labels to move from core to archival
-        pub swap_in: Vec<String>,   // Labels to move from archival to core
-        pub reason: String,         // Why the swap is needed
-    }
+The following tools are **already implemented** in Pattern:
+
+- **context** tool - Core memory operations:
+  - `append` - Add content to memory blocks
+  - `replace` - Replace content in memory blocks
+  - `archive` - Move core block to archival storage
+  - `load_from_archival` - Load archival block to core
+  - `swap` - Atomic swap between core and archival
+
+- **recall** tool - Archival memory operations:
+  - `insert` - Add new archival memories
+  - `append` - Add content to existing archival memory
+  - `read` - Read specific archival memory by label
+  - `delete` - Remove archival memories
+
+- **search** tool - Unified search interface:
+  - `archival_memory` domain - Full-text search of archival storage
+  - `conversations` domain - Search message history
+  - `all` domain - Search everything
+
+## What's Missing: Permission Checks
+
+The permission system described above is not yet complete. Human and Partner permissions are currently treated as read-only.

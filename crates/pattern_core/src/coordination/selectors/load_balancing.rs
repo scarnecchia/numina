@@ -217,7 +217,7 @@ mod tests {
         let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
                 agent: Arc::new(TestAgent {
-                    id: AgentId::generate(),
+                    id: agent1_id.clone(),
                     name: "agent1".to_string(),
                 }),
                 membership: GroupMembership {
@@ -241,7 +241,7 @@ mod tests {
             },
             AgentWithMembership {
                 agent: Arc::new(TestAgent {
-                    id: AgentId::generate(),
+                    id: agent3_id.clone(),
                     name: "agent3".to_string(),
                 }),
                 membership: GroupMembership {

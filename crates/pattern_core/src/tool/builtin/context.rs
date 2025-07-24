@@ -236,11 +236,11 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
 
         self.handle.memory.alter_block(&name, |_key, mut block| {
             // Check if this is context
-            if block.memory_type != MemoryType::Core {
+            if block.memory_type == MemoryType::Archival {
                 validation_result = Some(ContextOutput {
                     success: false,
                     message: Some(format!(
-                        "Block '{}' is not context (type: {:?}). Use archival_memory_insert for non-core memories.",
+                        "Block '{}' is not context (type: {:?}). Use `recall` with the insert operation for non-core memories.",
                         name, block.memory_type
                     )),
                     content: json!({}),
@@ -292,11 +292,15 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
     ) -> Result<ContextOutput> {
         // Check if the block exists first
         if !self.handle.memory.contains_block(&name) {
-            return Err(crate::CoreError::memory_not_found(
-                &self.handle.agent_id,
-                &name,
-                self.handle.memory.list_blocks(),
-            ));
+            return Ok(ContextOutput {
+                success: false,
+                message: Some(format!(
+                    "Memory '{}' not found, available blocks follow",
+                    name
+                )),
+                content: serde_json::to_value(self.handle.memory.list_blocks())
+                    .unwrap_or(json!({})),
+            });
         }
 
         // Use alter for atomic update with validation
@@ -304,7 +308,7 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
 
         self.handle.memory.alter_block(&name, |_key, mut block| {
             // Check if this is context
-            if block.memory_type != MemoryType::Core {
+            if block.memory_type == MemoryType::Archival {
                 validation_result = Some(ContextOutput {
                     success: false,
                     message: Some(format!(
@@ -368,6 +372,7 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
         // Check if the block exists and is context
         let block = match self.handle.memory.get_block(&name) {
             Some(block) => {
+                // can't archive blocks you don't have admin access for
                 if block.memory_type != MemoryType::Core {
                     return Ok(ContextOutput {
                         success: false,
@@ -377,15 +382,25 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
                         )),
                         content: json!({}),
                     });
+                } else if block.permission < MemoryPermission::Admin {
+                    return Ok(ContextOutput {
+                        success: false,
+                        message: Some(format!(
+                            "Not enough permissions to swap out block '{}', requires Admin",
+                            name
+                        )),
+                        content: json!({}),
+                    });
                 }
                 block.clone()
             }
             None => {
-                return Err(crate::CoreError::memory_not_found(
-                    &self.handle.agent_id,
-                    &name,
-                    self.handle.memory.list_blocks(),
-                ));
+                return Ok(ContextOutput {
+                    success: false,
+                    message: Some(format!("Memory '{}' not found", name)),
+                    content: serde_json::to_value(self.handle.memory.list_blocks())
+                        .unwrap_or(json!({})),
+                });
             }
         };
 
@@ -401,7 +416,7 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
         // Update it to be archival type
         if let Some(mut archival_block) = self.handle.memory.get_block_mut(&archival_label) {
             archival_block.memory_type = MemoryType::Archival;
-            archival_block.permission = MemoryPermission::ReadWrite;
+            archival_block.permission = MemoryPermission::Admin;
             archival_block.description = Some(format!("Archived from context '{}'", name));
         }
 
@@ -441,8 +456,13 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
             None => {
                 return Ok(ContextOutput {
                     success: false,
-                    message: Some(format!("Archival memory '{}' not found", archival_label)),
-                    content: json!({}),
+                    message: Some(format!(
+                        "Archival memory '{}' not found, available blocks follow",
+                        archival_label
+                    )),
+                    // Note: should filter for the right block type
+                    content: serde_json::to_value(self.handle.memory.list_blocks().truncate(20))
+                        .unwrap_or(json!({})),
                 });
             }
         };
@@ -502,21 +522,35 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
                         )),
                         content: json!({}),
                     });
+                } else if block.permission <= MemoryPermission::ReadWrite {
+                    return Ok(ContextOutput {
+                        success: false,
+                        message: Some(format!(
+                            "Not enough permissions to swap out block '{}', requires at least Read/Write",
+                            archive_name
+                        )),
+                        content: json!({}),
+                    });
                 }
                 block.clone()
             }
             None => {
-                return Err(crate::CoreError::memory_not_found(
-                    &self.handle.agent_id,
-                    &archive_name,
-                    self.handle.memory.list_blocks(),
-                ));
+                return Ok(ContextOutput {
+                    success: false,
+                    message: Some(format!(
+                        "Memory '{}' not found, available blocks follow",
+                        archive_name
+                    )),
+                    // Note: should filter for the right block type
+                    content: serde_json::to_value(self.handle.memory.list_blocks().truncate(20))
+                        .unwrap_or(json!({})),
+                });
             }
         };
 
         let archival_block = match self.handle.memory.get_block(&archival_label) {
             Some(block) => {
-                if block.memory_type != MemoryType::Archival {
+                if block.memory_type == MemoryType::Archival {
                     return Ok(ContextOutput {
                         success: false,
                         message: Some(format!(
@@ -532,7 +566,8 @@ impl<C: surrealdb::Connection + Clone> ContextTool<C> {
                 return Ok(ContextOutput {
                     success: false,
                     message: Some(format!("Archival memory '{}' not found", archival_label)),
-                    content: json!({}),
+                    content: serde_json::to_value(self.handle.memory.list_blocks().truncate(20))
+                        .unwrap_or(json!({})),
                 });
             }
         };
