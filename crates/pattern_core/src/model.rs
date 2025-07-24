@@ -158,6 +158,9 @@ pub enum ModelCapability {
 
     /// Fine-tunable model
     FineTuning,
+
+    /// Extended Thinking
+    ExtendedThinking,
 }
 
 /// A client for interacting with language models through the genai library

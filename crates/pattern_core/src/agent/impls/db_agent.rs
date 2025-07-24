@@ -26,6 +26,7 @@ use crate::{
 use chrono::Utc;
 
 /// A concrete agent implementation backed by the database
+#[derive(Clone)]
 pub struct DatabaseAgent<C, M, E>
 where
     C: surrealdb::Connection + Clone,
@@ -1164,7 +1165,7 @@ where
             created_at,
         };
 
-        let _ = crate::db::ops::create_entity(&db, &tool_call)
+        let _ = crate::db::ops::create_entity(&self.db, &tool_call)
             .await
             .inspect_err(|e| {
                 crate::log_error!("Failed to persist tool call", e);

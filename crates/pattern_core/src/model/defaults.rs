@@ -32,17 +32,69 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
 
     // Anthropic Claude models
     defaults.insert(
-        "claude-3-opus-20240229",
+        "claude-opus-4-20250514",
         ModelDefaults {
             context_window: 200_000,
-            max_output_tokens: Some(4_096),
+            max_output_tokens: Some(32_000),
             capabilities: vec![
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
-                ModelCapability::JsonMode,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.015),
+            cost_per_1k_completion: Some(0.015),
+        },
+    );
+
+    defaults.insert(
+        "claude-sonnet-4-20250514",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(64_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::SystemPrompt,
+                ModelCapability::VisionInput,
+                ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.03),
+            cost_per_1k_completion: Some(0.015),
+        },
+    );
+    defaults.insert(
+        "claude-3-7-sonnet-20250219",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(64_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::SystemPrompt,
+                ModelCapability::VisionInput,
+                ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.03),
+            cost_per_1k_completion: Some(0.015),
+        },
+    );
+
+    defaults.insert(
+        "claude-3-opus-20240229",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(8_192),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::SystemPrompt,
+                ModelCapability::VisionInput,
+                ModelCapability::LongContext,
             ],
             cost_per_1k_prompt: Some(0.015),
             cost_per_1k_completion: Some(0.075),
@@ -53,14 +105,13 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
         "claude-3-sonnet-20240229",
         ModelDefaults {
             context_window: 200_000,
-            max_output_tokens: Some(4_096),
+            max_output_tokens: Some(8_192),
             capabilities: vec![
                 ModelCapability::TextGeneration,
                 ModelCapability::FunctionCalling,
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
-                ModelCapability::JsonMode,
             ],
             cost_per_1k_prompt: Some(0.003),
             cost_per_1k_completion: Some(0.015),
@@ -78,7 +129,6 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
-                ModelCapability::JsonMode,
             ],
             cost_per_1k_prompt: Some(0.00025),
             cost_per_1k_completion: Some(0.00125),
@@ -96,7 +146,6 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
-                ModelCapability::JsonMode,
             ],
             cost_per_1k_prompt: Some(0.003),
             cost_per_1k_completion: Some(0.015),
@@ -114,7 +163,6 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
                 ModelCapability::SystemPrompt,
                 ModelCapability::VisionInput,
                 ModelCapability::LongContext,
-                ModelCapability::JsonMode,
             ],
             cost_per_1k_prompt: Some(0.0008),
             cost_per_1k_completion: Some(0.004),

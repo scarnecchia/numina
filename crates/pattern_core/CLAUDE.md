@@ -180,12 +180,19 @@ The context builder includes archival memory labels to enable intelligent memory
 
 This allows agents to make informed decisions about memory swapping without needing to search first.
 
+## Current Limitations
+
+1. **Transaction Retry Logic**: Database operations that were previously spawned as background tasks have been made synchronous to avoid transaction conflicts. When running multiple operations in parallel, proper retry logic for transaction conflicts will be needed.
+
+2. **Redundant Arc Wrapping**: DatabaseAgent contains internal Arc fields, so wrapping it in Arc<dyn Agent> is redundant. Consider implementing Clone for DatabaseAgent to allow direct ownership while maintaining shared internal state.
+
 ## Next Priorities
-1. **Model Configuration**: Fix hardcoded context window limits
-   - Currently defaulting to 1M tokens (Gemini-specific)
-   - Breaks with Anthropic and other providers
-   - Need per-model context window configuration
-   - Add model-specific defaults in ResponseOptions
+1. ~~**Model Configuration**: Fix hardcoded context window limits~~ ✅ COMPLETE (2025-07-24)
+   - Created model defaults registry with accurate limits
+   - Added enhance_model_info() for provider data enrichment
+   - Dynamic max_tokens calculation based on model
+   - Case-insensitive model/provider matching
+   - Config model selection now respected
 2. **Fix failing tests**: `test_load_balancing_selector` and `test_round_robin_skip_inactive`
    - Both failing after dyn-compatibility refactor
 3. Add vector search for archival memory using embeddings
