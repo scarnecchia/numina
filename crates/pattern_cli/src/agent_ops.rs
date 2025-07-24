@@ -4,6 +4,7 @@ use pattern_core::{
     Agent, ModelProvider,
     agent::{AgentRecord, AgentType, DatabaseAgent},
     config::PatternConfig,
+    coordination::groups::{AgentGroup, GroupManager},
     db::{client::DB, ops},
     embeddings::cloud::OpenAIEmbedder,
     id::AgentId,
@@ -25,7 +26,7 @@ pub async fn load_or_create_agent(
     model_name: Option<String>,
     enable_tools: bool,
     config: &PatternConfig,
-) -> Result<Box<dyn Agent>> {
+) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
     // First, try to find an existing agent with this name
@@ -131,7 +132,7 @@ pub async fn create_agent_from_record(
     model_name: Option<String>,
     enable_tools: bool,
     _config: &PatternConfig,
-) -> Result<Box<dyn Agent>> {
+) -> Result<Arc<dyn Agent>> {
     // Create model provider
     let model_provider = Arc::new(RwLock::new(GenAiClient::new().await?));
 
@@ -220,7 +221,7 @@ pub async fn create_agent_from_record(
     agent.start_stats_sync().await?;
     agent.start_memory_sync().await?;
 
-    Ok(Box::new(agent))
+    Ok(Arc::new(agent))
 }
 
 /// Create an agent with the specified configuration
@@ -229,7 +230,7 @@ pub async fn create_agent(
     model_name: Option<String>,
     enable_tools: bool,
     config: &PatternConfig,
-) -> Result<Box<dyn Agent>> {
+) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
     // Create model provider
@@ -397,11 +398,11 @@ pub async fn create_agent(
         }
     }
 
-    Ok(Box::new(agent))
+    Ok(Arc::new(agent))
 }
 
 /// Chat with an agent
-pub async fn chat_with_agent(agent: Box<dyn Agent>) -> Result<()> {
+pub async fn chat_with_agent(agent: Arc<dyn Agent>) -> Result<()> {
     use rustyline::DefaultEditor;
 
     let output = Output::new();
@@ -481,6 +482,137 @@ pub async fn chat_with_agent(agent: Box<dyn Agent>) -> Result<()> {
                     }
                     Err(e) => {
                         output.error(&format!("Error: {}", e));
+                    }
+                }
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                output.status("CTRL-C");
+                continue;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                output.status("CTRL-D");
+                break;
+            }
+            Err(err) => {
+                output.error(&format!("Error: {:?}", err));
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Chat with a group of agents
+pub async fn chat_with_group<M: GroupManager>(
+    group: AgentGroup,
+    agents: Vec<Arc<dyn Agent>>,
+    pattern_manager: M,
+) -> Result<()> {
+    use pattern_core::coordination::groups::AgentWithMembership;
+    use rustyline::DefaultEditor;
+
+    let output = Output::new();
+
+    output.status(&format!(
+        "Chatting with group '{}'",
+        group.name.bright_cyan()
+    ));
+    output.info("Pattern:", &format!("{:?}", group.coordination_pattern));
+    output.info("Members:", &format!("{} agents", agents.len()));
+    output.status("Type 'quit' or 'exit' to leave the chat");
+    output.status("Use Ctrl+D for multiline input, Enter to send");
+    println!();
+
+    let mut rl = DefaultEditor::new().into_diagnostic()?;
+    let prompt = format!("{} ", ">".bright_blue());
+
+    // Wrap agents with their membership data
+    let agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>> = agents
+        .into_iter()
+        .zip(group.members.iter())
+        .map(|(agent, (_, membership))| AgentWithMembership {
+            agent,
+            membership: membership.clone(),
+        })
+        .collect();
+
+    loop {
+        let readline = rl.readline(&prompt);
+        match readline {
+            Ok(line) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                if line.trim() == "quit" || line.trim() == "exit" {
+                    output.status("Goodbye!");
+                    break;
+                }
+
+                // Add to history
+                let _ = rl.add_history_entry(line.as_str());
+
+                // Create a message
+                let message = Message {
+                    content: MessageContent::Text(line.clone()),
+                    word_count: line.split_whitespace().count() as u32,
+                    ..Default::default()
+                };
+
+                // Route through the group
+                output.status("Routing message through group...");
+                match pattern_manager
+                    .route_message(&group, &agents_with_membership, message)
+                    .await
+                {
+                    Ok(group_response) => {
+                        // Display responses from each agent
+                        for agent_response in &group_response.responses {
+                            // Find agent name
+                            let agent_name = agents_with_membership
+                                .iter()
+                                .find(|a| a.agent.id() == agent_response.agent_id)
+                                .map(|a| a.agent.name())
+                                .unwrap_or("Unknown Agent".to_string());
+
+                            // Display the response
+                            for content in &agent_response.response.content {
+                                match content {
+                                    MessageContent::Text(text) => {
+                                        output.agent_message(&agent_name, text);
+                                    }
+                                    MessageContent::ToolCalls(calls) => {
+                                        for call in calls {
+                                            output.tool_call(
+                                                &call.fn_name,
+                                                &serde_json::to_string_pretty(&call.fn_arguments)
+                                                    .unwrap_or_else(|_| {
+                                                        call.fn_arguments.to_string()
+                                                    }),
+                                            );
+                                        }
+                                    }
+                                    MessageContent::ToolResponses(responses) => {
+                                        for resp in responses {
+                                            output.tool_result(&resp.content);
+                                        }
+                                    }
+                                    MessageContent::Parts(_) => {
+                                        output.status("[Multi-part content]");
+                                    }
+                                }
+                            }
+                        }
+
+                        // Show execution time
+                        output.info(
+                            "Execution time:",
+                            &format!("{:?}", group_response.execution_time),
+                        );
+                    }
+                    Err(e) => {
+                        output.error(&format!("Error routing message: {}", e));
                     }
                 }
             }

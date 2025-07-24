@@ -1,7 +1,8 @@
 //! Sleeptime coordination pattern implementation
 
+use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     CoreError, Result,
@@ -19,16 +20,14 @@ use crate::{
 
 pub struct SleeptimeManager;
 
+#[async_trait]
 impl GroupManager for SleeptimeManager {
-    async fn route_message<A>(
+    async fn route_message(
         &self,
         group: &crate::coordination::groups::AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>
-    where
-        A: Agent,
-    {
+    ) -> Result<GroupResponse> {
         let start_time = std::time::Instant::now();
 
         // Extract sleeptime config
@@ -269,6 +268,8 @@ impl SleeptimeManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{
         AgentId, MemoryBlock, UserId,
@@ -408,8 +409,8 @@ mod tests {
         let intervention_agent = create_test_agent("Pattern");
         let intervention_id = intervention_agent.id.clone();
 
-        let agents = vec![AgentWithMembership {
-            agent: intervention_agent,
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![AgentWithMembership {
+            agent: Arc::new(intervention_agent),
             membership: GroupMembership {
                 joined_at: Utc::now(),
                 role: GroupMemberRole::Supervisor,

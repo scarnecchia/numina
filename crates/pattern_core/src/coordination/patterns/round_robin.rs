@@ -1,5 +1,8 @@
 //! Round-robin coordination pattern implementation
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
@@ -14,16 +17,14 @@ use crate::{
 
 pub struct RoundRobinManager;
 
+#[async_trait]
 impl GroupManager for RoundRobinManager {
-    async fn route_message<A>(
+    async fn route_message(
         &self,
         group: &crate::coordination::groups::AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>
-    where
-        A: Agent,
-    {
+    ) -> Result<GroupResponse> {
         let start_time = std::time::Instant::now();
 
         // Extract round-robin config
@@ -116,6 +117,8 @@ impl GroupManager for RoundRobinManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{
         AgentId, MemoryBlock, UserId,
@@ -256,9 +259,9 @@ mod tests {
     async fn test_round_robin_basic() {
         let manager = RoundRobinManager;
 
-        let agents = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
-                agent: create_test_agent("Agent1"),
+                agent: Arc::new(create_test_agent("Agent1")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -267,7 +270,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: create_test_agent("Agent2"),
+                agent: Arc::new(create_test_agent("Agent2")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -276,7 +279,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: create_test_agent("Agent3"),
+                agent: Arc::new(create_test_agent("Agent3")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -312,7 +315,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.responses.len(), 1);
-        assert_eq!(response.responses[0].agent_id, agents[0].agent.id);
+        assert_eq!(response.responses[0].agent_id, agents[0].agent.id());
 
         // Check state was updated
         if let Some(GroupState::RoundRobin { current_index, .. }) = response.state_changes {
@@ -326,32 +329,32 @@ mod tests {
     async fn test_round_robin_skip_inactive() {
         let manager = RoundRobinManager;
 
-        let agents = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
-                agent: create_test_agent("Agent1"),
+                agent: Arc::new(create_test_agent("Agent1")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
-                    capabilities: vec![],
+                    capabilities: vec!["general".to_string()],
                 },
             },
             AgentWithMembership {
-                agent: create_test_agent("Agent2"),
-                membership: GroupMembership {
-                    joined_at: Utc::now(),
-                    role: GroupMemberRole::Regular,
-                    is_active: false, // Inactive!
-                    capabilities: vec![],
-                },
-            },
-            AgentWithMembership {
-                agent: create_test_agent("Agent3"),
+                agent: Arc::new(create_test_agent("Agent2")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
-                    capabilities: vec![],
+                    capabilities: vec!["technical".to_string()],
+                },
+            },
+            AgentWithMembership {
+                agent: Arc::new(create_test_agent("Agent3")),
+                membership: GroupMembership {
+                    joined_at: Utc::now(),
+                    role: GroupMemberRole::Regular,
+                    is_active: false, // Inactive - should not be selected
+                    capabilities: vec!["creative".to_string()],
                 },
             },
         ];
@@ -381,7 +384,7 @@ mod tests {
             .route_message(&group, &agents, message.clone())
             .await
             .unwrap();
-        assert_eq!(response1.responses[0].agent_id, agents[0].agent.id);
+        assert_eq!(response1.responses[0].agent_id, agents[0].agent.id());
 
         // Update group state for next call
         let mut group2 = group.clone();
@@ -405,6 +408,6 @@ mod tests {
             .route_message(&group2, &agents, message)
             .await
             .unwrap();
-        assert_eq!(response2.responses[0].agent_id, agents[2].agent.id);
+        assert_eq!(response2.responses[0].agent_id, agents[2].agent.id());
     }
 }

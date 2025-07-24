@@ -1,9 +1,12 @@
 //! Load-balancing agent selection
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::SelectionContext;
+use crate::coordination::AgentSelector;
 use crate::coordination::groups::AgentWithMembership;
 use crate::{Result, agent::Agent};
 
@@ -11,17 +14,14 @@ use crate::{Result, agent::Agent};
 #[derive(Debug, Clone)]
 pub struct LoadBalancingSelector;
 
-impl LoadBalancingSelector {
-    pub async fn select_agents<'a, A, T>(
-        &self,
-        agents: &'a [AgentWithMembership<T>],
+#[async_trait]
+impl AgentSelector for LoadBalancingSelector {
+    async fn select_agents<'a>(
+        &'a self,
+        agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<T>>>
-    where
-        A: Agent,
-        T: AsRef<A>,
-    {
+    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>> {
         // Get window for considering recent selections (default 5 minutes)
         let window_minutes = config
             .get("window_minutes")
@@ -77,11 +77,11 @@ impl LoadBalancingSelector {
         Ok(selected)
     }
 
-    pub fn name(&self) -> &str {
+    fn name(&self) -> &str {
         "load_balancing"
     }
 
-    pub fn description(&self) -> &str {
+    fn description(&self) -> &str {
         "Selects least recently used agents to balance load"
     }
 }
@@ -214,12 +214,12 @@ mod tests {
         let agent3_id = AgentId::generate();
 
         // Create agents
-        let agents = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
-                agent: TestAgent {
-                    id: agent1_id.clone(),
+                agent: Arc::new(TestAgent {
+                    id: AgentId::generate(),
                     name: "agent1".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -228,10 +228,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: agent2_id.clone(),
                     name: "agent2".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -240,10 +240,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: TestAgent {
-                    id: agent3_id.clone(),
+                agent: Arc::new(TestAgent {
+                    id: AgentId::generate(),
                     name: "agent3".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,

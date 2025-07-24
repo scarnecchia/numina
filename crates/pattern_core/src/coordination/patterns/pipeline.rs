@@ -1,7 +1,8 @@
 //! Pipeline coordination pattern implementation
 
+use async_trait::async_trait;
 use chrono::Utc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use uuid::Uuid;
 
 use crate::{
@@ -20,16 +21,14 @@ use crate::{
 
 pub struct PipelineManager;
 
+#[async_trait]
 impl GroupManager for PipelineManager {
-    async fn route_message<A>(
+    async fn route_message(
         &self,
         group: &crate::coordination::groups::AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>
-    where
-        A: Agent,
-    {
+    ) -> Result<GroupResponse> {
         let start_time = Instant::now();
 
         // Extract pipeline config
@@ -196,17 +195,14 @@ impl GroupManager for PipelineManager {
 }
 
 impl PipelineManager {
-    async fn process_stage<A>(
+    async fn process_stage(
         &self,
         stage: &PipelineStage,
         _stage_index: usize,
         message: &Message,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         group_name: String,
-    ) -> Result<(AgentResponse, StageResult)>
-    where
-        A: Agent,
-    {
+    ) -> Result<(AgentResponse, StageResult)> {
         let stage_start = Instant::now();
 
         // Select an agent for this stage
@@ -262,16 +258,13 @@ impl PipelineManager {
         Ok((response, result))
     }
 
-    async fn handle_stage_failure<A>(
+    async fn handle_stage_failure(
         &self,
         stage: &PipelineStage,
         stage_index: usize,
         error: CoreError,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
-    ) -> Result<Option<(AgentResponse, StageResult)>>
-    where
-        A: Agent,
-    {
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
+    ) -> Result<Option<(AgentResponse, StageResult)>> {
         match &stage.on_failure {
             StageFailureAction::Skip => {
                 // Skip the stage and continue

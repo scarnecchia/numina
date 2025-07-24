@@ -1,7 +1,8 @@
 //! Voting coordination pattern implementation
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
@@ -20,16 +21,14 @@ use crate::{
 
 pub struct VotingManager;
 
+#[async_trait]
 impl GroupManager for VotingManager {
-    async fn route_message<A>(
+    async fn route_message(
         &self,
         group: &crate::coordination::groups::AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>
-    where
-        A: Agent,
-    {
+    ) -> Result<GroupResponse> {
         let start_time = std::time::Instant::now();
 
         // Extract voting config

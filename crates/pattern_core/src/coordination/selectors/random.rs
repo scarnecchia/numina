@@ -1,8 +1,12 @@
 //! Random agent selection
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use super::SelectionContext;
+use crate::coordination::AgentSelector;
 use crate::coordination::groups::AgentWithMembership;
 use crate::{Result, agent::Agent};
 
@@ -10,17 +14,14 @@ use crate::{Result, agent::Agent};
 #[derive(Debug, Clone)]
 pub struct RandomSelector;
 
-impl RandomSelector {
-    pub async fn select_agents<'a, A, T>(
-        &self,
-        agents: &'a [AgentWithMembership<T>],
+#[async_trait]
+impl AgentSelector for RandomSelector {
+    async fn select_agents<'a>(
+        &'a self,
+        agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         _context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<T>>>
-    where
-        A: Agent,
-        T: AsRef<A>,
-    {
+    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>> {
         let mut rng = rand::rng();
 
         // Get number of agents to select (default 1)
@@ -54,11 +55,11 @@ impl RandomSelector {
         Ok(selected)
     }
 
-    pub fn name(&self) -> &str {
+    fn name(&self) -> &str {
         "random"
     }
 
-    pub fn description(&self) -> &str {
+    fn description(&self) -> &str {
         "Randomly selects one or more agents from the available pool"
     }
 }
@@ -187,12 +188,12 @@ mod tests {
         let selector = RandomSelector;
 
         // Create mock agents with membership
-        let agents = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: AgentId::generate(),
                     name: "agent1".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -201,10 +202,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: AgentId::generate(),
                     name: "agent2".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -213,10 +214,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: AgentId::generate(),
                     name: "agent3".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,

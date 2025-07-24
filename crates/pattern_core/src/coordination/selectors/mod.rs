@@ -1,6 +1,6 @@
 //! Agent selection strategies for dynamic coordination
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use super::{groups::AgentWithMembership, types::SelectionContext};
 use crate::{Result, agent::Agent};
@@ -9,94 +9,55 @@ mod capability;
 mod load_balancing;
 mod random;
 
+use async_trait::async_trait;
 pub use capability::CapabilitySelector;
+use dashmap::DashMap;
 pub use load_balancing::LoadBalancingSelector;
 pub use random::RandomSelector;
 
-/// Enum of all available agent selectors
-#[derive(Debug, Clone)]
-pub enum AgentSelector {
-    Random(RandomSelector),
-    Capability(CapabilitySelector),
-    LoadBalancing(LoadBalancingSelector),
-}
-
-impl AgentSelector {
-    /// Select one or more agents based on the context and configuration
-    pub async fn select_agents<'a, A, T>(
-        &self,
-        agents: &'a [AgentWithMembership<T>],
-        context: &SelectionContext,
+#[async_trait]
+pub trait AgentSelector: Send + Sync {
+    async fn select_agents<'a>(
+        &'a self,
+        agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
+        _context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<T>>>
-    where
-        A: Agent,
-        T: AsRef<A>,
-    {
-        match self {
-            AgentSelector::Random(selector) => {
-                selector.select_agents(agents, context, config).await
-            }
-            AgentSelector::Capability(selector) => {
-                selector.select_agents(agents, context, config).await
-            }
-            AgentSelector::LoadBalancing(selector) => {
-                selector.select_agents(agents, context, config).await
-            }
-        }
-    }
+    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>>;
 
-    /// Human-readable name for this selector
-    pub fn name(&self) -> &str {
-        match self {
-            AgentSelector::Random(selector) => selector.name(),
-            AgentSelector::Capability(selector) => selector.name(),
-            AgentSelector::LoadBalancing(selector) => selector.name(),
-        }
-    }
+    fn name(&self) -> &str;
 
-    /// Description of how this selector works
-    pub fn description(&self) -> &str {
-        match self {
-            AgentSelector::Random(selector) => selector.description(),
-            AgentSelector::Capability(selector) => selector.description(),
-            AgentSelector::LoadBalancing(selector) => selector.description(),
-        }
-    }
+    fn description(&self) -> &str;
 }
 
 /// Registry for agent selectors
 pub trait SelectorRegistry: Send + Sync {
     /// Get a selector by name
-    fn get(&self, name: &str) -> Option<&AgentSelector>;
+    fn get(&self, name: &str) -> Option<Arc<dyn AgentSelector>>;
 
     /// Register a new selector
-    fn register(&mut self, name: String, selector: AgentSelector);
+    fn register(&mut self, name: String, selector: Arc<dyn AgentSelector>);
 
     /// List all available selectors
-    fn list(&self) -> Vec<&str>;
+    fn list(&self) -> Vec<String>;
 }
 
 /// Default implementation of SelectorRegistry
 pub struct DefaultSelectorRegistry {
-    selectors: HashMap<String, AgentSelector>,
+    selectors: Arc<DashMap<String, Arc<dyn AgentSelector>>>,
 }
 
 impl DefaultSelectorRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
-            selectors: HashMap::new(),
+            selectors: Arc::new(DashMap::new()),
         };
 
         // Register default selectors
-        registry.register("random".to_string(), AgentSelector::Random(RandomSelector));
-        registry.register(
-            "capability".to_string(),
-            AgentSelector::Capability(CapabilitySelector),
-        );
+        registry.register("random".to_string(), Arc::new(RandomSelector));
+        registry.register("capability".to_string(), Arc::new(CapabilitySelector));
         registry.register(
             "load_balancing".to_string(),
-            AgentSelector::LoadBalancing(LoadBalancingSelector),
+            Arc::new(LoadBalancingSelector),
         );
 
         registry
@@ -104,16 +65,16 @@ impl DefaultSelectorRegistry {
 }
 
 impl SelectorRegistry for DefaultSelectorRegistry {
-    fn get(&self, name: &str) -> Option<&AgentSelector> {
-        self.selectors.get(name)
+    fn get(&self, name: &str) -> Option<Arc<dyn AgentSelector>> {
+        self.selectors.get(name).map(|r| r.clone())
     }
 
-    fn register(&mut self, name: String, selector: AgentSelector) {
+    fn register(&mut self, name: String, selector: Arc<dyn AgentSelector>) {
         self.selectors.insert(name, selector);
     }
 
-    fn list(&self) -> Vec<&str> {
-        self.selectors.keys().map(|s| s.as_str()).collect()
+    fn list(&self) -> Vec<String> {
+        self.selectors.iter().map(|s| s.key().clone()).collect()
     }
 }
 

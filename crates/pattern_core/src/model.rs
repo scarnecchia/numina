@@ -8,6 +8,8 @@ use crate::{
     message::{Request, Response},
 };
 
+pub mod defaults;
+
 /// A model provider that can generate completions
 #[async_trait]
 pub trait ModelProvider: Send + Sync + Debug {
@@ -175,14 +177,14 @@ impl GenAiClient {
         let mut available_endpoints = Vec::new();
 
         // Check which providers have API keys configured
-        if std::env::var("OPENAI_API_KEY").is_ok() {
-            available_endpoints.push(AdapterKind::OpenAI);
-        }
         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
             available_endpoints.push(AdapterKind::Anthropic);
         }
         if std::env::var("GEMINI_API_KEY").is_ok() {
             available_endpoints.push(AdapterKind::Gemini);
+        }
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::OpenAI);
         }
         if std::env::var("GROQ_API_KEY").is_ok() {
             available_endpoints.push(AdapterKind::Groq);

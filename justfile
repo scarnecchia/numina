@@ -13,5 +13,13 @@ run *ARGS:
 watch *ARGS:
 	bacon --job run -- -- {{ ARGS }}
 
+# Run CLI - Note: for multi-word strings, escape quotes: just cli group create TestGroup --description \"Test cluster\"
 cli *ARGS:
     cargo run --bin pattern-cli -- {{ARGS}}
+
+# Shortcuts for group operations
+group-create name description="Default group" pattern="round_robin":
+    cargo run --bin pattern-cli -- group create "{{name}}" --description "{{description}}" --pattern {{pattern}}
+
+group-add group agent role="regular":
+    cargo run --bin pattern-cli -- group add-member "{{group}}" "{{agent}}" --role {{role}}

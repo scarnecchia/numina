@@ -1,5 +1,6 @@
 //! Dynamic coordination pattern implementation
 
+use async_trait::async_trait;
 use chrono::Utc;
 use std::sync::Arc;
 
@@ -23,16 +24,14 @@ impl DynamicManager {
     }
 }
 
+#[async_trait]
 impl GroupManager for DynamicManager {
-    async fn route_message<A>(
+    async fn route_message(
         &self,
         group: &crate::coordination::groups::AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>
-    where
-        A: Agent,
-    {
+    ) -> Result<GroupResponse> {
         let start_time = std::time::Instant::now();
 
         // Extract dynamic config
@@ -167,7 +166,7 @@ mod tests {
         AgentId, MemoryBlock, UserId,
         agent::{Agent, AgentState, AgentType},
         coordination::{
-            AgentGroup,
+            AgentGroup, AgentSelector,
             groups::{AgentWithMembership, GroupMembership},
             selectors::SelectorRegistry,
             types::GroupMemberRole,
@@ -180,7 +179,7 @@ mod tests {
 
     // Mock selector registry for testing
     struct MockSelectorRegistry {
-        selectors: HashMap<String, crate::coordination::selectors::AgentSelector>,
+        selectors: HashMap<String, Arc<dyn AgentSelector>>,
     }
 
     impl MockSelectorRegistry {
@@ -191,29 +190,23 @@ mod tests {
             // Add a default random selector for testing
             registry.register(
                 "random".to_string(),
-                crate::coordination::selectors::AgentSelector::Random(
-                    crate::coordination::selectors::RandomSelector,
-                ),
+                Arc::new(crate::coordination::selectors::RandomSelector),
             );
             registry
         }
     }
 
     impl crate::coordination::selectors::SelectorRegistry for MockSelectorRegistry {
-        fn get(&self, name: &str) -> Option<&crate::coordination::selectors::AgentSelector> {
-            self.selectors.get(name)
+        fn get(&self, name: &str) -> Option<Arc<dyn AgentSelector>> {
+            self.selectors.get(name).map(|s| s.clone())
         }
 
-        fn register(
-            &mut self,
-            name: String,
-            selector: crate::coordination::selectors::AgentSelector,
-        ) {
+        fn register(&mut self, name: String, selector: Arc<dyn AgentSelector>) {
             self.selectors.insert(name, selector);
         }
 
-        fn list(&self) -> Vec<&str> {
-            self.selectors.keys().map(|s| s.as_str()).collect()
+        fn list(&self) -> Vec<String> {
+            self.selectors.keys().map(|s| s.clone()).collect()
         }
     }
 
@@ -340,9 +333,9 @@ mod tests {
         let registry = Arc::new(MockSelectorRegistry::new());
         let manager = DynamicManager::new(registry);
 
-        let agents = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
-                agent: create_test_agent("Agent1"),
+                agent: Arc::new(create_test_agent("Agent1")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -351,7 +344,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: create_test_agent("Agent2"),
+                agent: Arc::new(create_test_agent("Agent2")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -360,7 +353,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: create_test_agent("Agent3"),
+                agent: Arc::new(create_test_agent("Agent3")),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -399,7 +392,7 @@ mod tests {
 
         // Selected agent should be active (not Agent3)
         let selected_id = &response.responses[0].agent_id;
-        assert!(selected_id != &agents[2].agent.id);
+        assert!(selected_id != &agents[2].agent.id());
 
         // State should be updated with recent selection
         if let Some(GroupState::Dynamic { recent_selections }) = response.state_changes {

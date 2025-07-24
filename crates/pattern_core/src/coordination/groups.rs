@@ -1,10 +1,10 @@
 //! Agent groups and constellation management
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
-use std::future::Future;
 use std::sync::Arc;
 
 use crate::{
@@ -124,23 +124,22 @@ pub struct AgentResponse {
 }
 
 /// Trait for implementing group coordination managers
+#[async_trait]
 pub trait GroupManager: Send + Sync {
     /// Route a message through this group
-    fn route_message<A>(
+    async fn route_message(
         &self,
         group: &AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> impl Future<Output = Result<GroupResponse>>
-    where
-        A: Agent;
+    ) -> Result<GroupResponse>;
 
     /// Update group state after execution
-    fn update_state(
+    async fn update_state(
         &self,
         current_state: &GroupState,
         response: &GroupResponse,
-    ) -> impl Future<Output = Result<Option<GroupState>>>;
+    ) -> Result<Option<GroupState>>;
 }
 
 /// Agent with group membership metadata

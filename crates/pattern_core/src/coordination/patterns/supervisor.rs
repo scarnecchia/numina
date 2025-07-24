@@ -1,7 +1,8 @@
 //! Supervisor coordination pattern implementation
 
+use async_trait::async_trait;
 use chrono::Utc;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     AgentId, CoreError, Result,
@@ -16,16 +17,14 @@ use crate::{
 
 pub struct SupervisorManager;
 
+#[async_trait]
 impl GroupManager for SupervisorManager {
-    async fn route_message<A>(
+    async fn route_message(
         &self,
         group: &crate::coordination::groups::AgentGroup,
-        agents: &[AgentWithMembership<impl AsRef<A>>],
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>
-    where
-        A: Agent,
-    {
+    ) -> Result<GroupResponse> {
         let start_time = std::time::Instant::now();
 
         // Extract supervisor config
@@ -190,17 +189,14 @@ impl SupervisorManager {
         }
     }
 
-    fn select_delegate<'a, A>(
+    fn select_delegate<'a>(
         &self,
-        agents: &'a [AgentWithMembership<impl AsRef<A>>],
+        agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         leader_id: &AgentId,
         strategy: &DelegationStrategy,
         current_delegations: &HashMap<AgentId, usize>,
         max_delegations: Option<usize>,
-    ) -> Result<Option<&'a AgentWithMembership<impl AsRef<A>>>>
-    where
-        A: Agent,
-    {
+    ) -> Result<Option<&'a AgentWithMembership<Arc<dyn Agent>>>> {
         // Filter out leader and unavailable agents
         let available_agents: Vec<_> = agents
             .iter()

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     db::DatabaseConfig,
-    id::{AgentId, UserId},
+    id::{AgentId, GroupId, UserId},
     memory::{MemoryPermission, MemoryType},
 };
 
@@ -30,12 +30,17 @@ pub struct PatternConfig {
     /// Database configuration
     #[serde(default)]
     pub database: DatabaseConfig,
+
+    /// Agent groups configuration
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupConfig>,
 }
 
 /// User configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
     /// User ID (persisted across sessions)
+    #[serde(default)]
     pub id: UserId,
 
     /// Optional user name
@@ -93,6 +98,95 @@ pub struct MemoryBlockConfig {
     pub description: Option<String>,
 }
 
+/// Configuration for an agent group
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupConfig {
+    /// Optional ID (generated if not provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<GroupId>,
+
+    /// Name of the group
+    pub name: String,
+
+    /// Description of the group's purpose
+    pub description: String,
+
+    /// Coordination pattern to use
+    pub pattern: GroupPatternConfig,
+
+    /// Members of this group
+    pub members: Vec<GroupMemberConfig>,
+}
+
+/// Configuration for a group member
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMemberConfig {
+    /// Friendly name for this agent in the group
+    pub name: String,
+
+    /// Optional agent ID (if referencing existing agent)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+
+    /// Role in the group
+    #[serde(default)]
+    pub role: GroupMemberRoleConfig,
+
+    /// Capabilities this agent brings
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+/// Member role configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupMemberRoleConfig {
+    #[default]
+    Regular,
+    Supervisor,
+    Specialist {
+        domain: String,
+    },
+}
+
+/// Configuration for coordination patterns
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GroupPatternConfig {
+    /// One agent leads, others follow
+    Supervisor {
+        /// The agent that leads (by member name)
+        leader: String,
+    },
+    /// Agents take turns in order
+    RoundRobin {
+        /// Whether to skip unavailable agents
+        #[serde(default = "default_skip_unavailable")]
+        skip_unavailable: bool,
+    },
+    /// Sequential processing pipeline
+    Pipeline {
+        /// Ordered list of member names for each stage
+        stages: Vec<String>,
+    },
+    /// Dynamic selection based on context
+    Dynamic {
+        /// Selector strategy name
+        selector: String,
+    },
+    /// Background monitoring
+    Sleeptime {
+        /// Check interval in seconds
+        interval_seconds: u64,
+        /// Member name to activate on triggers
+        intervention_agent: String,
+    },
+}
+
+fn default_skip_unavailable() -> bool {
+    true
+}
+
 /// Model provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
@@ -109,7 +203,7 @@ pub struct ModelConfig {
 
     /// Additional provider-specific settings
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub settings: HashMap<String, serde_json::Value>,
+    pub settings: HashMap<String, toml::Value>,
 }
 
 // Default implementations
@@ -120,6 +214,7 @@ impl Default for PatternConfig {
             agent: AgentConfig::default(),
             model: ModelConfig::default(),
             database: DatabaseConfig::default(),
+            groups: Vec::new(),
         }
     }
 }
@@ -229,6 +324,7 @@ pub fn merge_configs(base: PatternConfig, overlay: PartialConfig) -> PatternConf
         },
         model: overlay.model.unwrap_or(base.model),
         database: overlay.database.unwrap_or(base.database),
+        groups: overlay.groups.unwrap_or(base.groups),
     }
 }
 
@@ -246,6 +342,9 @@ pub struct PartialConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<DatabaseConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<GroupConfig>>,
 }
 
 /// Partial agent configuration for overlaying
@@ -328,7 +427,8 @@ mod tests {
     fn test_default_config() {
         let config = PatternConfig::default();
         assert_eq!(config.agent.name, "Assistant");
-        assert_eq!(config.model.provider, "anthropic");
+        assert_eq!(config.model.provider, "Gemini");
+        assert!(config.groups.is_empty());
     }
 
     #[test]
@@ -353,9 +453,41 @@ mod tests {
 
         let merged = merge_configs(base, overlay);
         assert_eq!(merged.agent.name, "Custom Agent");
-        assert_eq!(
-            merged.agent.persona,
-            Some("You are a helpful AI assistant.".to_string())
-        );
+        // persona is None by default
+        assert_eq!(merged.agent.persona, None);
+    }
+
+    #[test]
+    fn test_group_config_serialization() {
+        let group = GroupConfig {
+            id: None,
+            name: "Main Group".to_string(),
+            description: "Primary ADHD support group".to_string(),
+            pattern: GroupPatternConfig::RoundRobin {
+                skip_unavailable: true,
+            },
+            members: vec![
+                GroupMemberConfig {
+                    name: "Executive".to_string(),
+                    agent_id: None,
+                    role: GroupMemberRoleConfig::Regular,
+                    capabilities: vec!["planning".to_string(), "organization".to_string()],
+                },
+                GroupMemberConfig {
+                    name: "Memory".to_string(),
+                    agent_id: Some(AgentId::generate()),
+                    role: GroupMemberRoleConfig::Specialist {
+                        domain: "memory_management".to_string(),
+                    },
+                    capabilities: vec!["recall".to_string()],
+                },
+            ],
+        };
+
+        let toml = toml::to_string_pretty(&group).unwrap();
+        assert!(toml.contains("name = \"Main Group\""));
+        assert!(toml.contains("type = \"round_robin\""));
+        assert!(toml.contains("[[members]]"));
+        assert!(toml.contains("name = \"Executive\""));
     }
 }

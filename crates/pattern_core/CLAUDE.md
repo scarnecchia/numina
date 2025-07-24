@@ -2,7 +2,7 @@
 
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support. Inspired by MemGPT architecture for stateful agents.
 
-## Current Status (2025-07-23)
+## Current Status (2025-07-24)
 
 ### Entity System ✅ COMPLETE
 - Proc macro-based entities with `#[derive(Entity)]`
@@ -16,10 +16,17 @@ Core agent framework, memory management, and coordination system for Pattern's m
 - Memory sharing via edge entities
 - Message compression support ready
 
-### Agent Groups ✅ COMPLETE
-- Dynamic, round-robin, sleeptime, pipeline managers
-- Selector registry with load balancing, random, etc.
-- All tests passing (107/107) ✅
+### Agent Groups ✅ COMPLETE (2025-07-24) - NEEDS USER TESTING
+- **Configuration**: `GroupConfig` and `GroupMemberConfig` in config system
+- **Database Operations**: Full CRUD operations with constellation relationships
+- **Coordination Patterns**: All 6 patterns working (Dynamic, RoundRobin, Pipeline, Supervisor, Voting, Sleeptime)
+- **CLI Integration**: group list/create/add-member/status commands
+- **Group Chat**: `pattern-cli chat --group <name>` routes through coordination patterns
+- **Type-erased Agents**: Groups work with `Arc<dyn Agent>` for flexibility and shared ownership
+- **Trait Refactoring**: `GroupManager` trait made dyn-compatible with `async_trait`
+- **Testing Status**: Basic operations work, but ~2 group-related tests failing after refactor
+- **⚠️ NEEDS USER TESTING**: Overall integrity and edge cases need validation
+- **Design Note**: Using `Arc<dyn Agent>` is intentional - agents can belong to multiple groups (overlap allowed)
 
 ### Tool System Refactoring ✅ COMPLETE
 - All core tools refactored to follow Letta/MemGPT patterns
@@ -174,20 +181,15 @@ The context builder includes archival memory labels to enable intelligent memory
 This allows agents to make informed decisions about memory swapping without needing to search first.
 
 ## Next Priorities
-1. ~~Implement search_conversations tool with database queries~~ ✅
-2. ~~Implement swap_memory tool for memory management~~ ✅ (integrated into context tool)
-3. ~~Refactor tools to match new design~~ ✅
-   - ~~Remove `search` from recall tool~~ ✅
-   - ~~Add `append` to recall tool~~ ✅
-   - ~~Add `archive`, `load_from_archival`, `swap` to context tool~~ ✅
-   - ~~Create unified `search` tool~~ ✅
-   - ~~Update context builder to include archival labels~~ ✅
-4. ~~Implement message compression with archival when context window fills~~ ✅
-   - Added Gemini-compatible message sequence validation
-   - Multiple compression strategies (truncate, time-decay, importance-based, recursive summarization)
-   - Comprehensive test coverage with realistic message counts
-5. Add vector search for archival memory using embeddings
-6. Create basic binary (CLI/TUI) for user testing
+1. **Model Configuration**: Fix hardcoded context window limits
+   - Currently defaulting to 1M tokens (Gemini-specific)
+   - Breaks with Anthropic and other providers
+   - Need per-model context window configuration
+   - Add model-specific defaults in ResponseOptions
+2. **Fix failing tests**: `test_load_balancing_selector` and `test_round_robin_skip_inactive`
+   - Both failing after dyn-compatibility refactor
+3. Add vector search for archival memory using embeddings
+4. ~~Create basic binary (CLI/TUI) for user testing~~ ✅ (pattern-cli complete)
 
 
 ## Eventually

@@ -7,46 +7,73 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 **Current Status**: Core foundation complete, ready for feature development
 
 ### 🚧 Current Development Priorities
-1. **Agent Groups** - Make existing implementation usable via CLI and config
-2. **Task Management System** - ADHD-aware task breakdown and tracking
-3. **MCP Tools Integration** - Task-related tools and agent communication
+1. **Model Configuration** - 🚨 URGENT - Fix hardcoded context limits breaking non-Gemini models
+   - Currently hardcoding 1M tokens in `agent_ops.rs` (lines 193, 314)
+   - Breaks Anthropic (200k limit) and other providers
+   
+   **Implementation Plan:**
+   - Create `pattern_core/src/model/defaults.rs` with static registry
+   - Use `std::sync::OnceLock` for model ID -> proper defaults mapping
+   - `enhance_model_info()` function to fix provider-supplied ModelInfo
+   - Apply user's ModelConfig overrides from config file
+   - Update agent_ops.rs to use: `config.model.max_tokens.or(Some(model_info.context_window / 4))`
+   - Remove hardcoded 1M value, use model-specific limits
 
-## Agent Groups Implementation Plan
+2. **Agent Groups** - ✅ COMPLETE (needs user testing) - Fully usable via CLI
+3. **Task Management System** - ADHD-aware task breakdown and tracking
+4. **MCP Tools Integration** - Task-related tools and agent communication
 
-### Phase 1: Configuration Structure
-Add group configuration to the existing config system:
-- Add `GroupConfig` struct to `pattern_core/src/config.rs`
-- Define `GroupMemberConfig` for agent membership with roles
-- Integrate into main `PatternConfig` structure
+## Agent Groups Implementation ✅ COMPLETE (needs user testing)
 
-### Phase 2: Database Operations
-Implement CRUD operations in `pattern_core/src/db/ops.rs`:
+The agent groups framework is now fully implemented! Groups allow multiple agents to work together using coordination patterns.
+
+**⚠️ Testing Status**: Basic operations work and CLI commands function correctly, but ~2 group-related tests are failing after the dyn-compatibility refactor. Overall integrity needs user testing to validate edge cases and real-world usage.
+
+### What's Implemented
+
+#### Phase 1: Configuration Structure ✅
+- Added `GroupConfig` struct to `pattern_core/src/config.rs`
+- Defined `GroupMemberConfig` with name, optional agent_id, role, and capabilities
+- Integrated into main `PatternConfig` structure with groups vector
+
+#### Phase 2: Database Operations ✅
 - `create_group()` - Create a new agent group
+- `create_group_for_user()` - Create group associated with user's constellation
 - `get_group_by_name()` - Find group by name for a user
-- `add_agent_to_group()` - Add an agent with a role
+- `add_agent_to_group()` - Add an agent with a role and membership metadata
 - `list_groups_for_user()` - List all groups owned by a user
-- `get_group_members()` - Get all agents in a group
+- `get_group_members()` - Get all agents in a group with their roles
+- Constellation operations for proper user->constellation->group relationships
 
-### Phase 3: CLI Commands
-Add group management commands:
-- `pattern-cli group list` - Show all groups
-- `pattern-cli group create <name> --pattern <type>` - Create a group
+#### Phase 3: CLI Commands ✅
+- `pattern-cli group list` - Show all groups for current user
+- `pattern-cli group create <name> -d <description> -p <pattern>` - Create a group
 - `pattern-cli group add-member <group> <agent> --role <role>` - Add agent to group
-- `pattern-cli group status <name>` - Show group details
-- `pattern-cli chat --group <name>` - Chat with a group
+- `pattern-cli group status <name>` - Show group details and members
+- `pattern-cli chat --group <name>` - Chat with a group using its coordination pattern
 
-### Phase 4: ADHD-Specific Templates
+**Note**: For multi-word descriptions in `just`, escape quotes: `just cli group create MyGroup --description \"My test group\"`
+Or use the shortcut: `just group-create MyGroup "My test group"`
+
+#### Phase 4: Runtime Integration ✅
+- Group chat routes messages through coordination patterns (RoundRobin, Dynamic, Pipeline, etc.)
+- Each agent in the group responds based on the pattern
+- Supports all coordination patterns with proper manager instantiation
+- Type-erased `dyn Agent` support for flexible group composition
+
+### Still TODO
+
+#### Phase 5: ADHD-Specific Templates 
 Create predefined group configurations in `pattern_nd`:
 - **Main Group**: Round-robin between executive function agents
 - **Crisis Group**: Dynamic selection based on urgency
 - **Planning Group**: Pipeline pattern for task breakdown
 - **Memory Group**: Supervisor pattern for memory management
 
-### Phase 5: Runtime Integration
-Make groups work in chat:
-- Group message routing through coordination patterns
-- State persistence between messages
-- Coordination pattern execution
+#### Phase 6: Config Persistence
+- Save groups to config file
+- Load groups from config on startup
+- Merge config groups with database groups
 
 ## Development Principles
 

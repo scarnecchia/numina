@@ -1,8 +1,12 @@
 //! Capability-based agent selection
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use super::SelectionContext;
+use crate::coordination::AgentSelector;
 use crate::coordination::groups::AgentWithMembership;
 use crate::{Result, agent::Agent};
 
@@ -10,17 +14,14 @@ use crate::{Result, agent::Agent};
 #[derive(Debug, Clone)]
 pub struct CapabilitySelector;
 
-impl CapabilitySelector {
-    pub async fn select_agents<'a, A, T>(
-        &self,
-        agents: &'a [AgentWithMembership<T>],
+#[async_trait]
+impl AgentSelector for CapabilitySelector {
+    async fn select_agents<'a>(
+        &'a self,
+        agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         _context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<T>>>
-    where
-        A: Agent,
-        T: AsRef<A>,
-    {
+    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>> {
         // Get required capabilities from config
         let required_capabilities: Vec<String> = config
             .get("capabilities")
@@ -71,11 +72,11 @@ impl CapabilitySelector {
         Ok(selected)
     }
 
-    pub fn name(&self) -> &str {
+    fn name(&self) -> &str {
         "capability"
     }
 
-    pub fn description(&self) -> &str {
+    fn description(&self) -> &str {
         "Selects agents based on their capabilities matching requirements"
     }
 }
@@ -208,12 +209,12 @@ mod tests {
         let agent3_id = AgentId::generate();
 
         // Create agents with different capabilities
-        let agents = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: agent1_id.clone(),
                     name: "agent1".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -222,10 +223,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: agent2_id.clone(),
                     name: "agent2".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -234,10 +235,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: TestAgent {
+                agent: Arc::new(TestAgent {
                     id: agent3_id.clone(),
                     name: "agent3".to_string(),
-                },
+                }),
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,

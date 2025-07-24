@@ -303,6 +303,12 @@ pub type AgentId = Id<AgentIdType>;
 /// Type alias for User IDs
 pub type UserId = Id<UserIdType>;
 
+impl Default for UserId {
+    fn default() -> Self {
+        UserId::generate()
+    }
+}
+
 /// Type alias for Conversation IDs
 pub type ConversationId = Id<ConversationIdType>;
 

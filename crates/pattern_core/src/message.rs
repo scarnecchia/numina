@@ -183,10 +183,18 @@ impl Request {
 }
 
 /// Message options
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageOptions {
     pub cache_control: Option<CacheControl>,
 }
+
+// impl Default for MessageOptions {
+//     fn default() -> Self {
+//         Self {
+//             cache_control: Some(CacheControl::Ephemeral),
+//         }
+//     }
+// }
 
 /// Cache control options
 #[derive(Debug, Clone, Serialize, Deserialize)]

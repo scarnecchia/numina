@@ -7,9 +7,14 @@ use miette::Result;
 use owo_colors::OwoColorize;
 use pattern_core::{
     config::{self},
-    db::{DatabaseConfig, client},
+    coordination::selectors::DefaultSelectorRegistry,
+    db::{
+        DatabaseConfig,
+        client::{self, DB},
+        ops,
+    },
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tracing::info;
 
 #[derive(Parser)]
@@ -38,8 +43,12 @@ enum Commands {
     /// Interactive chat with agents
     Chat {
         /// Agent name to chat with
-        #[arg(long, default_value = "Pattern")]
+        #[arg(long, default_value = "Pattern", conflicts_with = "group")]
         agent: String,
+
+        /// Group name to chat with
+        #[arg(long, conflicts_with = "agent")]
+        group: Option<String>,
 
         /// Model to use (e.g. gpt-4o, claude-3-haiku)
         #[arg(long)]
@@ -68,6 +77,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         cmd: ConfigCommands,
+    },
+    /// Agent group management
+    Group {
+        #[command(subcommand)]
+        cmd: GroupCommands,
     },
 }
 
@@ -102,6 +116,41 @@ enum ConfigCommands {
         /// Path to save configuration
         #[arg(default_value = "pattern.toml")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupCommands {
+    /// List all groups
+    List,
+    /// Create a new group
+    Create {
+        /// Group name
+        name: String,
+        /// Group description
+        #[arg(short = 'd', long)]
+        description: String,
+        /// Coordination pattern (round_robin, supervisor, dynamic, pipeline)
+        #[arg(short = 'p', long, default_value = "round_robin")]
+        pattern: String,
+    },
+    /// Add an agent to a group
+    AddMember {
+        /// Group name
+        group: String,
+        /// Agent name
+        agent: String,
+        /// Member role (regular, supervisor, specialist)
+        #[arg(long, default_value = "regular")]
+        role: String,
+        /// Capabilities (comma-separated)
+        #[arg(long)]
+        capabilities: Option<String>,
+    },
+    /// Show group status and members
+    Status {
+        /// Group name
+        name: String,
     },
 }
 
@@ -234,25 +283,102 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Chat {
             agent,
+            group,
             model,
             no_tools,
         } => {
             let output = crate::output::Output::new();
-            output.success("Starting chat mode...");
-            output.info("Agent:", &agent.bright_cyan().to_string());
-            if let Some(model_name) = &model {
-                output.info("Model:", &model_name.bright_yellow().to_string());
-            }
-            if !*no_tools {
-                output.info("Tools:", &"enabled".bright_green().to_string());
-            } else {
-                output.info("Tools:", &"disabled".bright_red().to_string());
-            }
 
-            // Try to load existing agent or create new one
-            let agent =
-                agent_ops::load_or_create_agent(agent, model.clone(), !*no_tools, &config).await?;
-            agent_ops::chat_with_agent(agent).await?;
+            if let Some(group_name) = group {
+                // Chat with a group
+                output.success("Starting group chat mode...");
+                output.info("Group:", &group_name.bright_cyan().to_string());
+
+                // Load the group from database
+                let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
+                let group = match group {
+                    Some(g) => g,
+                    None => {
+                        output.error(&format!("Group '{}' not found", group_name));
+                        return Ok(());
+                    }
+                };
+
+                // Load all agents in the group
+                let mut agents = Vec::new();
+                for (agent_record, _membership) in &group.members {
+                    // Create runtime agent from record
+                    let agent = agent_ops::create_agent_from_record(
+                        agent_record.clone(),
+                        model.clone(),
+                        !*no_tools,
+                        &config,
+                    )
+                    .await?;
+                    agents.push(agent);
+                }
+
+                if agents.is_empty() {
+                    output.error("No agents in group");
+                    output.info(
+                        "Hint:",
+                        "Add agents with: pattern-cli group add-member <group> <agent>",
+                    );
+                    return Ok(());
+                }
+
+                // Create the appropriate pattern manager
+                use pattern_core::coordination::types::CoordinationPattern;
+                use pattern_core::coordination::{
+                    DynamicManager, PipelineManager, RoundRobinManager, SleeptimeManager,
+                    SupervisorManager, VotingManager,
+                };
+
+                match &group.coordination_pattern {
+                    CoordinationPattern::RoundRobin { .. } => {
+                        let manager = RoundRobinManager;
+                        agent_ops::chat_with_group(group, agents, manager).await?;
+                    }
+                    CoordinationPattern::Dynamic { .. } => {
+                        let manager = DynamicManager::new(Arc::new(DefaultSelectorRegistry::new()));
+                        agent_ops::chat_with_group(group, agents, manager).await?;
+                    }
+                    CoordinationPattern::Pipeline { .. } => {
+                        let manager = PipelineManager;
+                        agent_ops::chat_with_group(group, agents, manager).await?;
+                    }
+                    CoordinationPattern::Supervisor { .. } => {
+                        let manager = SupervisorManager;
+                        agent_ops::chat_with_group(group, agents, manager).await?;
+                    }
+                    CoordinationPattern::Voting { .. } => {
+                        let manager = VotingManager;
+                        agent_ops::chat_with_group(group, agents, manager).await?;
+                    }
+                    CoordinationPattern::Sleeptime { .. } => {
+                        let manager = SleeptimeManager;
+                        agent_ops::chat_with_group(group, agents, manager).await?;
+                    }
+                }
+            } else {
+                // Chat with a single agent
+                output.success("Starting chat mode...");
+                output.info("Agent:", &agent.bright_cyan().to_string());
+                if let Some(model_name) = &model {
+                    output.info("Model:", &model_name.bright_yellow().to_string());
+                }
+                if !*no_tools {
+                    output.info("Tools:", &"enabled".bright_green().to_string());
+                } else {
+                    output.info("Tools:", &"disabled".bright_red().to_string());
+                }
+
+                // Try to load existing agent or create new one
+                let agent =
+                    agent_ops::load_or_create_agent(agent, model.clone(), !*no_tools, &config)
+                        .await?;
+                agent_ops::chat_with_agent(agent).await?;
+            }
         }
         Commands::Agent { cmd } => match cmd {
             AgentCommands::List => commands::agent::list().await?,
@@ -304,6 +430,24 @@ async fn main() -> Result<()> {
         Commands::Config { cmd } => match cmd {
             ConfigCommands::Show => commands::config::show(&config).await?,
             ConfigCommands::Save { path } => commands::config::save(&config, path).await?,
+        },
+        Commands::Group { cmd } => match cmd {
+            GroupCommands::List => commands::group::list(&config).await?,
+            GroupCommands::Create {
+                name,
+                description,
+                pattern,
+            } => commands::group::create(name, description, pattern, &config).await?,
+            GroupCommands::AddMember {
+                group,
+                agent,
+                role,
+                capabilities,
+            } => {
+                commands::group::add_member(group, agent, role, capabilities.as_deref(), &config)
+                    .await?
+            }
+            GroupCommands::Status { name } => commands::group::status(name, &config).await?,
         },
     }
 
