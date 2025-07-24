@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
                 .terminal_links(true)
                 //.rgb_colors(miette::RgbColors::)
                 .with_cause_chain()
-                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
+                //.with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
                 .color(true)
                 .context_lines(5)
                 .tab_width(2)

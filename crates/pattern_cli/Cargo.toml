@@ -18,7 +18,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
+miette = { workspace = true, features = ["fancy"] } # "syntect-highlighter"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 surrealdb = { workspace = true }
