@@ -407,37 +407,79 @@ pub async fn create_agent(
     agent.start_stats_sync().await?;
     agent.start_memory_sync().await?;
 
-    // Add persona as a core memory block if configured
+    // Update memory blocks from config only if they don't exist or have changed
+    // First check persona
     if let Some(persona) = &config.agent.persona {
-        output.status("Adding persona to agent's core memory...");
-        let persona_block = MemoryBlock::owned(config.user.id.clone(), "persona", persona.clone())
-            .with_description("Agent's persona and identity")
-            .with_permission(pattern_core::memory::MemoryPermission::ReadOnly);
+        match agent.get_memory("persona").await {
+            Ok(Some(mut existing)) => {
+                // Update existing block preserving its ID
+                if existing.value != *persona {
+                    output.status("Updating persona in agent's core memory...");
+                    existing.value = persona.clone();
+                    existing.description = Some("Agent's persona and identity".to_string());
+                    existing.permission = pattern_core::memory::MemoryPermission::ReadOnly;
 
-        if let Err(e) = agent.update_memory("persona", persona_block).await {
-            output.warning(&format!("Failed to add persona memory: {}", e));
+                    if let Err(e) = agent.update_memory("persona", existing).await {
+                        output.warning(&format!("Failed to update persona memory: {}", e));
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {
+                // Create new block
+                output.status("Adding persona to agent's core memory...");
+                let persona_block =
+                    MemoryBlock::owned(config.user.id.clone(), "persona", persona.clone())
+                        .with_description("Agent's persona and identity")
+                        .with_permission(pattern_core::memory::MemoryPermission::ReadOnly);
+
+                if let Err(e) = agent.update_memory("persona", persona_block).await {
+                    output.warning(&format!("Failed to add persona memory: {}", e));
+                }
+            }
         }
     }
 
-    // Add any pre-configured memory blocks
+    // Check and update other configured memory blocks
     for (label, block_config) in &config.agent.memory {
-        output.info("Adding memory block", &label.bright_yellow().to_string());
-        let memory_block = MemoryBlock::owned(
-            config.user.id.clone(),
-            label.clone(),
-            block_config.content.clone(),
-        )
-        .with_memory_type(block_config.memory_type)
-        .with_permission(block_config.permission);
+        match agent.get_memory(label).await {
+            Ok(Some(mut existing)) => {
+                // Update existing block preserving its ID
+                if existing.value != block_config.content {
+                    output.info("Updating memory block", &label.bright_yellow().to_string());
+                    existing.value = block_config.content.clone();
+                    existing.memory_type = block_config.memory_type;
+                    existing.permission = block_config.permission;
+                    if let Some(desc) = &block_config.description {
+                        existing.description = Some(desc.clone());
+                    }
 
-        let memory_block = if let Some(desc) = &block_config.description {
-            memory_block.with_description(desc.clone())
-        } else {
-            memory_block
-        };
+                    if let Err(e) = agent.update_memory(label, existing).await {
+                        output
+                            .warning(&format!("Failed to update memory block '{}': {}", label, e));
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {
+                // Create new block
+                output.info("Adding memory block", &label.bright_yellow().to_string());
+                let memory_block = MemoryBlock::owned(
+                    config.user.id.clone(),
+                    label.clone(),
+                    block_config.content.clone(),
+                )
+                .with_memory_type(block_config.memory_type)
+                .with_permission(block_config.permission);
 
-        if let Err(e) = agent.update_memory(label, memory_block).await {
-            output.warning(&format!("Failed to add memory block '{}': {}", label, e));
+                let memory_block = if let Some(desc) = &block_config.description {
+                    memory_block.with_description(desc.clone())
+                } else {
+                    memory_block
+                };
+
+                if let Err(e) = agent.update_memory(label, memory_block).await {
+                    output.warning(&format!("Failed to add memory block '{}': {}", label, e));
+                }
+            }
         }
     }
 
@@ -493,11 +535,22 @@ pub async fn chat_with_agent(agent: Arc<dyn Agent>) -> Result<()> {
                                 }
                                 MessageContent::ToolCalls(calls) => {
                                     for call in calls {
-                                        output.tool_call(
-                                            &call.fn_name,
-                                            &serde_json::to_string_pretty(&call.fn_arguments)
-                                                .unwrap_or_else(|_| call.fn_arguments.to_string()),
-                                        );
+                                        // For send_message, hide the content arg since it's displayed below
+                                        let args_display = if call.fn_name == "send_message" {
+                                            let mut args = call.fn_arguments.clone();
+                                            if args.get("content").is_some() {
+                                                args["content"] = serde_json::json!(
+                                                    "[content hidden - shown below]"
+                                                );
+                                            }
+                                            serde_json::to_string_pretty(&args)
+                                                .unwrap_or_else(|_| args.to_string())
+                                        } else {
+                                            serde_json::to_string_pretty(&call.fn_arguments)
+                                                .unwrap_or_else(|_| call.fn_arguments.to_string())
+                                        };
+
+                                        output.tool_call(&call.fn_name, &args_display);
 
                                         // Special handling for send_message tool
                                         if call.fn_name == "send_message" {
@@ -519,26 +572,6 @@ pub async fn chat_with_agent(agent: Arc<dyn Agent>) -> Result<()> {
                                 MessageContent::Parts(_) => {
                                     // Multi-part content, just show text parts for now
                                     output.status("[Multi-part content]");
-                                }
-                            }
-                        }
-
-                        // Also show tool calls from the response object
-                        if !response.tool_calls.is_empty() {
-                            for call in &response.tool_calls {
-                                output.tool_call(
-                                    &call.fn_name,
-                                    &serde_json::to_string_pretty(&call.fn_arguments)
-                                        .unwrap_or_else(|_| call.fn_arguments.to_string()),
-                                );
-
-                                // Special handling for send_message tool
-                                if call.fn_name == "send_message" {
-                                    if let Some(content) =
-                                        call.fn_arguments.get("content").and_then(|v| v.as_str())
-                                    {
-                                        output.agent_message(&agent_name, content);
-                                    }
                                 }
                             }
                         }

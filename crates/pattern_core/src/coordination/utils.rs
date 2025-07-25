@@ -8,7 +8,6 @@ pub fn text_response(text: impl Into<String>) -> Response {
     Response {
         content: vec![MessageContent::Text(text.into())],
         reasoning: None,
-        tool_calls: vec![],
         metadata: ResponseMetadata {
             processing_time: None,
             tokens_used: None,

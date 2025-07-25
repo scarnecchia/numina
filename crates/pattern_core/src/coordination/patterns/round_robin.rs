@@ -161,7 +161,6 @@ mod tests {
                     "Round robin test response".to_string(),
                 )],
                 reasoning: None,
-                tool_calls: vec![],
                 metadata: ResponseMetadata::default(),
             })
         }

@@ -231,7 +231,6 @@ mod tests {
             Ok(Response {
                 content: vec![MessageContent::Text("Test response".to_string())],
                 reasoning: None,
-                tool_calls: vec![],
                 metadata: ResponseMetadata::default(),
             })
         }

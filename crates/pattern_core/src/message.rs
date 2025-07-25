@@ -450,7 +450,6 @@ impl ToolResponse {
 pub struct Response {
     pub content: Vec<MessageContent>,
     pub reasoning: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
     pub metadata: ResponseMetadata,
 }
 
@@ -476,19 +475,18 @@ impl Response {
             .map(|gc| gc.into())
             .collect();
 
-        // Convert genai ToolCall to our ToolCall - this consumes resp
-        let tool_calls: Vec<ToolCall> = resp
-            .into_tool_calls()
-            .into_iter()
-            .map(|tc| tc.into())
-            .collect();
-
         Self {
             content,
             reasoning,
-            tool_calls,
             metadata,
         }
+    }
+
+    pub fn num_tool_calls(&self) -> usize {
+        self.content
+            .iter()
+            .filter(|c| c.tool_calls().is_some())
+            .count()
     }
 
     pub fn only_text(&self) -> String {
@@ -606,77 +604,129 @@ impl Message {
         }
     }
 
-    /// Create a Message from an agent Response
-    pub fn from_response(response: &Response, agent_id: crate::AgentId) -> Self {
-        // Determine content based on what the response contains
-        let content = if !response.content.is_empty() {
-            // If there's only one content item, use it directly
-            if response.content.len() == 1 {
-                // Special case: if it's Parts with a single Text, flatten to Text
-                match &response.content[0] {
-                    MessageContent::Parts(parts) if parts.len() == 1 => match &parts[0] {
-                        ContentPart::Text(text) => MessageContent::Text(text.clone()),
-                        _ => response.content[0].clone(),
-                    },
-                    _ => response.content[0].clone(),
+    /// Create Messages from an agent Response
+    pub fn from_response(response: &Response, agent_id: crate::AgentId) -> Vec<Self> {
+        let mut messages = Vec::new();
+
+        // Group assistant content together, but keep tool responses separate
+        let mut current_assistant_content: Vec<MessageContent> = Vec::new();
+
+        for content in &response.content {
+            match content {
+                MessageContent::ToolResponses(_) => {
+                    // First, flush any accumulated assistant content
+                    if !current_assistant_content.is_empty() {
+                        let combined_content = if current_assistant_content.len() == 1 {
+                            current_assistant_content[0].clone()
+                        } else {
+                            // Combine multiple content items - for now just take the first
+                            // TODO: properly combine Text + ToolCalls
+                            current_assistant_content[0].clone()
+                        };
+
+                        let has_tool_calls =
+                            matches!(&combined_content, MessageContent::ToolCalls(_));
+                        let word_count = Self::estimate_word_count(&combined_content);
+
+                        messages.push(Self {
+                            id: MessageId::generate(),
+                            role: ChatRole::Assistant,
+                            content: combined_content,
+                            metadata: MessageMetadata {
+                                user_id: Some(agent_id.to_string()),
+                                ..Default::default()
+                            },
+                            options: MessageOptions::default(),
+                            created_at: Utc::now(),
+                            owner_id: None,
+                            has_tool_calls,
+                            word_count,
+                            embedding: None,
+                            embedding_model: None,
+                        });
+                        current_assistant_content.clear();
+                    }
+
+                    // Then add the tool response as a separate message
+                    messages.push(Self {
+                        id: MessageId::generate(),
+                        role: ChatRole::Tool,
+                        content: content.clone(),
+                        metadata: MessageMetadata {
+                            user_id: Some(agent_id.to_string()),
+                            ..Default::default()
+                        },
+                        options: MessageOptions::default(),
+                        created_at: Utc::now(),
+                        owner_id: None,
+                        has_tool_calls: false,
+                        word_count: Self::estimate_word_count(content),
+                        embedding: None,
+                        embedding_model: None,
+                    });
                 }
-            } else {
-                // Multiple content items - concatenate all text into a single string
-                // This ensures compatibility with models like Gemini that don't support Parts
-                let combined_text: String = response
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        MessageContent::Text(text) => Some(text.clone()),
-                        _ => None, // Skip non-text content for now
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-
-                MessageContent::Text(combined_text)
+                _ => {
+                    // Accumulate assistant content
+                    current_assistant_content.push(content.clone());
+                }
             }
-        } else if !response.tool_calls.is_empty() {
-            // Tool calls response
-            MessageContent::ToolCalls(response.tool_calls.clone())
-        } else if let Some(reasoning) = &response.reasoning {
-            // Just reasoning text
-            MessageContent::Text(reasoning.clone())
-        } else {
-            // Empty response
-            MessageContent::Text(String::new())
-        };
-
-        // Determine role based on content type to ensure provider compatibility
-        // If response contains ToolResponses, it MUST be a Tool role message
-        let role = if response
-            .content
-            .iter()
-            .any(|c| matches!(c, MessageContent::ToolResponses(_)))
-        {
-            ChatRole::Tool
-        } else {
-            ChatRole::Assistant
-        };
-
-        let has_tool_calls = !response.tool_calls.is_empty();
-        let word_count = Self::estimate_word_count(&content);
-
-        Self {
-            id: MessageId::generate(),
-            role,
-            content,
-            metadata: MessageMetadata {
-                user_id: Some(agent_id.to_string()),
-                ..Default::default()
-            },
-            options: MessageOptions::default(),
-            created_at: Utc::now(),
-            owner_id: None,
-            has_tool_calls,
-            word_count,
-            embedding: None,
-            embedding_model: None,
         }
+
+        // Flush any remaining assistant content
+        if !current_assistant_content.is_empty() {
+            let combined_content = if current_assistant_content.len() == 1 {
+                current_assistant_content[0].clone()
+            } else {
+                // TODO: properly combine multiple content items
+                current_assistant_content[0].clone()
+            };
+
+            let has_tool_calls = matches!(&combined_content, MessageContent::ToolCalls(_));
+            let word_count = Self::estimate_word_count(&combined_content);
+
+            messages.push(Self {
+                id: MessageId::generate(),
+                role: ChatRole::Assistant,
+                content: combined_content,
+                metadata: MessageMetadata {
+                    user_id: Some(agent_id.to_string()),
+                    ..Default::default()
+                },
+                options: MessageOptions::default(),
+                created_at: Utc::now(),
+                owner_id: None,
+                has_tool_calls,
+                word_count,
+                embedding: None,
+                embedding_model: None,
+            });
+        }
+
+        // If response was empty but had reasoning, create a text message
+        if messages.is_empty() && response.reasoning.is_some() {
+            messages.push(Self {
+                id: MessageId::generate(),
+                role: ChatRole::Assistant,
+                content: MessageContent::Text(response.reasoning.clone().unwrap_or_default()),
+                metadata: MessageMetadata {
+                    user_id: Some(agent_id.to_string()),
+                    ..Default::default()
+                },
+                options: MessageOptions::default(),
+                created_at: Utc::now(),
+                owner_id: None,
+                has_tool_calls: false,
+                word_count: response
+                    .reasoning
+                    .as_ref()
+                    .map(|r| r.split_whitespace().count() as u32)
+                    .unwrap_or(0),
+                embedding: None,
+                embedding_model: None,
+            });
+        }
+
+        messages
     }
 
     /// Extract text content from the message if available

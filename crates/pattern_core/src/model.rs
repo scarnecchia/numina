@@ -340,7 +340,6 @@ impl ModelProvider for MockModelProvider {
         Ok(Response {
             content: vec![MessageContent::from_text(&self.response)],
             reasoning: None,
-            tool_calls: Vec::new(),
             metadata: Default::default(),
         })
     }

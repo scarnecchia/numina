@@ -504,96 +504,68 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
 
     /// Process a chat response and update state
     /// Returns a vec of responses: the original (minus tool calls) and a separate tool response if needed
-    pub async fn process_response(&self, response: Response) -> Result<Vec<Response>> {
-        let mut tool_responses = Vec::with_capacity(response.tool_calls.len());
-        let mut first_error = None;
+    pub async fn process_response(&self, mut response: Response) -> Response {
         let mut memory_updates = Vec::new();
 
+        let mut offset = 0usize; // as we add responses, our index gets offset.
         // Execute all tools, collecting responses or errors
-        for call in &response.tool_calls {
-            tracing::debug!(
-                "Executing tool: {} with args: {:?}",
-                call.fn_name,
-                call.fn_arguments
-            );
+        for (index, content) in response.content.clone().iter().enumerate() {
+            let mut tool_responses = Vec::new();
+            if let MessageContent::ToolCalls(call_group) = content {
+                for call in call_group {
+                    tracing::debug!(
+                        "Executing tool: {} with args: {:?}",
+                        call.fn_name,
+                        call.fn_arguments
+                    );
+                    match self
+                        .tools
+                        .execute(&call.fn_name, call.fn_arguments.clone())
+                        .await
+                    {
+                        Ok(tool_response) => {
+                            tracing::debug!("✅ Tool {} executed successfully", call.fn_name);
 
-            match self
-                .tools
-                .execute(&call.fn_name, call.fn_arguments.clone())
-                .await
-            {
-                Ok(tool_response) => {
-                    tracing::debug!("✅ Tool {} executed successfully", call.fn_name);
+                            // Track memory tool calls for persistence
+                            if call.fn_name.contains("memory") {
+                                memory_updates
+                                    .push((call.fn_name.clone(), call.fn_arguments.clone()));
+                            }
 
-                    // Track memory tool calls for persistence
-                    if call.fn_name.contains("memory") {
-                        memory_updates.push((call.fn_name.clone(), call.fn_arguments.clone()));
+                            tool_responses.push(ToolResponse {
+                                call_id: call.call_id.clone(),
+                                content: serde_json::to_string_pretty(&tool_response)
+                                    .unwrap_or("Error serializing tool response".to_string()),
+                            });
+                        }
+                        Err(e) => {
+                            crate::log_error!(
+                                format!("❌ Tool execution failed for {}", call.fn_name),
+                                e
+                            );
+
+                            // Add error response for this tool
+                            tool_responses.push(ToolResponse {
+                                call_id: call.call_id.clone(),
+                                content: format!(
+                                    "Error: Failed to execute tool '{}': {}",
+                                    call.fn_name, e
+                                ),
+                            });
+                        }
                     }
-
-                    tool_responses.push(ToolResponse {
-                        call_id: call.call_id.clone(),
-                        content: serde_json::to_string_pretty(&tool_response)
-                            .unwrap_or("Error serializing tool response".to_string()),
-                    });
                 }
-                Err(e) => {
-                    crate::log_error!(format!("❌ Tool execution failed for {}", call.fn_name), e);
-                    // Store first error but continue executing other tools
-                    if first_error.is_none() {
-                        first_error = Some(CoreError::tool_execution_error(
-                            call.fn_name.clone(),
-                            format!("{}", e),
-                        ));
-                    }
-                    // Add error response for this tool
-                    tool_responses.push(ToolResponse {
-                        call_id: call.call_id.clone(),
-                        content: format!("Error: Failed to execute tool '{}': {}", call.fn_name, e),
-                    });
-                }
+                // Insert tool responses RIGHT AFTER the tool calls
+                response.content.insert(
+                    index + offset + 1,
+                    MessageContent::ToolResponses(tool_responses),
+                );
+                // update our offset to accommodate the insertion
+                offset += 1;
             }
         }
 
-        // If any tool failed, return the first error
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-
-        let mut results = Vec::new();
-
-        // Add the original response if it has content (text/parts)
-        // Don't include tool calls in this response
-        let non_tool_content: Vec<MessageContent> = response
-            .content
-            .into_iter()
-            .filter(|c| !matches!(c, MessageContent::ToolCalls(_)))
-            .collect();
-
-        if !non_tool_content.is_empty() {
-            results.push(Response {
-                content: non_tool_content,
-                reasoning: response.reasoning,
-                tool_calls: vec![], // Tool calls handled separately
-                metadata: response.metadata.clone(),
-            });
-        }
-
-        // Create a separate response for tool responses with Tool role
-        if !tool_responses.is_empty() {
-            results.push(Response {
-                content: vec![MessageContent::ToolResponses(tool_responses)],
-                reasoning: None,
-                tool_calls: vec![],
-                metadata: response.metadata,
-            });
-        }
-
-        tracing::debug!(
-            "✅ process_response complete: returning {} responses",
-            results.len()
-        );
-
-        Ok(results)
+        response
     }
 
     /// Update a memory block

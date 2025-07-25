@@ -1,6 +1,9 @@
 //! Database operations - direct, simple, no unnecessary abstractions
 
-use super::{DatabaseError, Result, entity::DbEntity};
+use super::{
+    DatabaseError, Result,
+    entity::{AgentMemoryRelation, DbEntity},
+};
 use serde_json::json;
 use surrealdb::{Connection, Surreal};
 
@@ -141,7 +144,7 @@ pub async fn query_entities<E: DbEntity, C: Connection>(
 // Relationship Operations using RELATE
 // ============================================================================
 
-/// Create a typed relationship between two entities using RELATE
+/// Create a typed relationship between two entities using RELATE (idempotent)
 pub async fn create_relation_typed<E: DbEntity, C: Connection>(
     conn: &Surreal<C>,
     edge_entity: &E,
@@ -197,6 +200,41 @@ pub async fn create_relation_typed<E: DbEntity, C: Connection>(
         to,
         E::table_name()
     );
+
+    // Check if relation already exists
+    let existing_query = format!(
+        "SELECT * FROM {} WHERE in = $from AND out = $to",
+        E::table_name()
+    );
+
+    let mut existing_result = conn
+        .query(&existing_query)
+        .bind(("from", from.clone()))
+        .bind(("to", to.clone()))
+        .await?;
+
+    // Check if we already have this relation
+    let existing: Vec<E::DbModel> = existing_result.take(0).unwrap_or_default();
+
+    if !existing.is_empty() {
+        tracing::debug!(
+            "Relation already exists between {} and {} in table {}, returning existing",
+            from,
+            to,
+            E::table_name()
+        );
+
+        // Return the existing relation
+        return existing
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                DatabaseError::QueryFailed(surrealdb::Error::Api(surrealdb::error::Api::Query(
+                    "Failed to get existing relation".into(),
+                )))
+            })
+            .and_then(|db_model| E::from_db_model(db_model).map_err(DatabaseError::from));
+    }
 
     // Build the RELATE query
     let mut query = format!(
@@ -511,22 +549,22 @@ pub async fn attach_memory_to_agent<C: Connection>(
     memory_id: MemoryId,
     access_level: crate::memory::MemoryPermission,
 ) -> Result<()> {
-    use crate::db::entity::AgentMemoryRelation;
-
     tracing::debug!("🔗 Attaching memory {} to agent {}", memory_id, agent_id);
 
-    // Create the edge entity (without ID - SurrealDB will generate it)
-    let relation = AgentMemoryRelation {
-        id: None, // SurrealDB will generate the edge entity ID
-        in_id: agent_id.clone(),
-        out_id: memory_id.clone(),
-        access_level,
-        created_at: chrono::Utc::now(),
-    };
+    // Use RELATE to create the relationship
+    let query = r#"
+        RELATE $agent_id->agent_memories->$memory_id
+        SET access_level = $access_level,
+            created_at = time::now()
+    "#;
 
-    // Create the relation using the typed function
-    let _created = create_relation_typed(conn, &relation).await?;
-    tracing::debug!("✅ Created agent-memory relation: {:?}", _created);
+    conn.query(query)
+        .bind(("agent_id", RecordId::from(agent_id.clone())))
+        .bind(("memory_id", RecordId::from(memory_id.clone())))
+        .bind(("access_level", access_level))
+        .await?;
+
+    tracing::debug!("✅ Created agent-memory relation");
 
     // Verify the relation was created by querying for it
     let verify_query = r#"
@@ -595,13 +633,23 @@ pub async fn get_agent_memories<C: Connection>(
 
     // Now fetch the actual memory blocks
     let mut memories = Vec::new();
+    let mut seen_labels = std::collections::HashSet::<compact_str::CompactString>::new();
+
     for relation in relations {
         let memory_db: Option<<MemoryBlock as DbEntity>::DbModel> =
             conn.select(RecordId::from(relation.out_id)).await?;
 
         if let Some(db_model) = memory_db {
             let memory = MemoryBlock::from_db_model(db_model)?;
-            memories.push((memory, relation.access_level));
+            // Deduplicate by label
+            if seen_labels.insert(memory.label.clone()) {
+                memories.push((memory, relation.access_level));
+            } else {
+                tracing::warn!(
+                    "Skipping duplicate memory block with label: {}",
+                    memory.label
+                );
+            }
         }
     }
 
@@ -802,32 +850,17 @@ pub async fn persist_agent_memory<C: Connection>(
     // Store or update the memory block
     let stored_memory = memory.store_with_relations(conn).await?;
 
-    // Check if relation already exists
-    let existing_query = r#"
-        SELECT * FROM agent_memories
-        WHERE in = $agent_id AND out = $memory_id
-    "#;
+    // Create the relation using create_relation_typed (now idempotent)
+    let relation = AgentMemoryRelation {
+        id: None, // Will be set by SurrealDB
+        in_id: agent_id,
+        out_id: stored_memory.id,
+        access_level,
+        created_at: chrono::Utc::now(),
+    };
 
-    let mut result = conn
-        .query(existing_query)
-        .bind(("agent_id", RecordId::from(agent_id)))
-        .bind(("memory_id", RecordId::from(stored_memory.id)))
-        .await?;
-
-    let existing: Vec<serde_json::Value> = result.take(0)?;
-
-    if existing.is_empty() {
-        // Create new relation
-        let relation = crate::db::entity::AgentMemoryRelation {
-            id: None,
-            in_id: agent_id,
-            out_id: stored_memory.id,
-            access_level,
-            created_at: Utc::now(),
-        };
-
-        create_relation_typed(conn, &relation).await?;
-    }
+    let _created_relation = create_relation_typed(conn, &relation).await?;
+    tracing::debug!("Agent-memory relation created/confirmed");
 
     Ok(())
 }
@@ -991,8 +1024,8 @@ pub async fn get_group_by_name<C: Connection>(
     group_name: &str,
 ) -> Result<Option<AgentGroup>> {
     let query = r#"
-        SELECT * FROM group 
-        WHERE name = $name 
+        SELECT * FROM group
+        WHERE name = $name
         AND id IN (
             SELECT groups FROM constellation WHERE owner_id = $user_id
         )
@@ -1022,7 +1055,7 @@ pub async fn list_groups_for_user<C: Connection>(
     user_id: &UserId,
 ) -> Result<Vec<AgentGroup>> {
     let query = r#"
-        SELECT * FROM group 
+        SELECT * FROM group
         WHERE id IN (
             SELECT groups FROM constellation WHERE owner_id = $user_id
         )
@@ -1139,7 +1172,7 @@ pub async fn get_or_create_constellation<C: Connection>(
 ) -> Result<Constellation> {
     // First try to find existing constellation
     let query = r#"
-        SELECT * FROM constellation 
+        SELECT * FROM constellation
         WHERE owner_id = $user_id
         LIMIT 1
     "#;
