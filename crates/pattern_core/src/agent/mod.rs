@@ -13,6 +13,7 @@ pub use impls::{AgentDbExt, DatabaseAgent};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::str::FromStr;
@@ -91,7 +92,7 @@ pub trait Agent: Send + Sync + Debug {
 }
 
 /// Types of agents in the system
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
 pub enum AgentType {
     /// Generic agent without specific personality
     Generic,
@@ -212,7 +213,7 @@ impl FromStr for AgentType {
 }
 
 /// The current state of an agent
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentState {
     /// Agent is ready to process messages

@@ -37,10 +37,7 @@ impl GroupManager for RoundRobinManager {
                 return Err(CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "route_message".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid pattern for RoundRobinManager",
-                    )),
+                    cause: "Invalid pattern for RoundRobinManager".to_string(),
                 });
             }
         };
@@ -60,10 +57,7 @@ impl GroupManager for RoundRobinManager {
             return Err(CoreError::AgentGroupError {
                 group_name: group.name.clone(),
                 operation: "route_message".to_string(),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No available agents in group",
-                )),
+                cause: "No available agents in group".to_string(),
             });
         }
 

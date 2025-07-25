@@ -44,10 +44,7 @@ impl GroupManager for DynamicManager {
                 return Err(CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "route_message".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid pattern for DynamicManager",
-                    )),
+                    cause: "Invalid pattern for DynamicManager".to_string(),
                 });
             }
         };
@@ -65,10 +62,7 @@ impl GroupManager for DynamicManager {
                 .ok_or_else(|| CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "get_selector".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("Selector '{}' not found", selector_name),
-                    )),
+                    cause: format!("Selector '{}' not found", selector_name),
                 })?;
 
         // Build selection context
@@ -100,10 +94,7 @@ impl GroupManager for DynamicManager {
             return Err(CoreError::AgentGroupError {
                 group_name: group.name.clone(),
                 operation: "select_agents".to_string(),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No agents selected by dynamic selector",
-                )),
+                cause: "No agents selected by dynamic selector".to_string(),
             });
         }
 

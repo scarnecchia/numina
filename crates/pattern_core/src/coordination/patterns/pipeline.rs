@@ -41,10 +41,7 @@ impl GroupManager for PipelineManager {
                 return Err(CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "route_message".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid pattern for PipelineManager",
-                    )),
+                    cause: "Invalid pattern for PipelineManager".to_string(),
                 });
             }
         };
@@ -212,10 +209,7 @@ impl PipelineManager {
             .ok_or_else(|| CoreError::AgentGroupError {
                 group_name: group_name.clone(),
                 operation: format!("stage_{}", stage.name),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("No agents configured for stage '{}'", stage.name),
-                )),
+                cause: format!("No agents configured for stage '{}'", stage.name),
             })?;
 
         // Verify agent exists and is active
@@ -228,10 +222,7 @@ impl PipelineManager {
             return Err(CoreError::AgentGroupError {
                 group_name,
                 operation: format!("stage_{}", stage.name),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Agent {} is not active", agent_id),
-                )),
+                cause: format!("Agent {} is not active", agent_id),
             });
         }
 
@@ -307,13 +298,10 @@ impl PipelineManager {
                 Err(CoreError::AgentGroupError {
                     group_name: "pipeline".to_string(),
                     operation: format!("stage_{}_retry", stage.name),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "Stage '{}' failed after {} attempts",
-                            stage.name, max_attempts
-                        ),
-                    )),
+                    cause: format!(
+                        "Stage '{}' failed after {} attempts",
+                        stage.name, max_attempts
+                    ),
                 })
             }
             StageFailureAction::Abort => {
@@ -331,10 +319,7 @@ impl PipelineManager {
                     return Err(CoreError::AgentGroupError {
                         group_name: "pipeline".to_string(),
                         operation: format!("stage_{}_fallback", stage.name),
-                        cause: Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Fallback agent {} is not active", agent_id),
-                        )),
+                        cause: format!("Fallback agent {} is not active", agent_id),
                     });
                 }
 

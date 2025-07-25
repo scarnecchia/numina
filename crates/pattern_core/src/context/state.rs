@@ -749,10 +749,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
         if checkpoint.agent_id != self.handle.agent_id {
             return Err(CoreError::AgentInitFailed {
                 agent_type: format!("{:?}", self.handle.agent_type),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Checkpoint is for a different agent",
-                )),
+                cause: "Checkpoint is for a different agent".to_string(),
             });
         }
 

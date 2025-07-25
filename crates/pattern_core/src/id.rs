@@ -4,6 +4,7 @@
 //! and UUID-based uniqueness guarantees.
 
 use compact_str::CompactString;
+use schemars::JsonSchema;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{self, Display};
@@ -243,6 +244,17 @@ impl<'de, T: IdType> Visitor<'de> for Id<T> {
     }
 }
 
+impl<T: IdType> JsonSchema for Id<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Owned(format!("{}Id", T::PREFIX))
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Generate same schema as String since we serialize to string
+        String::json_schema(generator)
+    }
+}
+
 /// Macro to define new ID types with minimal boilerplate
 #[macro_export]
 macro_rules! define_id_type {
@@ -324,7 +336,7 @@ define_id_type!(MessageIdType, "msg");
 /// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
 /// format because it needs to be compatible with Anthropic/OpenAI APIs which
 /// expect arbitrary string UUIDs.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize, JsonSchema)]
 #[repr(transparent)]
 pub struct MessageId(pub String);
 

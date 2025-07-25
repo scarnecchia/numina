@@ -41,10 +41,7 @@ impl GroupManager for SleeptimeManager {
                 return Err(CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "route_message".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid pattern for SleeptimeManager",
-                    )),
+                    cause: "Invalid pattern for SleeptimeManager".to_string(),
                 });
             }
         };

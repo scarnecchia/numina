@@ -141,6 +141,12 @@ pub struct User {
 - [X] Add live query support for agent stats
 - [X] Build agent groups framework
 - [X] Create basic binary (CLI/TUI) for user testing - COMPLETE
+- [ ] **Backend API Server** - IN PROGRESS
+  - Create unified server that combines:
+    - HTTP/WebSocket API for Pattern framework
+    - MCP client/server integration
+    - Discord bot integration
+  - Architecture plan below
 
 ### Medium Priority
 - [X] Make agent groups usable via CLI and config system - COMPLETE
@@ -152,6 +158,118 @@ pub struct User {
 - [ ] Implement time tracking with ADHD multipliers
 - [ ] Add energy/attention monitoring
 - [ ] Add vector search for archival memory using embeddings
+
+## Backend API Server Architecture
+
+### Overview
+Create a unified backend server that provides multiple interfaces to the Pattern framework:
+- HTTP REST API for web/mobile clients
+- WebSocket API for real-time updates
+- MCP server for tool integration
+- MCP client for consuming external tools
+- Discord bot for chat integration
+
+### Crate Structure
+
+#### `pattern-api` (Shared Types)
+- Request/response DTOs
+- WebSocket message types
+- Event definitions
+- Error types
+- API versioning
+
+Key endpoints:
+- **Auth**: `/api/v1/auth/*` - User authentication
+- **Users**: `/api/v1/users/*` - User management
+- **Agents**: `/api/v1/agents/*` - Agent CRUD and management
+- **Groups**: `/api/v1/groups/*` - Group management
+- **Messages**: `/api/v1/messages/*` - Message history
+- **Chat**: `/api/v1/chat/*` - Real-time chat endpoints
+- **WebSocket**: `/ws` - Real-time updates
+
+#### `pattern-server` (Server Implementation)
+- Axum HTTP server
+- WebSocket handlers
+- MCP server integration
+- Discord bot runner
+- Database connection pool
+- Authentication middleware
+- Rate limiting
+- CORS handling
+
+Architecture:
+```
+pattern-server
+├── src/
+│   ├── main.rs           # Server entry point
+│   ├── config.rs         # Server configuration
+│   ├── state.rs          # Shared app state
+│   ├── auth/            # Authentication logic
+│   ├── handlers/        # HTTP request handlers
+│   │   ├── agents.rs
+│   │   ├── chat.rs
+│   │   ├── groups.rs
+│   │   └── users.rs
+│   ├── websocket/       # WebSocket handling
+│   ├── mcp/            # MCP client/server
+│   └── discord/        # Discord bot integration
+```
+
+#### `pattern-client` (Future Client SDK)
+- HTTP client wrapper
+- WebSocket client
+- Type-safe API calls
+- Automatic retries
+- Token management
+
+### Implementation Plan
+
+1. **Phase 1: Basic HTTP API**
+   - Set up Axum server structure
+   - Implement user authentication (JWT or session-based)
+   - Add basic CRUD endpoints for agents/groups
+   - Database connection pooling
+   - Error handling and logging
+
+2. **Phase 2: Chat Functionality**
+   - HTTP chat endpoints
+   - WebSocket support for real-time messaging
+   - Message streaming for long responses
+   - Typing indicators and presence
+
+3. **Phase 3: MCP Integration**
+   - MCP server for Pattern tools
+   - MCP client for external tools
+   - Tool discovery and registration
+   - Permission management
+
+4. **Phase 4: Discord Bot**
+   - Run Discord bot in same process
+   - Share database and agent infrastructure
+   - Command routing to API handlers
+   - DM and channel support
+
+5. **Phase 5: Advanced Features**
+   - Rate limiting per user/endpoint
+   - Metrics and monitoring
+   - Admin API endpoints
+   - Batch operations
+   - Import/export functionality
+
+### Security Considerations
+- JWT or session-based auth
+- Rate limiting per user
+- CORS configuration
+- Input validation
+- SQL injection prevention (already handled by SurrealDB)
+- Secure WebSocket connections (WSS)
+
+### Database Schema Updates
+May need to add:
+- API keys/tokens table
+- Rate limit tracking
+- Session storage
+- Audit logs
 
 ### Documentation
 Each major component has dedicated docs in `docs/`:

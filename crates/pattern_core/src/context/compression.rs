@@ -308,10 +308,7 @@ impl MessageCompressor {
                 config_path: "compression".to_string(),
                 field: "model_provider".to_string(),
                 expected: "ModelProvider required for recursive summarization".to_string(),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No model provider configured",
-                )),
+                cause: crate::error::ConfigError::MissingField("model_provider".to_string()),
             });
         }
 

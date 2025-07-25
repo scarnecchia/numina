@@ -37,10 +37,7 @@ impl GroupManager for SupervisorManager {
                 return Err(CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "route_message".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid pattern for SupervisorManager",
-                    )),
+                    cause: "Invalid pattern for SupervisorManager".to_string(),
                 });
             }
         };
@@ -117,10 +114,7 @@ impl GroupManager for SupervisorManager {
                         return Err(CoreError::AgentGroupError {
                             group_name: group.name.clone(),
                             operation: "delegate".to_string(),
-                            cause: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "No delegates available and fallback is set to fail",
-                            )),
+                            cause: "No delegates available and fallback is set to fail".to_string(),
                         });
                     }
                 }

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use genai::{ModelIden, chat::Usage};
 use pattern_macros::Entity;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -149,7 +150,7 @@ impl Message {
 }
 
 /// Metadata associated with a message
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct MessageMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
@@ -183,7 +184,7 @@ impl Request {
 }
 
 /// Message options
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct MessageOptions {
     pub cache_control: Option<CacheControl>,
 }
@@ -197,7 +198,7 @@ pub struct MessageOptions {
 // }
 
 /// Cache control options
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum CacheControl {
     Ephemeral,
 }
@@ -211,7 +212,7 @@ impl From<CacheControl> for MessageOptions {
 }
 
 /// Chat roles
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
     System,
@@ -254,7 +255,7 @@ impl ChatRole {
 }
 
 /// Message content variants
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum MessageContent {
     /// Simple text content
     Text(String),
@@ -362,7 +363,7 @@ impl From<Vec<ContentPart>> for MessageContent {
 }
 
 /// Content part for multi-modal messages
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ContentPart {
     Text(String),
     Image {
@@ -410,7 +411,7 @@ impl From<String> for ContentPart {
 }
 
 /// Image source
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ImageSource {
     /// URL to the image (not all models support this)
     Url(String),
@@ -420,7 +421,7 @@ pub enum ImageSource {
 }
 
 /// Tool call from the assistant
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ToolCall {
     pub call_id: String,
     pub fn_name: String,
@@ -428,7 +429,7 @@ pub struct ToolCall {
 }
 
 /// Tool response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ToolResponse {
     pub call_id: String,
     pub content: String,

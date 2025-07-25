@@ -264,7 +264,7 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
             config_path: path.display().to_string(),
             field: "file".to_string(),
             expected: "readable TOML file".to_string(),
-            cause: Box::new(e),
+            cause: crate::error::ConfigError::Io(e.to_string()),
         }
     })?;
 
@@ -273,7 +273,7 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
             config_path: path.display().to_string(),
             field: "content".to_string(),
             expected: "valid TOML configuration".to_string(),
-            cause: Box::new(e),
+            cause: crate::error::ConfigError::TomlParse(e.to_string()),
         })?;
 
     Ok(config)
@@ -288,7 +288,7 @@ pub async fn save_config(config: &PatternConfig, path: &Path) -> Result<()> {
                 config_path: parent.display().to_string(),
                 field: "directory".to_string(),
                 expected: "writable directory".to_string(),
-                cause: Box::new(e),
+                cause: crate::error::ConfigError::Io(e.to_string()),
             }
         })?;
     }
@@ -298,7 +298,7 @@ pub async fn save_config(config: &PatternConfig, path: &Path) -> Result<()> {
             config_path: path.display().to_string(),
             field: "serialization".to_string(),
             expected: "serializable config structure".to_string(),
-            cause: Box::new(e),
+            cause: crate::error::ConfigError::TomlSerialize(e.to_string()),
         })?;
 
     tokio::fs::write(path, content)
@@ -307,7 +307,7 @@ pub async fn save_config(config: &PatternConfig, path: &Path) -> Result<()> {
             config_path: path.display().to_string(),
             field: "file".to_string(),
             expected: "writable file location".to_string(),
-            cause: Box::new(e),
+            cause: crate::error::ConfigError::Io(e.to_string()),
         })?;
 
     Ok(())

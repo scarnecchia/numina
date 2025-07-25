@@ -41,10 +41,7 @@ impl GroupManager for VotingManager {
                 return Err(CoreError::AgentGroupError {
                     group_name: group.name.clone(),
                     operation: "route_message".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid pattern for VotingManager",
-                    )),
+                    cause: "Invalid pattern for VotingManager".to_string(),
                 });
             }
         };
@@ -235,10 +232,7 @@ impl VotingManager {
                         .ok_or_else(|| CoreError::AgentGroupError {
                             group_name: "voting".to_string(),
                             operation: "tie_breaker".to_string(),
-                            cause: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "No winners to choose from",
-                            )),
+                            cause: "No winners to choose from".to_string(),
                         })
                 }
                 TieBreaker::FirstVote => {
@@ -258,10 +252,7 @@ impl VotingManager {
                     winning_option.ok_or_else(|| CoreError::AgentGroupError {
                         group_name: "voting".to_string(),
                         operation: "tie_breaker".to_string(),
-                        cause: Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Could not determine first vote",
-                        )),
+                        cause: "Could not determine first vote".to_string(),
                     })
                 }
                 TieBreaker::SpecificAgent(agent_id) => {
@@ -273,19 +264,13 @@ impl VotingManager {
                         .ok_or_else(|| CoreError::AgentGroupError {
                             group_name: "voting".to_string(),
                             operation: "tie_breaker".to_string(),
-                            cause: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("Tie-breaker agent {} did not vote", agent_id),
-                            )),
+                            cause: format!("Tie-breaker agent {} did not vote", agent_id),
                         })
                 }
                 TieBreaker::NoDecision => Err(CoreError::AgentGroupError {
                     group_name: "voting".to_string(),
                     operation: "tie_breaker".to_string(),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Voting resulted in a tie with no tie-breaker",
-                    )),
+                    cause: "Voting resulted in a tie with no tie-breaker".to_string(),
                 }),
             }
         }

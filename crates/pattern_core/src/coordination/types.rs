@@ -1,6 +1,7 @@
 //! Type definitions for agent coordination patterns
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use uuid::Uuid;
 use crate::{AgentId, AgentState, message::Message};
 
 /// Defines how agents in a group coordinate their actions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinationPattern {
     /// One agent leads, others follow
@@ -64,7 +65,7 @@ pub enum CoordinationPattern {
 }
 
 /// Rules for delegation in supervisor pattern
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DelegationRules {
     /// Maximum concurrent delegations per agent
     pub max_delegations_per_agent: Option<usize>,
@@ -74,7 +75,7 @@ pub struct DelegationRules {
     pub fallback_behavior: FallbackBehavior,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegationStrategy {
     /// Delegate to agents in round-robin order
@@ -87,7 +88,7 @@ pub enum DelegationStrategy {
     Random,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackBehavior {
     /// Supervisor handles it themselves
@@ -99,10 +100,11 @@ pub enum FallbackBehavior {
 }
 
 /// Rules governing how voting works
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VotingRules {
     /// How long to wait for all votes before proceeding
     #[serde(with = "crate::utils::serde_duration")]
+    #[schemars(with = "u64")]
     pub voting_timeout: Duration,
     /// Strategy for breaking ties
     pub tie_breaker: TieBreaker,
@@ -111,7 +113,7 @@ pub struct VotingRules {
 }
 
 /// Strategy for breaking voting ties
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TieBreaker {
     /// Randomly select from tied options
@@ -125,7 +127,7 @@ pub enum TieBreaker {
 }
 
 /// A stage in a pipeline coordination pattern
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PipelineStage {
     /// Name of this stage
     pub name: String,
@@ -133,13 +135,14 @@ pub struct PipelineStage {
     pub agent_ids: Vec<AgentId>,
     /// Maximum time allowed for this stage
     #[serde(with = "crate::utils::serde_duration")]
+    #[schemars(with = "u64")]
     pub timeout: Duration,
     /// What to do if this stage fails
     pub on_failure: StageFailureAction,
 }
 
 /// Actions to take when a pipeline stage fails
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StageFailureAction {
     /// Skip this stage and continue
@@ -153,7 +156,7 @@ pub enum StageFailureAction {
 }
 
 /// A trigger condition for sleeptime monitoring
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SleeptimeTrigger {
     /// Name of this trigger
     pub name: String,
@@ -164,12 +167,13 @@ pub struct SleeptimeTrigger {
 }
 
 /// Conditions that can trigger intervention in sleeptime monitoring
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TriggerCondition {
     /// Trigger after a specific duration has passed
     TimeElapsed {
         #[serde(with = "crate::utils::serde_duration")]
+        #[schemars(with = "u64")]
         duration: Duration,
     },
     /// Trigger when a named pattern is detected
@@ -181,7 +185,9 @@ pub enum TriggerCondition {
 }
 
 /// Priority levels for sleeptime triggers
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerPriority {
     /// Low priority - can be batched or delayed
@@ -325,7 +331,7 @@ pub struct TriggerEvent {
 }
 
 /// Role of an agent in a group
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupMemberRole {
     /// Regular group member

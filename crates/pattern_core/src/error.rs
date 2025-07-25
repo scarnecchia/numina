@@ -1,10 +1,31 @@
 use crate::{
     AgentId,
     db::{DatabaseError, entity::EntityError},
+    embeddings::EmbeddingError,
 };
 use compact_str::CompactString;
 use miette::Diagnostic;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Configuration-specific errors
+#[derive(Error, Debug, Clone, Serialize, Deserialize)]
+pub enum ConfigError {
+    #[error("IO error: {0}")]
+    Io(String),
+
+    #[error("TOML parse error: {0}")]
+    TomlParse(String),
+
+    #[error("TOML serialize error: {0}")]
+    TomlSerialize(String),
+
+    #[error("Missing required field: {0}")]
+    MissingField(String),
+
+    #[error("Invalid value for field {field}: {reason}")]
+    InvalidValue { field: String, reason: String },
+}
 
 #[derive(Error, Diagnostic, Debug)]
 pub enum CoreError {
@@ -26,11 +47,7 @@ pub enum CoreError {
         code(pattern_core::agent_init_failed),
         help("Check the agent configuration and ensure all required fields are provided")
     )]
-    AgentInitFailed {
-        agent_type: String,
-        #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
-    },
+    AgentInitFailed { agent_type: String, cause: String },
 
     #[error("Memory block not found")]
     #[diagnostic(
@@ -52,7 +69,7 @@ pub enum CoreError {
         operation: String,
         agent_id: String,
         #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: DatabaseError,
     },
 
     #[error("Tool not found")]
@@ -76,8 +93,7 @@ pub enum CoreError {
     )]
     ToolExecutionFailed {
         tool_name: String,
-        #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: String,
         parameters: serde_json::Value,
     },
 
@@ -102,7 +118,7 @@ pub enum CoreError {
         provider: String,
         model: String,
         #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: genai::Error,
     },
 
     #[error("Model capability mismatch")]
@@ -159,7 +175,7 @@ pub enum CoreError {
         field: String,
         expected: String,
         #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: ConfigError,
     },
 
     #[error("Agent coordination failed")]
@@ -171,8 +187,7 @@ pub enum CoreError {
         group: String,
         pattern: String,
         participating_agents: Vec<String>,
-        #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: String,
     },
 
     #[error("Constellation not found")]
@@ -233,7 +248,7 @@ pub enum CoreError {
         collection: String,
         dimension_mismatch: Option<(usize, usize)>,
         #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: EmbeddingError,
     },
 
     #[error("Agent group error")]
@@ -244,8 +259,7 @@ pub enum CoreError {
     AgentGroupError {
         group_name: String,
         operation: String,
-        #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
+        cause: String,
     },
 
     #[error("Permission denied")]
@@ -313,7 +327,7 @@ impl From<DatabaseError> for CoreError {
             DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
                 collection: "unknown".to_string(),
                 dimension_mismatch: None,
-                cause: Box::new(e),
+                cause: e,
             },
             DatabaseError::EmbeddingModelMismatch {
                 db_model,
@@ -322,13 +336,13 @@ impl From<DatabaseError> for CoreError {
                 config_path: "database".to_string(),
                 field: "embedding_model".to_string(),
                 expected: db_model.clone(),
-                cause: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
+                cause: ConfigError::InvalidValue {
+                    field: "embedding_model".to_string(),
+                    reason: format!(
                         "Model mismatch: database has {}, config has {}",
                         db_model, config_model
                     ),
-                )),
+                },
             },
             DatabaseError::SchemaVersionMismatch {
                 db_version,
@@ -345,13 +359,7 @@ impl From<DatabaseError> for CoreError {
                 Self::VectorSearchFailed {
                     collection: "unknown".to_string(),
                     dimension_mismatch: Some((expected, actual)),
-                    cause: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "Invalid vector dimensions: expected {}, got {}",
-                            expected, actual
-                        ),
-                    )),
+                    cause: EmbeddingError::DimensionMismatch { expected, actual },
                 }
             }
             DatabaseError::TransactionFailed(e) => Self::DatabaseQueryFailed {
@@ -427,12 +435,12 @@ impl CoreError {
     pub fn model_error(
         provider: impl Into<String>,
         model: impl Into<String>,
-        cause: impl std::error::Error + Send + Sync + 'static,
+        cause: genai::Error,
     ) -> Self {
         Self::ModelProviderError {
             provider: provider.into(),
             model: model.into(),
-            cause: Box::new(cause),
+            cause,
         }
     }
 
@@ -461,13 +469,9 @@ impl CoreError {
     }
 
     pub fn tool_execution_error(tool_name: impl Into<String>, error: impl Into<String>) -> Self {
-        #[derive(Debug, Error)]
-        #[error("{0}")]
-        struct StringError(String);
-
         Self::ToolExecutionFailed {
             tool_name: tool_name.into(),
-            cause: Box::new(StringError(error.into())),
+            cause: error.into(),
             parameters: serde_json::Value::Null,
         }
     }

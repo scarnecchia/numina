@@ -187,7 +187,7 @@ mod tests {
             config_path: "/path/to/config.toml".to_string(),
             field: "api_key".to_string(),
             expected: "valid API key".to_string(),
-            cause: Box::new(io::Error::new(io::ErrorKind::NotFound, "File not found")),
+            cause: crate::error::ConfigError::Io("File not found".to_string()),
         };
 
         println!("\n=== CoreError with miette formatting ===");
