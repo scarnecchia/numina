@@ -894,8 +894,38 @@ where
             }
         };
 
+        // Log context state before processing
+        {
+            let context = self.context.read().await;
+            let history = context.history.read().await;
+            tracing::info!(
+                "📊 Context before processing response: {} messages in history",
+                history.messages.len()
+            );
+            for (i, msg) in history.messages.iter().rev().take(5).enumerate() {
+                tracing::info!(
+                    "  Message[{}]: role={:?}, content_type={:?}",
+                    i,
+                    msg.role,
+                    match &msg.content {
+                        MessageContent::Text(_) => "Text",
+                        MessageContent::Parts(_) => "Parts",
+                        MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
+                        MessageContent::ToolResponses(tr) =>
+                            &format!("ToolResponses({})", tr.len()),
+                    }
+                );
+                if let MessageContent::ToolCalls(calls) = &msg.content {
+                    for call in calls {
+                        tracing::info!("    Tool call ID: {}", call.call_id);
+                    }
+                }
+            }
+        }
+
         // Check if the response contains tool calls
-        let final_response = if !response.tool_calls.is_empty() {
+        let tool_calls_handled = !response.tool_calls.is_empty();
+        let final_response = if tool_calls_handled {
             tracing::debug!(
                 "Response contains {} tool calls, executing them",
                 response.tool_calls.len()
@@ -911,6 +941,14 @@ where
 
                 let context = self.context.read().await;
                 context.add_message(tool_call_message.clone()).await;
+
+                // Log what we just added
+                tracing::info!("✅ Added tool call message to context");
+                if let MessageContent::ToolCalls(calls) = &tool_call_message.content {
+                    for call in calls {
+                        tracing::info!("  Tool call ID: {}", call.call_id);
+                    }
+                }
 
                 // Also persist to DB
                 let _ = crate::db::ops::persist_agent_message(
@@ -928,7 +966,17 @@ where
             // Execute the tool calls and get responses
             let responses = {
                 let context = self.context.read().await;
-                context.process_response(response).await?
+                let resp = context.process_response(response).await?;
+                tracing::info!("🔧 process_response returned {} responses", resp.len());
+                for (i, r) in resp.iter().enumerate() {
+                    tracing::info!(
+                        "  Response[{}]: {} content parts, {} tool calls",
+                        i,
+                        r.content.len(),
+                        r.tool_calls.len()
+                    );
+                }
+                resp
             };
 
             // Persist any memory changes from tool execution
@@ -936,14 +984,23 @@ where
 
             // Process each response and convert to messages
             for response in responses {
+                // Skip empty responses or responses without tool responses
+                // (we already added the assistant message with tool calls)
+                let is_tool_response = response
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, MessageContent::ToolResponses(_)));
+
+                if !is_tool_response {
+                    tracing::warn!(
+                        "Skipping non-tool response - content: {:?}",
+                        response.content
+                    );
+                    continue;
+                }
+
                 let message = {
                     let context = self.context.read().await;
-
-                    // Determine role based on content - if it has ToolResponses, it's a Tool message
-                    let is_tool_response = response
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, MessageContent::ToolResponses(_)));
 
                     if is_tool_response {
                         // Create a Tool role message
@@ -1011,20 +1068,45 @@ where
                 tools: Some(memory_context.tools),
             };
 
-            tracing::debug!(
-                "Sending second request to LLM with tool results: {} messages",
+            tracing::info!(
+                "📤 Sending second request to LLM with tool results: {} messages",
                 request_with_tools.messages.len()
             );
+
+            // Log last few messages being sent
+            for (i, msg) in request_with_tools.messages.iter().rev().take(5).enumerate() {
+                tracing::info!(
+                    "  Message[{}]: role={:?}, content_type={:?}",
+                    i,
+                    msg.role,
+                    match &msg.content {
+                        MessageContent::Text(_) => "Text",
+                        MessageContent::Parts(_) => "Parts",
+                        MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
+                        MessageContent::ToolResponses(tr) =>
+                            &format!("ToolResponses({})", tr.len()),
+                    }
+                );
+            }
 
             // Get the final response from the LLM that incorporates the tool results
             let final_response = {
                 let model = self.model.read().await;
                 match model.complete(&options, request_with_tools).await {
                     Ok(response) => {
-                        tracing::debug!(
-                            "Got final response from LLM after tool execution: {} content parts",
-                            response.content.len()
+                        tracing::info!(
+                            "📥 Got final response from LLM after tool execution: {} content parts, {} tool calls",
+                            response.content.len(),
+                            response.tool_calls.len()
                         );
+                        if !response.tool_calls.is_empty() {
+                            tracing::warn!(
+                                "⚠️ Final response contains tool calls - this is unexpected!"
+                            );
+                            for call in &response.tool_calls {
+                                tracing::warn!("  Tool call ID: {}", call.call_id);
+                            }
+                        }
                         response
                     }
                     Err(e) => {
@@ -1065,20 +1147,48 @@ where
             Message::from_response(&final_response, context.handle.agent_id)
         };
 
-        let _ = crate::db::ops::persist_agent_message(
-            &self.db,
-            agent_id,
-            &response_message,
-            crate::message::MessageRelationType::Active,
-        )
-        .await
-        .inspect_err(|e| {
-            crate::log_error!("Failed to persist message", e);
-        });
-        // Add response message to context
-        {
-            let context = self.context.write().await;
-            context.add_message(response_message).await;
+        // Check if the response has meaningful content
+        let has_content = match &response_message.content {
+            MessageContent::Text(text) => !text.is_empty(),
+            MessageContent::Parts(parts) => !parts.is_empty(),
+            MessageContent::ToolCalls(calls) => !calls.is_empty(),
+            MessageContent::ToolResponses(responses) => !responses.is_empty(),
+        };
+
+        if has_content {
+            let _ = crate::db::ops::persist_agent_message(
+                &self.db,
+                agent_id,
+                &response_message,
+                crate::message::MessageRelationType::Active,
+            )
+            .await
+            .inspect_err(|e| {
+                crate::log_error!("Failed to persist message", e);
+            });
+
+            // Add response message to context
+            {
+                tracing::info!(
+                    "📝 Adding final response message to context: role={:?}, content_type={:?}",
+                    response_message.role,
+                    match &response_message.content {
+                        MessageContent::Text(_) => "Text",
+                        MessageContent::Parts(_) => "Parts",
+                        MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
+                        MessageContent::ToolResponses(tr) =>
+                            &format!("ToolResponses({})", tr.len()),
+                    }
+                );
+                if let MessageContent::ToolCalls(calls) = &response_message.content {
+                    for call in calls {
+                        tracing::info!("  Tool call ID: {}", call.call_id);
+                    }
+                }
+
+                let context = self.context.write().await;
+                context.add_message(response_message).await;
+            }
         }
 
         // Update stats in background

@@ -361,6 +361,8 @@ pub struct AgentContextMetadata {
     pub total_tool_calls: usize,
     pub context_rebuilds: usize,
     pub compression_events: usize,
+    #[serde(skip)]
+    pub tool_call_ids: std::collections::HashSet<String>,
 }
 
 impl Default for AgentContextMetadata {
@@ -372,6 +374,7 @@ impl Default for AgentContextMetadata {
             total_tool_calls: 0,
             context_rebuilds: 0,
             compression_events: 0,
+            tool_call_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -399,14 +402,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
             handle,
             tools,
             context_config,
-            metadata: Arc::new(RwLock::new(AgentContextMetadata {
-                created_at: Utc::now(),
-                last_active: Utc::now(),
-                total_messages: 0,
-                total_tool_calls: 0,
-                context_rebuilds: 0,
-                compression_events: 0,
-            })),
+            metadata: Arc::new(RwLock::new(AgentContextMetadata::default())),
             history: Arc::new(RwLock::new(MessageHistory::new(
                 CompressionStrategy::default(),
             ))),
@@ -465,11 +461,36 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
     }
 
     /// Add a new message to the state
-    pub async fn add_message(&self, message: Message) {
-        // Count tool calls if this is an assistant message
+    pub async fn add_message(&self, mut message: Message) {
+        // Filter duplicate tool calls to prevent API errors
         if message.role.is_assistant() {
-            let mut metadata = self.metadata.write().await;
-            metadata.total_tool_calls += message.tool_call_count();
+            if let MessageContent::ToolCalls(calls) = &mut message.content {
+                let mut metadata = self.metadata.write().await;
+
+                // Filter out any duplicate tool calls
+                let original_count = calls.len();
+                calls.retain(|call| {
+                    if metadata.tool_call_ids.contains(&call.call_id) {
+                        tracing::warn!(
+                            "Filtering out duplicate tool call with ID: {}",
+                            call.call_id
+                        );
+                        false
+                    } else {
+                        metadata.tool_call_ids.insert(call.call_id.clone());
+                        true
+                    }
+                });
+
+                // If all tool calls were duplicates, skip the message entirely
+                if calls.is_empty() && original_count > 0 {
+                    tracing::warn!("All tool calls were duplicates, skipping message");
+                    return;
+                }
+
+                // Count only the non-duplicate tool calls
+                metadata.total_tool_calls += calls.len();
+            }
         }
 
         let mut history = self.history.write().await;
@@ -542,9 +563,15 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
 
         // Add the original response if it has content (text/parts)
         // Don't include tool calls in this response
-        if !response.content.is_empty() {
+        let non_tool_content: Vec<MessageContent> = response
+            .content
+            .into_iter()
+            .filter(|c| !matches!(c, MessageContent::ToolCalls(_)))
+            .collect();
+
+        if !non_tool_content.is_empty() {
             results.push(Response {
-                content: response.content,
+                content: non_tool_content,
                 reasoning: response.reasoning,
                 tool_calls: vec![], // Tool calls handled separately
                 metadata: response.metadata.clone(),

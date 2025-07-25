@@ -303,14 +303,15 @@ impl Memory {
         block.label = label.clone();
         block.updated_at = Utc::now();
 
-        if self.blocks.contains_key(&label) {
-            // Update existing block
-            let block_id = block.id.clone();
+        if let Some(existing_block) = self.blocks.get(&label) {
+            // Update existing block, preserving its ID
+            let existing_id = existing_block.id.clone();
+            block.id = existing_id.clone(); // Preserve the existing ID
             self.blocks.insert(label, block);
 
             // Mark as dirty if not new
-            if !self.new_blocks.contains(&block_id) {
-                self.dirty_blocks.insert(block_id);
+            if !self.new_blocks.contains(&existing_id) {
+                self.dirty_blocks.insert(existing_id);
             }
         } else {
             // New block

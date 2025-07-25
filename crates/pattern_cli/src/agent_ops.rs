@@ -498,6 +498,17 @@ pub async fn chat_with_agent(agent: Arc<dyn Agent>) -> Result<()> {
                                             &serde_json::to_string_pretty(&call.fn_arguments)
                                                 .unwrap_or_else(|_| call.fn_arguments.to_string()),
                                         );
+
+                                        // Special handling for send_message tool
+                                        if call.fn_name == "send_message" {
+                                            if let Some(content) = call
+                                                .fn_arguments
+                                                .get("content")
+                                                .and_then(|v| v.as_str())
+                                            {
+                                                output.agent_message(&agent_name, content);
+                                            }
+                                        }
                                     }
                                 }
                                 MessageContent::ToolResponses(responses) => {
@@ -520,6 +531,15 @@ pub async fn chat_with_agent(agent: Arc<dyn Agent>) -> Result<()> {
                                     &serde_json::to_string_pretty(&call.fn_arguments)
                                         .unwrap_or_else(|_| call.fn_arguments.to_string()),
                                 );
+
+                                // Special handling for send_message tool
+                                if call.fn_name == "send_message" {
+                                    if let Some(content) =
+                                        call.fn_arguments.get("content").and_then(|v| v.as_str())
+                                    {
+                                        output.agent_message(&agent_name, content);
+                                    }
+                                }
                             }
                         }
                     }
