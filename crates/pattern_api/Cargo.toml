@@ -24,6 +24,9 @@ pattern-core = { path = "../pattern_core" }
 # For WebSocket message types
 axum = { workspace = true, optional = true }
 
+# For JWT types
+jsonwebtoken = { workspace = true }
+
 [features]
 default = []
 server = ["axum"]

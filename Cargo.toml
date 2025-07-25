@@ -96,6 +96,12 @@ dotenvy = "0.15"
 schemars = { version = "1.0", features = ["chrono04"] }
 ferroid = { version = "0.5", features = ["snowflake", "async-tokio", "serde"] }
 
+# Authentication
+jsonwebtoken = "9.3"
+argon2 = "0.5"
+axum-extra = { version = "0.9", default-features = false }
+rand = "0.8"
+
 
 [workspace.lints.clippy]
 mod_module_files = "warn"

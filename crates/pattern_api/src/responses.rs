@@ -1,11 +1,10 @@
 //! API response types
 
-use crate::{ApiResponse, PaginatedResponse};
 use pattern_core::{
     agent::{AgentState, AgentType},
     coordination::{CoordinationPattern, GroupMemberRole},
     id::{AgentId, GroupId, MessageId, UserId},
-    message::{ChatRole, Message, MessageContent},
+    message::{ChatRole, MessageContent},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -224,4 +223,100 @@ pub struct BatchResult<T> {
 pub struct BatchError {
     pub index: u32,
     pub error: String,
+}
+
+// ============ MCP Server Management ============
+
+/// MCP server info
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerResponse {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: McpServerStatus,
+    pub transport_type: String,
+    pub auto_reconnect: bool,
+    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_error: Option<String>,
+    pub available_tools: Vec<McpToolInfo>,
+}
+
+/// MCP server connection status
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerStatus {
+    Connected,
+    Connecting,
+    Disconnected,
+    Error,
+}
+
+/// MCP tool information
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Option<serde_json::Value>,
+}
+
+// ============ Model Provider Configuration ============
+
+/// Model provider info
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ModelProviderResponse {
+    pub id: String,
+    pub provider: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub status: ModelProviderStatus,
+    pub available_models: Vec<ModelInfo>,
+    pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Model provider status
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProviderStatus {
+    Active,
+    InvalidCredentials,
+    RateLimited,
+    Error,
+}
+
+/// Model information
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub context_length: u32,
+    pub input_cost_per_1k: Option<f32>,
+    pub output_cost_per_1k: Option<f32>,
+}
+
+// ============ API Key Management ============
+
+/// API key response (only returned on creation)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApiKeyResponse {
+    pub id: String,
+    pub name: String,
+    pub key: String, // Only returned once on creation
+    pub permissions: Vec<crate::requests::ApiPermission>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub rate_limit: Option<u32>,
+}
+
+/// API key info (for listing)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApiKeyInfo {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String, // First 8 chars of key
+    pub permissions: Vec<crate::requests::ApiPermission>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub rate_limit: Option<u32>,
+    pub enabled: bool,
 }

@@ -10,6 +10,12 @@ pub mod responses;
 
 pub use error::ApiError;
 
+// re-export for consumer crates, so that they don't have to import separately
+pub use chrono;
+pub use schemars;
+pub use serde_json;
+pub use uuid;
+
 // Re-export common types from pattern-core
 pub use pattern_core::agent::AgentState;
 pub use pattern_core::id::{AgentId, GroupId, MessageId, UserId};
@@ -17,6 +23,110 @@ pub use pattern_core::message::{ChatRole, Message, MessageContent};
 
 /// API version constant
 pub const API_VERSION: &str = "v1";
+
+/// A hashed password that has been properly salted and hashed
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HashedPassword(String);
+
+impl HashedPassword {
+    /// Create a new hashed password from an already-hashed value
+    /// This does NOT hash the input - it expects an already hashed value
+    pub fn from_hash(hash: String) -> Self {
+        Self(hash)
+    }
+
+    /// Get the hash string for storage
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A plaintext password that needs to be hashed
+/// This type ensures we handle plaintext passwords carefully
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(transparent)]
+pub struct PlaintextPassword(String);
+
+impl PlaintextPassword {
+    pub fn new(password: String) -> Self {
+        Self(password)
+    }
+
+    /// Get the plaintext password for hashing
+    /// This is intentionally not implementing Display or Deref to avoid accidental logging
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+// Explicitly no Serialize for PlaintextPassword - we never send passwords back
+// Explicitly no Display/Debug with actual password content to avoid logging
+
+/// JWT claims for access tokens
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AccessTokenClaims {
+    /// Subject (user ID)
+    pub sub: UserId,
+    /// Issued at
+    pub iat: i64,
+    /// Expiration time
+    pub exp: i64,
+    /// Token ID (for revocation)
+    pub jti: uuid::Uuid,
+    /// Token type
+    pub token_type: String,
+    /// Optional permissions (for API keys)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<requests::ApiPermission>>,
+}
+
+/// JWT claims for refresh tokens
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RefreshTokenClaims {
+    /// Subject (user ID)
+    pub sub: UserId,
+    /// Issued at
+    pub iat: i64,
+    /// Expiration time
+    pub exp: i64,
+    /// Token ID (for revocation)
+    pub jti: uuid::Uuid,
+    /// Token type
+    pub token_type: String,
+    /// Token family (for refresh token rotation)
+    pub family: uuid::Uuid,
+}
+
+/// HTTP method types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+/// API endpoint trait for request types
+pub trait ApiEndpoint {
+    /// The response type for this endpoint
+    type Response;
+
+    /// HTTP method for this endpoint
+    const METHOD: Method;
+
+    /// Path template for this endpoint (e.g., "/api/v1/users/{id}")
+    const PATH: &'static str;
+}
+
+/// Parameter location for API requests
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamLocation {
+    Path,
+    Query,
+    Body,
+    Header,
+}
 
 /// Common metadata included in all responses
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
