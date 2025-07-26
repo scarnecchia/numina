@@ -12,7 +12,7 @@ name = "pattern-cli"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["oauth"]
 oauth = ["pattern-core/oauth"]
 
 [dependencies]
