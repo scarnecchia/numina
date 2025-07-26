@@ -1160,6 +1160,209 @@ pub async fn update_group_state<C: Connection>(
 }
 
 // ============================================================================
+// OAuth Token Operations
+// ============================================================================
+
+#[cfg(feature = "oauth")]
+use crate::id::OAuthTokenId;
+#[cfg(feature = "oauth")]
+use crate::oauth::OAuthToken;
+
+/// Create a new OAuth token in the database
+#[cfg(feature = "oauth")]
+pub async fn create_oauth_token<C: Connection>(
+    conn: &Surreal<C>,
+    provider: String,
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    owner_id: UserId,
+) -> Result<OAuthToken> {
+    let token = OAuthToken::new(
+        provider,
+        access_token,
+        refresh_token,
+        expires_at,
+        owner_id.clone(),
+    );
+
+    // Create the token
+    let created = create_entity::<OAuthToken, _>(conn, &token).await?;
+
+    // Create the ownership relation
+    let query = "RELATE $user_id->owns->$token_id";
+    conn.query(query)
+        .bind(("user_id", RecordId::from(owner_id)))
+        .bind(("token_id", RecordId::from(created.id.clone())))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    Ok(created)
+}
+
+/// Get an OAuth token by ID
+#[cfg(feature = "oauth")]
+pub async fn get_oauth_token<C: Connection>(
+    conn: &Surreal<C>,
+    token_id: &OAuthTokenId,
+) -> Result<Option<OAuthToken>> {
+    get_entity::<OAuthToken, _>(conn, token_id).await
+}
+
+/// Get the most recent OAuth token for a user and provider
+#[cfg(feature = "oauth")]
+pub async fn get_user_oauth_token<C: Connection>(
+    conn: &Surreal<C>,
+    user_id: &UserId,
+    provider: &str,
+) -> Result<Option<OAuthToken>> {
+    let query = r#"
+        SELECT * FROM oauth_token
+        WHERE owner_id = $user_id
+        AND provider = $provider
+        AND expires_at > $now
+        ORDER BY last_used_at DESC
+        LIMIT 1
+    "#;
+
+    let mut result = conn
+        .query(query)
+        .bind(("user_id", RecordId::from(user_id.clone())))
+        .bind(("provider", provider.to_string()))
+        .bind(("now", surrealdb::Datetime::from(Utc::now())))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    let tokens: Vec<<OAuthToken as DbEntity>::DbModel> =
+        result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    if let Some(db_model) = tokens.into_iter().next() {
+        Ok(Some(OAuthToken::from_db_model(db_model)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Update an OAuth token after refresh
+#[cfg(feature = "oauth")]
+pub async fn update_oauth_token<C: Connection>(
+    conn: &Surreal<C>,
+    token_id: &OAuthTokenId,
+    new_access_token: String,
+    new_refresh_token: Option<String>,
+    new_expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<OAuthToken> {
+    let mut update_query = conn
+        .update(RecordId::from(token_id.clone()))
+        .patch(PatchOp::replace("/access_token", new_access_token))
+        .patch(PatchOp::replace(
+            "/expires_at",
+            surrealdb::Datetime::from(new_expires_at),
+        ))
+        .patch(PatchOp::replace(
+            "/last_used_at",
+            surrealdb::Datetime::from(Utc::now()),
+        ));
+
+    if let Some(refresh) = new_refresh_token {
+        update_query = update_query.patch(PatchOp::replace("/refresh_token", refresh));
+    }
+
+    let updated: Option<<OAuthToken as DbEntity>::DbModel> = update_query.await?;
+
+    match updated {
+        Some(db_model) => Ok(OAuthToken::from_db_model(db_model)?),
+        None => Err(DatabaseError::NotFound {
+            entity_type: "oauth_token".to_string(),
+            id: token_id.to_string(),
+        }),
+    }
+}
+
+/// Mark an OAuth token as used
+#[cfg(feature = "oauth")]
+pub async fn mark_oauth_token_used<C: Connection>(
+    conn: &Surreal<C>,
+    token_id: &OAuthTokenId,
+) -> Result<()> {
+    let _: Option<serde_json::Value> = conn
+        .update(RecordId::from(token_id.clone()))
+        .patch(PatchOp::replace(
+            "/last_used_at",
+            surrealdb::Datetime::from(Utc::now()),
+        ))
+        .await?;
+
+    Ok(())
+}
+
+/// Delete an OAuth token
+#[cfg(feature = "oauth")]
+pub async fn delete_oauth_token<C: Connection>(
+    conn: &Surreal<C>,
+    token_id: &OAuthTokenId,
+) -> Result<()> {
+    // First delete the ownership relation
+    let query = "DELETE owns WHERE out = $token_id";
+    conn.query(query)
+        .bind(("token_id", RecordId::from(token_id.clone())))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    // Then delete the token
+    delete_entity::<OAuthToken, _, OAuthTokenId>(conn, token_id).await
+}
+
+/// Delete all OAuth tokens for a user and provider
+#[cfg(feature = "oauth")]
+pub async fn delete_user_oauth_tokens<C: Connection>(
+    conn: &Surreal<C>,
+    user_id: &UserId,
+    provider: &str,
+) -> Result<usize> {
+    // First get all token IDs
+    let query = r#"
+        SELECT id FROM oauth_token
+        WHERE owner_id = $user_id
+        AND provider = $provider
+    "#;
+
+    let mut result = conn
+        .query(query)
+        .bind(("user_id", RecordId::from(user_id.clone())))
+        .bind(("provider", provider.to_string()))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    let token_records: Vec<serde_json::Value> =
+        result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    let token_ids: Vec<OAuthTokenId> = token_records
+        .into_iter()
+        .filter_map(|v| {
+            v.get("id").and_then(|id| {
+                // Extract the ID string from the record
+                if let serde_json::Value::String(id_str) = id {
+                    // Parse it as OAuthTokenId
+                    id_str.parse::<OAuthTokenId>().ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    let count = token_ids.len();
+
+    // Delete each token
+    for token_id in token_ids {
+        delete_oauth_token(conn, &token_id).await?;
+    }
+
+    Ok(count)
+}
+
+// ============================================================================
 // Constellation Operations
 // ============================================================================
 

@@ -16,6 +16,7 @@ pub mod id;
 pub mod memory;
 pub mod message;
 pub mod model;
+pub mod oauth;
 pub mod realtime;
 pub mod tool;
 pub mod users;
@@ -31,8 +32,8 @@ pub use context::{
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use id::{
-    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, MessageIdType, ModelId, RequestId,
-    SessionId, TaskId, ToolCallId, UserId,
+    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, MessageIdType, ModelId, OAuthTokenId,
+    RequestId, SessionId, TaskId, ToolCallId, UserId,
 };
 pub use memory::{Memory, MemoryBlock};
 pub use model::ModelCapability;

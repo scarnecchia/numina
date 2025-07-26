@@ -186,12 +186,15 @@ impl GenAiClient {
     /// Create a new GenAiClient with the default configuration
     /// This will use environment variables for API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
     pub async fn new() -> Result<Self> {
+        // Create default client - OAuth support will be added by the caller if needed
         let client = genai::Client::default();
 
         // Discover available endpoints based on configured API keys
         let mut available_endpoints = Vec::new();
 
         // Check which providers have API keys configured
+        // Only include Anthropic if API key is available
+        // OAuth cases will use with_endpoints() to explicitly add it
         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
             available_endpoints.push(AdapterKind::Anthropic);
         }
@@ -233,18 +236,26 @@ impl ModelProvider for GenAiClient {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let mut model_strings = Vec::new();
         for endpoint in &self.available_endpoints {
-            let models = self
-                .client
-                .all_model_names(*endpoint)
-                .await
-                .expect("Fix error handling here");
+            let models = match self.client.all_model_names(*endpoint).await {
+                Ok(models) => models,
+                Err(e) => {
+                    tracing::debug!("Failed to list models for {}: {}", endpoint, e);
+                    continue;
+                }
+            };
 
             for model in models {
-                let _model_iden = self
-                    .client
-                    .resolve_service_target(&model)
-                    .await
-                    .expect("Fix error handling here");
+                // Try to resolve the service target - this validates authentication
+                match self.client.resolve_service_target(&model).await {
+                    Ok(_) => {
+                        // Model is accessible, continue
+                    }
+                    Err(e) => {
+                        // Authentication failed for this model, skip it
+                        tracing::debug!("Skipping model {} due to auth error: {}", model, e);
+                        continue;
+                    }
+                }
 
                 // Create basic ModelInfo from provider
                 let model_info = ModelInfo {

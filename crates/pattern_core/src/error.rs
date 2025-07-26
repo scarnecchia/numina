@@ -298,6 +298,17 @@ pub enum CoreError {
         current_usage: String,
         limit: String,
     },
+
+    #[error("OAuth authentication error: {operation} failed for {provider}")]
+    #[diagnostic(
+        code(pattern_core::oauth_error),
+        help("Check OAuth configuration and ensure tokens are valid")
+    )]
+    OAuthError {
+        provider: String,
+        operation: String,
+        details: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

@@ -1263,7 +1263,8 @@ fn determine_storage_type(
                 quote! { ::surrealdb::RecordId }
             }
         }
-        "created_at" | "updated_at" | "scheduled_for" | "last_active" => {
+        "created_at" | "updated_at" | "scheduled_for" | "last_active" | "expires_at"
+        | "last_used_at" => {
             // Check if it's wrapped in Option
             if is_option_type(field_type) {
                 quote! { Option<::surrealdb::Datetime> }
@@ -1356,7 +1357,8 @@ fn generate_to_storage(
                 quote! { #field_name: ::surrealdb::RecordId::from(self.#field_name) }
             }
         }
-        "created_at" | "updated_at" | "scheduled_for" | "last_active" => {
+        "created_at" | "updated_at" | "scheduled_for" | "last_active" | "expires_at"
+        | "last_used_at" => {
             if is_option_type(field_type) {
                 quote! { #field_name: self.#field_name.map(::surrealdb::Datetime::from) }
             } else {
@@ -1476,7 +1478,8 @@ fn generate_from_storage(
                 }
             }
         }
-        "created_at" | "updated_at" | "scheduled_for" | "last_active" => {
+        "created_at" | "updated_at" | "scheduled_for" | "last_active" | "expires_at"
+        | "last_used_at" => {
             if is_option_type(field_type) {
                 quote! { #field_name: db_model.#field_name.map(#crate_path::db::from_surreal_datetime) }
             } else {

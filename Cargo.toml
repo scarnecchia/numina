@@ -29,7 +29,12 @@ anyhow = "1.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time", "local-time"] }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "json",
+    "time",
+    "local-time",
+] }
 
 # Database
 surrealdb = { version = "2.3", default-features = false, features = [
@@ -41,7 +46,9 @@ surrealdb = { version = "2.3", default-features = false, features = [
 ] }
 
 # AI/LLM
-genai = { git = "https://github.com/jeremychone/rust-genai" }
+# Using fork with OAuth support (system prompt array format)
+genai = { git = "https://github.com/orual/rust-genai" }
+# genai = { git = "https://github.com/jeremychone/rust-genai" }
 
 # Utilities
 uuid = { version = "1.10", features = ["v4", "serde"] }

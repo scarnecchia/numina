@@ -11,9 +11,14 @@ homepage.workspace = true
 name = "pattern-cli"
 path = "src/main.rs"
 
+[features]
+default = []
+oauth = ["pattern-core/oauth"]
+
 [dependencies]
 # Workspace dependencies
 pattern-core = { path = "../pattern_core" }
+genai = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

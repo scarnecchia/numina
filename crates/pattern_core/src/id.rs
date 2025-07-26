@@ -401,6 +401,7 @@ define_id_type!(ModelIdType, "model");
 define_id_type!(RequestIdType, "request");
 define_id_type!(GroupIdType, "group");
 define_id_type!(ConstellationIdType, "const");
+define_id_type!(OAuthTokenIdType, "oauth");
 
 /// Type alias for Model IDs
 pub type ModelId = Id<ModelIdType>;
@@ -413,6 +414,9 @@ pub type GroupId = Id<GroupIdType>;
 
 /// Type alias for Constellation IDs
 pub type ConstellationId = Id<ConstellationIdType>;
+
+/// Type alias for OAuth Token IDs
+pub type OAuthTokenId = Id<OAuthTokenIdType>;
 
 #[cfg(test)]
 mod tests {

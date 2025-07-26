@@ -131,10 +131,33 @@ pub async fn create_agent_from_record(
     record: AgentRecord,
     model_name: Option<String>,
     enable_tools: bool,
-    _config: &PatternConfig,
+    config: &PatternConfig,
 ) -> Result<Arc<dyn Agent>> {
-    // Create model provider
-    let model_provider = Arc::new(RwLock::new(GenAiClient::new().await?));
+    // Create model provider - use OAuth if available
+    let model_provider = {
+        #[cfg(feature = "oauth")]
+        {
+            use pattern_core::oauth::resolver::OAuthClientBuilder;
+            let oauth_client =
+                OAuthClientBuilder::new(Arc::new(DB.clone()), config.user.id.clone()).build()?;
+            // Wrap in GenAiClient with all endpoints available
+            let genai_client = GenAiClient::with_endpoints(
+                oauth_client,
+                vec![
+                    genai::adapter::AdapterKind::Anthropic,
+                    genai::adapter::AdapterKind::Gemini,
+                    genai::adapter::AdapterKind::OpenAI,
+                    genai::adapter::AdapterKind::Groq,
+                    genai::adapter::AdapterKind::Cohere,
+                ],
+            );
+            Arc::new(RwLock::new(genai_client))
+        }
+        #[cfg(not(feature = "oauth"))]
+        {
+            Arc::new(RwLock::new(GenAiClient::new().await?))
+        }
+    };
 
     // Get available models and select the one to use
     let model_info = {
@@ -152,7 +175,7 @@ pub async fn create_agent_from_record(
                         || m.name.to_lowercase().contains(&model_lower)
                 })
                 .cloned()
-        } else if let Some(config_model) = &_config.model.model {
+        } else if let Some(config_model) = &config.model.model {
             // Use model from config
             models
                 .iter()
@@ -255,8 +278,31 @@ pub async fn create_agent(
 ) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
-    // Create model provider
-    let model_provider = Arc::new(RwLock::new(GenAiClient::new().await?));
+    // Create model provider - use OAuth if available
+    let model_provider = {
+        #[cfg(feature = "oauth")]
+        {
+            use pattern_core::oauth::resolver::OAuthClientBuilder;
+            let oauth_client =
+                OAuthClientBuilder::new(Arc::new(DB.clone()), config.user.id.clone()).build()?;
+            // Wrap in GenAiClient with all endpoints available
+            let genai_client = GenAiClient::with_endpoints(
+                oauth_client,
+                vec![
+                    genai::adapter::AdapterKind::Anthropic,
+                    genai::adapter::AdapterKind::Gemini,
+                    genai::adapter::AdapterKind::OpenAI,
+                    genai::adapter::AdapterKind::Groq,
+                    genai::adapter::AdapterKind::Cohere,
+                ],
+            );
+            Arc::new(RwLock::new(genai_client))
+        }
+        #[cfg(not(feature = "oauth"))]
+        {
+            Arc::new(RwLock::new(GenAiClient::new().await?))
+        }
+    };
 
     // Get available models and select the one to use
     let model_info = {

@@ -83,6 +83,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: GroupCommands,
     },
+    /// OAuth authentication
+    #[cfg(feature = "oauth")]
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -97,6 +103,25 @@ enum AgentCommands {
     },
     /// Show agent status
     Status { name: String },
+}
+
+#[cfg(feature = "oauth")]
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Authenticate with Anthropic OAuth
+    Login {
+        /// Provider to authenticate with
+        #[arg(default_value = "anthropic")]
+        provider: String,
+    },
+    /// Show current auth status
+    Status,
+    /// Logout (remove stored tokens)
+    Logout {
+        /// Provider to logout from
+        #[arg(default_value = "anthropic")]
+        provider: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -448,6 +473,12 @@ async fn main() -> Result<()> {
                     .await?
             }
             GroupCommands::Status { name } => commands::group::status(name, &config).await?,
+        },
+        #[cfg(feature = "oauth")]
+        Commands::Auth { cmd } => match cmd {
+            AuthCommands::Login { provider } => commands::auth::login(provider, &config).await?,
+            AuthCommands::Status => commands::auth::status(&config).await?,
+            AuthCommands::Logout { provider } => commands::auth::logout(provider, &config).await?,
         },
     }
 
