@@ -110,7 +110,7 @@ pub trait DbEntity: Send + Sync {
     type Domain: Send + Sync + Debug + 'static;
 
     /// The ID type for this entity
-    type Id: IdType;
+    type Id: IdType + Debug;
 
     /// Convert from domain to database model
     fn to_db_model(&self) -> Self::DbModel;
@@ -121,12 +121,12 @@ pub trait DbEntity: Send + Sync {
     /// Get the table name for this entity
     fn table_name() -> &'static str;
 
-    fn id(&self) -> crate::Id<Self::Id>;
+    fn id(&self) -> &Self::Id;
 
     /// Get the record key for storing in the database
-    /// Default implementation uses the UUID, but can be overridden
+    /// Default implementation uses the ID's key representation
     fn record_key(&self) -> String {
-        self.id().uuid().to_string()
+        self.id().to_key()
     }
 
     /// Get the schema definition for this entity
@@ -143,5 +143,3 @@ pub trait HasRecordId {
 // Re-export base entity implementations
 mod base;
 pub use base::*;
-
-mod example;

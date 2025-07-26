@@ -7,6 +7,7 @@ use std::sync::Arc;
 use surrealdb::Surreal;
 use tokio::sync::RwLock;
 
+use crate::id::RelationId;
 use crate::tool::builtin::BuiltinTools;
 
 use crate::{
@@ -123,7 +124,7 @@ where
         );
 
         // Create memory with the owner
-        let memory = Memory::with_owner(record.owner_id);
+        let memory = Memory::with_owner(&record.owner_id);
 
         // Load memory blocks from the record's relations
         for (memory_block, _relation) in &record.memories {
@@ -134,7 +135,7 @@ where
             );
             memory.create_block(memory_block.label.clone(), memory_block.value.clone())?;
             if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
-                block.id = memory_block.id;
+                block.id = memory_block.id.clone();
                 block.description = memory_block.description.clone();
                 block.metadata = memory_block.metadata.clone();
                 block.embedding_model = memory_block.embedding_model.clone();
@@ -149,8 +150,8 @@ where
 
         // Create the agent with the loaded configuration
         let agent = Self::new(
-            record.id,
-            record.owner_id,
+            record.id.clone(),
+            record.owner_id.clone(),
             record.agent_type.clone(),
             record.name.clone(),
             context_config.base_instructions.clone(),
@@ -226,7 +227,7 @@ where
         let (agent_id, name, agent_type, state) = {
             let context = self.context.read().await;
             (
-                context.handle.agent_id,
+                context.handle.agent_id.clone(),
                 context.handle.name.clone(),
                 context.handle.agent_type.clone(),
                 context.handle.state,
@@ -261,7 +262,7 @@ where
             state,
             base_instructions,
             max_messages,
-            owner_id: self.user_id,
+            owner_id: self.user_id.clone(),
             total_messages,
             total_tool_calls,
             context_rebuilds,
@@ -281,7 +282,10 @@ where
     pub async fn start_memory_sync(&self) -> Result<()> {
         let (agent_id, memory) = {
             let context = self.context.read().await;
-            (context.handle.agent_id, context.handle.memory.clone())
+            (
+                context.handle.agent_id.clone(),
+                context.handle.memory.clone(),
+            )
         };
         let db = self.db.clone();
 
@@ -291,7 +295,7 @@ where
             tracing::debug!("Memory sync task started for agent {}", agent_id);
 
             // Subscribe to all memory changes for this agent
-            let stream = match ops::subscribe_to_agent_memory_updates(&db, agent_id).await {
+            let stream = match ops::subscribe_to_agent_memory_updates(&db, &agent_id).await {
                 Ok(s) => {
                     tracing::debug!(
                         "Successfully subscribed to memory updates for agent {} - live query active",
@@ -334,7 +338,7 @@ where
                         }
                         // Update other fields if present
                         if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
-                            block.id = memory_block.id;
+                            block.id = memory_block.id.clone();
                             block.owner_id = memory_block.owner_id;
                             block.description = memory_block.description;
                             block.metadata = memory_block.metadata;
@@ -382,7 +386,7 @@ where
 
                         // Update other fields if present
                         if let Some(mut block) = memory.get_block_mut(&memory_block.label) {
-                            block.id = memory_block.id;
+                            block.id = memory_block.id.clone();
                             block.owner_id = memory_block.owner_id;
                             block.description = memory_block.description;
                             block.metadata = memory_block.metadata;
@@ -421,14 +425,14 @@ where
         let (agent_id, metadata, history) = {
             let context = self.context.read().await;
             (
-                context.handle.agent_id,
+                context.handle.agent_id.clone(),
                 Arc::clone(&context.metadata),
                 Arc::clone(&context.history),
             )
         };
 
         tokio::spawn(async move {
-            let stream = match crate::db::ops::subscribe_to_agent_stats(&db, agent_id).await {
+            let stream = match crate::db::ops::subscribe_to_agent_stats(&db, &agent_id).await {
                 Ok(stream) => stream,
                 Err(e) => {
                     crate::log_error!("Failed to subscribe to agent stats updates", e);
@@ -597,7 +601,7 @@ where
 
                 // Also update the agent record's message summary in background
                 let db = self.db.clone();
-                let agent_id = context.handle.agent_id;
+                let agent_id = context.handle.agent_id.clone();
                 let summary = new_summary;
                 tokio::spawn(async move {
                     let query = r#"
@@ -633,11 +637,11 @@ where
             let db = self.db.clone();
             let agent_id = {
                 let context = self.context.read().await;
-                context.handle.agent_id
+                context.handle.agent_id.clone()
             };
             tokio::spawn(async move {
                 if let Err(e) =
-                    crate::db::ops::archive_agent_messages(&db, agent_id, &archived_ids).await
+                    crate::db::ops::archive_agent_messages(&db, &agent_id, &archived_ids).await
                 {
                     crate::log_error!("Failed to archive messages in database", e);
                 } else {
@@ -683,8 +687,8 @@ where
                 // Attach to agent
                 match ops::attach_memory_to_agent(
                     &self.db,
-                    context.handle.agent_id.clone(),
-                    stored.id,
+                    &context.handle.agent_id.clone(),
+                    &stored.id,
                     block.permission,
                 )
                 .await
@@ -765,7 +769,7 @@ where
     fn id(&self) -> AgentId {
         // These methods are synchronous, so we need to store these values outside the lock
         // For now, we'll panic if we can't get the lock - this should be rare
-        futures::executor::block_on(async { self.context.read().await.handle.agent_id })
+        futures::executor::block_on(async { self.context.read().await.handle.agent_id.clone() })
     }
 
     fn name(&self) -> String {
@@ -781,11 +785,11 @@ where
             let mut context = self.context.write().await;
             context.handle.state = AgentState::Processing;
 
-            let agent_id = context.handle.agent_id;
+            let agent_id = context.handle.agent_id.clone();
 
             let _ = crate::db::ops::persist_agent_message(
                 &self.db,
-                agent_id,
+                &agent_id,
                 &message,
                 crate::message::MessageRelationType::Active,
             )
@@ -939,7 +943,7 @@ where
             self.persist_memory_changes().await?;
 
             // Convert the processed response (with tool calls AND responses) to messages
-            let response_messages = Message::from_response(&processed_response, agent_id);
+            let response_messages = Message::from_response(&processed_response, &agent_id);
 
             // Add all messages from the processed response to context
             for message in response_messages {
@@ -963,7 +967,7 @@ where
                 // Also persist to DB
                 let _ = crate::db::ops::persist_agent_message(
                     &self.db,
-                    agent_id,
+                    &agent_id,
                     &message,
                     crate::message::MessageRelationType::Active,
                 )
@@ -1077,7 +1081,7 @@ where
         if !tool_calls_handled {
             let response_messages = {
                 let context = self.context.read().await;
-                Message::from_response(&final_response, context.handle.agent_id)
+                Message::from_response(&final_response, &context.handle.agent_id)
             };
 
             // Add each response message to context and persist
@@ -1093,7 +1097,7 @@ where
                 if has_content {
                     let _ = crate::db::ops::persist_agent_message(
                         &self.db,
-                        agent_id,
+                        &agent_id,
                         &message,
                         crate::message::MessageRelationType::Active,
                     )
@@ -1158,7 +1162,7 @@ where
     async fn update_memory(&self, key: &str, memory: MemoryBlock) -> Result<()> {
         let agent_id = {
             let context = self.context.read().await;
-            context.handle.agent_id
+            context.handle.agent_id.clone()
         };
         tracing::debug!("🔧 Agent {} updating memory key '{}'", agent_id, key);
 
@@ -1171,10 +1175,6 @@ where
 
         // Persist memory block synchronously during initial setup
         // TODO: Consider spawning background task for updates after agent is initialized
-        let agent_id = {
-            let context = self.context.read().await;
-            context.handle.agent_id
-        };
 
         crate::db::ops::persist_agent_memory(
             &self.db,
@@ -1206,7 +1206,7 @@ where
                         .collect(),
                 )
             })?;
-            (tool.clone(), context.handle.agent_id)
+            (tool.clone(), context.handle.agent_id.clone())
         };
 
         // Record start time
@@ -1311,7 +1311,7 @@ where
         let db = self.db.clone();
         let memory_id = memory_block.id.clone();
         let relation = AgentMemoryRelation {
-            id: None,
+            id: RelationId::nil(),
             in_id: target_agent_id.clone(),
             out_id: memory_id.clone(),
             access_level,
@@ -1340,7 +1340,7 @@ where
         let db = self.db.clone();
         let agent_id = {
             let context = self.context.read().await;
-            context.handle.agent_id
+            context.handle.agent_id.clone()
         };
 
         // Query for all memory blocks shared with this agent
@@ -1437,7 +1437,7 @@ where
         let db = self.db.clone();
         let agent_id = {
             let context = self.context.read().await;
-            context.handle.agent_id
+            context.handle.agent_id.clone()
         };
 
         let _ = db

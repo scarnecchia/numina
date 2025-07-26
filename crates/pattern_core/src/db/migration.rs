@@ -2,7 +2,7 @@
 
 use super::{DatabaseError, Result};
 use crate::db::schema::Schema;
-use crate::id::{IdType, MemoryIdType, TaskIdType};
+use crate::id::{IdType, MemoryId, TaskId};
 use surrealdb::{Connection, Surreal};
 
 /// Database migration runner
@@ -99,7 +99,7 @@ impl MigrationRunner {
         let dimensions = 384;
 
         // Create vector indexes for tables with embeddings
-        let memory_index = Schema::vector_index(MemoryIdType::PREFIX, "embedding", dimensions);
+        let memory_index = Schema::vector_index(MemoryId::PREFIX, "embedding", dimensions);
         db.query(&memory_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
@@ -109,7 +109,7 @@ impl MigrationRunner {
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let task_index = Schema::vector_index(TaskIdType::PREFIX, "embedding", dimensions);
+        let task_index = Schema::vector_index(TaskId::PREFIX, "embedding", dimensions);
         db.query(&task_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
@@ -160,12 +160,12 @@ impl MigrationRunner {
 
     /// Create specialized indices (full-text search, vector indices)
     async fn create_specialized_indices<C: Connection>(db: &Surreal<C>) -> Result<()> {
-        use crate::id::{MemoryIdType, MessageIdType, TaskIdType};
+        use crate::id::{MemoryId, MessageId, TaskId};
 
         // Create full-text search analyzer and index for messages
         let message_analyzer = format!(
             "DEFINE ANALYZER {}_content_analyzer TOKENIZERS class FILTERS lowercase, snowball(english)",
-            MessageIdType::PREFIX
+            MessageId::PREFIX
         );
         db.query(&message_analyzer)
             .await
@@ -192,7 +192,7 @@ impl MigrationRunner {
         // Create full-text search analyzer and index for memory blocks
         let memory_analyzer = format!(
             "DEFINE ANALYZER {}_value_analyzer TOKENIZERS class FILTERS lowercase, snowball(english)",
-            MemoryIdType::PREFIX
+            MemoryId::PREFIX
         );
         db.query(&memory_analyzer)
             .await
@@ -218,17 +218,17 @@ impl MigrationRunner {
         // Create vector indexes with default dimensions (384 for MiniLM)
         let dimensions = 384;
 
-        let memory_index = Schema::vector_index(MemoryIdType::PREFIX, "embedding", dimensions);
+        let memory_index = Schema::vector_index(MemoryId::PREFIX, "embedding", dimensions);
         db.query(&memory_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let message_index = Schema::vector_index(MessageIdType::PREFIX, "embedding", dimensions);
+        let message_index = Schema::vector_index(MessageId::PREFIX, "embedding", dimensions);
         db.query(&message_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let task_index = Schema::vector_index(TaskIdType::PREFIX, "embedding", dimensions);
+        let task_index = Schema::vector_index(TaskId::PREFIX, "embedding", dimensions);
         db.query(&task_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;

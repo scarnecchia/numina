@@ -12,6 +12,7 @@ pub mod db;
 pub mod embeddings;
 pub mod error;
 //pub mod export;
+pub mod atproto_identity;
 pub mod id;
 pub mod memory;
 pub mod message;
@@ -32,8 +33,8 @@ pub use context::{
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use id::{
-    AgentId, ConversationId, Id, IdType, MemoryId, MessageId, MessageIdType, ModelId, OAuthTokenId,
-    RequestId, SessionId, TaskId, ToolCallId, UserId,
+    AgentId, AtprotoIdentityId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId,
+    OAuthTokenId, RequestId, SessionId, TaskId, ToolCallId, UserId,
 };
 pub use memory::{Memory, MemoryBlock};
 pub use model::ModelCapability;
@@ -45,7 +46,7 @@ pub mod prelude {
     pub use crate::{
         Agent, AgentContext, AgentContextBuilder, AgentId, AgentState, AgentType, AiTool,
         CompressionStrategy, Constellation, ContextBuilder, ContextConfig, CoordinationPattern,
-        CoreError, DynamicTool, Id, IdType, Memory, MemoryBlock, MemoryContext, MessageCompressor,
+        CoreError, DynamicTool, IdType, Memory, MemoryBlock, MemoryContext, MessageCompressor,
         ModelCapability, ModelProvider, Result, ToolRegistry, ToolResult,
     };
 }

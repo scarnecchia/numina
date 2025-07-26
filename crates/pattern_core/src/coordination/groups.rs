@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::{
     AgentId, CoreError, Result, UserId,
     agent::{Agent, AgentRecord},
-    id::{ConstellationId, ConstellationIdType, GroupId, GroupIdType},
+    id::{ConstellationId, GroupId},
     message::{Message, Response},
 };
 

@@ -627,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_append() {
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
 
         // Create a context block
         memory

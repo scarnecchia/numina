@@ -93,7 +93,7 @@ mod tests {
             agent_type: AgentType::Custom("pattern".to_string()),
             state: AgentState::default(),
             model_id: None,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
         let pattern_record = create_entity::<AgentRecord, _>(&db, &pattern_record)
@@ -102,7 +102,7 @@ mod tests {
 
         // Create ownership relationship using entity system
         let mut user_with_pattern = user.clone();
-        user_with_pattern.owned_agent_ids = vec![pattern_record.id];
+        user_with_pattern.owned_agent_ids = vec![pattern_record.id.clone()];
         user_with_pattern.store_relations(&db).await.unwrap();
 
         let entropy_record = AgentRecord {
@@ -111,7 +111,7 @@ mod tests {
             agent_type: AgentType::Custom("entropy".to_string()),
             state: AgentState::default(),
             model_id: None,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
         let entropy_record = create_entity::<AgentRecord, _>(&db, &entropy_record)
@@ -120,17 +120,19 @@ mod tests {
 
         // Add entropy to owned agents
         let mut user_with_both = user_with_pattern.clone();
-        user_with_both.owned_agent_ids.push(entropy_record.id);
+        user_with_both
+            .owned_agent_ids
+            .push(entropy_record.id.clone());
         user_with_both.store_relations(&db).await.unwrap();
 
         // Create agent instances
         let _pattern = DatabaseAgent::new(
-            pattern_record.id,
-            user.id,
+            pattern_record.id.clone(),
+            user.id.clone(),
             AgentType::Custom("pattern".to_string()),
             "Pattern".to_string(),
             "I am Pattern, the orchestrator".to_string(),
-            Memory::with_owner(user.id),
+            Memory::with_owner(&user.id),
             db.clone(),
             model.clone(),
             tools.clone(),
@@ -138,12 +140,12 @@ mod tests {
         );
 
         let _entropy = DatabaseAgent::new(
-            entropy_record.id,
-            user.id,
+            entropy_record.id.clone(),
+            user.id.clone(),
             AgentType::Custom("entropy".to_string()),
             "Entropy".to_string(),
             "I am Entropy, task specialist".to_string(),
-            Memory::with_owner(user.id),
+            Memory::with_owner(&user.id),
             db.clone(),
             model.clone(),
             tools.clone(),
@@ -153,7 +155,7 @@ mod tests {
         // Create a shared memory block
         let shared_memory = MemoryBlock {
             id: MemoryId::generate(),
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             label: "shared_context".to_compact_string(),
             value: "Test context".to_string(),
             description: Some("Shared context for testing".to_string()),
@@ -174,8 +176,8 @@ mod tests {
         // Attach memory to both agents
         attach_memory_to_agent(
             &db,
-            pattern_record.id,
-            shared_memory.id,
+            &pattern_record.id,
+            &shared_memory.id.clone(),
             MemoryPermission::ReadWrite,
         )
         .await
@@ -183,8 +185,8 @@ mod tests {
 
         attach_memory_to_agent(
             &db,
-            entropy_record.id,
-            shared_memory.id,
+            &entropy_record.id.clone(),
+            &shared_memory.id.clone(),
             MemoryPermission::ReadOnly,
         )
         .await
@@ -232,7 +234,7 @@ mod tests {
             agent_type: AgentType::Generic,
             state: AgentState::default(),
             model_id: None,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
         let agent_record = create_entity::<AgentRecord, _>(&db, &agent_record)
@@ -241,19 +243,19 @@ mod tests {
 
         // Create ownership relationship using entity system
         let mut user_with_agent = user.clone();
-        user_with_agent.owned_agent_ids = vec![agent_record.id];
+        user_with_agent.owned_agent_ids = vec![agent_record.id.clone()];
         user_with_agent.store_relations(&db).await.unwrap();
 
-        let agent_id = agent_record.id;
+        let agent_id = agent_record.id.clone();
 
         // Create agent
         let _agent = DatabaseAgent::new(
-            agent_id,
-            user.id,
+            agent_id.clone(),
+            user.id.clone(),
             AgentType::Generic,
             "TestAgent".to_string(),
             "Test agent".to_string(),
-            Memory::with_owner(user.id),
+            Memory::with_owner(&user.id),
             db.clone(),
             model,
             tools,
@@ -263,7 +265,7 @@ mod tests {
         // Create and attach some memory blocks
         let persistent_memory = MemoryBlock {
             id: MemoryId::generate(),
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             label: "persistent_context".to_compact_string(),
             value: "This should persist".to_string(),
             description: Some("Memory that persists across conversations".to_string()),
@@ -283,8 +285,8 @@ mod tests {
 
         attach_memory_to_agent(
             &db,
-            agent_id,
-            persistent_memory.id,
+            &agent_id,
+            &persistent_memory.id,
             MemoryPermission::ReadWrite,
         )
         .await
@@ -312,8 +314,8 @@ mod tests {
 
         attach_memory_to_agent(
             &db,
-            agent_id,
-            deletable_memory.id,
+            &agent_id,
+            &deletable_memory.id,
             MemoryPermission::ReadWrite,
         )
         .await
@@ -358,19 +360,19 @@ mod tests {
             agent_type: AgentType::Generic,
             state: AgentState::default(),
             model_id: None,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
         let agent = create_entity::<AgentRecord, _>(&db, &agent).await.unwrap();
 
         // Create ownership relationship using entity system
         let mut user_with_agent = user.clone();
-        user_with_agent.owned_agent_ids = vec![agent.id];
+        user_with_agent.owned_agent_ids = vec![agent.id.clone()];
         user_with_agent.store_relations(&db).await.unwrap();
 
         let memory = MemoryBlock {
             id: MemoryId::generate(),
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             label: "test_memory".into(),
             value: "Test value".to_string(),
             description: None,
@@ -386,11 +388,16 @@ mod tests {
         let agent_id = agent.id;
 
         // Test different access levels
-        attach_memory_to_agent(&db, agent_id, memory.id, MemoryPermission::ReadOnly)
-            .await
-            .unwrap();
+        attach_memory_to_agent(
+            &db,
+            &agent_id.clone(),
+            &memory.id,
+            MemoryPermission::ReadOnly,
+        )
+        .await
+        .unwrap();
 
-        let memories = get_agent_memories(&db, agent_id).await.unwrap();
+        let memories = get_agent_memories(&db, &agent_id).await.unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].1, MemoryPermission::ReadOnly);
         assert_eq!(memories[0].0.label, "test_memory");
@@ -417,7 +424,7 @@ mod tests {
             agent_type: AgentType::Generic,
             state: AgentState::Ready,
             model_id: None,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
         let agent_record = create_entity::<AgentRecord, _>(&db, &agent_record)
@@ -426,18 +433,18 @@ mod tests {
 
         // Create ownership relationship using entity system
         let mut user_with_agent = user.clone();
-        user_with_agent.owned_agent_ids = vec![agent_record.id];
+        user_with_agent.owned_agent_ids = vec![agent_record.id.clone()];
         user_with_agent.store_relations(&db).await.unwrap();
 
         let agent_id = agent_record.id;
 
         let agent = DatabaseAgent::new(
             agent_id,
-            user.id,
+            user.id.clone(),
             AgentType::Generic,
             "TestAgent".to_string(),
             "Test agent".to_string(),
-            Memory::with_owner(user.id),
+            Memory::with_owner(&user.id),
             db.clone(),
             model,
             tools,

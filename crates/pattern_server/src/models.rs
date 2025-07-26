@@ -3,18 +3,15 @@
 use chrono::{DateTime, Utc};
 use pattern_core::{
     define_id_type,
-    id::{AgentId, EventId, Id, MemoryId, TaskId, UserId},
+    id::{AgentId, EventId, MemoryId, TaskId, UserId},
 };
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Define ID types for server entities
-define_id_type!(ApiKeyIdType, "apikey");
-define_id_type!(RefreshTokenFamilyIdType, "rtfam");
-
-pub type ApiKeyId = Id<ApiKeyIdType>;
-pub type RefreshTokenFamilyId = Id<RefreshTokenFamilyIdType>;
+define_id_type!(ApiKeyId, "apikey");
+define_id_type!(RefreshTokenFamilyId, "rtfam");
 
 /// Server-side user model with authentication fields
 /// Extends pattern_core::User with auth-specific fields

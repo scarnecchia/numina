@@ -334,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_archival_in_memory() {
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
 
         // Create some archival memories
         memory

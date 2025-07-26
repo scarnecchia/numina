@@ -6,7 +6,7 @@
 
 use crate::agent::{AgentState, AgentType};
 use crate::context::{CompressionStrategy, ContextConfig};
-use crate::id::{AgentId, EventId, MemoryId, TaskId, UserId};
+use crate::id::{AgentId, EventId, MemoryId, RelationId, TaskId, UserId};
 use crate::memory::MemoryBlock;
 use chrono::{DateTime, Utc};
 use ferroid::{SnowflakeGeneratorAsyncTokioExt, SnowflakeMastodonId};
@@ -279,7 +279,7 @@ impl AgentRecord {
 
         // Create the relation using the edge entity
         let relation = crate::message::AgentMessageRelation {
-            id: None,
+            id: RelationId::nil(),
             in_id: self.id.clone(),
             out_id: message_id.clone(),
             message_type,
@@ -299,12 +299,11 @@ impl AgentRecord {
 /// This is already defined in base.rs but included here for reference.
 /// It stores metadata about how an agent relates to a memory block.
 use crate::memory::MemoryPermission;
-use surrealdb::RecordId;
 
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
 #[entity(entity_type = "agent_memories", edge = true)]
 pub struct AgentMemoryRelation {
-    pub id: Option<RecordId>,
+    pub id: RelationId,
     pub in_id: AgentId,
     pub out_id: MemoryId,
     pub access_level: MemoryPermission,

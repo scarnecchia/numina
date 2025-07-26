@@ -68,6 +68,10 @@ zstd = { version = "0.13", optional = true }
 #hyper-tls.workspace = true
 ureq.workspace = true
 
+atrium-api.workspace = true
+atrium-oauth.workspace = true
+atrium-common.workspace = true
+
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
 
@@ -86,7 +90,7 @@ miette = { workspace = true, features = ["fancy"] }
 default = ["surreal-embedded", "embed-candle", "embed-cloud"]
 nd = []                                                       # Enable neurodivergent features when pattern-nd is ready
 export = ["zstd"]                                             # Agent export/import with compression
-oauth = ["reqwest", "reqwest-middleware", "http"]            # OAuth authentication support
+oauth = ["reqwest", "reqwest-middleware", "http"]             # OAuth authentication support
 
 # Database backends
 surreal-embedded = ["surrealdb/kv-surrealkv"]

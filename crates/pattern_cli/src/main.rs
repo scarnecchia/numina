@@ -89,6 +89,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuthCommands,
     },
+    /// ATProto/Bluesky authentication
+    Atproto {
+        #[command(subcommand)]
+        cmd: AtprotoCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -177,6 +182,32 @@ enum GroupCommands {
         /// Group name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AtprotoCommands {
+    /// Login with app password
+    Login {
+        /// Your handle (e.g., alice.bsky.social) or DID
+        identifier: String,
+        /// App password (will prompt if not provided)
+        #[arg(short = 'p', long)]
+        app_password: Option<String>,
+    },
+    /// Login with OAuth (coming soon)
+    OAuth {
+        /// Your handle (e.g., alice.bsky.social) or DID
+        identifier: String,
+    },
+    /// Show authentication status
+    Status,
+    /// Unlink an ATProto identity
+    Unlink {
+        /// Handle or DID to unlink
+        identifier: String,
+    },
+    /// Test ATProto connections
+    Test,
 }
 
 #[derive(Subcommand)]
@@ -479,6 +510,23 @@ async fn main() -> Result<()> {
             AuthCommands::Login { provider } => commands::auth::login(provider, &config).await?,
             AuthCommands::Status => commands::auth::status(&config).await?,
             AuthCommands::Logout { provider } => commands::auth::logout(provider, &config).await?,
+        },
+        Commands::Atproto { cmd } => match cmd {
+            AtprotoCommands::Login {
+                identifier,
+                app_password,
+            } => {
+                commands::atproto::app_password_login(identifier, app_password.clone(), &config)
+                    .await?
+            }
+            AtprotoCommands::OAuth { identifier } => {
+                commands::atproto::oauth_login(identifier, &config).await?
+            }
+            AtprotoCommands::Status => commands::atproto::status(&config).await?,
+            AtprotoCommands::Unlink { identifier } => {
+                commands::atproto::unlink(identifier, &config).await?
+            }
+            AtprotoCommands::Test => commands::atproto::test(&config).await?,
         },
     }
 

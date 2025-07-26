@@ -43,6 +43,16 @@ dialoguer = "0.11"
 dirs = { workspace = true }
 dotenvy = { workspace = true }
 rustyline = "14"
+rpassword = "7.3"
+
+# ATProto dependencies
+atrium-api = { workspace = true }
+atrium-xrpc = { workspace = true }
+atrium-xrpc-client = { version = "0.5.13", features = ["reqwest"] }
+atrium-common = { workspace = true }
+atrium-identity = { workspace = true }
+hickory-resolver = "0.24"
+reqwest = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

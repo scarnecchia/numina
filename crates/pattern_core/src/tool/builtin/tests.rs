@@ -11,7 +11,7 @@ mod tests {
     #[tokio::test]
     async fn test_builtin_tools_registration() {
         // Create a memory and handle
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
         memory.create_block("test", "initial value").unwrap();
 
         let handle = AgentHandle::test_with_memory(memory);
@@ -34,7 +34,7 @@ mod tests {
     #[tokio::test]
     async fn test_context_append_through_registry() {
         // Create a memory and handle
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
         memory.create_block("test", "initial value").unwrap();
 
         // Make it a core memory block with append permission
@@ -95,7 +95,7 @@ mod tests {
     #[tokio::test]
     async fn test_context_replace_through_registry() {
         // Create a memory and handle
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
         memory
             .create_block("persona", "I am a helpful AI assistant.")
             .unwrap();
@@ -134,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn test_recall_through_registry() {
         // Create a memory and handle
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
 
         let handle = AgentHandle::test_with_memory(memory.clone());
 

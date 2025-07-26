@@ -3,37 +3,25 @@
 //! This module provides a generic, type-safe ID system with consistent prefixes
 //! and UUID-based uniqueness guarantees.
 
-use compact_str::CompactString;
 use schemars::JsonSchema;
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
-use std::marker::PhantomData;
 use std::str::FromStr;
 use surrealdb::RecordId;
 use uuid::Uuid;
 
-use crate::db::strip_brackets;
-
-/// A type-safe ID with a consistent prefix and UUID
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Id<T> {
-    /// The unique identifier
-    uuid: Uuid,
-    /// Phantom data to make each ID type unique
-    _phantom: PhantomData<T>,
-}
-
-impl<T: IdType> fmt::Debug for Id<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}_{}", T::PREFIX, self.uuid)
-    }
-}
-
 /// Trait for types that can be used as ID markers
 pub trait IdType: Send + Sync + 'static {
-    /// The prefix for this ID type (e.g., "agt" for agents, "usr" for users)
+    /// The table name for this ID type (e.g., "agent" for agents, "user" for users)
     const PREFIX: &'static str;
+
+    /// Convert to a string key for RecordId
+    fn to_key(&self) -> String;
+
+    /// Convert from a string key
+    fn from_key(key: &str) -> Result<Self, IdError>
+    where
+        Self: Sized;
 }
 
 /// Errors that can occur when working with IDs
@@ -54,284 +42,114 @@ pub enum IdError {
     InvalidFormat(String),
 }
 
-impl<T: IdType> Id<T> {
-    /// Create a new ID with a generated UUID
-    pub fn generate() -> Self {
-        Self {
-            uuid: Uuid::new_v4(),
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Create an ID from a specific UUID (useful for tests or migrations)
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self {
-            uuid,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Parse an ID from a string
-    pub fn parse(s: &str) -> Result<Self, IdError> {
-        // Check if the string contains a separator
-        let parts: Vec<&str> = s.splitn(2, '_').collect();
-        if parts.len() != 2 {
-            return Err(IdError::InvalidFormat(
-                "ID must be in format 'prefix_uuid'".to_string(),
-            ));
-        }
-
-        let [prefix, uuid_str] = [parts[0], parts[1]];
-
-        // Verify prefix matches
-        if prefix != T::PREFIX {
-            return Err(IdError::InvalidPrefix {
-                expected: T::PREFIX.to_string(),
-                actual: prefix.to_string(),
-            });
-        }
-
-        // Parse the UUID
-        let uuid = Uuid::parse_str(uuid_str)?;
-
-        Ok(Self {
-            uuid,
-            _phantom: PhantomData,
-        })
-    }
-
-    /// Get the UUID part
-    pub fn uuid(&self) -> Uuid {
-        self.uuid
-    }
-
-    pub fn from_record(record: RecordId) -> Self {
-        Self::from_uuid(
-            Uuid::from_str(strip_brackets(&record.key().to_string()))
-                .expect("should be a valid uuid"),
-        )
-    }
-
-    /// Get the prefix for this ID type
-    pub fn prefix(&self) -> &'static str {
-        T::PREFIX
-    }
-
-    /// Convert to a compact string representation
-    pub fn to_compact_string(&self) -> CompactString {
-        compact_str::format_compact!("{}_{}", T::PREFIX, self.uuid)
-    }
-
-    pub fn to_record_id(&self) -> String {
-        self.uuid().to_string()
-    }
-
-    /// Create a nil/empty ID (all zeros)
-    pub fn nil() -> Self {
-        Self {
-            uuid: Uuid::nil(),
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Check if this is a nil/empty ID
-    pub fn is_nil(&self) -> bool {
-        self.uuid.is_nil()
-    }
-}
-
-impl<T: IdType> Display for Id<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}_{}", T::PREFIX, self.uuid)
-    }
-}
-
-impl<T: IdType> FromStr for Id<T> {
-    type Err = IdError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s)
-    }
-}
-
-impl<T: IdType> From<Id<T>> for String {
-    fn from(id: Id<T>) -> Self {
-        id.to_string()
-    }
-}
-
-impl<T: IdType> AsRef<Uuid> for Id<T> {
-    fn as_ref(&self) -> &Uuid {
-        &self.uuid
-    }
-}
-
-impl<T: IdType> From<Id<T>> for RecordId {
-    fn from(id: Id<T>) -> Self {
-        // Use just the UUID part as the key
-        RecordId::from_table_key(T::PREFIX, id.uuid.to_string())
-    }
-}
-
-impl<T: IdType> From<&Id<T>> for RecordId {
-    fn from(id: &Id<T>) -> Self {
-        // Use just the UUID part as the key
-        RecordId::from_table_key(T::PREFIX, id.uuid.to_string())
-    }
-}
-
-impl<T: IdType> Serialize for Id<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&format!("{}_{}", T::PREFIX, self.uuid()))
-    }
-}
-
-impl<'de, T: IdType> Deserialize<'de> for Id<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let visitor: Id<T> = Id::nil();
-        deserializer.deserialize_str(visitor)
-    }
-}
-
-impl<'de, T: IdType> Visitor<'de> for Id<T> {
-    type Value = Id<T>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "A string with the format 'prefix_UUID'")
-    }
-
-    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        // Check if the string contains a separator
-        let parts: Vec<&str> = s.splitn(2, '_').collect();
-        if parts.len() != 2 {
-            return Err(de::Error::custom(
-                "ID must be in format 'prefix_uuid'".to_string(),
-            ));
-        }
-
-        let [prefix, uuid_str] = [parts[0], parts[1]];
-
-        // Verify prefix matches
-        if prefix != T::PREFIX {
-            return Err(de::Error::custom(format!(
-                "ID prefix must match type ({}), but was {}",
-                T::PREFIX,
-                prefix
-            )));
-        }
-
-        // Parse the UUID
-        let uuid = Uuid::parse_str(uuid_str).map_err(|e| {
-            de::Error::custom(format!(
-                "Second component of id must be a valid UUIDv4, but got error{}",
-                e
-            ))
-        })?;
-
-        Ok(Self {
-            uuid,
-            _phantom: PhantomData,
-        })
-    }
-}
-
-impl<T: IdType> JsonSchema for Id<T> {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Owned(format!("{}Id", T::PREFIX))
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        // Generate same schema as String since we serialize to string
-        String::json_schema(generator)
-    }
-}
-
 /// Macro to define new ID types with minimal boilerplate
 #[macro_export]
 macro_rules! define_id_type {
-    ($type_name:ident, $prefix:expr) => {
-        /// Marker type for the ID
-        #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-        pub struct $type_name;
+    ($type_name:ident, $table:expr) => {
+        #[derive(
+            Debug,
+            PartialEq,
+            Eq,
+            Hash,
+            Clone,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::schemars::JsonSchema,
+        )]
+        pub struct $type_name(pub String);
 
         impl $crate::id::IdType for $type_name {
-            const PREFIX: &'static str = $prefix;
+            const PREFIX: &'static str = $table;
+
+            fn to_key(&self) -> String {
+                self.0.clone()
+            }
+
+            fn from_key(key: &str) -> Result<Self, $crate::id::IdError> {
+                Ok($type_name(key.to_string()))
+            }
+        }
+
+        impl From<$type_name> for ::surrealdb::RecordIdKey {
+            fn from(id: $type_name) -> Self {
+                id.0.into()
+            }
+        }
+
+        impl From<$type_name> for ::surrealdb::RecordId {
+            fn from(id: $type_name) -> Self {
+                ::surrealdb::RecordId::from_table_key(
+                    <$type_name as $crate::id::IdType>::PREFIX,
+                    id.0,
+                )
+            }
+        }
+
+        impl From<&$type_name> for ::surrealdb::RecordId {
+            fn from(id: &$type_name) -> Self {
+                ::surrealdb::RecordId::from_table_key(
+                    <$type_name as $crate::id::IdType>::PREFIX,
+                    &id.0,
+                )
+            }
+        }
+
+        impl ::std::fmt::Display for $type_name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        impl $type_name {
+            pub fn generate() -> Self {
+                $type_name(::uuid::Uuid::new_v4().simple().to_string())
+            }
+
+            pub fn nil() -> Self {
+                $type_name(::uuid::Uuid::nil().simple().to_string())
+            }
+
+            pub fn from_record(record: ::surrealdb::RecordId) -> Self {
+                $type_name(record.key().to_string())
+            }
+
+            pub fn to_record_id(&self) -> String {
+                self.0.clone()
+            }
+
+            pub fn from_uuid(uuid: ::uuid::Uuid) -> Self {
+                $type_name(uuid.simple().to_string())
+            }
+
+            pub fn is_nil(&self) -> bool {
+                self.0 == ::uuid::Uuid::nil().simple().to_string()
+            }
+        }
+
+        impl ::std::str::FromStr for $type_name {
+            type Err = $crate::id::IdError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Ok($type_name(s.to_string()))
+            }
         }
     };
 }
 
-// Implement common ID types
-//
-/// Type alias for Message IDs (these are just strings for compat with API)
-///
-/// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
-/// format because it needs to be compatible with Anthropic/OpenAI APIs which
-/// expect arbitrary string UUIDs.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
-#[repr(transparent)]
-pub struct RelationId(pub String);
-
-// RelationId is special and doesn't use the macro
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct RelationIdType;
-
-impl IdType for RelationIdType {
-    const PREFIX: &'static str = "rel";
-}
-
-impl RelationId {
-    pub fn generate() -> Self {
-        let mut buf = Uuid::encode_buffer();
-        let uuid = uuid::Uuid::new_v4().simple().encode_lower(&mut buf);
-        RelationId(format!("rel_{uuid}"))
-    }
-}
-
-impl From<RelationId> for RecordId {
-    fn from(value: RelationId) -> Self {
-        RecordId::from_table_key("rel", value.0)
-    }
-}
+define_id_type!(RelationId, "rel");
 
 // Define common ID types using the macro
-define_id_type!(AgentIdType, "agent");
-define_id_type!(UserIdType, "user");
-define_id_type!(ConversationIdType, "convo");
-define_id_type!(TaskIdType, "task");
-define_id_type!(ToolCallIdType, "toolcall");
-
-/// Type alias for Agent IDs
-pub type AgentId = Id<AgentIdType>;
-
-/// Type alias for User IDs
-pub type UserId = Id<UserIdType>;
+define_id_type!(AgentId, "agent");
+define_id_type!(UserId, "user");
+define_id_type!(ConversationId, "convo");
+define_id_type!(TaskId, "task");
+define_id_type!(ToolCallId, "toolcall");
 
 impl Default for UserId {
     fn default() -> Self {
         UserId::generate()
     }
 }
-
-/// Type alias for Conversation IDs
-pub type ConversationId = Id<ConversationIdType>;
-
-/// Type alias for Task IDs
-pub type TaskId = Id<TaskIdType>;
-
-/// Type alias for Tool Call IDs
-pub type ToolCallId = Id<ToolCallIdType>;
-
-// MessageIdType uses the macro
-define_id_type!(MessageIdType, "msg");
 
 /// Unlike other IDs in the system, MessageId doesn't follow the `prefix_uuid`
 /// format because it needs to be compatible with Anthropic/OpenAI APIs which
@@ -340,12 +158,18 @@ define_id_type!(MessageIdType, "msg");
 #[repr(transparent)]
 pub struct MessageId(pub String);
 
+impl Display for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 // MessageId cannot implement Copy because String doesn't implement Copy
 // This is intentional as MessageId needs to own its string data
 
 impl MessageId {
     pub fn generate() -> Self {
-        let uuid = uuid::Uuid::new_v4();
+        let uuid = uuid::Uuid::new_v4().simple();
         MessageId(format!("msg_{}", uuid))
     }
 
@@ -382,41 +206,115 @@ impl From<&MessageId> for RecordId {
     }
 }
 
+impl IdType for MessageId {
+    const PREFIX: &'static str = "msg";
+
+    fn to_key(&self) -> String {
+        self.0.clone()
+    }
+
+    fn from_key(key: &str) -> Result<Self, IdError> {
+        Ok(MessageId(key.to_string()))
+    }
+}
+
+impl FromStr for MessageId {
+    type Err = IdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(MessageId(s.to_string()))
+    }
+}
+
+impl JsonSchema for Did {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "did".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        generator.root_schema_for::<String>()
+    }
+}
+
+/// Unlike other IDs in the system, Did doesn't follow the `prefix_uuid`
+/// format because it follows the DID standard (did:plc, did:web)
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct Did(pub atrium_api::types::string::Did);
+
+// Did cannot implement Copy because String doesn't implement Copy
+// This is intentional as Did needs to own its string data
+
+impl Did {
+    pub fn to_record_id(&self) -> String {
+        // Return the full string as the record key
+        self.0.to_string()
+    }
+
+    pub fn from_record(record_id: RecordId) -> Self {
+        Did(
+            atrium_api::types::string::Did::new(record_id.key().to_string())
+                .expect("should be valid did"),
+        )
+    }
+}
+
+impl From<Did> for RecordId {
+    fn from(value: Did) -> Self {
+        RecordId::from_table_key(Did::PREFIX, value.0.to_string())
+    }
+}
+
+impl From<&Did> for RecordId {
+    fn from(value: &Did) -> Self {
+        RecordId::from_table_key(Did::PREFIX, &value.0.to_string())
+    }
+}
+
+impl std::fmt::Display for Did {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.to_string())
+    }
+}
+
+impl FromStr for Did {
+    type Err = IdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Did(atrium_api::types::string::Did::new(s.to_string())
+            .map_err(|_| {
+                IdError::InvalidFormat(format!("Invalid DID format: {}", s))
+            })?))
+    }
+}
+
+impl IdType for Did {
+    const PREFIX: &'static str = "atproto_identity";
+
+    fn to_key(&self) -> String {
+        self.0.to_string()
+    }
+
+    fn from_key(key: &str) -> Result<Self, IdError> {
+        Ok(Did(atrium_api::types::string::Did::new(key.to_string())
+            .map_err(|_| {
+                IdError::InvalidFormat(format!("Invalid DID format: {}", key))
+            })?))
+    }
+}
+
 // More ID types using the macro
-define_id_type!(MemoryIdType, "mem");
-define_id_type!(EventIdType, "event");
-define_id_type!(SessionIdType, "session");
-
-/// Type alias for Memory Block IDs
-pub type MemoryId = Id<MemoryIdType>;
-
-/// Type alias for Event IDs
-pub type EventId = Id<EventIdType>;
-
-/// Type alias for Session IDs
-pub type SessionId = Id<SessionIdType>;
+define_id_type!(MemoryId, "mem");
+define_id_type!(EventId, "event");
+define_id_type!(SessionId, "session");
 
 // Define new ID types using the macro
-define_id_type!(ModelIdType, "model");
-define_id_type!(RequestIdType, "request");
-define_id_type!(GroupIdType, "group");
-define_id_type!(ConstellationIdType, "const");
-define_id_type!(OAuthTokenIdType, "oauth");
-
-/// Type alias for Model IDs
-pub type ModelId = Id<ModelIdType>;
-
-/// Type alias for Request IDs
-pub type RequestId = Id<RequestIdType>;
-
-/// Type alias for Group IDs
-pub type GroupId = Id<GroupIdType>;
-
-/// Type alias for Constellation IDs
-pub type ConstellationId = Id<ConstellationIdType>;
-
-/// Type alias for OAuth Token IDs
-pub type OAuthTokenId = Id<OAuthTokenIdType>;
+define_id_type!(ModelId, "model");
+define_id_type!(RequestId, "request");
+define_id_type!(GroupId, "group");
+define_id_type!(ConstellationId, "const");
+define_id_type!(OAuthTokenId, "oauth");
+define_id_type!(AtprotoIdentityId, "atproto_identity");
 
 #[cfg(test)]
 mod tests {
@@ -430,31 +328,8 @@ mod tests {
         // IDs should be unique
         assert_ne!(id1, id2);
 
-        // IDs should have correct prefix
-        assert_eq!(id1.prefix(), "agent");
-        assert!(id2.to_string().starts_with("agent_"));
-    }
-
-    #[test]
-    fn test_id_parsing() {
-        let id = AgentId::generate();
-        let id_str = id.to_string();
-
-        // Should be able to parse back
-        let parsed = AgentId::parse(&id_str).unwrap();
-        assert_eq!(id, parsed);
-
-        // Should fail with wrong prefix
-        assert!(UserId::parse(&id_str).is_err());
-
-        // Should fail with invalid format
-        assert!(AgentId::parse("invalid").is_err());
-        assert!(AgentId::parse("agent_").is_err());
-        assert!(AgentId::parse("agent_not-a-uuid").is_err());
-
-        // Should succeed with valid format
-        let uuid = uuid::Uuid::new_v4();
-        assert!(AgentId::parse(&format!("agent_{}", uuid)).is_ok());
+        // IDs should have correct table name
+        assert_eq!(AgentId::PREFIX, "agent");
     }
 
     #[test]
@@ -465,9 +340,6 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let deserialized: AgentId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, deserialized);
-
-        // Should serialize as "prefix_uuid"
-        assert!(json.contains("agent_"));
     }
 
     #[test]
@@ -476,55 +348,17 @@ mod tests {
         let user_id = UserId::generate();
         let task_id = TaskId::generate();
 
-        assert!(agent_id.to_string().starts_with("agent_"));
-        assert!(user_id.to_string().starts_with("user_"));
-        assert!(task_id.to_string().starts_with("task_"));
+        // All should be different UUIDs
+        assert_ne!(agent_id.0, user_id.0);
+        assert_ne!(user_id.0, task_id.0);
     }
 
     #[test]
-    fn test_nil_id() {
-        let nil_id = AgentId::nil();
-        assert!(nil_id.is_nil());
-        assert_eq!(
-            nil_id.to_string(),
-            "agent_00000000-0000-0000-0000-000000000000"
-        );
-    }
-
-    #[test]
-    fn test_from_uuid() {
-        let uuid = Uuid::new_v4();
-        let id = AgentId::from_uuid(uuid);
-        assert_eq!(id.uuid(), uuid);
-    }
-
-    #[test]
-    fn test_compact_string() {
-        let id = AgentId::generate();
-        let compact = id.to_compact_string();
-        let string = id.to_string();
-        assert_eq!(compact.as_str(), string.as_str());
-    }
-
-    #[test]
-    fn test_debug_output() {
+    fn test_record_id_conversion() {
         let agent_id = AgentId::generate();
-        let user_id = UserId::generate();
+        let record_id: RecordId = agent_id.clone().into();
 
-        // Debug output should be clean, just "prefix_uuid"
-        let agent_debug = format!("{:?}", agent_id);
-        let user_debug = format!("{:?}", user_id);
-
-        assert!(agent_debug.starts_with("agent_"));
-        assert!(user_debug.starts_with("user_"));
-
-        // Should not contain PhantomData or other noise
-        assert!(!agent_debug.contains("PhantomData"));
-        assert!(!agent_debug.contains("_phantom"));
-        assert!(!agent_debug.contains("uuid:"));
-
-        // Debug should match Display
-        assert_eq!(agent_debug, agent_id.to_string());
-        assert_eq!(user_debug, user_id.to_string());
+        assert_eq!(record_id.table(), "agent");
+        assert_eq!(record_id.key().to_string(), agent_id.0);
     }
 }

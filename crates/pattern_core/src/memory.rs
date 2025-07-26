@@ -10,7 +10,6 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::Arc;
 
-use crate::id::MemoryIdType;
 use crate::{MemoryId, Result, UserId};
 
 /// Permission levels for memory operations (most to least restrictive)
@@ -164,13 +163,13 @@ impl Memory {
     }
 
     /// Create a new memory system owned by a specific user
-    pub fn with_owner(owner_id: UserId) -> Self {
+    pub fn with_owner(owner_id: &UserId) -> Self {
         Self {
             blocks: Arc::new(DashMap::new()),
             new_blocks: Arc::new(DashSet::new()),
             dirty_blocks: Arc::new(DashSet::new()),
             char_limit: 5000,
-            owner_id,
+            owner_id: owner_id.clone(),
         }
     }
 
@@ -455,6 +454,8 @@ impl MemoryBlock {
 
 #[cfg(test)]
 mod tests {
+    use crate::db::DbEntity;
+
     use super::*;
 
     #[test]
@@ -519,7 +520,7 @@ mod tests {
         );
 
         // Load it back
-        let loaded = MemoryBlock::load_with_relations(&db, stored.id)
+        let loaded = MemoryBlock::load_with_relations(&db, stored.id())
             .await
             .unwrap()
             .expect("Memory block should exist");

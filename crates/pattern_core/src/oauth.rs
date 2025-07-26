@@ -15,7 +15,7 @@ pub mod resolver;
 pub mod integration;
 
 use crate::CoreError;
-use crate::id::{OAuthTokenId, OAuthTokenIdType, UserId};
+use crate::id::{OAuthTokenId, UserId};
 use chrono::{DateTime, Utc};
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};

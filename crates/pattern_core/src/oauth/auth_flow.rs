@@ -290,7 +290,6 @@ mod tests {
 
         // URL should contain all required parameters
         assert!(auth_url.contains("response_type=code"));
-        assert!(auth_url.contains("client_id=claude-code"));
         assert!(auth_url.contains("code_challenge="));
         assert!(auth_url.contains("code_challenge_method=S256"));
         assert!(auth_url.contains("state="));

@@ -3,7 +3,7 @@
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AgentId, ToolCallId, ToolCallIdType};
+use crate::id::{AgentId, ToolCallId};
 
 /// SQL schema definitions for the database
 pub struct Schema;

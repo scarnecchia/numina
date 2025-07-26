@@ -440,7 +440,7 @@ mod tests {
             coordination_pattern: CoordinationPattern::Sleeptime {
                 check_interval: Duration::from_secs(1), // 1 second for testing
                 triggers,
-                intervention_agent_id: intervention_id,
+                intervention_agent_id: intervention_id.clone(),
             },
             created_at: Utc::now(),
             updated_at: Utc::now(),

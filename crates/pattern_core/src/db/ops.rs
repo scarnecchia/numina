@@ -7,14 +7,12 @@ use super::{
 use serde_json::json;
 use surrealdb::{Connection, Surreal};
 
-use crate::MessageId;
 use crate::embeddings::EmbeddingProvider;
-use crate::id::{AgentId, AgentIdType, GroupId, IdType, MemoryId, MemoryIdType, UserId};
+use crate::id::{AgentId, GroupId, IdType, MemoryId, UserId};
 use crate::memory::MemoryBlock;
 use crate::message::Message;
-
-use crate::Id;
 use crate::utils::debug::ResponseExt;
+use crate::{MessageId, id::RelationId};
 use chrono::Utc;
 
 use futures::{Stream, StreamExt};
@@ -54,10 +52,10 @@ pub async fn create_entity<E: DbEntity, C: Connection>(
 /// Get an entity by ID
 pub async fn get_entity<E: DbEntity, C: Connection>(
     conn: &Surreal<C>,
-    id: &Id<E::Id>,
+    id: &E::Id,
 ) -> Result<Option<E::Domain>> {
     let result: Option<E::DbModel> = conn
-        .select((E::table_name(), id.uuid().to_string()))
+        .select((E::table_name(), id.to_key()))
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
 
@@ -74,7 +72,7 @@ pub async fn update_entity<E: DbEntity, C: Connection>(
 ) -> Result<E::Domain> {
     let db_model = E::to_db_model(entity);
     let updated: Option<E::DbModel> = conn
-        .update((E::table_name(), entity.id().uuid().to_string()))
+        .update((E::table_name(), entity.id().to_key()))
         .merge(db_model)
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
@@ -83,7 +81,7 @@ pub async fn update_entity<E: DbEntity, C: Connection>(
         Some(db_model) => E::from_db_model(db_model).map_err(DatabaseError::from),
         None => Err(DatabaseError::NotFound {
             entity_type: E::table_name().to_string(),
-            id: entity.id().to_string(),
+            id: format!("{:?}", entity.id()),
         }),
     }
 }
@@ -91,10 +89,10 @@ pub async fn update_entity<E: DbEntity, C: Connection>(
 /// Delete an entity from the database
 pub async fn delete_entity<E: DbEntity, C: Connection, I>(
     conn: &Surreal<C>,
-    id: &Id<E::Id>,
+    id: &E::Id,
 ) -> Result<()> {
     let _deleted: Option<E::DbModel> = conn
-        .delete(RecordId::from(id))
+        .delete((E::table_name(), id.to_key()))
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
 
@@ -423,7 +421,7 @@ pub trait VectorSearchExt<C: Connection> {
     fn search_memories(
         &self,
         embeddings: &dyn EmbeddingProvider,
-        agent_id: AgentId,
+        agent_id: &AgentId,
         query: &str,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<(MemoryBlock, f32)>>>;
@@ -433,7 +431,7 @@ impl<C: Connection> VectorSearchExt<C> for Surreal<C> {
     async fn search_memories(
         &self,
         embeddings: &dyn EmbeddingProvider,
-        agent_id: AgentId,
+        agent_id: &AgentId,
         query: &str,
         limit: usize,
     ) -> Result<Vec<(MemoryBlock, f32)>> {
@@ -450,7 +448,7 @@ impl<C: Connection> VectorSearchExt<C> for Surreal<C> {
             ORDER BY score DESC
             LIMIT {}
             "#,
-            MemoryIdType::PREFIX,
+            MemoryId::PREFIX,
             RecordId::from(agent_id),
             limit
         );
@@ -482,10 +480,10 @@ impl<C: Connection> VectorSearchExt<C> for Surreal<C> {
 /// Subscribe to memory updates for a specific memory
 pub async fn subscribe_to_memory_updates<C: Connection>(
     conn: &Surreal<C>,
-    memory_id: MemoryId,
+    memory_id: &MemoryId,
 ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
     let stream = conn
-        .select((MemoryIdType::PREFIX, memory_id.uuid().to_string()))
+        .select((MemoryId::PREFIX, memory_id.to_key()))
         .live()
         .await?;
 
@@ -508,7 +506,7 @@ pub async fn subscribe_to_memory_updates<C: Connection>(
 /// Subscribe to all memory updates for an agent
 pub async fn subscribe_to_agent_memory_updates<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
 ) -> Result<impl Stream<Item = (Action, MemoryBlock)>> {
     // For now, just watch all memory blocks and filter in the handler
     // TODO: Optimize this to only watch memories connected to the agent
@@ -545,8 +543,8 @@ pub async fn subscribe_to_agent_memory_updates<C: Connection>(
 /// Attach a memory block to an agent with specific access level
 pub async fn attach_memory_to_agent<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
-    memory_id: MemoryId,
+    agent_id: &AgentId,
+    memory_id: &MemoryId,
     access_level: crate::memory::MemoryPermission,
 ) -> Result<()> {
     tracing::debug!("🔗 Attaching memory {} to agent {}", memory_id, agent_id);
@@ -590,7 +588,7 @@ pub async fn attach_memory_to_agent<C: Connection>(
 /// Get all memories accessible to an agent
 pub async fn get_agent_memories<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
 ) -> Result<Vec<(MemoryBlock, crate::memory::MemoryPermission)>> {
     use crate::db::entity::AgentMemoryRelation;
 
@@ -733,7 +731,7 @@ pub async fn update_memory_content<C: Connection>(
 /// Persist a message and create agent-message relation
 pub async fn persist_agent_message<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
     message: &Message,
     message_type: crate::message::MessageRelationType,
 ) -> Result<()> {
@@ -752,7 +750,7 @@ pub async fn persist_agent_message<C: Connection>(
     loop {
         attempt += 1;
 
-        match persist_agent_message_inner(conn, agent_id, &message, message_type).await {
+        match persist_agent_message_inner(conn, &agent_id, &message, message_type).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Check if it's a transaction conflict
@@ -778,7 +776,7 @@ pub async fn persist_agent_message<C: Connection>(
 /// Inner function that does the actual persistence
 async fn persist_agent_message_inner<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
     message: &Message,
     message_type: crate::message::MessageRelationType,
 ) -> Result<()> {
@@ -790,8 +788,8 @@ async fn persist_agent_message_inner<C: Connection>(
     let position = crate::agent::get_next_message_position().await;
 
     let relation = crate::message::AgentMessageRelation {
-        id: None,
-        in_id: agent_id,
+        id: RelationId::nil(),
+        in_id: agent_id.clone(),
         out_id: stored_message.id.clone(),
         message_type,
         position: position.clone(),
@@ -814,7 +812,7 @@ async fn persist_agent_message_inner<C: Connection>(
 /// Archive messages by updating their relation type to Archived
 pub async fn archive_agent_messages<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
     message_ids: &[MessageId],
 ) -> Result<()> {
     // Update all relations for these messages to Archived type
@@ -852,7 +850,7 @@ pub async fn persist_agent_memory<C: Connection>(
 
     // Create the relation using create_relation_typed (now idempotent)
     let relation = AgentMemoryRelation {
-        id: None, // Will be set by SurrealDB
+        id: RelationId::nil(),
         in_id: agent_id,
         out_id: stored_memory.id,
         access_level,
@@ -899,10 +897,10 @@ pub async fn update_agent_stats<C: Connection>(
 /// Subscribe to agent stats updates
 pub async fn subscribe_to_agent_stats<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
 ) -> Result<impl Stream<Item = (Action, crate::agent::AgentRecord)>> {
     let stream = conn
-        .select((AgentIdType::PREFIX, agent_id.uuid().to_string()))
+        .select((AgentId::PREFIX, agent_id.to_key()))
         .live()
         .await?;
 
@@ -925,7 +923,7 @@ pub async fn subscribe_to_agent_stats<C: Connection>(
 /// Load full agent state from database
 pub async fn load_agent_state<C: Connection>(
     conn: &Surreal<C>,
-    agent_id: AgentId,
+    agent_id: &AgentId,
 ) -> Result<(crate::agent::AgentRecord, Vec<Message>, Vec<MemoryBlock>)> {
     // Load the agent record with relations
     let agent = crate::agent::AgentRecord::load_with_relations(conn, agent_id)
@@ -1131,7 +1129,7 @@ pub async fn get_group_members<C: Connection>(
     )>,
 > {
     // Load the group with its relations
-    let group = AgentGroup::load_with_relations(conn, group_id.clone())
+    let group = AgentGroup::load_with_relations(conn, &group_id)
         .await?
         .ok_or_else(|| DatabaseError::NotFound {
             entity_type: "group".to_string(),
@@ -1167,6 +1165,9 @@ pub async fn update_group_state<C: Connection>(
 use crate::id::OAuthTokenId;
 #[cfg(feature = "oauth")]
 use crate::oauth::OAuthToken;
+
+// ATProto identity operations module
+pub mod atproto;
 
 /// Create a new OAuth token in the database
 #[cfg(feature = "oauth")]
@@ -1471,7 +1472,7 @@ mod tests {
             id: AgentId::generate(),
             name: "Test Agent".to_string(),
             agent_type: AgentType::Generic,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
 
@@ -1488,9 +1489,9 @@ mod tests {
 
         let relation = create_relation(
             &db,
-            &RecordId::from(created_user.id),
+            &RecordId::from(&created_user.id),
             "manages",
-            &RecordId::from(created_agent.id),
+            &RecordId::from(&created_agent.id),
             Some(properties.clone()),
         )
         .await
@@ -1506,8 +1507,8 @@ mod tests {
 
         let mut result = db
             .query(query)
-            .bind(("user_id", RecordId::from(created_user.id)))
-            .bind(("agent_id", RecordId::from(created_agent.id)))
+            .bind(("user_id", RecordId::from(&created_user.id)))
+            .bind(("agent_id", RecordId::from(&created_agent.id)))
             .await
             .unwrap();
         println!("result: {:?}", result.pretty_debug());
@@ -1560,7 +1561,7 @@ mod tests {
             agent_type: AgentType::Generic,
             state: AgentState::Ready,
             model_id: None,
-            owner_id: user.id,
+            owner_id: user.id.clone(),
             ..Default::default()
         };
 
@@ -1568,11 +1569,11 @@ mod tests {
 
         // Create ownership relationship using entity system
         let mut user_with_agent = user.clone();
-        user_with_agent.owned_agent_ids = vec![agent.id];
+        user_with_agent.owned_agent_ids = vec![agent.id.clone()];
         user_with_agent.store_relations(&db).await.unwrap();
 
         // Get agents for the user using entity system
-        let retrieved_user = User::load_with_relations(&db, user.id)
+        let retrieved_user = User::load_with_relations(&db, &user.id)
             .await
             .unwrap()
             .unwrap();
@@ -1592,21 +1593,21 @@ mod tests {
 
         // Create relationships using entity system
         let mut user_with_task = retrieved_user;
-        user_with_task.created_task_ids = vec![task.id];
+        user_with_task.created_task_ids = vec![task.id.clone()];
         user_with_task.store_relations(&db).await.unwrap();
 
         let mut agent_with_task = agent.clone();
-        agent_with_task.assigned_task_ids = vec![task.id];
+        agent_with_task.assigned_task_ids = vec![task.id.clone()];
         agent_with_task.store_relations(&db).await.unwrap();
 
         // Query relationships using entity system
-        let final_user = User::load_with_relations(&db, user.id)
+        let final_user = User::load_with_relations(&db, &user.id)
             .await
             .unwrap()
             .unwrap();
         assert!(!final_user.created_task_ids.is_empty());
 
-        let final_agent = AgentRecord::load_with_relations(&db, agent.id)
+        let final_agent = AgentRecord::load_with_relations(&db, &agent.id)
             .await
             .unwrap()
             .unwrap();

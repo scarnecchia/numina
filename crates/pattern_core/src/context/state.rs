@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use std::sync::Arc;
 
 use crate::{
-    AgentId, AgentState, AgentType, CoreError, Result,
+    AgentId, AgentState, AgentType, CoreError, IdType, Result,
     db::{DatabaseError, DbEntity},
     memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
     message::{Message, MessageContent, Response, ToolResponse},
@@ -80,7 +80,7 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
             AND value @@ $search_term
             LIMIT $limit
         "#,
-            self.agent_id.uuid()
+            self.agent_id.to_key()
         );
 
         tracing::debug!(
@@ -218,7 +218,7 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
         // Build the query dynamically using graph traversal
         let mut sql = format!(
             "SELECT * FROM msg WHERE (<-agent_messages<-agent:⟨{}⟩..)",
-            self.agent_id.uuid()
+            self.agent_id.to_key()
         );
 
         // Add optional filters

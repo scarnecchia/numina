@@ -79,7 +79,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     };
 
     let name = &input.ident;
-    let db_model_name = Ident::new(&format!("{}DbModel", name), name.span());
+    let db_model_name = Ident::new(&format!("{name}DbModel"), name.span());
     let entity_type = &opts.entity_type;
     let table_name = opts.table.unwrap_or_else(|| {
         // Special case for message entity - use "msg" as table name
@@ -186,7 +186,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             &storage_type,
             &crate_path,
             needs_custom_conversion,
-            &entity_type,
+            entity_type,
             is_edge_entity,
         ));
     }
@@ -245,18 +245,12 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     // Generate relation table definitions
     for (_field_name, _field_type, relation_name) in &relation_fields {
-        field_definitions.push(format!(
-            "DEFINE TABLE OVERWRITE {} SCHEMALESS",
-            relation_name
-        ));
+        field_definitions.push(format!("DEFINE TABLE OVERWRITE {relation_name} SCHEMALESS"));
     }
 
     // Generate relation table definitions
     for (_field_name, _field_type, relation_name, _edge_entity) in &edge_entity_fields {
-        field_definitions.push(format!(
-            "DEFINE TABLE OVERWRITE {} SCHEMALESS",
-            relation_name
-        ));
+        field_definitions.push(format!("DEFINE TABLE OVERWRITE {relation_name} SCHEMALESS"));
     }
 
     // Extract the id field type
@@ -271,14 +265,14 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     let id_type = if is_edge_entity {
         // For edge entities, we'll handle this specially
         // Use a dummy type that won't be used in practice
-        quote! { #crate_path::id::RelationIdType }
+        quote! { #crate_path::id::RelationId }
     } else {
         match entity_type.as_str() {
-            "user" => quote! { #crate_path::id::UserIdType },
-            "agent" => quote! { #crate_path::id::AgentIdType },
-            "memory" => quote! { #crate_path::id::MemoryIdType },
-            "message" => quote! { #crate_path::id::MessageIdType },
-            "event" => quote! { #crate_path::id::EventIdType },
+            "user" => quote! { #crate_path::id::UserId },
+            "agent" => quote! { #crate_path::id::AgentId },
+            "memory" => quote! { #crate_path::id::MemoryId },
+            "message" => quote! { #crate_path::id::MessageId },
+            "event" => quote! { #crate_path::id::EventId },
             _ => {
                 // For custom entity types, we need to determine the IdType
                 // The id field could be:
@@ -293,23 +287,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     if let Some(segment) = type_path.path.segments.last() {
                         let type_name = segment.ident.to_string();
 
-                        if segment.ident == "Id" {
-                            // Direct Id<T> type - extract T
-                            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                                if let Some(syn::GenericArgument::Type(inner_type)) =
-                                    args.args.first()
-                                {
-                                    quote! { #inner_type }
-                                } else {
-                                    panic!("Id type must have a type parameter");
-                                }
-                            } else {
-                                panic!("Id type must have angle bracket arguments");
-                            }
-                        } else if type_name.ends_with("Id") {
+                        if type_name.ends_with("Id") {
                             // Type alias like AgentId -> AgentIdType
                             let base_name = &type_name[..type_name.len() - 2];
-                            let id_type_name = format!("{}IdType", base_name);
+                            let id_type_name = format!("{base_name}Id");
                             let id_type_ident =
                                 syn::Ident::new(&id_type_name, segment.ident.span());
                             quote! { #id_type_ident }
@@ -328,10 +309,10 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     };
 
     // Generate helper function name
-    let helper_fn = Ident::new(&format!("generate_{}_schema", entity_type), name.span());
+    let helper_fn = Ident::new(&format!("generate_{entity_type}_schema"), name.span());
 
     // Generate field keys function name
-    let field_keys_fn = Ident::new(&format!("{}_field_keys", entity_type), name.span());
+    let field_keys_fn = Ident::new(&format!("{entity_type}_field_keys"), name.span());
 
     // Generate store_relations method
     let store_relation_calls = relation_fields.iter().map(|(field_name, field_type, relation_name)| {
@@ -350,7 +331,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     for related_id in &self.#field_name {
                         let query = format!(
                             "RELATE {}->{}->{} SET created_at = time::now()",
-                            ::surrealdb::RecordId::from(self.id), #relation_name,
+                            ::surrealdb::RecordId::from(self.id.clone()), #relation_name,
                             ::surrealdb::RecordId::from(related_id)
                         );
                         db.query(&query).await?;
@@ -375,8 +356,8 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         // Create the relation
                         let query = format!(
                             "RELATE {}->{}->{} SET created_at = time::now()",
-                            ::surrealdb::RecordId::from(self.id), #relation_name,
-                            ::surrealdb::RecordId::from(related_entity.id())
+                            ::surrealdb::RecordId::from(self.id.clone()), #relation_name,
+                            ::surrealdb::RecordId::from(related_entity.id().clone())
                         );
                         db.query(&query).await?;
                     }
@@ -389,7 +370,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 if !self.#field_name.is_nil() {
                     let query = format!(
                         "RELATE {}->{}->{} SET created_at = time::now()",
-                        ::surrealdb::RecordId::from(self.id), #relation_name,
+                        ::surrealdb::RecordId::from(self.id.clone()), #relation_name,
                         ::surrealdb::RecordId::from(self.#field_name)
                     );
                     db.query(&query).await?;
@@ -415,8 +396,8 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         // Create the relation
                         let query = format!(
                             "RELATE {}->{}->{} SET created_at = time::now()",
-                            ::surrealdb::RecordId::from(self.id), #relation_name,
-                            ::surrealdb::RecordId::from(related_entity.id())
+                            ::surrealdb::RecordId::from(self.id.clone()), #relation_name,
+                            ::surrealdb::RecordId::from(related_entity.id().clone())
                         );
                         db.query(&query).await?;
                     }
@@ -437,8 +418,8 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     // Create the relation
                     let query = format!(
                         "RELATE {}->{}->{} SET created_at = time::now()",
-                        ::surrealdb::RecordId::from(self.id), #relation_name,
-                        ::surrealdb::RecordId::from(self.#field_name.id())
+                        ::surrealdb::RecordId::from(self.id.clone()), #relation_name,
+                        ::surrealdb::RecordId::from(self.#field_name.id().clone())
                     );
                     db.query(&query).await?;
                 }
@@ -465,7 +446,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                     tracing::trace!("id vec query: {}", query);
                     let mut result = db.query(&query)
-                        .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                        .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
                     tracing::trace!("vec result {:?}", result);
@@ -491,7 +472,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     tracing::trace!("full vec query: {}", query);
 
                     let mut result = db.query(&query)
-                        .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                        .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
                     tracing::trace!("vec result {:?}", result);
@@ -523,7 +504,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                 tracing::trace!("single id query: {}", query);
                 let mut result = db.query(&query)
-                    .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                    .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                     .await?;
 
                 let record_ids: Vec<Vec<::surrealdb::RecordId>> =
@@ -531,7 +512,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
                 self.#field_name = record_ids.concat().into_iter().next()
                     .map(|record_id| #field_type::from_record(record_id))
-                    .unwrap_or_else(|| #field_type::nil());
+                    .unwrap_or_else(|| #field_type::nil().simple());
             }
         } else {
             // Single Entity relation - check if it's Option<Entity> or just Entity
@@ -545,7 +526,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         Self::related_table_from_type(stringify!(#inner_type)));
 
                     let mut result = db.query(&query)
-                        .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                        .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
                     let db_models: Vec<Vec<<#inner_type as #crate_path::db::entity::DbEntity>::DbModel>> =
@@ -569,7 +550,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         Self::related_table_from_type(stringify!(#field_type)));
 
                     let mut result = db.query(&query)
-                        .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                        .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
                     let db_models: Vec<Vec<<#field_type as #crate_path::db::entity::DbEntity>::DbModel>> =
@@ -606,7 +587,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     // Store Vec<(Entity, EdgeEntity)> with edge entity relations
                     for (related_entity, edge_data) in &self.#field_name {
                         // First upsert the related entity using its DbEntity implementation
-                        let related_id = related_entity.id();
+                        let related_id = related_entity.id().clone();
                         let db_model = related_entity.to_db_model();
                         let _stored = db
                             .upsert(related_id.to_record_id())
@@ -730,7 +711,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     let query = format!("SELECT *, out.* as related_data FROM {} WHERE in = $parent ORDER BY id ASC", #relation_name);
 
                     let mut result = db.query(&query)
-                        .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                        .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
                     // Extract edge records - we need to get them as the DbModel type
@@ -752,7 +733,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     let query = format!("SELECT *, out.* as related_data FROM {} WHERE in = $parent ORDER BY id ASC", #relation_name);
 
                     let mut result = db.query(&query)
-                        .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                        .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
                     // For now, initialize as empty with proper type annotation
@@ -772,7 +753,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         let query = format!("SELECT *, out.* as related_data FROM {} WHERE in = $parent ORDER BY id ASC LIMIT 1", #relation_name);
 
                         let mut result = db.query(&query)
-                            .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                            .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                             .await?;
 
                         // Extract the edge entity
@@ -843,7 +824,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         let query = format!("SELECT *, out.* as related_data FROM {} WHERE in = $parent ORDER BY id ASC LIMIT 1", #relation_name);
 
                         let mut result = db.query(&query)
-                            .bind(("parent", ::surrealdb::RecordId::from(self.id)))
+                            .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                             .await?;
 
                         // Extract the edge entity
@@ -991,7 +972,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             /// Edge entities cannot be loaded directly - query the edge table instead
             pub async fn load_with_relations<C: ::surrealdb::Connection>(
                 _db: &::surrealdb::Surreal<C>,
-                _id: #crate_path::Id<#id_type>,
+                _id: &#id_type,
             ) -> std::result::Result<Option<Self>, #crate_path::db::DatabaseError> {
                 Err(#crate_path::db::DatabaseError::QueryFailed(
                     ::surrealdb::Error::Api(::surrealdb::error::Api::Query(
@@ -1028,13 +1009,41 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 }
             }
         }
+    } else if entity_type == "atproto_identity" {
+        // Special case for Message entity which uses MessageId directly
+        quote! {
+            /// Load entity from database with all relations
+            pub async fn load_with_relations<C: ::surrealdb::Connection>(
+                db: &::surrealdb::Surreal<C>,
+                id: &#crate_path::Did,
+            ) -> std::result::Result<Option<Self>, #crate_path::db::DatabaseError> {
+                // First load the entity - MessageId already has to_record_id() method
+                let db_model: Option<#db_model_name> = db
+                    .select((<Self as #crate_path::db::entity::DbEntity>::table_name(), id.to_record_id()))
+                    .await?;
+
+                if let Some(db_model) = db_model {
+                    let mut entity = <Self as #crate_path::db::entity::DbEntity>::from_db_model(db_model)
+                        .map_err(|e| #crate_path::db::DatabaseError::QueryFailed(
+                            ::surrealdb::Error::Api(::surrealdb::error::Api::Query(format!("Failed to convert entity: {:?}", e)))
+                        ))?;
+
+                    // Then load all relations
+                    entity.load_relations(db).await?;
+
+                    Ok(Some(entity))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     } else {
         // Regular entity implementation
         quote! {
             /// Load entity from database with all relations
             pub async fn load_with_relations<C: ::surrealdb::Connection>(
                 db: &::surrealdb::Surreal<C>,
-                id: #crate_path::Id<#id_type>,
+                id: &#id_type,
             ) -> std::result::Result<Option<Self>, #crate_path::db::DatabaseError> {
                 // First load the entity
                 let db_model: Option<#db_model_name> = db
@@ -1058,42 +1067,9 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         }
     };
 
-    let id_method_impl = if is_edge_entity {
-        // Edge entities with Option<RecordId> need special handling
-        quote! {
-            fn id(&self) -> #crate_path::Id<Self::Id> {
-                // Edge entities don't use our ID system, return a nil value
-                #crate_path::Id::<Self::Id>::nil()
-            }
-        }
-    } else if entity_type == "message" {
-        // Special case for Message entity which uses MessageId instead of Id<MessageIdType>
-        quote! {
-            fn id(&self) -> #crate_path::Id<Self::Id> {
-                // Convert MessageId to Id<MessageIdType>
-                #crate_path::Id::<Self::Id>::from_uuid(
-                    ::uuid::Uuid::parse_str(
-                        self.id.0.strip_prefix("msg_").unwrap_or(&self.id.0)
-                    ).unwrap_or(::uuid::Uuid::nil())
-                )
-            }
-
-            fn record_key(&self) -> String {
-                // For Message, extract just the UUID part for the database key
-                // This handles both "msg_uuid" format and arbitrary external IDs
-                if let Some(uuid_part) = self.id.0.strip_prefix("msg_") {
-                    uuid_part.to_string()
-                } else {
-                    // For external IDs, use as-is and hope it's a valid identifier
-                    self.id.0.clone()
-                }
-            }
-        }
-    } else {
-        quote! {
-            fn id(&self) -> #crate_path::Id<Self::Id> {
-                self.id
-            }
+    let id_method_impl = quote! {
+        fn id(&self) -> &Self::Id  {
+            &self.id
         }
     };
 
@@ -1352,9 +1328,12 @@ fn generate_to_storage(
             } else if type_str.contains("MessageId") {
                 // Special case for MessageId which doesn't implement From<MessageId> for RecordId
                 quote! { #field_name: ::surrealdb::RecordId::from(self.#field_name.clone()) }
+            } else if type_str.contains("Did") {
+                // Special case for MessageId which doesn't implement From<MessageId> for RecordId
+                quote! { #field_name: ::surrealdb::RecordId::from(self.#field_name.clone()) }
             } else {
                 // Regular entity with custom ID type
-                quote! { #field_name: ::surrealdb::RecordId::from(self.#field_name) }
+                quote! { #field_name: ::surrealdb::RecordId::from(&self.#field_name.clone()) }
             }
         }
         "created_at" | "updated_at" | "scheduled_for" | "last_active" | "expires_at"
@@ -1463,17 +1442,21 @@ fn generate_from_storage(
                         #crate_path::db::strip_brackets(&db_model.#field_name.key().to_string()).to_string()
                     )
                 }
+            } else if entity_type == "atproto_identity" {
+                // Special case for Did which stores the full prefixed string
+                quote! {
+                    #field_name: #crate_path::Did(::atrium_api::types::string::Did::new(
+                        #crate_path::db::strip_brackets(&db_model.#field_name.key().to_string()).to_string()
+                    ).unwrap())
+                }
             } else {
                 // Regular entity with custom ID type
                 quote! {
                     #field_name: {
                         let id_str = db_model.#field_name.key().to_string();
                         let uuid_str = id_str.trim_start_matches('⟨').trim_end_matches('⟩');
-                        let uuid = ::uuid::Uuid::parse_str(&uuid_str)
-                            .map_err(|e| #crate_path::db::entity::EntityError::InvalidId(
-                                #crate_path::id::IdError::InvalidUuid(e)
-                            ))?;
-                        #field_type::from_uuid(uuid)
+
+                        <#field_type as #crate_path::id::IdType>::from_key(uuid_str).unwrap()
                     }
                 }
             }
@@ -1530,6 +1513,45 @@ fn generate_from_storage(
                         } else {
                             quote! {
                                 #field_name: #crate_path::MessageId::from_record(db_model.#field_name)
+                            }
+                        }
+                    }
+                } else if type_str.contains("Did") {
+                    // MessageId stores the full string and uses from_record()
+                    if is_edge_entity {
+                        // Edge entities need special handling because SurrealDB may wrap the ID
+                        if is_option_type(field_type) {
+                            quote! {
+                                #field_name: if let Some(record_id) = db_model.#field_name {
+                                    let key = record_id.key().to_string();
+                                    let cleaned = #crate_path::db::strip_brackets(&key);
+                                    Some(#crate_path::Did(cleaned.to_string()))
+                                } else {
+                                    None
+                                }
+                            }
+                        } else {
+                            quote! {
+                                #field_name: {
+                                    let key = db_model.#field_name.key().to_string();
+                                    let cleaned = #crate_path::db::strip_brackets(&key);
+                                    #crate_path::Did(cleaned.to_string())
+                                }
+                            }
+                        }
+                    } else {
+                        // Regular entities use from_record()
+                        if is_option_type(field_type) {
+                            quote! {
+                                #field_name: if let Some(record_id) = db_model.#field_name {
+                                    Some(#crate_path::Did::from_record(record_id))
+                                } else {
+                                    None
+                                }
+                            }
+                        } else {
+                            quote! {
+                                #field_name: #crate_path::Did::from_record(db_model.#field_name)
                             }
                         }
                     }
@@ -1687,10 +1709,7 @@ fn generate_field_definition(
     // Special case: if db_type = "object", use FLEXIBLE TYPE object
     if let Some(db_type) = &field_opts.db_type {
         if db_type == "object" {
-            return format!(
-                "DEFINE FIELD {} ON TABLE {} FLEXIBLE TYPE object",
-                field_str, table_name
-            );
+            return format!("DEFINE FIELD {field_str} ON TABLE {table_name} FLEXIBLE TYPE object");
         } else if db_type == "optional_object" {
             return format!(
                 "DEFINE FIELD {} ON TABLE {} FLEXIBLE TYPE option<object>",
@@ -1761,10 +1780,7 @@ fn generate_field_definition(
         }
     };
 
-    format!(
-        "DEFINE FIELD {} ON TABLE {} {}",
-        field_str, table_name, surreal_type
-    )
+    format!("DEFINE FIELD {field_str} ON TABLE {table_name} {surreal_type}")
 }
 
 fn is_id_type(ty: &Type) -> bool {

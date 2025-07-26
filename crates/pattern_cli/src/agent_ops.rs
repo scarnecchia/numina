@@ -7,7 +7,7 @@ use pattern_core::{
     coordination::groups::{AgentGroup, GroupManager},
     db::{client::DB, ops},
     embeddings::cloud::OpenAIEmbedder,
-    id::AgentId,
+    id::{AgentId, RelationId},
     memory::{Memory, MemoryBlock},
     message::{Message, MessageContent},
     model::{GenAiClient, ResponseOptions},
@@ -43,7 +43,7 @@ pub async fn load_or_create_agent(
         let agent_id = AgentId::from_record(id_value.clone());
 
         // Load the full agent record
-        let mut existing_agent = match AgentRecord::load_with_relations(&DB, agent_id).await {
+        let mut existing_agent = match AgentRecord::load_with_relations(&DB, &agent_id).await {
             Ok(Some(agent)) => {
                 tracing::trace!("Full AgentRecord: {:#?}", agent);
                 agent
@@ -64,7 +64,7 @@ pub async fn load_or_create_agent(
         );
 
         // Also manually load memory blocks using the ops function
-        let memory_tuples = ops::get_agent_memories(&DB, agent_id)
+        let memory_tuples = ops::get_agent_memories(&DB, &agent_id)
             .await
             .map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
 
@@ -87,9 +87,9 @@ pub async fn load_or_create_agent(
             .into_iter()
             .map(|(memory_block, access_level)| {
                 let relation = pattern_core::agent::AgentMemoryRelation {
-                    id: None,
-                    in_id: agent_id,
-                    out_id: memory_block.id,
+                    id: RelationId::nil(),
+                    in_id: agent_id.clone(),
+                    out_id: memory_block.id.clone(),
                     access_level,
                     created_at: chrono::Utc::now(),
                 };
@@ -384,7 +384,7 @@ pub async fn create_agent(
     };
 
     // Create memory with the configured user as owner
-    let memory = Memory::with_owner(config.user.id.clone());
+    let memory = Memory::with_owner(&config.user.id);
 
     // Create tool registry
     let tools = ToolRegistry::new();

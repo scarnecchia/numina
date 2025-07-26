@@ -35,15 +35,17 @@ pub fn create_oauth_auth_resolver<C: Connection + 'static>(
             // Only handle Anthropic OAuth for now
             if adapter_kind == AdapterKind::Anthropic {
                 tracing::info!("Checking OAuth token for Anthropic, user: {}", user_id);
-                // Try to get OAuth token first
-                match get_oauth_token(&db, &user_id, "anthropic").await {
+                // Use OAuthModelProvider to handle token refresh automatically
+                let provider =
+                    crate::oauth::integration::OAuthModelProvider::new(db.clone(), user_id.clone());
+
+                match provider.get_token("anthropic").await {
                     Ok(Some(token)) => {
-                        // Check if token needs refresh
-                        if token.needs_refresh() {
-                            // TODO: Implement token refresh here
-                            // For now, use the potentially expired token
-                            tracing::warn!("OAuth token for Anthropic needs refresh");
-                        }
+                        // Token is automatically refreshed if needed by get_token()
+                        tracing::info!(
+                            "Using OAuth token for Anthropic (expires: {})",
+                            token.expires_at
+                        );
 
                         // Return bearer token with "Bearer " prefix so genai detects OAuth
                         return Ok(Some(AuthData::Key(format!(
@@ -101,6 +103,7 @@ pub fn create_service_target_resolver() -> ServiceTargetResolver {
 }
 
 /// Load OAuth token for a provider from the database
+#[allow(dead_code)]
 async fn get_oauth_token<C: Connection>(
     db: &Surreal<C>,
     user_id: &UserId,
@@ -199,11 +202,4 @@ impl<C: Connection + 'static> OAuthClientBuilder<C> {
 
         Ok(client)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // TODO: Add tests once we have mock database support
 }

@@ -121,7 +121,7 @@ pub async fn search_conversations(
         };
 
         // Create a minimal agent handle for searching
-        let memory = Memory::with_owner(agent_record.owner_id.clone());
+        let memory = Memory::with_owner(&agent_record.owner_id);
         let mut handle = AgentHandle::default();
         handle.name = agent_record.name.clone();
         handle.agent_id = agent_record.id.clone();
@@ -261,7 +261,7 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
 
         // Create a minimal agent handle for searching
         // IMPORTANT: Use the actual owner_id from the database so the search will match
-        let memory = Memory::with_owner(agent_record.owner_id.clone());
+        let memory = Memory::with_owner(&agent_record.owner_id);
         let mut handle = AgentHandle::default();
         handle.name = agent_record.name.clone();
         handle.agent_id = agent_record.id.clone();

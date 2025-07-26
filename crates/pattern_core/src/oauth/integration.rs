@@ -142,10 +142,3 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
         Ok(count)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // TODO: Add integration tests with mock OAuth provider
-}

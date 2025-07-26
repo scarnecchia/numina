@@ -421,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_archival_insert_and_append() {
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
         let handle = AgentHandle::test_with_memory(memory.clone());
 
         let tool = RecallTool { handle };
@@ -477,7 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_archival_delete() {
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
 
         // Create an archival block
         memory
@@ -508,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cannot_delete_non_archival() {
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
 
         // Create a core memory block with Admin permission
         memory

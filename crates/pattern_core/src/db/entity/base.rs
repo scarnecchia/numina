@@ -3,7 +3,7 @@
 //! These implementations provide the core entities that all deployments need,
 //! using the derive macro for minimal boilerplate and proper type separation.
 
-use crate::id::{AgentId, EventId, MemoryId, TaskId, TaskIdType, UserId};
+use crate::id::{AgentId, EventId, MemoryId, RelationId, TaskId, UserId};
 use crate::users::User;
 use chrono::{DateTime, Utc};
 use pattern_macros::Entity;
@@ -126,13 +126,12 @@ impl Default for BaseEvent {
 // ============================================================================
 
 use crate::memory::MemoryPermission;
-use surrealdb::RecordId;
 
 /// Edge entity for agent-memory relationships with access levels
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
 #[entity(entity_type = "agent_memories", edge = true)]
 pub struct AgentMemoryRelation {
-    pub id: Option<RecordId>,
+    pub id: RelationId,
     pub in_id: AgentId,
     pub out_id: MemoryId,
     pub access_level: MemoryPermission,
@@ -142,7 +141,7 @@ pub struct AgentMemoryRelation {
 impl Default for AgentMemoryRelation {
     fn default() -> Self {
         Self {
-            id: None,
+            id: RelationId::nil(),
             in_id: AgentId::nil(),
             out_id: MemoryId::nil(),
             access_level: MemoryPermission::default(), // Uses Append as default
@@ -168,7 +167,7 @@ pub async fn get_user_agents<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     user_id: &UserId,
 ) -> Result<Vec<AgentId>, crate::db::DatabaseError> {
-    let user = User::load_with_relations(db, *user_id).await?;
+    let user = User::load_with_relations(db, user_id).await?;
     Ok(user.map(|u| u.owned_agent_ids).unwrap_or_default())
 }
 
@@ -177,7 +176,7 @@ pub async fn get_user_tasks<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     user_id: &UserId,
 ) -> Result<Vec<TaskId>, crate::db::DatabaseError> {
-    let user = User::load_with_relations(db, *user_id).await?;
+    let user = User::load_with_relations(db, user_id).await?;
     Ok(user.map(|u| u.created_task_ids).unwrap_or_default())
 }
 
@@ -187,7 +186,7 @@ pub async fn get_agent_tasks<C: surrealdb::Connection>(
     agent_id: &AgentId,
 ) -> Result<Vec<TaskId>, crate::db::DatabaseError> {
     use crate::agent::AgentRecord;
-    let agent = AgentRecord::load_with_relations(db, *agent_id).await?;
+    let agent = AgentRecord::load_with_relations(db, agent_id).await?;
     Ok(agent.map(|a| a.assigned_task_ids).unwrap_or_default())
 }
 
@@ -197,7 +196,7 @@ pub async fn get_task_owner<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     task_id: &TaskId,
 ) -> Result<Option<UserId>, crate::db::DatabaseError> {
-    let task = BaseTask::load_with_relations(db, *task_id).await?;
+    let task = BaseTask::load_with_relations(db, task_id).await?;
     Ok(task.map(|t| t.creator_id))
 }
 
@@ -206,7 +205,7 @@ pub async fn get_task_subtasks<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     parent_id: &TaskId,
 ) -> Result<Vec<TaskId>, crate::db::DatabaseError> {
-    let task = BaseTask::load_with_relations(db, *parent_id).await?;
+    let task = BaseTask::load_with_relations(db, parent_id).await?;
     Ok(task.map(|t| t.subtask_ids).unwrap_or_default())
 }
 

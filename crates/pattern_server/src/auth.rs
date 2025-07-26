@@ -10,6 +10,8 @@ use pattern_core::id::UserId;
 
 use crate::error::ServerResult;
 
+//pub mod atproto;
+
 /// Hash a plaintext password
 pub fn hash_password(password: &str) -> ServerResult<String> {
     let salt = SaltString::generate(&mut rand::thread_rng());

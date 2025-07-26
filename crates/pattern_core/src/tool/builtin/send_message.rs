@@ -156,7 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_tool() {
-        let memory = Memory::with_owner(UserId::generate());
+        let memory = Memory::with_owner(&UserId::generate());
         let handle = AgentHandle::test_with_memory(memory);
 
         let tool = SendMessageTool { handle };
