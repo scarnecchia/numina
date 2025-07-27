@@ -465,13 +465,6 @@ mod tests {
         );
 
         // Check initial state
-        assert_eq!(agent.state(), AgentState::Ready);
-
-        // Transition to processing
-        // State transitions would be tested here if mutable access was available
-        // The current Agent trait doesn't provide mutable state access
-
-        // The AgentState::Error variant is a unit variant, not tuple
-        assert_eq!(agent.state(), AgentState::Ready);
+        assert_eq!(agent.state().await, AgentState::Ready);
     }
 }

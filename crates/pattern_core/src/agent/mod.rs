@@ -61,13 +61,6 @@ pub trait Agent: Send + Sync + Debug {
     /// List all available memory block keys
     async fn list_memory_keys(&self) -> Result<Vec<CompactString>>;
 
-    /// Search memory blocks by content (semantic search if embeddings available)
-    async fn search_memory(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<(CompactString, MemoryBlock, f32)>>;
-
     /// Share a memory block with another agent
     async fn share_memory_with(
         &self,
@@ -83,10 +76,10 @@ pub trait Agent: Send + Sync + Debug {
     async fn system_prompt(&self) -> Vec<String>;
 
     /// Get the list of tools available to this agent
-    fn available_tools(&self) -> Vec<Box<dyn DynamicTool>>;
+    async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>>;
 
     /// Get the agent's current state
-    fn state(&self) -> AgentState;
+    async fn state(&self) -> AgentState;
 
     /// Update the agent's state
     async fn set_state(&self, state: AgentState) -> Result<()>;

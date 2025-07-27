@@ -151,14 +151,6 @@ mod tests {
             unimplemented!("Test agent")
         }
 
-        async fn search_memory(
-            &self,
-            _query: &str,
-            _limit: usize,
-        ) -> Result<Vec<(CompactString, MemoryBlock, f32)>> {
-            unimplemented!("Test agent")
-        }
-
         async fn share_memory_with(
             &self,
             _memory_key: &str,
@@ -176,11 +168,11 @@ mod tests {
             vec![]
         }
 
-        fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
+        async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
             vec![]
         }
 
-        fn state(&self) -> AgentState {
+        async fn state(&self) -> AgentState {
             AgentState::Ready
         }
 

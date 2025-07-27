@@ -483,7 +483,7 @@ pub async fn create_agent(
                     output.status("Updating persona in agent's core memory...");
                     existing.value = persona.clone();
                     existing.description = Some("Agent's persona and identity".to_string());
-                    existing.permission = pattern_core::memory::MemoryPermission::ReadOnly;
+                    existing.permission = pattern_core::memory::MemoryPermission::Append;
 
                     if let Err(e) = agent.update_memory("persona", existing).await {
                         output.warning(&format!("Failed to update persona memory: {}", e));
@@ -496,7 +496,7 @@ pub async fn create_agent(
                 let persona_block =
                     MemoryBlock::owned(config.user.id.clone(), "persona", persona.clone())
                         .with_description("Agent's persona and identity")
-                        .with_permission(pattern_core::memory::MemoryPermission::ReadOnly);
+                        .with_permission(pattern_core::memory::MemoryPermission::Append);
 
                 if let Err(e) = agent.update_memory("persona", persona_block).await {
                     output.warning(&format!("Failed to add persona memory: {}", e));
@@ -695,6 +695,9 @@ pub async fn chat_with_agent(
     output.status("Use Ctrl+D for multiline input, Enter to send");
 
     let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
+
+    // Update the global tracing writer to use the SharedWriter
+    crate::tracing_writer::set_shared_writer(writer.clone());
 
     // Create output with SharedWriter for proper concurrent output
     let output = Output::new().with_writer(writer.clone());
@@ -914,6 +917,9 @@ pub async fn chat_with_group<M: GroupManager>(
     use rustyline_async::{Readline, ReadlineEvent};
 
     let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
+
+    // Update the global tracing writer to use the SharedWriter
+    crate::tracing_writer::set_shared_writer(writer.clone());
 
     // Create output with SharedWriter for proper concurrent output
     let output = Output::new().with_writer(writer.clone());

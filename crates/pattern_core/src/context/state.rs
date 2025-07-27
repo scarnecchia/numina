@@ -730,48 +730,6 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
         Ok(archived_ids)
     }
 
-    /// Search through message history (including archived)
-    pub async fn search_messages(
-        &self,
-        query: &str,
-        page: usize,
-        page_size: usize,
-    ) -> Vec<Message> {
-        let query_lower = query.to_lowercase();
-
-        let history = self.history.read().await;
-
-        // Search through all messages (active + archived)
-        let all_messages: Vec<&Message> = history
-            .archived_messages
-            .iter()
-            .chain(history.messages.iter())
-            .collect();
-
-        // Filter messages containing the query
-        let matching_messages: Vec<&Message> = all_messages
-            .into_iter()
-            .filter(|msg| {
-                msg.text_content()
-                    .map(|text| text.to_lowercase().contains(&query_lower))
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        // Paginate results
-        let start = page * page_size;
-        let end = (start + page_size).min(matching_messages.len());
-
-        if start < matching_messages.len() {
-            matching_messages[start..end]
-                .iter()
-                .map(|m| (*m).clone())
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Get agent statistics
     pub async fn get_stats(&self) -> AgentStats {
         let history = self.history.read().await;
@@ -943,50 +901,5 @@ impl AgentContextBuilder {
         }
 
         Ok(state)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_agent_state_builder() {
-        let id = AgentId::generate();
-        let state = AgentContextBuilder::new(id.clone(), AgentType::Generic)
-            .with_memory_block(
-                "persona",
-                "I am a helpful AI assistant",
-                Some("Agent persona"),
-            )
-            .with_memory_block("human", "The user's name is unknown", None::<String>)
-            .build()
-            .await
-            .unwrap();
-
-        assert_eq!(state.handle.agent_id, id);
-        assert_eq!(state.handle.memory.list_blocks().len(), 2);
-        assert!(state.handle.memory.get_block("persona").is_some());
-    }
-
-    #[tokio::test]
-    async fn test_message_search() {
-        let state = AgentContextBuilder::new(AgentId::generate(), AgentType::Generic)
-            .build()
-            .await
-            .unwrap();
-
-        state
-            .add_message(Message::user("Hello, how are you?"))
-            .await;
-        state
-            .add_message(Message::agent("I'm doing well, thank you!"))
-            .await;
-        state
-            .add_message(Message::user("What's the weather like?"))
-            .await;
-
-        let results = state.search_messages("weather", 0, 10).await;
-        assert_eq!(results.len(), 1);
     }
 }

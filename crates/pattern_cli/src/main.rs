@@ -2,6 +2,7 @@ mod agent_ops;
 mod commands;
 mod endpoints;
 mod output;
+mod tracing_writer;
 
 use clap::{Parser, Subcommand};
 use miette::Result;
@@ -285,6 +286,9 @@ async fn main() -> Result<()> {
     miette::set_panic_hook();
     let cli = Cli::parse();
 
+    // Initialize our custom tracing writer
+    let tracing_writer = tracing_writer::init_tracing_writer();
+
     // Initialize tracing
     use tracing_subscriber::{EnvFilter, fmt};
 
@@ -299,7 +303,7 @@ async fn main() -> Result<()> {
             .with_thread_ids(false)
             .with_thread_names(false)
             .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()) // Local time in RFC 3339 format
-            .with_writer(std::io::stderr) // Send logs to stderr to avoid interfering with chat output
+            .with_writer(tracing_writer.clone())
             .pretty()
             .init();
     } else {
@@ -311,7 +315,7 @@ async fn main() -> Result<()> {
             .with_target(false)
             .with_thread_ids(false)
             .with_thread_names(false)
-            .with_writer(std::io::stderr) // Send logs to stderr to avoid interfering with chat output
+            .with_writer(tracing_writer.clone())
             .compact()
             .init();
     };

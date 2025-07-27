@@ -4,18 +4,6 @@ Core agent framework, memory management, and coordination system for Pattern's m
 
 ## Current Status (2025-07-24)
 
-### Entity System ✅ COMPLETE
-- Proc macro-based entities with `#[derive(Entity)]`
-- SurrealDB graph relationships using RELATE
-- Message-agent relationships with Snowflake IDs
-- Zero-boilerplate relation management
-
-### DatabaseAgent ✅ COMPLETE
-- Non-blocking persistence with optimistic updates
-- Full state recovery from AgentRecord
-- Memory sharing via edge entities
-- Message compression support ready
-
 ### Agent Groups ✅ COMPLETE (2025-07-24) - NEEDS USER TESTING
 - **Configuration**: `GroupConfig` and `GroupMemberConfig` in config system
 - **Database Operations**: Full CRUD operations with constellation relationships
@@ -24,16 +12,8 @@ Core agent framework, memory management, and coordination system for Pattern's m
 - **Group Chat**: `pattern-cli chat --group <name>` routes through coordination patterns
 - **Type-erased Agents**: Groups work with `Arc<dyn Agent>` for flexibility and shared ownership
 - **Trait Refactoring**: `GroupManager` trait made dyn-compatible with `async_trait`
-- **Testing Status**: Basic operations work, but ~2 group-related tests failing after refactor
 - **⚠️ NEEDS USER TESTING**: Overall integrity and edge cases need validation
 - **Design Note**: Using `Arc<dyn Agent>` is intentional - agents can belong to multiple groups (overlap allowed)
-
-### Tool System Refactoring ✅ COMPLETE
-- All core tools refactored to follow Letta/MemGPT patterns
-- Domain-based multi-operation tools implemented
-- Unified search tool consolidates all search operations
-- Context builder includes archival memory labels
-- Full test coverage with realistic scenarios
 
 ## Critical Implementation Notes
 
@@ -89,33 +69,18 @@ Core agent framework, memory management, and coordination system for Pattern's m
    - Response `.take()` can return nested vectors, DELETE queries need special handling
    - Use `unwrap_surreal_value` helper for nested value extraction
 
-2. **ID Format Consistency**:
-   - All IDs use underscore separator: `prefix_uuid` (e.g., `agent_12345678-...`)
-   - MemoryIdType uses "mem" prefix, not "memory"
-   - MessageId exception: preserves full string for API compatibility
-
-3. **Parameterized Queries**:
+2. **Parameterized Queries**:
    - **ALWAYS** use parameter binding to prevent SQL injection
    - Example: `query("SELECT * FROM user WHERE id = $id").bind(("id", user_id))`
 
 ### Technical Decisions
 
-1. **Free Functions over Extension Traits**:
-   - All database operations in `db::ops` as free functions
-   - No `use SomeExt` imports needed
-   - Cleaner, more discoverable API
-
-2. **Optimistic Updates Pattern**:
-   - UI responds immediately
-   - Database syncs in background via `tokio::spawn`
-   - Clone minimal data for background tasks
-
-3. **Snowflake IDs for Message Ordering**:
+1. **Snowflake IDs for Message Ordering**:
    - Using ferroid crate for distributed monotonic IDs
    - Stored as String in `position` field
    - Guarantees order even with rapid message creation
 
-4. **Concurrent Memory Access**:
+2. **Concurrent Memory Access**:
    - Use `alter_block` for atomic updates to avoid deadlocks
    - Never hold refs across async boundaries
    - Extract data and drop locks immediately
@@ -178,174 +143,9 @@ The context builder includes archival memory labels to enable intelligent memory
 
 This allows agents to make informed decisions about memory swapping without needing to search first.
 
-## Current Limitations
+## Message System Implementation TODOS
 
-1. **Transaction Retry Logic**: Database operations that were previously spawned as background tasks have been made synchronous to avoid transaction conflicts. When running multiple operations in parallel, proper retry logic for transaction conflicts will be needed.
-
-2. **Redundant Arc Wrapping**: DatabaseAgent contains internal Arc fields, so wrapping it in Arc<dyn Agent> is redundant. Consider implementing Clone for DatabaseAgent to allow direct ownership while maintaining shared internal state.
-
-## Model Configuration ✅ COMPLETE (2025-07-24)
-
-### What We Fixed
-1. **Created `model/defaults.rs`** with comprehensive registry:
-   - Accurate July 2025 model specifications
-   - Context windows: Anthropic (200k), Gemini (1M/2M), OpenAI (128k-1M)
-   - Max output tokens: Model-specific limits (4k-100k)
-   - Pricing information for all major models
-   - Embedding model defaults (dimensions, max tokens, pricing)
-
-2. **Smart Token Management**:
-   - `enhance_model_info()` fixes provider-supplied ModelInfo
-   - `calculate_max_tokens()` respects model-specific limits
-   - Dynamic calculation: user config > model max > context/4
-   - Case-insensitive matching with fuzzy fallback
-
-3. **Context Compression** ✅:
-   - Integrated `MessageCompressor` with multiple strategies
-   - `CompressionStrategy`: Truncate, RecursiveSummarization, ImportanceBased, TimeDecay
-   - Made `ContextBuilder::build()` async for proper compression
-   - Maintains Gemini API compatibility (valid message sequences)
-
-4. **Smart Caching** ✅:
-   - Added `CacheControl::Ephemeral` to optimize Anthropic token usage
-   - Applied to first message and every 20th message
-   - Works with all compression strategies
-
-## Message System Implementation Status
-
-### ✅ Completed Components
-
-#### 1. **Heartbeat System** ✅ COMPLETE (2025-07-24)
-- Added `request_heartbeat: bool` field to ALL tool input structs (context, recall, search, send_message)
-- Agent checks for heartbeat requests in `process_message()` before returning
-- CLI creates heartbeat monitor task that triggers new agent turns
-- Works in practice - tested and functional!
-
-#### 2. **Message Queue Entities** ✅ COMPLETE
-- Created `QueuedMessage` entity with:
-  - Separate `QueuedMessageId` type for the queue_msg table
-  - Support for agent-to-agent and user-to-agent messages
-  - Call chain for loop prevention
-  - Read/unread tracking with timestamps
-- Created `ScheduledWakeup` entity with:
-  - One-time and recurring wakeup support
-  - Active/inactive state management
-  - Metadata field for extensibility
-
-#### 3. **AgentMessageRouter** ✅ COMPLETE
-- Core router implementation with:
-  - Database-backed message queuing
-  - Endpoint registry for extensible delivery
-  - Support for User, Agent, Group, and Channel targets
-  - Loop prevention via call chain checking
-- `MessageEndpoint` trait for custom endpoints
-- `CliEndpoint` implementation for stdout
-- Added to `AgentHandle` as optional field
-
-### 🚧 Next Steps
-
-#### IMMEDIATE TODO: Switch to rustyline-async
-**Problem**: Current readline implementation blocks the main thread, causing issues with:
-- Heartbeat responses appearing at wrong times
-- Messages from other agents interrupting the prompt
-- Poor user experience when async events occur
-
-**Solution**: Switch from `rustyline` to `rustyline-async` (https://github.com/zyansheep/rustyline-async)
-
-**Changes needed**:
-1. Update `pattern_cli/Cargo.toml`:
-   - Replace `rustyline = "14.0"` with `rustyline-async = "0.4"`
-   
-2. Refactor `chat_with_agent()` in `agent_ops.rs`:
-   - Use `rustyline_async::Readline` instead of `DefaultEditor`
-   - Properly handle concurrent input/output with tokio::select!
-   - Allow heartbeat responses and incoming messages to display without breaking the input line
-   
-   Example pattern:
-   ```rust
-   let mut rl = Readline::new("> ".to_string()).unwrap();
-   
-   loop {
-       tokio::select! {
-           // Handle user input
-           line = rl.readline() => {
-               match line {
-                   Ok(line) => { /* process user input */ }
-                   Err(_) => break,
-               }
-           }
-           
-           // Handle heartbeat responses
-           Some(response) = response_receiver.recv() => {
-               // Save current input
-               let saved = rl.line();
-               
-               // Clear line and display response
-               print!("\r\x1b[K"); // Clear current line
-               display_response(response);
-               
-               // Restore prompt and input
-               print!("{}{}", prompt, saved);
-               io::stdout().flush()?;
-           }
-           
-           // Handle incoming messages from other agents
-           // (would need another channel for this)
-       }
-   }
-   ```
-   
-3. Benefits:
-   - Clean handling of async events (heartbeats, agent messages)
-   - No more prompt corruption
-   - Better user experience for multi-agent conversations
-
-#### Phase 1: Wire Router to Tools (HIGH PRIORITY) ✅ COMPLETE
-1. **Update SendMessageTool** to use AgentMessageRouter ✅
-   - Get router from AgentHandle
-   - Convert tool input to router method call
-   - Handle missing router gracefully
-
-2. **Create router during agent initialization** ✅
-   - Modify DatabaseAgent to create router with DB connection
-   - Pass appropriate endpoints (CLI for now)
-   - Update AgentHandle during construction
-
-#### Phase 2: Live Query Message Delivery ✅ COMPLETE
-1. **Add incoming message monitoring to DatabaseAgent** ✅
-   - Added `subscribe_to_agent_messages()` in db/ops.rs
-   - Set up live query: `LIVE SELECT * FROM queue_msg WHERE to_agent = agent_id AND read = false`
-   - Background task monitors incoming messages
-
-2. **Message processing flow** ✅
-   - Convert QueuedMessage to Message with proper role and metadata
-   - Use weak reference to agent for processing in background task
-   - Mark messages as read immediately to prevent reprocessing
-   - Call process_message() directly on incoming messages
-
-#### Phase 3: Scheduled Wakeups (MEDIUM PRIORITY)
-1. **Background scheduler service**
-   - Query for due wakeups periodically
-   - Send system messages to trigger agents
-   - Update recurring wakeups for next execution
-   - Handle missed wakeups gracefully
-
-2. **Integration with agents**
-   - Add "schedule_wakeup" tool for agents to self-schedule
-   - Include wakeup reason in trigger message
-   - Allow cancellation of scheduled wakeups
-
-#### Phase 3: Test CLI Endpoint ✅ READY FOR TESTING
-- Added slash commands to chat loop:
-  - `/send <agent> <message>` - Send message to another agent
-  - `/list` - List all agents
-  - `/status` - Show current agent status
-  - `/help` - Show available commands
-  - `/exit` or `/quit` - Exit chat
-- CLI endpoint prints incoming messages to stdout
-- Need to test with multiple agents running simultaneously
-
-#### Phase 4: Additional Endpoints (MEDIUM PRIORITY) 
+#### Phase 4: Additional Endpoints (MEDIUM PRIORITY)
 **STATUS: Only CliEndpoint implemented so far**
 
 1. **GroupEndpoint** (TODO)

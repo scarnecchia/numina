@@ -417,7 +417,8 @@ impl AgentRecord {
     /// Note: This creates a snapshot of the current agent state.
     /// Some fields like relations, creation time, and detailed config are not
     /// accessible through the public API and would need to be loaded separately.
-    pub fn from_database_agent<C, M, E>(
+
+    pub async fn from_database_agent<C, M, E>(
         agent: &crate::agent::DatabaseAgent<C, M, E>,
         owner_id: UserId,
         base_instructions: String,
@@ -435,7 +436,7 @@ impl AgentRecord {
             id: agent.id(),
             name: agent.name().to_string(),
             agent_type: agent.agent_type(),
-            state: agent.state(),
+            state: agent.state().await,
             model_id: None,               // TODO: Get from model provider
             model_config: HashMap::new(), // TODO: Get from model provider config
             base_instructions,

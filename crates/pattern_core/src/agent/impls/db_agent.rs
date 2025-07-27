@@ -889,6 +889,110 @@ where
 
         Ok(())
     }
+
+    /// Filter duplicate tool calls or responses from content
+    fn filter_duplicate_content(
+        content: MessageContent,
+        seen_tool_call_ids: &mut std::collections::HashSet<String>,
+        seen_tool_response_ids: &mut std::collections::HashSet<String>,
+    ) -> Option<MessageContent> {
+        match content {
+            MessageContent::ToolCalls(calls) => {
+                let filtered_calls: Vec<_> = calls
+                    .into_iter()
+                    .filter(|call| {
+                        if seen_tool_call_ids.contains(&call.call_id) {
+                            tracing::debug!(
+                                "Filtering out duplicate tool call with ID: {}",
+                                call.call_id
+                            );
+                            false
+                        } else {
+                            seen_tool_call_ids.insert(call.call_id.clone());
+                            true
+                        }
+                    })
+                    .collect();
+
+                if filtered_calls.is_empty() {
+                    None
+                } else {
+                    Some(MessageContent::ToolCalls(filtered_calls))
+                }
+            }
+            MessageContent::ToolResponses(responses) => {
+                let filtered_responses: Vec<_> = responses
+                    .into_iter()
+                    .filter(|response| {
+                        if seen_tool_response_ids.contains(&response.call_id) {
+                            tracing::debug!(
+                                "Filtering out duplicate tool response with ID: {}",
+                                response.call_id
+                            );
+                            false
+                        } else {
+                            seen_tool_response_ids.insert(response.call_id.clone());
+                            true
+                        }
+                    })
+                    .collect();
+
+                if filtered_responses.is_empty() {
+                    None
+                } else {
+                    Some(MessageContent::ToolResponses(filtered_responses))
+                }
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Add messages to context and persist to database
+    async fn persist_response_messages(
+        &self,
+        response: &Response,
+        agent_id: &AgentId,
+    ) -> Result<()> {
+        let response_messages = {
+            let context = self.context.read().await;
+            Message::from_response(response, &context.handle.agent_id)
+        };
+
+        for message in response_messages {
+            if !message.content.is_empty() {
+                tracing::debug!(
+                    "Adding message with role: {:?}, content type: {:?}",
+                    message.role,
+                    match &message.content {
+                        MessageContent::Text(_) => "Text",
+                        MessageContent::Parts(_) => "Parts",
+                        MessageContent::ToolCalls(_) => "ToolCalls",
+                        MessageContent::ToolResponses(_) => "ToolResponses",
+                    }
+                );
+
+                // Add the message to context
+                {
+                    let context = self.context.read().await;
+                    context.add_message(message.clone()).await;
+                }
+
+                // Also persist to DB
+                let _ = crate::db::ops::persist_agent_message(
+                    &self.db,
+                    agent_id,
+                    &message,
+                    crate::message::MessageRelationType::Active,
+                )
+                .await
+                .inspect_err(|e| {
+                    crate::log_error!("Failed to persist response message", e);
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<C, M, E> std::fmt::Debug for DatabaseAgent<C, M, E>
@@ -1032,25 +1136,7 @@ where
                 Err(e) => {
                     crate::log_error!("Failed to get response from model", e);
 
-                    // Check if it's a specific Gemini error about missing candidates
-                    let error_str = e.to_string();
-                    if error_str.contains("candidates/0/content/parts") {
-                        tracing::warn!(
-                            "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
-                        );
-
-                        // Create a fallback response when Gemini blocks content
-                        Response {
-                        content: vec![crate::message::MessageContent::Text(
-                            "I apologize, but I'm unable to process that request at the moment. This might be due to content filters or rate limits. Please try rephrasing your message or try again later.".to_string()
-                        )],
-                        reasoning: None,
-                        metadata: crate::message::ResponseMetadata::default(),
-                    }
-                    } else {
-                        // For other errors, return them
-                        return Err(e);
-                    }
+                    return Err(e);
                 }
             }
         };
@@ -1110,86 +1196,18 @@ where
 
                 // Store the processed content, filtering out duplicate tool calls
                 for content in processed_response.content.clone() {
-                    match &content {
-                        MessageContent::ToolCalls(calls) => {
-                            let mut filtered_calls = Vec::new();
-                            for call in calls {
-                                if seen_tool_call_ids.insert(call.call_id.clone()) {
-                                    // This is a new tool call ID
-                                    filtered_calls.push(call.clone());
-                                } else {
-                                    tracing::debug!(
-                                        "Filtering out duplicate tool call with ID: {} from response",
-                                        call.call_id
-                                    );
-                                }
-                            }
-                            if !filtered_calls.is_empty() {
-                                all_processed_content
-                                    .push(MessageContent::ToolCalls(filtered_calls));
-                            }
-                        }
-                        MessageContent::ToolResponses(responses) => {
-                            let mut filtered_responses = Vec::new();
-                            for response in responses {
-                                if seen_tool_response_ids.insert(response.call_id.clone()) {
-                                    // This is a new tool response ID
-                                    filtered_responses.push(response.clone());
-                                } else {
-                                    tracing::debug!(
-                                        "Filtering out duplicate tool response with ID: {} from response",
-                                        response.call_id
-                                    );
-                                }
-                            }
-                            if !filtered_responses.is_empty() {
-                                all_processed_content
-                                    .push(MessageContent::ToolResponses(filtered_responses));
-                            }
-                        }
-                        _ => {
-                            // Not a tool call or response, just add it
-                            all_processed_content.push(content);
-                        }
+                    if let Some(filtered_content) = Self::filter_duplicate_content(
+                        content,
+                        &mut seen_tool_call_ids,
+                        &mut seen_tool_response_ids,
+                    ) {
+                        all_processed_content.push(filtered_content);
                     }
                 }
 
-                // Convert the processed response (with tool calls AND responses) to messages
-                let response_messages = Message::from_response(&processed_response, &agent_id);
-
-                // Add all messages from the processed response to context
-                for message in response_messages {
-                    if !message.content.is_empty() {
-                        tracing::debug!(
-                            "Adding message with role: {:?}, content type: {:?}",
-                            message.role,
-                            match &message.content {
-                                MessageContent::Text(_) => "Text",
-                                MessageContent::Parts(_) => "Parts",
-                                MessageContent::ToolCalls(_) => "ToolCalls",
-                                MessageContent::ToolResponses(_) => "ToolResponses",
-                            }
-                        );
-
-                        // Add the message to context
-                        {
-                            let context = self.context.read().await;
-                            context.add_message(message.clone()).await;
-                        }
-
-                        // Also persist to DB
-                        let _ = crate::db::ops::persist_agent_message(
-                            &self.db,
-                            &agent_id,
-                            &message,
-                            crate::message::MessageRelationType::Active,
-                        )
-                        .await
-                        .inspect_err(|e| {
-                            crate::log_error!("Failed to persist response message", e);
-                        });
-                    }
-                }
+                // Add messages to context and persist to database
+                self.persist_response_messages(&processed_response, &agent_id)
+                    .await?;
 
                 // Build context again with the tool responses included
                 let memory_context = {
@@ -1242,25 +1260,7 @@ where
                         Err(e) => {
                             crate::log_error!("Failed to get final response from model", e);
 
-                            // Check if it's a specific Gemini error about missing candidates
-                            let error_str = e.to_string();
-                            if error_str.contains("candidates/0/content/parts") {
-                                tracing::warn!(
-                                    "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
-                                );
-
-                                // Create a fallback response when Gemini blocks content
-                                Response {
-                                content: vec![crate::message::MessageContent::Text(
-                                    "I apologize, but I'm unable to process that request at the moment. This might be due to content filters or rate limits. Please try rephrasing your message or try again later.".to_string()
-                                )],
-                                reasoning: None,
-                                metadata: crate::message::ResponseMetadata::default(),
-                            }
-                            } else {
-                                // For other errors, return them
-                                return Err(e);
-                            }
+                            return Err(e);
                         }
                     }
                 };
@@ -1271,85 +1271,17 @@ where
 
                     // Store the processed content, filtering out duplicate tool calls
                     for content in processed_response.content.clone() {
-                        match &content {
-                            MessageContent::ToolCalls(calls) => {
-                                let mut filtered_calls = Vec::new();
-                                for call in calls {
-                                    if seen_tool_call_ids.insert(call.call_id.clone()) {
-                                        // This is a new tool call ID
-                                        filtered_calls.push(call.clone());
-                                    } else {
-                                        tracing::debug!(
-                                            "Filtering out duplicate tool call with ID: {} from response",
-                                            call.call_id
-                                        );
-                                    }
-                                }
-                                if !filtered_calls.is_empty() {
-                                    all_processed_content
-                                        .push(MessageContent::ToolCalls(filtered_calls));
-                                }
-                            }
-                            MessageContent::ToolResponses(responses) => {
-                                let mut filtered_responses = Vec::new();
-                                for response in responses {
-                                    if seen_tool_response_ids.insert(response.call_id.clone()) {
-                                        // This is a new tool response ID
-                                        filtered_responses.push(response.clone());
-                                    } else {
-                                        tracing::debug!(
-                                            "Filtering out duplicate tool response with ID: {} from response",
-                                            response.call_id
-                                        );
-                                    }
-                                }
-                                if !filtered_responses.is_empty() {
-                                    all_processed_content
-                                        .push(MessageContent::ToolResponses(filtered_responses));
-                                }
-                            }
-                            _ => {
-                                // Not a tool call or response, just add it
-                                all_processed_content.push(content);
-                            }
+                        if let Some(filtered_content) = Self::filter_duplicate_content(
+                            content,
+                            &mut seen_tool_call_ids,
+                            &mut seen_tool_response_ids,
+                        ) {
+                            all_processed_content.push(filtered_content);
                         }
                     }
-                    // Convert the processed response (with tool calls AND responses) to messages
-                    let response_messages = Message::from_response(&processed_response, &agent_id);
-
-                    // Add all messages from the processed response to context
-                    for message in response_messages {
-                        if !message.content.is_empty() {
-                            tracing::debug!(
-                                "Adding message with role: {:?}, content type: {:?}",
-                                message.role,
-                                match &message.content {
-                                    MessageContent::Text(_) => "Text",
-                                    MessageContent::Parts(_) => "Parts",
-                                    MessageContent::ToolCalls(_) => "ToolCalls",
-                                    MessageContent::ToolResponses(_) => "ToolResponses",
-                                }
-                            );
-
-                            // Add the message to context
-                            {
-                                let context = self.context.read().await;
-                                context.add_message(message.clone()).await;
-                            }
-
-                            // Also persist to DB
-                            let _ = crate::db::ops::persist_agent_message(
-                                &self.db,
-                                &agent_id,
-                                &message,
-                                crate::message::MessageRelationType::Active,
-                            )
-                            .await
-                            .inspect_err(|e| {
-                                crate::log_error!("Failed to persist response message", e);
-                            });
-                        }
-                    }
+                    // Add messages to context and persist to database
+                    self.persist_response_messages(&processed_response, &agent_id)
+                        .await?;
                 }
             }
             Response {
@@ -1358,58 +1290,8 @@ where
                 metadata: current_response.metadata.clone(),
             }
         } else {
-            let response_messages = {
-                let context = self.context.read().await;
-                Message::from_response(&response, &context.handle.agent_id)
-            };
-
-            // Add each response message to context and persist
-            for message in response_messages {
-                // Check if the message has meaningful content
-                let has_content = match &message.content {
-                    MessageContent::Text(text) => !text.is_empty(),
-                    MessageContent::Parts(parts) => !parts.is_empty(),
-                    MessageContent::ToolCalls(calls) => !calls.is_empty(),
-                    MessageContent::ToolResponses(responses) => !responses.is_empty(),
-                };
-
-                if has_content {
-                    let _ = crate::db::ops::persist_agent_message(
-                        &self.db,
-                        &agent_id,
-                        &message,
-                        crate::message::MessageRelationType::Active,
-                    )
-                    .await
-                    .inspect_err(|e| {
-                        crate::log_error!("Failed to persist message", e);
-                    });
-
-                    // Add response message to context
-                    {
-                        tracing::debug!(
-                            "📝 Adding final response message to context: role={:?}, content_type={:?}",
-                            message.role,
-                            match &message.content {
-                                MessageContent::Text(_) => "Text",
-                                MessageContent::Parts(_) => "Parts",
-                                MessageContent::ToolCalls(tc) =>
-                                    &format!("ToolCalls({})", tc.len()),
-                                MessageContent::ToolResponses(tr) =>
-                                    &format!("ToolResponses({})", tr.len()),
-                            }
-                        );
-                        if let MessageContent::ToolCalls(calls) = &message.content {
-                            for call in calls {
-                                tracing::debug!("  Tool call ID: {}", call.call_id);
-                            }
-                        }
-
-                        let context = self.context.write().await;
-                        context.add_message(message).await;
-                    }
-                }
-            }
+            // No tool calls, just persist the response
+            self.persist_response_messages(&response, &agent_id).await?;
             response
         };
 
@@ -1563,38 +1445,6 @@ where
         Ok(context.handle.memory.list_blocks())
     }
 
-    async fn search_memory(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<(CompactString, MemoryBlock, f32)>> {
-        // For now, do a simple text search in memory blocks
-        // TODO: Implement proper semantic search with embeddings
-        let query_lower = query.to_lowercase();
-
-        let mut results: Vec<(CompactString, MemoryBlock, f32)> = Vec::new();
-
-        let blocks = {
-            let context = self.context.read().await;
-            context.handle.memory.get_all_blocks()
-        };
-        for block in blocks {
-            let content_lower = block.value.to_lowercase();
-            if content_lower.contains(&query_lower) {
-                // Simple scoring based on match count
-                let score =
-                    content_lower.matches(&query_lower).count() as f32 / block.value.len() as f32;
-                results.push((block.label.clone(), block, score));
-            }
-        }
-
-        // Sort by score descending
-        results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
-
-        Ok(results)
-    }
-
     async fn share_memory_with(
         &self,
         memory_key: &str,
@@ -1716,22 +1566,14 @@ where
         }
     }
 
-    fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
-        // This is problematic because it's a sync function but we need async to read the lock
-        // For now, we'll use block_on
-        futures::executor::block_on(async {
-            let context = self.context.read().await;
-            context.tools.get_all_as_dynamic()
-        })
+    async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
+        let context = self.context.read().await;
+        context.tools.get_all_as_dynamic()
     }
 
-    fn state(&self) -> AgentState {
-        // This is problematic because it's a sync function but we need async to read the lock
-        // For now, we'll use block_on
-        futures::executor::block_on(async {
-            let context = self.context.read().await;
-            context.handle.state
-        })
+    async fn state(&self) -> AgentState {
+        let context = self.context.read().await;
+        context.handle.state
     }
 
     /// Set the agent's state
