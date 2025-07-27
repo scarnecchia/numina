@@ -34,7 +34,7 @@ pub fn create_oauth_auth_resolver<C: Connection + 'static>(
 
             // Only handle Anthropic OAuth for now
             if adapter_kind == AdapterKind::Anthropic {
-                tracing::info!("Checking OAuth token for Anthropic, user: {}", user_id);
+                tracing::debug!("Checking OAuth token for Anthropic, user: {}", user_id);
                 // Use OAuthModelProvider to handle token refresh automatically
                 let provider =
                     crate::oauth::integration::OAuthModelProvider::new(db.clone(), user_id.clone());
@@ -42,7 +42,7 @@ pub fn create_oauth_auth_resolver<C: Connection + 'static>(
                 match provider.get_token("anthropic").await {
                     Ok(Some(token)) => {
                         // Token is automatically refreshed if needed by get_token()
-                        tracing::info!(
+                        tracing::debug!(
                             "Using OAuth token for Anthropic (expires: {})",
                             token.expires_at
                         );

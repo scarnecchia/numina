@@ -1,5 +1,6 @@
 mod agent_ops;
 mod commands;
+mod endpoints;
 mod output;
 
 use clap::{Parser, Subcommand};
@@ -298,6 +299,7 @@ async fn main() -> Result<()> {
             .with_thread_ids(false)
             .with_thread_names(false)
             .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()) // Local time in RFC 3339 format
+            .with_writer(std::io::stderr) // Send logs to stderr to avoid interfering with chat output
             .pretty()
             .init();
     } else {
@@ -309,6 +311,7 @@ async fn main() -> Result<()> {
             .with_target(false)
             .with_thread_ids(false)
             .with_thread_names(false)
+            .with_writer(std::io::stderr) // Send logs to stderr to avoid interfering with chat output
             .compact()
             .init();
     };
@@ -345,6 +348,10 @@ async fn main() -> Result<()> {
         } => {
             let output = crate::output::Output::new();
 
+            // Create heartbeat channel for agent(s)
+            let (heartbeat_sender, heartbeat_receiver) =
+                pattern_core::context::heartbeat::heartbeat_channel();
+
             if let Some(group_name) = group {
                 // Chat with a group
                 output.success("Starting group chat mode...");
@@ -369,6 +376,7 @@ async fn main() -> Result<()> {
                         model.clone(),
                         !*no_tools,
                         &config,
+                        heartbeat_sender.clone(),
                     )
                     .await?;
                     agents.push(agent);
@@ -430,10 +438,15 @@ async fn main() -> Result<()> {
                 }
 
                 // Try to load existing agent or create new one
-                let agent =
-                    agent_ops::load_or_create_agent(agent, model.clone(), !*no_tools, &config)
-                        .await?;
-                agent_ops::chat_with_agent(agent).await?;
+                let agent = agent_ops::load_or_create_agent(
+                    agent,
+                    model.clone(),
+                    !*no_tools,
+                    &config,
+                    heartbeat_sender,
+                )
+                .await?;
+                agent_ops::chat_with_agent(agent, heartbeat_receiver).await?;
             }
         }
         Commands::Agent { cmd } => match cmd {

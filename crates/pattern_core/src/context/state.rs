@@ -40,7 +40,10 @@ pub struct AgentHandle<C: surrealdb::Connection + Clone = surrealdb::engine::any
     /// Private database connection for controlled access
     #[serde(skip)]
     db: Option<surrealdb::Surreal<C>>,
-    // TODO: Add message_sender when we implement it
+
+    /// Message router for sending messages to various targets
+    #[serde(skip)]
+    pub(crate) message_router: Option<super::message_router::AgentMessageRouter<C>>,
 }
 
 impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
@@ -53,6 +56,20 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
     /// Check if this handle has a database connection
     pub fn has_db_connection(&self) -> bool {
         self.db.is_some()
+    }
+
+    /// Set the message router for this handle
+    pub fn with_message_router(
+        mut self,
+        router: super::message_router::AgentMessageRouter<C>,
+    ) -> Self {
+        self.message_router = Some(router);
+        self
+    }
+
+    /// Get the message router for this handle
+    pub fn message_router(&self) -> Option<&super::message_router::AgentMessageRouter<C>> {
+        self.message_router.as_ref()
     }
 
     /// Search archival memories directly from the database
@@ -285,6 +302,7 @@ impl Default for AgentHandle {
             state: AgentState::Ready,
             agent_type: AgentType::Generic,
             db: None,
+            message_router: None,
         }
     }
 }
@@ -300,6 +318,7 @@ impl AgentHandle {
             state: AgentState::Ready,
             agent_type: AgentType::Generic,
             db: None,
+            message_router: None,
         }
     }
 }
@@ -363,6 +382,9 @@ pub struct AgentContextMetadata {
     pub compression_events: usize,
     #[serde(skip)]
     pub tool_call_ids: std::collections::HashSet<String>,
+
+    #[serde(skip)]
+    pub tool_response_ids: std::collections::HashSet<String>,
 }
 
 impl Default for AgentContextMetadata {
@@ -375,6 +397,7 @@ impl Default for AgentContextMetadata {
             context_rebuilds: 0,
             compression_events: 0,
             tool_call_ids: std::collections::HashSet::new(),
+            tool_response_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -396,6 +419,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
             agent_type,
             state: AgentState::Ready,
             db: None,
+            message_router: None,
         };
 
         Self {
@@ -471,7 +495,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
                 let original_count = calls.len();
                 calls.retain(|call| {
                     if metadata.tool_call_ids.contains(&call.call_id) {
-                        tracing::warn!(
+                        tracing::debug!(
                             "Filtering out duplicate tool call with ID: {}",
                             call.call_id
                         );
@@ -484,12 +508,36 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
 
                 // If all tool calls were duplicates, skip the message entirely
                 if calls.is_empty() && original_count > 0 {
-                    tracing::warn!("All tool calls were duplicates, skipping message");
+                    tracing::debug!("All tool calls were duplicates, skipping message");
                     return;
                 }
 
                 // Count only the non-duplicate tool calls
                 metadata.total_tool_calls += calls.len();
+            }
+        }
+        if let MessageContent::ToolResponses(calls) = &mut message.content {
+            let mut metadata = self.metadata.write().await;
+
+            // Filter out any duplicate tool calls
+            let original_count = calls.len();
+            calls.retain(|call| {
+                if metadata.tool_response_ids.contains(&call.call_id) {
+                    tracing::debug!(
+                        "Filtering out duplicate tool response with ID: {}",
+                        call.call_id
+                    );
+                    false
+                } else {
+                    metadata.tool_response_ids.insert(call.call_id.clone());
+                    true
+                }
+            });
+
+            // If all tool calls were duplicates, skip the message entirely
+            if calls.is_empty() && original_count > 0 {
+                tracing::debug!("All tool responses were duplicates, skipping message");
+                return;
             }
         }
 
@@ -513,6 +561,13 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
             let mut tool_responses = Vec::new();
             if let MessageContent::ToolCalls(call_group) = content {
                 for call in call_group {
+                    // Deduplicate tool calls here.
+                    let metadata = self.metadata.read().await;
+                    if metadata.tool_call_ids.contains(&call.call_id) {
+                        continue;
+                    }
+                    drop(metadata);
+
                     tracing::debug!(
                         "Executing tool: {} with args: {:?}",
                         call.fn_name,
@@ -555,13 +610,15 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
                         }
                     }
                 }
-                // Insert tool responses RIGHT AFTER the tool calls
-                response.content.insert(
-                    index + offset + 1,
-                    MessageContent::ToolResponses(tool_responses),
-                );
-                // update our offset to accommodate the insertion
-                offset += 1;
+                if !tool_responses.is_empty() {
+                    // Insert tool responses RIGHT AFTER the tool calls
+                    response.content.insert(
+                        index + offset + 1,
+                        MessageContent::ToolResponses(tool_responses),
+                    );
+                    // update our offset to accommodate the insertion
+                    offset += 1;
+                }
             }
         }
 

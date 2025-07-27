@@ -144,6 +144,8 @@ define_id_type!(UserId, "user");
 define_id_type!(ConversationId, "convo");
 define_id_type!(TaskId, "task");
 define_id_type!(ToolCallId, "toolcall");
+define_id_type!(WakeupId, "wakeup");
+define_id_type!(QueuedMessageId, "queue_msg");
 
 impl Default for UserId {
     fn default() -> Self {

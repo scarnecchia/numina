@@ -4,6 +4,7 @@ use pattern_core::{
     Agent, ModelProvider,
     agent::{AgentRecord, AgentType, DatabaseAgent},
     config::PatternConfig,
+    context::heartbeat,
     coordination::groups::{AgentGroup, GroupManager},
     db::{client::DB, ops},
     embeddings::cloud::OpenAIEmbedder,
@@ -18,7 +19,7 @@ use surrealdb::RecordId;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::output::Output;
+use crate::{endpoints::CliEndpoint, output::Output};
 
 /// Load an existing agent from the database or create a new one
 pub async fn load_or_create_agent(
@@ -26,6 +27,7 @@ pub async fn load_or_create_agent(
     model_name: Option<String>,
     enable_tools: bool,
     config: &PatternConfig,
+    heartbeat_sender: heartbeat::HeartbeatSender,
 ) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
@@ -116,13 +118,20 @@ pub async fn load_or_create_agent(
         println!();
 
         // Create runtime agent from the stored record
-        create_agent_from_record(existing_agent.clone(), model_name, enable_tools, config).await
+        create_agent_from_record(
+            existing_agent.clone(),
+            model_name,
+            enable_tools,
+            config,
+            heartbeat_sender,
+        )
+        .await
     } else {
         output.info("+", &format!("Creating new agent '{}'", name.bright_cyan()));
         println!();
 
         // Create a new agent
-        create_agent(name, model_name, enable_tools, config).await
+        create_agent(name, model_name, enable_tools, config, heartbeat_sender).await
     }
 }
 
@@ -132,6 +141,7 @@ pub async fn create_agent_from_record(
     model_name: Option<String>,
     enable_tools: bool,
     config: &PatternConfig,
+    heartbeat_sender: heartbeat::HeartbeatSender,
 ) -> Result<Arc<dyn Agent>> {
     // Create model provider - use OAuth if available
     let model_provider = {
@@ -255,6 +265,7 @@ pub async fn create_agent_from_record(
         model_provider,
         tools,
         embedding_provider,
+        heartbeat_sender,
     )
     .await?;
 
@@ -263,10 +274,14 @@ pub async fn create_agent_from_record(
         let mut options = agent.chat_options.write().await;
         *options = Some(response_options);
     }
-    agent.start_stats_sync().await?;
-    agent.start_memory_sync().await?;
 
-    Ok(Arc::new(agent))
+    // Wrap in Arc before calling monitoring methods
+    let agent = Arc::new(agent);
+    agent.clone().start_stats_sync().await?;
+    agent.clone().start_memory_sync().await?;
+    agent.clone().start_message_monitoring().await?;
+
+    Ok(agent)
 }
 
 /// Create an agent with the specified configuration
@@ -275,6 +290,7 @@ pub async fn create_agent(
     model_name: Option<String>,
     enable_tools: bool,
     config: &PatternConfig,
+    heartbeat_sender: heartbeat::HeartbeatSender,
 ) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
@@ -426,6 +442,7 @@ pub async fn create_agent(
         model_provider,
         tools,
         embedding_provider,
+        heartbeat_sender,
     );
 
     // Set the chat options with our selected model
@@ -450,8 +467,11 @@ pub async fn create_agent(
         }
     }
 
-    agent.start_stats_sync().await?;
-    agent.start_memory_sync().await?;
+    // Wrap in Arc before calling monitoring methods
+    let agent = Arc::new(agent);
+    agent.clone().start_stats_sync().await?;
+    agent.clone().start_memory_sync().await?;
+    agent.clone().start_message_monitoring().await?;
 
     // Update memory blocks from config only if they don't exist or have changed
     // First check persona
@@ -529,115 +549,354 @@ pub async fn create_agent(
         }
     }
 
-    Ok(Arc::new(agent))
+    Ok(agent)
+}
+
+/// Handle slash commands in chat
+async fn handle_slash_command(
+    command: &str,
+    current_agent: &Arc<dyn Agent>,
+    output: &Output,
+) -> Result<bool> {
+    let parts: Vec<&str> = command.trim().split_whitespace().collect();
+    if parts.is_empty() {
+        return Ok(false);
+    }
+
+    match parts[0] {
+        "/help" | "/?" => {
+            output.section("Available Commands");
+            output.list_item("/help or /? - Show this help message");
+            output.list_item("/exit or /quit - Exit the chat");
+            output.list_item("/send <agent> <message> - Send a message to another agent");
+            output.list_item("/list - List all agents");
+            output.list_item("/status - Show current agent status");
+            println!();
+            Ok(false)
+        }
+        "/exit" | "/quit" => Ok(true),
+        "/send" => {
+            if parts.len() < 3 {
+                output.error("Usage: /send <agent_name> <message>");
+                return Ok(false);
+            }
+
+            let target_agent = parts[1];
+            let message = parts[2..].join(" ");
+
+            // Use the send_message tool through the agent
+            let _tool_input = serde_json::json!({
+                "target": {
+                    "target_type": "agent",
+                    "target_id": target_agent
+                },
+                "content": message,
+                "request_heartbeat": false
+            });
+
+            output.status(&format!("Sending message to agent '{}'...", target_agent));
+
+            // Create a system message asking the agent to send the message
+            let system_msg = Message::system(format!(
+                "Please use the send_message tool to send this message to agent '{}': {}",
+                target_agent, message
+            ));
+
+            match current_agent.process_message(system_msg).await {
+                Ok(response) => {
+                    // Check if the tool was used
+                    let mut tool_used = false;
+                    for content in &response.content {
+                        if let MessageContent::ToolCalls(calls) = content {
+                            for call in calls {
+                                if call.fn_name == "send_message" {
+                                    tool_used = true;
+                                    output.success(&format!(
+                                        "Message sent to agent '{}'",
+                                        target_agent
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !tool_used {
+                        output.warning("Agent did not use send_message tool. Try enabling tools.");
+                    }
+                }
+                Err(e) => {
+                    output.error(&format!("Failed to send message: {}", e));
+                }
+            }
+
+            Ok(false)
+        }
+        "/list" => {
+            output.status("Fetching agent list...");
+            match ops::list_entities::<AgentRecord, _>(&DB).await {
+                Ok(agents) => {
+                    if agents.is_empty() {
+                        output.status("No agents found");
+                    } else {
+                        output.section("Available Agents");
+                        for agent in agents {
+                            output.list_item(&format!(
+                                "{} ({})",
+                                agent.name.bright_cyan(),
+                                agent.id.to_string().dimmed()
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    output.error(&format!("Failed to list agents: {}", e));
+                }
+            }
+            println!();
+            Ok(false)
+        }
+        "/status" => {
+            output.section("Current Agent Status");
+            output.kv("Name", &current_agent.name().bright_cyan().to_string());
+            output.kv("ID", &current_agent.id().to_string().dimmed().to_string());
+
+            // Try to get memory stats
+            match current_agent.list_memory_keys().await {
+                Ok(memory_blocks) => {
+                    output.kv("Memory blocks", &memory_blocks.len().to_string());
+                }
+                Err(_) => {
+                    output.kv("Memory blocks", "error loading");
+                }
+            }
+
+            println!();
+            Ok(false)
+        }
+        _ => {
+            output.error(&format!("Unknown command: {}", parts[0]));
+            output.status("Type /help for available commands");
+            Ok(false)
+        }
+    }
 }
 
 /// Chat with an agent
-pub async fn chat_with_agent(agent: Arc<dyn Agent>) -> Result<()> {
-    use rustyline::DefaultEditor;
+pub async fn chat_with_agent(
+    agent: Arc<dyn Agent>,
+    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+) -> Result<()> {
+    use rustyline_async::{Readline, ReadlineEvent};
+    use tokio::sync::mpsc;
 
     let output = Output::new();
 
     output.status("Type 'quit' or 'exit' to leave the chat");
     output.status("Use Ctrl+D for multiline input, Enter to send");
-    println!();
 
-    let mut rl = DefaultEditor::new().into_diagnostic()?;
-    let prompt = format!("{} ", ">".bright_blue());
+    let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
 
-    loop {
-        let readline = rl.readline(&prompt);
-        match readline {
-            Ok(line) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
+    // Create output with SharedWriter for proper concurrent output
+    let output = Output::new().with_writer(writer.clone());
 
-                if line.trim() == "quit" || line.trim() == "exit" {
-                    output.status("Goodbye!");
-                    break;
-                }
+    // Register CLI endpoint on all agents in the group
+    let cli_endpoint = Arc::new(CliEndpoint::new(output.clone()));
+    agent.set_default_user_endpoint(cli_endpoint).await?;
 
-                // Add to history
-                let _ = rl.add_history_entry(line.as_str());
+    // Create channel for response routing
+    let (response_sender, mut response_receiver) =
+        mpsc::channel::<pattern_core::message::Response>(100);
 
-                // Create a message using the actual Message structure
-                let message = Message {
-                    content: MessageContent::Text(line.clone()),
-                    word_count: line.split_whitespace().count() as u32,
-                    ..Default::default()
-                };
+    // Spawn heartbeat monitor task
+    let agent_clone = agent.clone();
+    let tx = response_sender.clone();
+    tokio::spawn(async move {
+        while let Some(heartbeat) = heartbeat_receiver.recv().await {
+            tracing::debug!(
+                "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
+                heartbeat.agent_id,
+                heartbeat.tool_name,
+                heartbeat.tool_call_id
+            );
 
-                // Process message
-                output.status("Thinking...");
-                match agent.process_message(message).await {
+            // Clone for the task
+            let agent = agent_clone.clone();
+            let tx = tx.clone();
+
+            // Spawn task to handle this heartbeat
+            tokio::spawn(async move {
+                tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
+
+                // Create a system message to trigger another turn
+                let heartbeat_message = Message::system(format!(
+                    "[Heartbeat continuation from tool: {}]",
+                    heartbeat.tool_name
+                ));
+
+                match agent.process_message(heartbeat_message).await {
                     Ok(response) => {
-                        // Print response
-                        let agent_name = agent.name();
-                        for content in &response.content {
-                            match content {
-                                MessageContent::Text(text) => {
-                                    output.agent_message(&agent_name, text);
-                                }
-                                MessageContent::ToolCalls(calls) => {
-                                    for call in calls {
-                                        // For send_message, hide the content arg since it's displayed below
-                                        let args_display = if call.fn_name == "send_message" {
-                                            let mut args = call.fn_arguments.clone();
-                                            if args.get("content").is_some() {
-                                                args["content"] = serde_json::json!(
-                                                    "[content hidden - shown below]"
-                                                );
-                                            }
-                                            serde_json::to_string_pretty(&args)
-                                                .unwrap_or_else(|_| args.to_string())
-                                        } else {
-                                            serde_json::to_string_pretty(&call.fn_arguments)
-                                                .unwrap_or_else(|_| call.fn_arguments.to_string())
-                                        };
-
-                                        output.tool_call(&call.fn_name, &args_display);
-
-                                        // Special handling for send_message tool
-                                        if call.fn_name == "send_message" {
-                                            if let Some(content) = call
-                                                .fn_arguments
-                                                .get("content")
-                                                .and_then(|v| v.as_str())
-                                            {
-                                                output.agent_message(&agent_name, content);
-                                            }
-                                        }
-                                    }
-                                }
-                                MessageContent::ToolResponses(responses) => {
-                                    for resp in responses {
-                                        output.tool_result(&resp.content);
-                                    }
-                                }
-                                MessageContent::Parts(_) => {
-                                    // Multi-part content, just show text parts for now
-                                    output.status("[Multi-part content]");
-                                }
-                            }
+                        if let Err(e) = tx.send(response).await {
+                            tracing::warn!("Failed to send heartbeat response: {}", e);
                         }
                     }
                     Err(e) => {
-                        output.error(&format!("Error: {}", e));
+                        tracing::error!("Error processing heartbeat: {}", e);
+                    }
+                }
+            });
+        }
+        tracing::debug!("Heartbeat monitor task exiting");
+    });
+
+    loop {
+        tokio::select! {
+            // Handle user input
+            event = rl.readline() => {
+                match event {
+                    Ok(ReadlineEvent::Line(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+
+                        // Check for slash commands
+                        if line.trim().starts_with('/') {
+                            match handle_slash_command(&line, &agent, &output).await {
+                                Ok(should_exit) => {
+                                    if should_exit {
+                                        output.status("Goodbye!");
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                Err(e) => {
+                                    output.error(&format!("Command error: {}", e));
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if line.trim() == "quit" || line.trim() == "exit" {
+                            output.status("Goodbye!");
+                            break;
+                        }
+
+                        // Add to history
+                        rl.add_history_entry(line.clone());
+
+                        // Create a message using the actual Message structure
+                        let message = Message {
+                            content: MessageContent::Text(line.clone()),
+                            word_count: line.split_whitespace().count() as u32,
+                            ..Default::default()
+                        };
+
+                        // Process message
+                        output.status("Thinking...");
+                        match agent.process_message(message).await {
+                            Ok(response) => {
+                                // Print response
+                                let agent_name = agent.name();
+                                for content in &response.content {
+                                    match content {
+                                        MessageContent::Text(text) => {
+                                            output.agent_message(&agent_name, text);
+                                        }
+                                        MessageContent::ToolCalls(calls) => {
+                                            for call in calls {
+                                                // For send_message, hide the content arg since it's displayed below
+                                                let args_display = if call.fn_name == "send_message" {
+                                                    let mut args = call.fn_arguments.clone();
+                                                    if args.get("content").is_some() {
+                                                        args["content"] = serde_json::json!(
+                                                            "[content hidden - shown above]"
+                                                        );
+                                                    }
+                                                    serde_json::to_string(&args)
+                                                        .unwrap_or_else(|_| args.to_string())
+                                                } else {
+                                                    serde_json::to_string_pretty(&call.fn_arguments)
+                                                        .unwrap_or_else(|_| call.fn_arguments.to_string())
+                                                };
+
+                                                output.tool_call(&call.fn_name, &args_display);
+
+                                                // Special handling removed - CliEndpoint now handles display
+                                            }
+                                        }
+                                        MessageContent::ToolResponses(responses) => {
+                                            for resp in responses {
+                                                output.tool_result(&resp.content);
+                                            }
+                                        }
+                                        MessageContent::Parts(_) => {
+                                            // Multi-part content, just show text parts for now
+                                            output.status("[Multi-part content]");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                output.error(&format!("Error: {}", e));
+                            }
+                        }
+                    }
+                    Ok(ReadlineEvent::Interrupted) => {
+                        output.status("CTRL-C");
+                        continue;
+                    }
+                    Ok(ReadlineEvent::Eof) => {
+                        output.status("CTRL-D");
+                        break;
+                    }
+                    Err(err) => {
+                        output.error(&format!("Error: {:?}", err));
+                        break;
                     }
                 }
             }
-            Err(rustyline::error::ReadlineError::Interrupted) => {
-                output.status("CTRL-C");
-                continue;
-            }
-            Err(rustyline::error::ReadlineError::Eof) => {
-                output.status("CTRL-D");
-                break;
-            }
-            Err(err) => {
-                output.error(&format!("Error: {:?}", err));
-                break;
+
+            // Handle heartbeat responses from background task
+            Some(response) = response_receiver.recv() => {
+                // Display heartbeat response
+                output.status("💓 Heartbeat continuation:");
+
+                // Display the response content
+                for content in &response.content {
+                    match content {
+                        MessageContent::Text(text) => {
+                            output.agent_message(&agent.name(), text);
+                        }
+                        MessageContent::ToolCalls(calls) => {
+                            for call in calls {
+                                // For send_message, hide the content arg since it's displayed below
+                                let args_display = if call.fn_name == "send_message" {
+                                    let mut args = call.fn_arguments.clone();
+                                    if args.get("content").is_some() {
+                                        args["content"] =
+                                            serde_json::json!("[content hidden - shown below]");
+                                    }
+                                    serde_json::to_string_pretty(&args)
+                                        .unwrap_or_else(|_| args.to_string())
+                                } else {
+                                    serde_json::to_string_pretty(&call.fn_arguments)
+                                        .unwrap_or_else(|_| call.fn_arguments.to_string())
+                                };
+
+                                output.tool_call(&call.fn_name, &args_display);
+
+                                // Special handling removed - CliEndpoint now handles display
+                            }
+                        }
+                        MessageContent::ToolResponses(responses) => {
+                            for resp in responses {
+                                output.tool_result(&resp.content);
+                            }
+                        }
+                        MessageContent::Parts(_) => {
+                            output.status("[Multi-part content]");
+                        }
+                    }
+                }
             }
         }
     }
@@ -652,9 +911,20 @@ pub async fn chat_with_group<M: GroupManager>(
     pattern_manager: M,
 ) -> Result<()> {
     use pattern_core::coordination::groups::AgentWithMembership;
-    use rustyline::DefaultEditor;
+    use rustyline_async::{Readline, ReadlineEvent};
 
-    let output = Output::new();
+    let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
+
+    // Create output with SharedWriter for proper concurrent output
+    let output = Output::new().with_writer(writer.clone());
+
+    // Register CLI endpoint now that we have the output with SharedWriter
+    let cli_endpoint = Arc::new(CliEndpoint::new(output.clone()));
+    for agent in &agents {
+        agent
+            .set_default_user_endpoint(cli_endpoint.clone())
+            .await?;
+    }
 
     output.status(&format!(
         "Chatting with group '{}'",
@@ -664,10 +934,6 @@ pub async fn chat_with_group<M: GroupManager>(
     output.info("Members:", &format!("{} agents", agents.len()));
     output.status("Type 'quit' or 'exit' to leave the chat");
     output.status("Use Ctrl+D for multiline input, Enter to send");
-    println!();
-
-    let mut rl = DefaultEditor::new().into_diagnostic()?;
-    let prompt = format!("{} ", ">".bright_blue());
 
     // Wrap agents with their membership data
     let agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>> = agents
@@ -680,10 +946,17 @@ pub async fn chat_with_group<M: GroupManager>(
         .collect();
 
     loop {
-        let readline = rl.readline(&prompt);
-        match readline {
-            Ok(line) => {
+        let event = rl.readline().await;
+        match event {
+            Ok(ReadlineEvent::Line(line)) => {
                 if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Check for slash commands
+                if line.trim().starts_with('/') {
+                    // Skip for group chat - we don't have slash commands here yet
+                    output.error("Slash commands not yet available in group chat");
                     continue;
                 }
 
@@ -693,7 +966,7 @@ pub async fn chat_with_group<M: GroupManager>(
                 }
 
                 // Add to history
-                let _ = rl.add_history_entry(line.as_str());
+                rl.add_history_entry(line.clone());
 
                 // Create a message
                 let message = Message {
@@ -758,11 +1031,11 @@ pub async fn chat_with_group<M: GroupManager>(
                     }
                 }
             }
-            Err(rustyline::error::ReadlineError::Interrupted) => {
+            Ok(ReadlineEvent::Interrupted) => {
                 output.status("CTRL-C");
                 continue;
             }
-            Err(rustyline::error::ReadlineError::Eof) => {
+            Ok(ReadlineEvent::Eof) => {
                 output.status("CTRL-D");
                 break;
             }

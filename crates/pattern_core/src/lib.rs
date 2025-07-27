@@ -16,6 +16,7 @@ pub mod atproto_identity;
 pub mod id;
 pub mod memory;
 pub mod message;
+pub mod message_queue;
 pub mod model;
 pub mod oauth;
 pub mod realtime;
@@ -34,9 +35,10 @@ pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use id::{
     AgentId, AtprotoIdentityId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId,
-    OAuthTokenId, RequestId, SessionId, TaskId, ToolCallId, UserId,
+    OAuthTokenId, QueuedMessageId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId,
 };
 pub use memory::{Memory, MemoryBlock};
+pub use message_queue::{QueuedMessage, ScheduledWakeup};
 pub use model::ModelCapability;
 pub use model::ModelProvider;
 pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};

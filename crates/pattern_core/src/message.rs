@@ -489,6 +489,16 @@ impl Response {
             .count()
     }
 
+    pub fn num_tool_responses(&self) -> usize {
+        self.content
+            .iter()
+            .filter(|c| match c {
+                MessageContent::ToolResponses(_) => true,
+                _ => false,
+            })
+            .count()
+    }
+
     pub fn only_text(&self) -> String {
         let mut text = String::new();
         for content in &self.content {
@@ -764,6 +774,14 @@ impl Message {
     pub fn tool_call_count(&self) -> usize {
         match &self.content {
             MessageContent::ToolCalls(calls) => calls.len(),
+            _ => 0,
+        }
+    }
+
+    /// Get the number of tool responses in this message
+    pub fn tool_response_count(&self) -> usize {
+        match &self.content {
+            MessageContent::ToolResponses(calls) => calls.len(),
             _ => 0,
         }
     }

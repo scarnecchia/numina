@@ -13,7 +13,10 @@ use crate::tool::builtin::BuiltinTools;
 use crate::{
     CoreError, MemoryBlock, ModelProvider, Result, UserId,
     agent::{Agent, AgentMemoryRelation, AgentState, AgentType},
-    context::{AgentContext, ContextConfig},
+    context::{
+        AgentContext, ContextConfig,
+        heartbeat::{HeartbeatRequest, HeartbeatSender, check_heartbeat_request},
+    },
     db::{DatabaseError, ops, schema},
     embeddings::EmbeddingProvider,
     id::AgentId,
@@ -45,6 +48,9 @@ where
 
     /// Embedding provider for semantic search
     embeddings: Option<Arc<E>>,
+
+    /// Channel for sending heartbeat requests
+    pub heartbeat_sender: HeartbeatSender,
 }
 
 impl<C, M, E> DatabaseAgent<C, M, E>
@@ -69,6 +75,7 @@ where
         model: Arc<RwLock<M>>,
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
+        heartbeat_sender: HeartbeatSender,
     ) -> Self {
         let context_config = if !system_prompt.is_empty() {
             ContextConfig {
@@ -79,12 +86,25 @@ where
             ContextConfig::default()
         };
         // Build AgentContext with tools
-        let mut context =
-            AgentContext::new(agent_id, name, agent_type, memory, tools, context_config);
+        let mut context = AgentContext::new(
+            agent_id.clone(),
+            name,
+            agent_type,
+            memory,
+            tools,
+            context_config,
+        );
         context.handle.state = AgentState::Ready;
 
         // Wire up database connection to handle for archival memory tools
         context.handle = context.handle.with_db(db.clone());
+
+        // Create and wire up message router
+        let router =
+            crate::context::message_router::AgentMessageRouter::new(agent_id.clone(), db.clone());
+
+        // Add router to handle - endpoints will be registered by the consumer
+        context.handle = context.handle.with_message_router(router);
 
         // Register built-in tools
         // TODO: Fix tool schema for Gemini compatibility
@@ -98,7 +118,13 @@ where
             db,
             embeddings,
             model,
+            heartbeat_sender,
         }
+    }
+
+    /// Set the heartbeat sender for this agent
+    pub fn set_heartbeat_sender(&mut self, sender: HeartbeatSender) {
+        self.heartbeat_sender = sender;
     }
 
     /// Create a DatabaseAgent from a persisted AgentRecord
@@ -111,6 +137,7 @@ where
         model: Arc<RwLock<M>>,
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
+        heartbeat_sender: HeartbeatSender,
     ) -> Result<Self> {
         tracing::debug!(
             "Creating DatabaseAgent from record: agent_id={}, name={}",
@@ -160,6 +187,7 @@ where
             model,
             tools,
             embeddings,
+            heartbeat_sender,
         );
 
         // Restore the agent state
@@ -279,7 +307,7 @@ where
     }
 
     /// Start background task to sync memory updates via live queries
-    pub async fn start_memory_sync(&self) -> Result<()> {
+    pub async fn start_memory_sync(self: Arc<Self>) -> Result<()> {
         let (agent_id, memory) = {
             let context = self.context.read().await;
             (
@@ -412,6 +440,138 @@ where
 
             tracing::warn!(
                 "⚠️ Memory sync task exiting for agent {} - stream ended",
+                agent_id
+            );
+        });
+
+        Ok(())
+    }
+
+    /// Start background task to monitor incoming messages
+    pub async fn start_message_monitoring(self: Arc<Self>) -> Result<()> {
+        let db = self.db.clone();
+        let agent_id = {
+            let context = self.context.read().await;
+            context.handle.agent_id.clone()
+        };
+
+        // Create a weak reference for the spawned task
+        let agent_weak = Arc::downgrade(&self);
+
+        tokio::spawn(async move {
+            let stream = match crate::db::ops::subscribe_to_agent_messages(&db, &agent_id).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    crate::log_error!("Failed to subscribe to agent messages", e);
+                    return;
+                }
+            };
+
+            tracing::info!("📬 Agent {} message monitoring started", agent_id);
+
+            tokio::pin!(stream);
+            while let Some((action, mut queued_msg)) = stream.next().await {
+                match action {
+                    surrealdb::Action::Create | surrealdb::Action::Update => {
+                        tracing::info!(
+                            "📨 Agent {} received message from {:?}{:?}: {}",
+                            agent_id,
+                            queued_msg.from_agent,
+                            queued_msg.from_user,
+                            queued_msg.content
+                        );
+
+                        // Update the call chain to include this agent
+                        queued_msg.add_to_call_chain(agent_id.clone());
+
+                        // Convert QueuedMessage to Message
+                        let mut message = if let Some(_from_agent) = &queued_msg.from_agent {
+                            // Message from another agent
+                            Message::agent(queued_msg.content.clone())
+                        } else if let Some(from_user) = &queued_msg.from_user {
+                            // Message from a user
+                            let mut msg = Message::user(queued_msg.content.clone());
+                            msg.owner_id = Some(from_user.clone());
+                            msg
+                        } else {
+                            // System message or unknown source
+                            Message::system(queued_msg.content.clone())
+                        };
+
+                        // Add metadata if present
+                        if queued_msg.metadata != serde_json::Value::Null {
+                            message.metadata = crate::message::MessageMetadata {
+                                custom: queued_msg.metadata.clone(),
+                                ..Default::default()
+                            };
+                        }
+
+                        // Mark message as read immediately to prevent reprocessing
+                        if let Err(e) =
+                            crate::db::ops::mark_message_as_read(&db, &queued_msg.id).await
+                        {
+                            crate::log_error!("Failed to mark message as read", e);
+                        }
+
+                        // Process the message directly
+                        // Try to upgrade the weak reference to process the message
+                        if let Some(agent) = agent_weak.upgrade() {
+                            tracing::info!(
+                                "💬 Agent {} processing message from {:?}{:?}",
+                                agent_id,
+                                queued_msg.from_agent,
+                                queued_msg.from_user
+                            );
+
+                            // Call process_message through the Agent trait
+                            match agent.process_message(message).await {
+                                Ok(response) => {
+                                    tracing::debug!(
+                                        "✅ Agent {} successfully processed incoming message, response has {} content parts",
+                                        agent_id,
+                                        response.content.len()
+                                    );
+
+                                    // If there's a response with actual content, we might want to send it back
+                                    // For now, just log it
+                                    for content in &response.content {
+                                        match content {
+                                            MessageContent::Text(text) => {
+                                                tracing::info!("📤 Agent response: {}", text);
+                                            }
+                                            _ => {
+                                                tracing::debug!(
+                                                    "📤 Agent response contains non-text content"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "❌ Agent {} failed to process incoming message: {}",
+                                        agent_id,
+                                        e
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "⚠️ Agent {} has been dropped, cannot process incoming message",
+                                agent_id
+                            );
+                            // Exit the monitoring task since the agent is gone
+                            break;
+                        }
+                    }
+                    _ => {
+                        tracing::debug!("Ignoring action {:?} for message queue", action);
+                    }
+                }
+            }
+
+            tracing::warn!(
+                "⚠️ Message monitoring task exiting for agent {} - stream ended",
                 agent_id
             );
         });
@@ -858,7 +1018,7 @@ where
             .expect("should have options or default");
 
         // Note: this will usually make a network request and will need to wait for generated tokens from the LLM. it's the slowest bit.
-        let response = {
+        let mut response = {
             let model = self.model.read().await;
             match model.complete(&options, request).await {
                 Ok(response) => {
@@ -926,162 +1086,281 @@ where
         }
 
         // Check if the response contains tool calls
-        let tool_calls_handled = response.num_tool_calls() > 0;
-        let final_response = if tool_calls_handled {
-            tracing::debug!(
-                "Response contains {} tool calls, executing them",
-                response.num_tool_calls()
-            );
+        let final_response = if response.num_tool_calls() > 0 {
+            let current_response = &mut response;
 
-            // Execute the tool calls and get responses inline
-            let processed_response = {
-                let context = self.context.read().await;
-                context.process_response(response).await
-            };
+            let mut all_processed_content = Vec::new();
+            let mut seen_tool_call_ids = std::collections::HashSet::<String>::new();
+            let mut seen_tool_response_ids = std::collections::HashSet::<String>::new();
 
-            // Persist any memory changes from tool execution
-            self.persist_memory_changes().await?;
-
-            // Convert the processed response (with tool calls AND responses) to messages
-            let response_messages = Message::from_response(&processed_response, &agent_id);
-
-            // Add all messages from the processed response to context
-            for message in response_messages {
+            while current_response.num_tool_calls() > 0 {
                 tracing::debug!(
-                    "Adding message with role: {:?}, content type: {:?}",
-                    message.role,
-                    match &message.content {
-                        MessageContent::Text(_) => "Text",
-                        MessageContent::Parts(_) => "Parts",
-                        MessageContent::ToolCalls(_) => "ToolCalls",
-                        MessageContent::ToolResponses(_) => "ToolResponses",
-                    }
+                    "Response contains {} tool calls, executing them",
+                    current_response.num_tool_calls()
                 );
 
-                // Add the message to context
-                {
+                // Execute the tool calls and get responses inline
+                let processed_response = {
                     let context = self.context.read().await;
-                    context.add_message(message.clone()).await;
-                }
+                    context.process_response(current_response.clone()).await
+                };
 
-                // Also persist to DB
-                let _ = crate::db::ops::persist_agent_message(
-                    &self.db,
-                    &agent_id,
-                    &message,
-                    crate::message::MessageRelationType::Active,
-                )
-                .await
-                .inspect_err(|e| {
-                    crate::log_error!("Failed to persist response message", e);
-                });
-            }
+                // Persist any memory changes from tool execution
+                self.persist_memory_changes().await?;
 
-            // Build context again with the tool responses included
-            let memory_context = {
-                let context = self.context.read().await;
-                context.build_context().await?
-            };
-
-            // Create a new request with the updated context (including tool responses)
-            let request_with_tools = Request {
-                system: Some(vec![memory_context.system_prompt.clone()]),
-                messages: memory_context.messages,
-                tools: Some(memory_context.tools),
-            };
-
-            tracing::debug!(
-                "📤 Sending second request to LLM with tool results: {} messages",
-                request_with_tools.messages.len()
-            );
-
-            // Log last few messages being sent
-            let start = request_with_tools.messages.len().saturating_sub(5);
-            for (i, msg) in request_with_tools.messages[start..].iter().enumerate() {
-                tracing::debug!(
-                    "  Message[{}]: role={:?}, content_type={:?}",
-                    i,
-                    msg.role,
-                    match &msg.content {
-                        MessageContent::Text(_) => "Text",
-                        MessageContent::Parts(_) => "Parts",
-                        MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
-                        MessageContent::ToolResponses(tr) =>
-                            &format!("ToolResponses({})", tr.len()),
-                    }
-                );
-            }
-
-            // Get the final response from the LLM that incorporates the tool results
-            let final_response = {
-                let model = self.model.read().await;
-                match model.complete(&options, request_with_tools).await {
-                    Ok(response) => {
-                        tracing::debug!(
-                            "📥 Got final response from LLM after tool execution: {} content parts, {} tool calls",
-                            response.content.len(),
-                            response.num_tool_calls()
-                        );
-                        if response.num_tool_calls() > 0 {
-                            tracing::warn!(
-                                "⚠️ Final response contains tool calls - this is unexpected!"
-                            );
-                            for content in &response.content {
-                                if let MessageContent::ToolCalls(calls) = content {
-                                    for call in calls {
-                                        tracing::warn!("  Tool call ID: {}", call.call_id);
-                                    }
+                // Store the processed content, filtering out duplicate tool calls
+                for content in processed_response.content.clone() {
+                    match &content {
+                        MessageContent::ToolCalls(calls) => {
+                            let mut filtered_calls = Vec::new();
+                            for call in calls {
+                                if seen_tool_call_ids.insert(call.call_id.clone()) {
+                                    // This is a new tool call ID
+                                    filtered_calls.push(call.clone());
+                                } else {
+                                    tracing::debug!(
+                                        "Filtering out duplicate tool call with ID: {} from response",
+                                        call.call_id
+                                    );
                                 }
                             }
+                            if !filtered_calls.is_empty() {
+                                all_processed_content
+                                    .push(MessageContent::ToolCalls(filtered_calls));
+                            }
                         }
-                        response
-                    }
-                    Err(e) => {
-                        crate::log_error!("Failed to get final response from model", e);
-
-                        // Check if it's a specific Gemini error about missing candidates
-                        let error_str = e.to_string();
-                        if error_str.contains("candidates/0/content/parts") {
-                            tracing::warn!(
-                                "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
-                            );
-
-                            // Create a fallback response when Gemini blocks content
-                            Response {
-                            content: vec![crate::message::MessageContent::Text(
-                                "I apologize, but I'm unable to process that request at the moment. This might be due to content filters or rate limits. Please try rephrasing your message or try again later.".to_string()
-                            )],
-                            reasoning: None,
-                            metadata: crate::message::ResponseMetadata::default(),
+                        MessageContent::ToolResponses(responses) => {
+                            let mut filtered_responses = Vec::new();
+                            for response in responses {
+                                if seen_tool_response_ids.insert(response.call_id.clone()) {
+                                    // This is a new tool response ID
+                                    filtered_responses.push(response.clone());
+                                } else {
+                                    tracing::debug!(
+                                        "Filtering out duplicate tool response with ID: {} from response",
+                                        response.call_id
+                                    );
+                                }
+                            }
+                            if !filtered_responses.is_empty() {
+                                all_processed_content
+                                    .push(MessageContent::ToolResponses(filtered_responses));
+                            }
                         }
-                        } else {
-                            // For other errors, return them
-                            return Err(e);
+                        _ => {
+                            // Not a tool call or response, just add it
+                            all_processed_content.push(content);
                         }
                     }
                 }
-            };
 
-            // Merge the processed response (with tool calls/responses) with the final response
-            // This preserves both the tool execution details and any final LLM output
-            let mut combined_content = processed_response.content;
-            combined_content.extend(final_response.content);
+                // Convert the processed response (with tool calls AND responses) to messages
+                let response_messages = Message::from_response(&processed_response, &agent_id);
 
+                // Add all messages from the processed response to context
+                for message in response_messages {
+                    if !message.content.is_empty() {
+                        tracing::debug!(
+                            "Adding message with role: {:?}, content type: {:?}",
+                            message.role,
+                            match &message.content {
+                                MessageContent::Text(_) => "Text",
+                                MessageContent::Parts(_) => "Parts",
+                                MessageContent::ToolCalls(_) => "ToolCalls",
+                                MessageContent::ToolResponses(_) => "ToolResponses",
+                            }
+                        );
+
+                        // Add the message to context
+                        {
+                            let context = self.context.read().await;
+                            context.add_message(message.clone()).await;
+                        }
+
+                        // Also persist to DB
+                        let _ = crate::db::ops::persist_agent_message(
+                            &self.db,
+                            &agent_id,
+                            &message,
+                            crate::message::MessageRelationType::Active,
+                        )
+                        .await
+                        .inspect_err(|e| {
+                            crate::log_error!("Failed to persist response message", e);
+                        });
+                    }
+                }
+
+                // Build context again with the tool responses included
+                let memory_context = {
+                    let context = self.context.read().await;
+                    context.build_context().await?
+                };
+
+                // Create a new request with the updated context (including tool responses)
+                let request_with_tools = Request {
+                    system: Some(vec![memory_context.system_prompt.clone()]),
+                    messages: memory_context.messages,
+                    tools: Some(memory_context.tools),
+                };
+
+                tracing::debug!(
+                    "📤 Sending further request to LLM with tool results: {} messages",
+                    request_with_tools.messages.len()
+                );
+
+                // Log last few messages being sent
+                let start = request_with_tools.messages.len().saturating_sub(5);
+                for (i, msg) in request_with_tools.messages[start..].iter().enumerate() {
+                    tracing::debug!(
+                        "  Message[{}]: role={:?}, content_type={:?}",
+                        i,
+                        msg.role,
+                        match &msg.content {
+                            MessageContent::Text(_) => "Text",
+                            MessageContent::Parts(_) => "Parts",
+                            MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
+                            MessageContent::ToolResponses(tr) =>
+                                &format!("ToolResponses({})", tr.len()),
+                        }
+                    );
+                }
+
+                // Get the response from the LLM that incorporates the tool results
+                *current_response = {
+                    let model = self.model.read().await;
+                    match model.complete(&options, request_with_tools).await {
+                        Ok(response) => {
+                            tracing::debug!(
+                                "📥 Got final response from LLM after tool execution: {} content parts, {} tool calls",
+                                response.content.len(),
+                                response.num_tool_calls()
+                            );
+
+                            response
+                        }
+                        Err(e) => {
+                            crate::log_error!("Failed to get final response from model", e);
+
+                            // Check if it's a specific Gemini error about missing candidates
+                            let error_str = e.to_string();
+                            if error_str.contains("candidates/0/content/parts") {
+                                tracing::warn!(
+                                    "Gemini returned an empty or blocked response. This might be due to safety filters or rate limits. Returning a fallback response."
+                                );
+
+                                // Create a fallback response when Gemini blocks content
+                                Response {
+                                content: vec![crate::message::MessageContent::Text(
+                                    "I apologize, but I'm unable to process that request at the moment. This might be due to content filters or rate limits. Please try rephrasing your message or try again later.".to_string()
+                                )],
+                                reasoning: None,
+                                metadata: crate::message::ResponseMetadata::default(),
+                            }
+                            } else {
+                                // For other errors, return them
+                                return Err(e);
+                            }
+                        }
+                    }
+                };
+
+                if current_response.num_tool_calls() == 0 {
+                    // Persist any memory changes from tool execution
+                    self.persist_memory_changes().await?;
+
+                    // Store the processed content, filtering out duplicate tool calls
+                    for content in processed_response.content.clone() {
+                        match &content {
+                            MessageContent::ToolCalls(calls) => {
+                                let mut filtered_calls = Vec::new();
+                                for call in calls {
+                                    if seen_tool_call_ids.insert(call.call_id.clone()) {
+                                        // This is a new tool call ID
+                                        filtered_calls.push(call.clone());
+                                    } else {
+                                        tracing::debug!(
+                                            "Filtering out duplicate tool call with ID: {} from response",
+                                            call.call_id
+                                        );
+                                    }
+                                }
+                                if !filtered_calls.is_empty() {
+                                    all_processed_content
+                                        .push(MessageContent::ToolCalls(filtered_calls));
+                                }
+                            }
+                            MessageContent::ToolResponses(responses) => {
+                                let mut filtered_responses = Vec::new();
+                                for response in responses {
+                                    if seen_tool_response_ids.insert(response.call_id.clone()) {
+                                        // This is a new tool response ID
+                                        filtered_responses.push(response.clone());
+                                    } else {
+                                        tracing::debug!(
+                                            "Filtering out duplicate tool response with ID: {} from response",
+                                            response.call_id
+                                        );
+                                    }
+                                }
+                                if !filtered_responses.is_empty() {
+                                    all_processed_content
+                                        .push(MessageContent::ToolResponses(filtered_responses));
+                                }
+                            }
+                            _ => {
+                                // Not a tool call or response, just add it
+                                all_processed_content.push(content);
+                            }
+                        }
+                    }
+                    // Convert the processed response (with tool calls AND responses) to messages
+                    let response_messages = Message::from_response(&processed_response, &agent_id);
+
+                    // Add all messages from the processed response to context
+                    for message in response_messages {
+                        if !message.content.is_empty() {
+                            tracing::debug!(
+                                "Adding message with role: {:?}, content type: {:?}",
+                                message.role,
+                                match &message.content {
+                                    MessageContent::Text(_) => "Text",
+                                    MessageContent::Parts(_) => "Parts",
+                                    MessageContent::ToolCalls(_) => "ToolCalls",
+                                    MessageContent::ToolResponses(_) => "ToolResponses",
+                                }
+                            );
+
+                            // Add the message to context
+                            {
+                                let context = self.context.read().await;
+                                context.add_message(message.clone()).await;
+                            }
+
+                            // Also persist to DB
+                            let _ = crate::db::ops::persist_agent_message(
+                                &self.db,
+                                &agent_id,
+                                &message,
+                                crate::message::MessageRelationType::Active,
+                            )
+                            .await
+                            .inspect_err(|e| {
+                                crate::log_error!("Failed to persist response message", e);
+                            });
+                        }
+                    }
+                }
+            }
             Response {
-                content: combined_content,
-                reasoning: final_response.reasoning,
-                metadata: final_response.metadata,
+                content: all_processed_content,
+                reasoning: current_response.reasoning.clone(),
+                metadata: current_response.metadata.clone(),
             }
         } else {
-            response
-        };
-
-        // Only convert and add final response if we didn't handle tool calls
-        // (tool call handling already added all necessary messages)
-        if !tool_calls_handled {
             let response_messages = {
                 let context = self.context.read().await;
-                Message::from_response(&final_response, &context.handle.agent_id)
+                Message::from_response(&response, &context.handle.agent_id)
             };
 
             // Add each response message to context and persist
@@ -1131,16 +1410,17 @@ where
                     }
                 }
             }
-        }
+            response
+        };
 
         // Update stats in background
-        let (stats, db) = {
+        let (stats, db, agent_id_clone) = {
             let context = self.context.read().await;
-            (context.get_stats().await, self.db.clone())
+            (context.get_stats().await, self.db.clone(), agent_id.clone())
         };
 
         let _handle = tokio::spawn(async move {
-            if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id, &stats).await {
+            if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id_clone, &stats).await {
                 crate::log_error!("Failed to update agent stats", e);
             }
         });
@@ -1149,6 +1429,37 @@ where
         {
             let mut context = self.context.write().await;
             context.handle.state = AgentState::Ready;
+        }
+
+        // Check for heartbeat requests in the response
+        for content in &final_response.content {
+            if let MessageContent::ToolCalls(calls) = content {
+                for call in calls {
+                    if check_heartbeat_request(&call.fn_arguments) {
+                        tracing::debug!(
+                            "💓 Heartbeat requested by tool {} (call_id: {})",
+                            call.fn_name,
+                            call.call_id
+                        );
+
+                        let heartbeat_req = HeartbeatRequest {
+                            agent_id: agent_id.clone(),
+                            tool_name: call.fn_name.clone(),
+                            tool_call_id: call.call_id.clone(),
+                        };
+
+                        // Try to send, but don't block if the channel is full
+                        match self.heartbeat_sender.try_send(heartbeat_req) {
+                            Ok(()) => {
+                                tracing::debug!("✅ Heartbeat request sent");
+                            }
+                            Err(e) => {
+                                tracing::warn!("⚠️ Failed to send heartbeat request: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(final_response)
@@ -1451,6 +1762,43 @@ where
             });
 
         Ok(())
+    }
+
+    async fn register_endpoint(
+        &self,
+        name: String,
+        endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
+    ) -> Result<()> {
+        let context = self.context.read().await;
+
+        // Get the message router from the handle
+        let router = context.handle.message_router().ok_or_else(|| {
+            crate::CoreError::ToolExecutionFailed {
+                tool_name: "register_endpoint".to_string(),
+                cause: "Message router not configured for this agent".to_string(),
+                parameters: serde_json::json!({ "name": name }),
+            }
+        })?;
+
+        // Register the endpoint
+        router.register_endpoint(name, endpoint).await;
+        Ok(())
+    }
+
+    async fn set_default_user_endpoint(
+        &self,
+        endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
+    ) -> Result<()> {
+        let mut context = self.context.write().await;
+        if let Some(router) = &mut context.handle.message_router {
+            router.set_default_user_endpoint(endpoint).await;
+            Ok(())
+        } else {
+            Err(crate::CoreError::AgentInitFailed {
+                agent_type: self.agent_type().as_str().to_string(),
+                cause: "Message router not initialized".to_string(),
+            })
+        }
     }
 }
 

@@ -211,12 +211,173 @@ This allows agents to make informed decisions about memory swapping without need
    - Applied to first message and every 20th message
    - Works with all compression strategies
 
-## Next Priorities
-1. **Fix failing tests**: `test_load_balancing_selector` and `test_round_robin_skip_inactive`
-   - Both failing after dyn-compatibility refactor
-2. Add vector search for archival memory using embeddings
-3. ~~Create basic binary (CLI/TUI) for user testing~~ ✅ (pattern-cli complete)
+## Message System Implementation Status
 
+### ✅ Completed Components
+
+#### 1. **Heartbeat System** ✅ COMPLETE (2025-07-24)
+- Added `request_heartbeat: bool` field to ALL tool input structs (context, recall, search, send_message)
+- Agent checks for heartbeat requests in `process_message()` before returning
+- CLI creates heartbeat monitor task that triggers new agent turns
+- Works in practice - tested and functional!
+
+#### 2. **Message Queue Entities** ✅ COMPLETE
+- Created `QueuedMessage` entity with:
+  - Separate `QueuedMessageId` type for the queue_msg table
+  - Support for agent-to-agent and user-to-agent messages
+  - Call chain for loop prevention
+  - Read/unread tracking with timestamps
+- Created `ScheduledWakeup` entity with:
+  - One-time and recurring wakeup support
+  - Active/inactive state management
+  - Metadata field for extensibility
+
+#### 3. **AgentMessageRouter** ✅ COMPLETE
+- Core router implementation with:
+  - Database-backed message queuing
+  - Endpoint registry for extensible delivery
+  - Support for User, Agent, Group, and Channel targets
+  - Loop prevention via call chain checking
+- `MessageEndpoint` trait for custom endpoints
+- `CliEndpoint` implementation for stdout
+- Added to `AgentHandle` as optional field
+
+### 🚧 Next Steps
+
+#### IMMEDIATE TODO: Switch to rustyline-async
+**Problem**: Current readline implementation blocks the main thread, causing issues with:
+- Heartbeat responses appearing at wrong times
+- Messages from other agents interrupting the prompt
+- Poor user experience when async events occur
+
+**Solution**: Switch from `rustyline` to `rustyline-async` (https://github.com/zyansheep/rustyline-async)
+
+**Changes needed**:
+1. Update `pattern_cli/Cargo.toml`:
+   - Replace `rustyline = "14.0"` with `rustyline-async = "0.4"`
+   
+2. Refactor `chat_with_agent()` in `agent_ops.rs`:
+   - Use `rustyline_async::Readline` instead of `DefaultEditor`
+   - Properly handle concurrent input/output with tokio::select!
+   - Allow heartbeat responses and incoming messages to display without breaking the input line
+   
+   Example pattern:
+   ```rust
+   let mut rl = Readline::new("> ".to_string()).unwrap();
+   
+   loop {
+       tokio::select! {
+           // Handle user input
+           line = rl.readline() => {
+               match line {
+                   Ok(line) => { /* process user input */ }
+                   Err(_) => break,
+               }
+           }
+           
+           // Handle heartbeat responses
+           Some(response) = response_receiver.recv() => {
+               // Save current input
+               let saved = rl.line();
+               
+               // Clear line and display response
+               print!("\r\x1b[K"); // Clear current line
+               display_response(response);
+               
+               // Restore prompt and input
+               print!("{}{}", prompt, saved);
+               io::stdout().flush()?;
+           }
+           
+           // Handle incoming messages from other agents
+           // (would need another channel for this)
+       }
+   }
+   ```
+   
+3. Benefits:
+   - Clean handling of async events (heartbeats, agent messages)
+   - No more prompt corruption
+   - Better user experience for multi-agent conversations
+
+#### Phase 1: Wire Router to Tools (HIGH PRIORITY) ✅ COMPLETE
+1. **Update SendMessageTool** to use AgentMessageRouter ✅
+   - Get router from AgentHandle
+   - Convert tool input to router method call
+   - Handle missing router gracefully
+
+2. **Create router during agent initialization** ✅
+   - Modify DatabaseAgent to create router with DB connection
+   - Pass appropriate endpoints (CLI for now)
+   - Update AgentHandle during construction
+
+#### Phase 2: Live Query Message Delivery ✅ COMPLETE
+1. **Add incoming message monitoring to DatabaseAgent** ✅
+   - Added `subscribe_to_agent_messages()` in db/ops.rs
+   - Set up live query: `LIVE SELECT * FROM queue_msg WHERE to_agent = agent_id AND read = false`
+   - Background task monitors incoming messages
+
+2. **Message processing flow** ✅
+   - Convert QueuedMessage to Message with proper role and metadata
+   - Use weak reference to agent for processing in background task
+   - Mark messages as read immediately to prevent reprocessing
+   - Call process_message() directly on incoming messages
+
+#### Phase 3: Scheduled Wakeups (MEDIUM PRIORITY)
+1. **Background scheduler service**
+   - Query for due wakeups periodically
+   - Send system messages to trigger agents
+   - Update recurring wakeups for next execution
+   - Handle missed wakeups gracefully
+
+2. **Integration with agents**
+   - Add "schedule_wakeup" tool for agents to self-schedule
+   - Include wakeup reason in trigger message
+   - Allow cancellation of scheduled wakeups
+
+#### Phase 3: Test CLI Endpoint ✅ READY FOR TESTING
+- Added slash commands to chat loop:
+  - `/send <agent> <message>` - Send message to another agent
+  - `/list` - List all agents
+  - `/status` - Show current agent status
+  - `/help` - Show available commands
+  - `/exit` or `/quit` - Exit chat
+- CLI endpoint prints incoming messages to stdout
+- Need to test with multiple agents running simultaneously
+
+#### Phase 4: Additional Endpoints (MEDIUM PRIORITY) 
+**STATUS: Only CliEndpoint implemented so far**
+
+1. **GroupEndpoint** (TODO)
+   - Query group members from database
+   - Apply coordination pattern for routing
+   - Handle offline members appropriately
+
+2. **DiscordEndpoint** (TODO - when Discord integration ready)
+   - Use Discord bot to send messages
+   - Map channel IDs appropriately
+   - Handle rate limits and errors
+
+3. **QueueEndpoint** (Stub exists but not functional)
+   - Currently has unused fields warning
+   - Needs proper implementation for database queuing
+
+### 🎯 Implementation Order
+1. ✅ Wire router to send_message tool (COMPLETE)
+2. ✅ Set up live queries (COMPLETE)
+3. ✅ Add slash commands for testing (COMPLETE)
+4. 🧪 TEST: Agent-to-agent messaging with CLI endpoint
+   - Run two agents in separate terminals
+   - Use `/send` command to send messages between them
+   - Verify messages are received and processed
+5. Add scheduled wakeups (enables time-based features)
+6. Implement additional endpoints as needed
+
+### 💡 Design Decisions
+- Each agent has its own router (not a singleton) for flexibility
+- Database queuing provides natural buffering for offline agents
+- Call chain prevents infinite loops while allowing controlled recursion
+- Heartbeats and scheduled wakeups are separate systems with different use cases
 
 ## Eventually
  - Add provider capability flags to ModelProvider trait for multi-modal support

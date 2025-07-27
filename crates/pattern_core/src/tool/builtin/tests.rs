@@ -3,7 +3,8 @@ mod tests {
     use super::super::*;
     use crate::{
         UserId,
-        context::AgentHandle,
+        context::{AgentHandle, message_router::AgentMessageRouter},
+        db::client::create_test_db,
         memory::{Memory, MemoryPermission, MemoryType},
         tool::ToolRegistry,
     };
@@ -69,8 +70,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_through_registry() {
+        let db = create_test_db().await.unwrap();
+
         // Create a handle
-        let handle = AgentHandle::default();
+        let mut handle = AgentHandle::default().with_db(db.clone());
+
+        let router = AgentMessageRouter::new(handle.agent_id.clone(), db);
+        handle.message_router = Some(router);
 
         // Create and register tools
         let registry = ToolRegistry::new();

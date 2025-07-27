@@ -39,6 +39,10 @@ pub struct RecallInput {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+
+    /// Request another turn after this tool executes
+    #[serde(default)]
+    pub request_heartbeat: bool,
 }
 
 /// Output from recall storage operations
@@ -151,6 +155,7 @@ impl<C: surrealdb::Connection + Clone + Debug> AiTool for RecallTool<C> {
                             .to_string(),
                     ),
                     label: None,
+                    request_heartbeat: false,
                 },
                 expected_output: Some(RecallOutput {
                     success: true,
@@ -164,6 +169,7 @@ impl<C: surrealdb::Connection + Clone + Debug> AiTool for RecallTool<C> {
                     operation: ArchivalMemoryOperationType::Append,
                     content: Some("Max is a golden retriever.".to_string()),
                     label: Some("archival_1234567890".to_string()),
+                    request_heartbeat: false,
                 },
                 expected_output: Some(RecallOutput {
                     success: true,
@@ -432,6 +438,7 @@ mod tests {
                 operation: ArchivalMemoryOperationType::Insert,
                 content: Some("The user's favorite color is blue.".to_string()),
                 label: Some("user_preferences".to_string()),
+                request_heartbeat: false,
             })
             .await
             .unwrap();
@@ -455,6 +462,7 @@ mod tests {
                 operation: ArchivalMemoryOperationType::Append,
                 content: Some(" They also like the color green.".to_string()),
                 label: Some("user_preferences".to_string()),
+                request_heartbeat: false,
             })
             .await
             .unwrap();
@@ -498,6 +506,7 @@ mod tests {
                 operation: ArchivalMemoryOperationType::Delete,
                 content: None,
                 label: Some("to_delete".to_string()),
+                request_heartbeat: false,
             })
             .await
             .unwrap();
@@ -529,6 +538,7 @@ mod tests {
                 operation: ArchivalMemoryOperationType::Delete,
                 content: None,
                 label: Some("core_block".to_string()),
+                request_heartbeat: false,
             })
             .await
             .unwrap();

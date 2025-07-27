@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::{
     AgentId, MemoryBlock, Result,
@@ -89,6 +90,19 @@ pub trait Agent: Send + Sync + Debug {
 
     /// Update the agent's state
     async fn set_state(&self, state: AgentState) -> Result<()>;
+
+    /// Register a message endpoint for a specific channel
+    async fn register_endpoint(
+        &self,
+        name: String,
+        endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
+    ) -> Result<()>;
+
+    /// Set the default user endpoint
+    async fn set_default_user_endpoint(
+        &self,
+        endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
+    ) -> Result<()>;
 }
 
 /// Types of agents in the system

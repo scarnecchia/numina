@@ -59,6 +59,10 @@ pub struct ContextInput {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_name: Option<String>,
+
+    /// Request another turn after this tool executes
+    #[serde(default)]
+    pub request_heartbeat: bool,
 }
 
 /// Output from context operations
@@ -192,6 +196,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for ContextTool<
                     new_content: None,
                     archival_label: None,
                     archive_name: None,
+                    request_heartbeat: false,
                 },
                 expected_output: Some(ContextOutput {
                     success: true,
@@ -209,6 +214,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for ContextTool<
                     new_content: Some("knowledgeable AI companion".to_string()),
                     archival_label: None,
                     archive_name: None,
+                    request_heartbeat: false,
                 },
                 expected_output: Some(ContextOutput {
                     success: true,
@@ -652,6 +658,7 @@ mod tests {
                 new_content: None,
                 archival_label: None,
                 archive_name: None,
+                request_heartbeat: false,
             })
             .await
             .unwrap();

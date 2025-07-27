@@ -16,6 +16,8 @@ use crate::{
 
 pub mod compression;
 pub mod genai_ext;
+pub mod heartbeat;
+pub mod message_router;
 pub mod state;
 
 pub use compression::{CompressionResult, CompressionStrategy, MessageCompressor};

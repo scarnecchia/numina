@@ -182,6 +182,22 @@ mod tests {
         async fn set_state(&self, _state: AgentState) -> Result<()> {
             unimplemented!("Test agent")
         }
+
+        async fn register_endpoint(
+            &self,
+            _name: String,
+            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
+        ) -> Result<()> {
+            unimplemented!("Test agent")
+        }
+
+        /// Set the default user endpoint
+        async fn set_default_user_endpoint(
+            &self,
+            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
+        ) -> Result<()> {
+            unimplemented!("Test agent")
+        }
     }
 
     fn create_test_message(content: &str) -> Message {

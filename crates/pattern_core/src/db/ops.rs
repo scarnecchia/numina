@@ -503,6 +503,64 @@ pub async fn subscribe_to_memory_updates<C: Connection>(
     ))
 }
 
+/// Subscribe to incoming messages for an agent
+pub async fn subscribe_to_agent_messages<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: &AgentId,
+) -> Result<impl Stream<Item = (Action, crate::message_queue::QueuedMessage)>> {
+    // Subscribe to messages where to_agent = agent_id AND read = false
+    let query = format!(
+        "LIVE SELECT * FROM queue_msg WHERE to_agent = agent:⟨{}⟩ AND read = false",
+        agent_id.to_key()
+    );
+
+    let mut result = conn.query(query).await?;
+    let stream = result
+        .stream::<Notification<<crate::message_queue::QueuedMessage as DbEntity>::DbModel>>(0)?;
+
+    Ok(stream.filter_map(
+        |notif: surrealdb::Result<
+            Notification<<crate::message_queue::QueuedMessage as DbEntity>::DbModel>,
+        >| async move {
+            match notif {
+                Ok(Notification { action, data, .. }) => {
+                    match crate::message_queue::QueuedMessage::from_db_model(data) {
+                        Ok(msg) => Some((action, msg)),
+                        Err(e) => {
+                            tracing::error!("Failed to convert db model to QueuedMessage: {}", e);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error in message subscription: {}", e);
+                    None
+                }
+            }
+        },
+    ))
+}
+
+/// Mark a queued message as read
+pub async fn mark_message_as_read<C: Connection>(
+    conn: &Surreal<C>,
+    message_id: &crate::id::QueuedMessageId,
+) -> Result<()> {
+    let query = r#"
+        UPDATE queue_msg
+        SET
+            read = true,
+            read_at = time::now()
+        WHERE id = $id
+    "#;
+
+    conn.query(query)
+        .bind(("id", RecordId::from(message_id)))
+        .await?;
+
+    Ok(())
+}
+
 /// Subscribe to all memory updates for an agent
 pub async fn subscribe_to_agent_memory_updates<C: Connection>(
     conn: &Surreal<C>,

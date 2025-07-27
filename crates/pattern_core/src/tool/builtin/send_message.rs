@@ -21,6 +21,10 @@ pub struct SendMessageInput {
     #[schemars(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+
+    /// Request another turn after this tool executes
+    #[serde(default)]
+    pub request_heartbeat: bool,
 }
 
 /// Output from send message operation
@@ -60,48 +64,75 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        // TODO: Implement actual message sending logic
-        // This will need to integrate with the message bus/sender in the AgentHandle
+        // Get the message router from the handle
+        let router =
+            self.handle
+                .message_router()
+                .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                    tool_name: "send_message".to_string(),
+                    cause: "Message router not configured for this agent".to_string(),
+                    parameters: serde_json::to_value(&params).unwrap_or_default(),
+                })?;
 
-        let result = match params.target.target_type {
-            TargetType::User => {
-                // Send to user through default channel
-                Ok(SendMessageOutput {
-                    success: true,
-                    message_id: Some(format!("msg_{}", chrono::Utc::now().timestamp())),
-                    details: Some("Message sent to user".to_string()),
-                })
-            }
-            TargetType::Agent => {
-                // Send to another agent
-                let agent_id = params.target.target_id.as_deref().unwrap_or("unknown");
-                Ok(SendMessageOutput {
-                    success: true,
-                    message_id: Some(format!("msg_{}", chrono::Utc::now().timestamp())),
-                    details: Some(format!("Message sent to agent {}", agent_id)),
-                })
-            }
-            TargetType::Group => {
-                // Send to a group
-                let group_id = params.target.target_id.as_deref().unwrap_or("unknown");
-                Ok(SendMessageOutput {
-                    success: true,
-                    message_id: Some(format!("msg_{}", chrono::Utc::now().timestamp())),
-                    details: Some(format!("Message sent to group {}", group_id)),
-                })
-            }
-            TargetType::Channel => {
-                // Send to a specific channel
-                let channel_id = params.target.target_id.as_deref().unwrap_or("unknown");
-                Ok(SendMessageOutput {
-                    success: true,
-                    message_id: Some(format!("msg_{}", chrono::Utc::now().timestamp())),
-                    details: Some(format!("Message sent to channel {}", channel_id)),
-                })
-            }
-        };
+        // Send the message through the router
+        match router
+            .send_message(
+                params.target.clone(),
+                params.content.clone(),
+                params.metadata.clone(),
+            )
+            .await
+        {
+            Ok(()) => {
+                // Generate a message ID for tracking
+                let message_id = format!("msg_{}", chrono::Utc::now().timestamp_millis());
 
-        result
+                // Build details based on target type
+                let details = match params.target.target_type {
+                    TargetType::User => {
+                        if let Some(id) = &params.target.target_id {
+                            format!("Message sent to user {}", id)
+                        } else {
+                            "Message sent to user".to_string()
+                        }
+                    }
+                    TargetType::Agent => {
+                        format!(
+                            "Message queued for agent {}",
+                            params.target.target_id.as_deref().unwrap_or("unknown")
+                        )
+                    }
+                    TargetType::Group => {
+                        format!(
+                            "Message sent to group {}",
+                            params.target.target_id.as_deref().unwrap_or("unknown")
+                        )
+                    }
+                    TargetType::Channel => {
+                        format!(
+                            "Message sent to channel {}",
+                            params.target.target_id.as_deref().unwrap_or("default")
+                        )
+                    }
+                };
+
+                Ok(SendMessageOutput {
+                    success: true,
+                    message_id: Some(message_id),
+                    details: Some(details),
+                })
+            }
+            Err(e) => {
+                // Log the error for debugging
+                tracing::error!("Failed to send message: {}", e);
+
+                Ok(SendMessageOutput {
+                    success: false,
+                    message_id: None,
+                    details: Some(format!("Failed to send message: {}", e)),
+                })
+            }
+        }
     }
 
     fn examples(&self) -> Vec<crate::tool::ToolExample<Self::Input, Self::Output>> {
@@ -115,6 +146,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
                     },
                     content: "Hello! How can I help you today?".to_string(),
                     metadata: None,
+                    request_heartbeat: false,
                 },
                 expected_output: Some(SendMessageOutput {
                     success: true,
@@ -134,6 +166,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
                         "priority": "high",
                         "context": "task_breakdown"
                     })),
+                    request_heartbeat: false,
                 },
                 expected_output: Some(SendMessageOutput {
                     success: true,
@@ -152,12 +185,20 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{UserId, memory::Memory};
+    use crate::{
+        UserId, context::message_router::AgentMessageRouter, db::client::create_test_db,
+        memory::Memory,
+    };
 
     #[tokio::test]
     async fn test_send_message_tool() {
+        let db = create_test_db().await.unwrap();
+
         let memory = Memory::with_owner(&UserId::generate());
-        let handle = AgentHandle::test_with_memory(memory);
+        let mut handle = AgentHandle::test_with_memory(memory).with_db(db.clone());
+
+        let router = AgentMessageRouter::new(handle.agent_id.clone(), db);
+        handle.message_router = Some(router);
 
         let tool = SendMessageTool { handle };
 
@@ -170,6 +211,7 @@ mod tests {
                 },
                 content: "Test message".to_string(),
                 metadata: None,
+                request_heartbeat: false,
             })
             .await
             .unwrap();

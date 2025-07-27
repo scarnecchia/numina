@@ -125,6 +125,9 @@ mod tests {
             .push(entropy_record.id.clone());
         user_with_both.store_relations(&db).await.unwrap();
 
+        let (heartbeat_sender, _heartbeat_receiver) =
+            crate::context::heartbeat::heartbeat_channel();
+
         // Create agent instances
         let _pattern = DatabaseAgent::new(
             pattern_record.id.clone(),
@@ -137,6 +140,7 @@ mod tests {
             model.clone(),
             tools.clone(),
             None::<Arc<MockEmbeddingProvider>>,
+            heartbeat_sender.clone(),
         );
 
         let _entropy = DatabaseAgent::new(
@@ -150,6 +154,7 @@ mod tests {
             model.clone(),
             tools.clone(),
             None::<Arc<MockEmbeddingProvider>>,
+            heartbeat_sender.clone(),
         );
 
         // Create a shared memory block
@@ -248,6 +253,9 @@ mod tests {
 
         let agent_id = agent_record.id.clone();
 
+        let (heartbeat_sender, _heartbeat_receiver) =
+            crate::context::heartbeat::heartbeat_channel();
+
         // Create agent
         let _agent = DatabaseAgent::new(
             agent_id.clone(),
@@ -260,6 +268,7 @@ mod tests {
             model,
             tools,
             None::<Arc<MockEmbeddingProvider>>,
+            heartbeat_sender,
         );
 
         // Create and attach some memory blocks
@@ -438,6 +447,9 @@ mod tests {
 
         let agent_id = agent_record.id;
 
+        let (heartbeat_sender, _heartbeat_receiver) =
+            crate::context::heartbeat::heartbeat_channel();
+
         let agent = DatabaseAgent::new(
             agent_id,
             user.id.clone(),
@@ -449,6 +461,7 @@ mod tests {
             model,
             tools,
             None::<Arc<MockEmbeddingProvider>>,
+            heartbeat_sender,
         );
 
         // Check initial state

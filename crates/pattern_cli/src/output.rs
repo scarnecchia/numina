@@ -1,9 +1,13 @@
 use owo_colors::OwoColorize;
+use rustyline_async::SharedWriter;
+use std::io::Write;
 use termimad::MadSkin;
 
 /// Standard output formatting for the CLI
+#[derive(Clone)]
 pub struct Output {
     skin: MadSkin,
+    writer: Option<SharedWriter>,
 }
 
 impl Output {
@@ -22,87 +26,137 @@ impl Output {
         skin.code_block
             .set_bg(termimad::crossterm::style::Color::Black);
         skin.code_block.set_fg(termimad::ansi(15)); // bright white text
+        Self { skin, writer: None }
+    }
 
-        Self { skin }
+    pub fn with_writer(self, writer: SharedWriter) -> Self {
+        Self {
+            skin: self.skin,
+            writer: Some(writer),
+        }
+    }
+
+    /// Helper method to write output either to SharedWriter or stdout
+    fn write_line(&self, content: &str) {
+        if let Some(ref writer) = self.writer {
+            // Clone the writer to get a mutable version
+            let mut writer = writer.clone();
+            // When using SharedWriter, it handles the synchronization
+            let _ = writeln!(writer, "{}", content);
+        } else {
+            // Fallback to regular println
+            println!("{}", content);
+        }
     }
 
     /// Print an agent message with markdown formatting
     pub fn agent_message(&self, agent_name: &str, content: &str) {
         // Clear visual separation without box drawing chars
-        println!();
-        println!("{} {}", agent_name.bright_cyan().bold(), "says:".dimmed());
-        println!();
+        self.write_line("");
+        self.write_line(&format!(
+            "{} {}",
+            agent_name.bright_cyan().bold(),
+            "says:".dimmed()
+        ));
+        self.write_line("");
 
-        // Don't indent - let termimad handle the formatting
-        // This avoids the issue where indented lists become code blocks
-        self.skin.print_text(content);
-        println!();
+        // Use termimad to format the markdown content
+        use termimad::FmtText;
+        let formatted = FmtText::from(&self.skin, content, Some(80));
+        let formatted_string = formatted.to_string();
+
+        // Write each line through our write_line method
+        for line in formatted_string.lines() {
+            self.write_line(line);
+        }
+
+        self.write_line("");
     }
 
     /// Print a system/status message (indented)
     pub fn status(&self, message: &str) {
-        println!("  {}", message.dimmed());
+        self.write_line(&format!("  {}", message.dimmed()));
     }
 
     /// Print an info message (indented)
     pub fn info(&self, label: &str, value: &str) {
-        println!("  {} {}", label.bright_blue(), value);
+        self.write_line(&format!("  {} {}", label.bright_blue(), value));
     }
 
     /// Print a success message (indented)
     pub fn success(&self, message: &str) {
-        println!("  {} {}", "✓".bright_green(), message);
+        self.write_line(&format!("  {} {}", "✓".bright_green(), message));
     }
 
     /// Print an error message (indented)
     pub fn error(&self, message: &str) {
-        println!("  {} {}", "✗".bright_red(), message);
+        self.write_line(&format!("  {} {}", "✗".bright_red(), message));
     }
 
     /// Print a warning message (indented)
     pub fn warning(&self, message: &str) {
-        println!("  {} {}", "⚠".yellow(), message);
+        self.write_line(&format!("  {} {}", "⚠".yellow(), message));
     }
 
     /// Print a section header
     pub fn section(&self, title: &str) {
-        println!();
-        println!("{}", title.bright_cyan().bold());
-        println!("{}", "─".repeat(40).dimmed());
+        self.write_line("");
+        self.write_line(&title.bright_cyan().bold().to_string());
+        self.write_line(&"─".repeat(40).dimmed().to_string());
     }
 
     /// Print a list item (already indented)
     pub fn list_item(&self, item: &str) {
-        println!("    • {}", item);
+        self.write_line(&format!("    • {}", item));
     }
 
     /// Print a tool call
     pub fn tool_call(&self, tool_name: &str, args: &str) {
-        println!(
+        self.write_line(&format!(
             "  {} Using tool: {}",
             ">>".bright_blue(),
             tool_name.bright_yellow()
-        );
+        ));
         if !args.is_empty() {
-            println!("     Args: {}", args.dimmed());
+            // Indent each line of the args for proper alignment
+            for (i, line) in args.lines().enumerate() {
+                if i == 0 {
+                    self.write_line(&format!("     Args: {}", line).dimmed().to_string());
+                } else {
+                    self.write_line(&format!("           {}", line).dimmed().to_string());
+                }
+            }
         }
     }
 
     /// Print a tool result
     pub fn tool_result(&self, result: &str) {
-        println!("  {} Tool result: {}", "=>".bright_green(), result.dimmed());
+        // Handle multi-line results with proper indentation
+        let lines: Vec<&str> = result.lines().collect();
+        if lines.len() == 1 {
+            self.write_line(&format!(
+                "  {} Tool result: {}",
+                "=>".bright_green(),
+                result.dimmed()
+            ));
+        } else {
+            self.write_line(&format!("  {} Tool result:", "=>".bright_green()));
+            for line in lines {
+                self.write_line(&format!("     {}", line.dimmed()));
+            }
+        }
     }
 
     /// Print a "working on it" status message
     /// For actual progress bars, use indicatif directly
     #[allow(dead_code)]
     pub fn working(&self, label: &str) {
-        println!("  {} {}...", "[...]".dimmed(), label);
+        self.write_line(&format!("  {} {}...", "[...]".dimmed(), label));
     }
 
     /// Print a key-value pair (indented)
     pub fn kv(&self, key: &str, value: &str) {
-        println!("  {} {}", format!("{}:", key).dimmed(), value);
+        self.write_line(&format!("  {} {}", format!("{}:", key).dimmed(), value));
     }
 
     /// Print a prompt for user input
@@ -116,22 +170,30 @@ impl Output {
     /// Print markdown content (not from agent)
     #[allow(dead_code)]
     pub fn markdown(&self, content: &str) {
-        self.skin.print_text(content);
+        // Use termimad to format the markdown content
+        use termimad::FmtText;
+        let formatted = FmtText::from(&self.skin, content, Some(80));
+        let formatted_string = formatted.to_string();
+
+        // Write each line through our write_line method
+        for line in formatted_string.lines() {
+            self.write_line(line);
+        }
     }
 
     /// Print a table-like header
     #[allow(dead_code)]
     pub fn table_header(&self, columns: &[&str]) {
         let header = columns.join(" | ");
-        println!("  {}", header.bright_white().bold());
-        println!("  {}", "─".repeat(header.len()).dimmed());
+        self.write_line(&format!("  {}", header.bright_white().bold()));
+        self.write_line(&format!("  {}", "─".repeat(header.len()).dimmed()));
     }
 
     /// Print a table row
     #[allow(dead_code)]
     pub fn table_row(&self, cells: &[&str]) {
         let row = cells.join(" | ");
-        println!("  {}", row);
+        self.write_line(&format!("  {}", row));
     }
 }
 

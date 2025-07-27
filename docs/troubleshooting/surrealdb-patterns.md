@@ -260,6 +260,40 @@ let user: Option<User> = response.take(0)?; // This is None, not an error
 
 Live queries on junction tables don't fire when the related records change, only when the junction itself changes. For real-time updates on related data, watch the actual data tables with appropriate filters.
 
+## Structured Record IDs (Experimental)
+
+### Array-Based IDs
+
+SurrealDB supports complex ID types including arrays and objects, which can be useful for encoding metadata directly in the ID:
+
+```rust
+// Example: weather:['London', d'2025-02-14T01:52:50.375Z']
+// This allows natural sorting and efficient range queries
+```
+
+We experimented with using array-based IDs for MessageId to encode `[datetime, api_id, agent_id?]` but encountered issues with:
+- Double-encoding when storing/retrieving through the Entity macro
+- Complex array keys not working reliably with SurrealDB beta
+- Serialization/deserialization edge cases
+
+**Current Status**: Reverted to simple string IDs for MessageId. The implementation challenges outweighed the benefits for now.
+
+### Alternative Approaches
+
+For more comprehensive SurrealDB helper functionality, consider these community crates:
+
+- **surrealdb-extras**: A proc macro helper crate that provides additional functionality for working with SurrealDB: https://github.com/frederik-uni/surrealdb-extras
+  - More sophisticated entity mapping
+  - Advanced query builders
+  - Additional type safety features
+
+- **surreal_derive_plus**: Another derive macro crate for SurrealDB: https://crates.io/crates/surreal_derive_plus
+  - Enhanced derive macros for SurrealDB models
+  - Automatic query generation
+  - Relationship handling
+
+These could be worth investigating in the future as SurrealDB matures and stabilizes its array/object ID support.
+
 ## Best Practices
 
 1. **Use RecordId::from()**: Always convert typed IDs with `RecordId::from()` for database operations

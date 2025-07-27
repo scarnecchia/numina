@@ -46,6 +46,10 @@ pub struct SearchInput {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
+
+    /// Request another turn after this tool executes
+    #[serde(default)]
+    pub request_heartbeat: bool,
 }
 
 /// Output from search operations
@@ -135,6 +139,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C
                     role: None,
                     start_time: None,
                     end_time: None,
+                    request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
                     success: true,
@@ -156,6 +161,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C
                     role: Some("assistant".to_string()),
                     start_time: None,
                     end_time: None,
+                    request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
                     success: true,
@@ -363,6 +369,7 @@ mod tests {
                 role: None,
                 start_time: None,
                 end_time: None,
+                request_heartbeat: false,
             })
             .await
             .unwrap();
