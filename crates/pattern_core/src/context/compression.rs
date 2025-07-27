@@ -259,7 +259,41 @@ impl MessageCompressor {
         let archive_count = messages.len().saturating_sub(keep_recent);
 
         let (archived, mut active): (Vec<_>, Vec<_>) = if messages.len() > keep_recent {
-            let split_point = messages.len() - keep_recent;
+            let mut split_point = messages.len() - keep_recent;
+
+            // Adjust split point to preserve tool call/response pairs
+            while split_point > 0 && split_point < messages.len() {
+                let current = &messages[split_point];
+                let prev = if split_point > 0 {
+                    Some(&messages[split_point - 1])
+                } else {
+                    None
+                };
+
+                // If current is a tool response, check if previous is its tool call
+                if current.role == ChatRole::Tool {
+                    if let Some(prev_msg) = prev {
+                        if prev_msg.tool_call_count() > 0 {
+                            // Move split point to include both the tool call and response
+                            split_point -= 1;
+                            continue;
+                        }
+                    }
+                }
+
+                // If current is assistant with tool calls, check if next is tool response
+                if split_point < messages.len() - 1 && current.tool_call_count() > 0 {
+                    let next = &messages[split_point + 1];
+                    if next.role == ChatRole::Tool {
+                        // Move split point to before this tool call/response pair
+                        split_point -= 1;
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
             (
                 messages[..split_point].to_vec(),
                 messages[split_point..].to_vec(),

@@ -12,6 +12,7 @@ pub struct TracingWriter {
 
 #[derive(Clone)]
 enum WriterTarget {
+    #[allow(dead_code)]
     Stdout,
     Stderr,
 }
@@ -31,6 +32,7 @@ impl TracingWriter {
     }
 
     /// Create a clone with the SharedWriter set
+    #[allow(dead_code)]
     pub fn with_shared_writer(&self, writer: SharedWriter) -> Self {
         let mut new = self.clone();
         new.writer = Some(writer);
@@ -84,6 +86,7 @@ pub fn set_shared_writer(shared_writer: SharedWriter) {
 }
 
 /// Get a clone of the global tracing writer
+#[allow(dead_code)]
 pub fn get_tracing_writer() -> Option<TracingWriter> {
     TRACING_WRITER.lock().ok()?.clone()
 }

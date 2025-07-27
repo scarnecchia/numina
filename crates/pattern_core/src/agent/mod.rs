@@ -18,12 +18,54 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio_stream::Stream;
 
 use crate::{
     AgentId, MemoryBlock, Result,
-    message::{Message, Response},
+    message::{Message, MessageContent, Response, ToolCall, ToolResponse},
     tool::DynamicTool,
 };
+
+/// Events emitted during message processing for real-time streaming
+#[derive(Debug, Clone)]
+pub enum ResponseEvent {
+    /// Tool execution is starting
+    ToolCallStarted {
+        call_id: String,
+        fn_name: String,
+        args: serde_json::Value,
+    },
+    /// Tool execution completed (success or error)
+    ToolCallCompleted {
+        call_id: String,
+        result: std::result::Result<String, String>,
+    },
+    /// Partial text chunk from the LLM response
+    TextChunk {
+        text: String,
+        /// Whether this is a final chunk for this text block
+        is_final: bool,
+    },
+    /// Partial reasoning/thinking content from the model
+    ReasoningChunk {
+        text: String,
+        /// Whether this is a final chunk for this reasoning block
+        is_final: bool,
+    },
+    /// Tool calls the agent is about to make
+    ToolCalls { calls: Vec<ToolCall> },
+    /// Tool responses received
+    ToolResponses { responses: Vec<ToolResponse> },
+    /// Processing complete with final metadata
+    Complete {
+        /// The ID of the incoming message that triggered this response
+        message_id: crate::MessageId,
+        /// Metadata about the complete response (usage, timing, etc)
+        metadata: crate::message::ResponseMetadata,
+    },
+    /// An error occurred during processing
+    Error { message: String, recoverable: bool },
+}
 
 /// The base trait that all agents must implement
 #[async_trait]
@@ -39,6 +81,89 @@ pub trait Agent: Send + Sync + Debug {
 
     /// Process an incoming message and generate a response
     async fn process_message(&self, message: Message) -> Result<Response>;
+
+    /// Process a message and stream responses as they happen
+    ///
+    /// Default implementation collects all events and returns the final response.
+    /// Implementations should override this to provide real streaming.
+    async fn process_message_stream(
+        self: Arc<Self>,
+        message: Message,
+    ) -> Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>>
+    where
+        Self: 'static,
+    {
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+
+        // Clone for the spawned task
+        let self_clone = self.clone();
+        let message_id = message.id.clone();
+
+        tokio::spawn(async move {
+            match self_clone.process_message(message).await {
+                Ok(response) => {
+                    // Emit any text content
+                    for content in &response.content {
+                        match content {
+                            MessageContent::Text(text) => {
+                                let _ = tx
+                                    .send(ResponseEvent::TextChunk {
+                                        text: text.clone(),
+                                        is_final: true,
+                                    })
+                                    .await;
+                            }
+                            MessageContent::ToolCalls(calls) => {
+                                let _ = tx
+                                    .send(ResponseEvent::ToolCalls {
+                                        calls: calls.clone(),
+                                    })
+                                    .await;
+                            }
+                            MessageContent::ToolResponses(responses) => {
+                                let _ = tx
+                                    .send(ResponseEvent::ToolResponses {
+                                        responses: responses.clone(),
+                                    })
+                                    .await;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Emit reasoning if present
+                    if let Some(reasoning) = &response.reasoning {
+                        let _ = tx
+                            .send(ResponseEvent::ReasoningChunk {
+                                text: reasoning.clone(),
+                                is_final: true,
+                            })
+                            .await;
+                    }
+
+                    // Send completion
+                    let _ = tx
+                        .send(ResponseEvent::Complete {
+                            message_id,
+                            metadata: response.metadata,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(ResponseEvent::Error {
+                            message: e.to_string(),
+                            recoverable: false,
+                        })
+                        .await;
+                }
+            }
+        });
+
+        Ok(Box::new(ReceiverStream::new(rx)))
+    }
 
     /// Get a memory block by key
     async fn get_memory(&self, key: &str) -> Result<Option<MemoryBlock>>;

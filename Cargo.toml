@@ -16,6 +16,7 @@ readme = "README.md"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive", "rc"] }

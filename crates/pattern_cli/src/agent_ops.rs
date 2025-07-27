@@ -2,7 +2,7 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     Agent, ModelProvider,
-    agent::{AgentRecord, AgentType, DatabaseAgent},
+    agent::{AgentRecord, AgentType, DatabaseAgent, ResponseEvent},
     config::PatternConfig,
     context::heartbeat,
     coordination::groups::{AgentGroup, GroupManager},
@@ -17,6 +17,7 @@ use pattern_core::{
 use std::sync::Arc;
 use surrealdb::RecordId;
 use tokio::sync::RwLock;
+use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::{endpoints::CliEndpoint, output::Output};
@@ -687,8 +688,6 @@ pub async fn chat_with_agent(
     mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
 ) -> Result<()> {
     use rustyline_async::{Readline, ReadlineEvent};
-    use tokio::sync::mpsc;
-
     let output = Output::new();
 
     output.status("Type 'quit' or 'exit' to leave the chat");
@@ -706,13 +705,9 @@ pub async fn chat_with_agent(
     let cli_endpoint = Arc::new(CliEndpoint::new(output.clone()));
     agent.set_default_user_endpoint(cli_endpoint).await?;
 
-    // Create channel for response routing
-    let (response_sender, mut response_receiver) =
-        mpsc::channel::<pattern_core::message::Response>(100);
-
     // Spawn heartbeat monitor task
     let agent_clone = agent.clone();
-    let tx = response_sender.clone();
+    let output_clone = output.clone();
     tokio::spawn(async move {
         while let Some(heartbeat) = heartbeat_receiver.recv().await {
             tracing::debug!(
@@ -724,8 +719,7 @@ pub async fn chat_with_agent(
 
             // Clone for the task
             let agent = agent_clone.clone();
-            let tx = tx.clone();
-
+            let output = output_clone.clone();
             // Spawn task to handle this heartbeat
             tokio::spawn(async move {
                 tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
@@ -736,10 +730,13 @@ pub async fn chat_with_agent(
                     heartbeat.tool_name
                 ));
 
-                match agent.process_message(heartbeat_message).await {
-                    Ok(response) => {
-                        if let Err(e) = tx.send(response).await {
-                            tracing::warn!("Failed to send heartbeat response: {}", e);
+                match agent.process_message_stream(heartbeat_message).await {
+                    Ok(mut response_stream) => {
+                        while let Some(event) = response_stream.next().await {
+                            // Display heartbeat response
+                            output.status("💓 Heartbeat continuation:");
+
+                            print_response_event(event, &output);
                         }
                     }
                     Err(e) => {
@@ -793,55 +790,26 @@ pub async fn chat_with_agent(
                             ..Default::default()
                         };
 
-                        // Process message
-                        output.status("Thinking...");
-                        match agent.process_message(message).await {
-                            Ok(response) => {
-                                // Print response
-                                let agent_name = agent.name();
-                                for content in &response.content {
-                                    match content {
-                                        MessageContent::Text(text) => {
-                                            output.agent_message(&agent_name, text);
-                                        }
-                                        MessageContent::ToolCalls(calls) => {
-                                            for call in calls {
-                                                // For send_message, hide the content arg since it's displayed below
-                                                let args_display = if call.fn_name == "send_message" {
-                                                    let mut args = call.fn_arguments.clone();
-                                                    if args.get("content").is_some() {
-                                                        args["content"] = serde_json::json!(
-                                                            "[content hidden - shown above]"
-                                                        );
-                                                    }
-                                                    serde_json::to_string(&args)
-                                                        .unwrap_or_else(|_| args.to_string())
-                                                } else {
-                                                    serde_json::to_string_pretty(&call.fn_arguments)
-                                                        .unwrap_or_else(|_| call.fn_arguments.to_string())
-                                                };
+                        let r_agent = agent.clone();
+                        let output = output.clone();
+                        tokio::spawn(async move {
+                            // Process message with streaming
+                            output.status("Thinking...");
 
-                                                output.tool_call(&call.fn_name, &args_display);
+                            use tokio_stream::StreamExt;
 
-                                                // Special handling removed - CliEndpoint now handles display
-                                            }
-                                        }
-                                        MessageContent::ToolResponses(responses) => {
-                                            for resp in responses {
-                                                output.tool_result(&resp.content);
-                                            }
-                                        }
-                                        MessageContent::Parts(_) => {
-                                            // Multi-part content, just show text parts for now
-                                            output.status("[Multi-part content]");
-                                        }
+                            match r_agent.clone().process_message_stream(message).await {
+                                Ok(mut stream) => {
+
+                                    while let Some(event) = stream.next().await {
+                                        print_response_event(event, &output);
                                     }
                                 }
+                                Err(e) => {
+                                    output.error(&format!("Error: {}", e));
+                                }
                             }
-                            Err(e) => {
-                                output.error(&format!("Error: {}", e));
-                            }
-                        }
+                        });
                     }
                     Ok(ReadlineEvent::Interrupted) => {
                         output.status("CTRL-C");
@@ -857,54 +825,73 @@ pub async fn chat_with_agent(
                     }
                 }
             }
-
-            // Handle heartbeat responses from background task
-            Some(response) = response_receiver.recv() => {
-                // Display heartbeat response
-                output.status("💓 Heartbeat continuation:");
-
-                // Display the response content
-                for content in &response.content {
-                    match content {
-                        MessageContent::Text(text) => {
-                            output.agent_message(&agent.name(), text);
-                        }
-                        MessageContent::ToolCalls(calls) => {
-                            for call in calls {
-                                // For send_message, hide the content arg since it's displayed below
-                                let args_display = if call.fn_name == "send_message" {
-                                    let mut args = call.fn_arguments.clone();
-                                    if args.get("content").is_some() {
-                                        args["content"] =
-                                            serde_json::json!("[content hidden - shown below]");
-                                    }
-                                    serde_json::to_string_pretty(&args)
-                                        .unwrap_or_else(|_| args.to_string())
-                                } else {
-                                    serde_json::to_string_pretty(&call.fn_arguments)
-                                        .unwrap_or_else(|_| call.fn_arguments.to_string())
-                                };
-
-                                output.tool_call(&call.fn_name, &args_display);
-
-                                // Special handling removed - CliEndpoint now handles display
-                            }
-                        }
-                        MessageContent::ToolResponses(responses) => {
-                            for resp in responses {
-                                output.tool_result(&resp.content);
-                            }
-                        }
-                        MessageContent::Parts(_) => {
-                            output.status("[Multi-part content]");
-                        }
-                    }
-                }
-            }
         }
     }
 
     Ok(())
+}
+
+pub fn print_response_event(event: ResponseEvent, output: &Output) {
+    match event {
+        ResponseEvent::ToolCallStarted {
+            call_id: _,
+            fn_name,
+            args,
+        } => {
+            // For send_message, hide the content arg since it's displayed below
+            let args_display = if fn_name == "send_message" {
+                let mut display_args = args.clone();
+                if let Some(args_obj) = display_args.as_object_mut() {
+                    if args_obj.contains_key("content") {
+                        args_obj.insert("content".to_string(), serde_json::json!("[shown below]"));
+                    }
+                }
+                serde_json::to_string(&display_args).unwrap_or_else(|_| display_args.to_string())
+            } else {
+                serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string())
+            };
+
+            output.tool_call(&fn_name, &args_display);
+        }
+        ResponseEvent::ToolCallCompleted { call_id, result } => match result {
+            Ok(content) => {
+                output.tool_result(&content);
+            }
+            Err(error) => {
+                output.error(&format!("Tool error ({}): {}", call_id, error));
+            }
+        },
+        ResponseEvent::TextChunk { .. } => {
+            // Skip displaying here - CliEndpoint already shows it
+            // output.agent_message(&agent_name, &text);
+        }
+        ResponseEvent::ReasoningChunk { text, is_final: _ } => {
+            output.status(&format!("💭 Reasoning: {}", text));
+        }
+        ResponseEvent::ToolCalls { .. } => {
+            // Skip - we handle individual ToolCallStarted events instead
+        }
+        ResponseEvent::ToolResponses { .. } => {
+            // Skip - we handle individual ToolCallCompleted events instead
+        }
+        ResponseEvent::Complete {
+            message_id,
+            metadata,
+        } => {
+            // Could display metadata if desired
+            tracing::debug!("Message {} complete: {:?}", message_id, metadata);
+        }
+        ResponseEvent::Error {
+            message,
+            recoverable,
+        } => {
+            if recoverable {
+                output.warning(&format!("Recoverable error: {}", message));
+            } else {
+                output.error(&format!("Error: {}", message));
+            }
+        }
+    }
 }
 
 /// Chat with a group of agents

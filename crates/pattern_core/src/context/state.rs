@@ -13,7 +13,7 @@ use crate::{
     AgentId, AgentState, AgentType, CoreError, IdType, Result,
     db::{DatabaseError, DbEntity},
     memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
-    message::{Message, MessageContent, Response, ToolResponse},
+    message::{Message, MessageContent, Response, ToolCall, ToolResponse},
     tool::ToolRegistry,
 };
 
@@ -547,6 +547,65 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
             let mut metadata = self.metadata.write().await;
             metadata.total_messages += 1;
             metadata.last_active = Utc::now();
+        }
+    }
+
+    /// Process a single tool call and return the response
+    pub async fn process_tool_call(&self, call: &ToolCall) -> Result<ToolResponse> {
+        // Check for duplicate
+        let metadata = self.metadata.read().await;
+        if metadata.tool_call_ids.contains(&call.call_id) {
+            return Ok(ToolResponse {
+                call_id: call.call_id.clone(),
+                content: "Tool call already executed".to_string(),
+            });
+        }
+        drop(metadata);
+
+        tracing::debug!(
+            "Executing tool: {} with args: {:?}",
+            call.fn_name,
+            call.fn_arguments
+        );
+
+        match self
+            .tools
+            .execute(&call.fn_name, call.fn_arguments.clone())
+            .await
+        {
+            Ok(tool_response) => {
+                tracing::debug!("✅ Tool {} executed successfully", call.fn_name);
+
+                // Track tool call ID
+                self.metadata
+                    .write()
+                    .await
+                    .tool_call_ids
+                    .insert(call.call_id.clone());
+
+                let response_json = serde_json::to_string_pretty(&tool_response)
+                    .unwrap_or_else(|_| "Error serializing response".to_string());
+
+                Ok(ToolResponse {
+                    call_id: call.call_id.clone(),
+                    content: response_json,
+                })
+            }
+            Err(e) => {
+                tracing::warn!("❌ Tool {} failed: {}", call.fn_name, e);
+
+                // Track tool call ID even on failure
+                self.metadata
+                    .write()
+                    .await
+                    .tool_call_ids
+                    .insert(call.call_id.clone());
+
+                Ok(ToolResponse {
+                    call_id: call.call_id.clone(),
+                    content: format!("Error: {}", e),
+                })
+            }
         }
     }
 

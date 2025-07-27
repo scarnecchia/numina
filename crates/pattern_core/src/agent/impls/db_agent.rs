@@ -2,12 +2,13 @@
 
 use async_trait::async_trait;
 use compact_str::CompactString;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use surrealdb::Surreal;
 use tokio::sync::RwLock;
 
 use crate::id::RelationId;
+use crate::message::ToolResponse;
 use crate::tool::builtin::BuiltinTools;
 
 use crate::{
@@ -26,6 +27,8 @@ use crate::{
     tool::{DynamicTool, ToolRegistry},
 };
 use chrono::Utc;
+
+use crate::agent::ResponseEvent;
 
 /// A concrete agent implementation backed by the database
 #[derive(Clone)]
@@ -993,6 +996,325 @@ where
 
         Ok(())
     }
+
+    /// Process a message and stream responses as they happen
+    pub async fn process_message_stream(
+        self: Arc<Self>,
+        message: Message,
+    ) -> Result<impl Stream<Item = ResponseEvent>> {
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        // Clone what we need for the spawned task
+        let agent_id = self.id();
+        let db = self.db.clone();
+        let context = self.context.clone();
+        let model = self.model.clone();
+        let chat_options = self.chat_options.clone();
+        let self_clone = self.clone();
+
+        // Spawn the processing task
+        tokio::spawn(async move {
+            // Helper to send events
+            let send_event = |event: ResponseEvent| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(event).await;
+                }
+            };
+
+            // Capture the incoming message ID for the completion event
+            let incoming_message_id = message.id.clone();
+
+            // Update state and persist message
+            {
+                let mut ctx = context.write().await;
+                ctx.handle.state = AgentState::Processing;
+                let _ = crate::db::ops::persist_agent_message(
+                    &db,
+                    &agent_id,
+                    &message,
+                    crate::message::MessageRelationType::Active,
+                )
+                .await
+                .inspect_err(|e| {
+                    crate::log_error!("Failed to persist incoming message", e);
+                });
+                ctx.add_message(message).await;
+            }
+
+            // Build memory context
+            let memory_context = match context.read().await.build_context().await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    send_event(ResponseEvent::Error {
+                        message: format!("Failed to build context: {}", e),
+                        recoverable: false,
+                    })
+                    .await;
+                    return;
+                }
+            };
+
+            // Create request
+            let request = Request {
+                system: Some(vec![memory_context.system_prompt.clone()]),
+                messages: memory_context.messages,
+                tools: Some(memory_context.tools),
+            };
+
+            let options = chat_options
+                .read()
+                .await
+                .clone()
+                .expect("should have options or default");
+
+            // Get response from model
+            let response = {
+                let model = model.read().await;
+                match model.complete(&options, request).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        send_event(ResponseEvent::Error {
+                            message: format!("Model error: {}", e),
+                            recoverable: false,
+                        })
+                        .await;
+                        return;
+                    }
+                }
+            };
+
+            // Track deduplication
+            let mut seen_tool_call_ids = std::collections::HashSet::new();
+            let mut seen_tool_response_ids = std::collections::HashSet::new();
+
+            // Process the response in a loop for multiple rounds
+            let mut all_processed_content = Vec::new();
+            let mut current_response = response;
+
+            loop {
+                // Check for tool calls
+                let has_tool_calls = current_response
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, MessageContent::ToolCalls(_)));
+
+                if has_tool_calls {
+                    // Emit ToolCalls events
+                    for content in &current_response.content {
+                        if let MessageContent::ToolCalls(calls) = content {
+                            // Filter duplicates
+                            let new_calls: Vec<_> = calls
+                                .iter()
+                                .filter(|call| !seen_tool_call_ids.contains(&call.call_id))
+                                .cloned()
+                                .collect();
+
+                            if !new_calls.is_empty() {
+                                send_event(ResponseEvent::ToolCalls {
+                                    calls: new_calls.clone(),
+                                })
+                                .await;
+
+                                // Execute tools and emit events
+                                for call in new_calls {
+                                    seen_tool_call_ids.insert(call.call_id.clone());
+
+                                    send_event(ResponseEvent::ToolCallStarted {
+                                        call_id: call.call_id.clone(),
+                                        fn_name: call.fn_name.clone(),
+                                        args: call.fn_arguments.clone(),
+                                    })
+                                    .await;
+
+                                    // Execute tool using the context method
+                                    let ctx = context.read().await;
+                                    let tool_response = ctx
+                                        .process_tool_call(&call)
+                                        .await
+                                        .unwrap_or_else(|e| ToolResponse {
+                                            call_id: call.call_id.clone(),
+                                            content: format!("Error executing tool: {}", e),
+                                        });
+
+                                    let tool_result = if tool_response.content.starts_with("Error:")
+                                    {
+                                        Err(tool_response.content.clone())
+                                    } else {
+                                        Ok(tool_response.content.clone())
+                                    };
+
+                                    send_event(ResponseEvent::ToolCallCompleted {
+                                        call_id: call.call_id.clone(),
+                                        result: tool_result,
+                                    })
+                                    .await;
+
+                                    // Add to processed content
+                                    all_processed_content
+                                        .push(MessageContent::ToolResponses(vec![tool_response]));
+                                }
+                            }
+                        }
+                    }
+
+                    // Build the processed response manually since we already executed tools
+                    let mut processed_response = current_response.clone();
+
+                    // Find where tool calls are in the original response and insert responses after them
+                    let mut new_content = Vec::new();
+                    for (i, content) in current_response.content.iter().enumerate() {
+                        new_content.push(content.clone());
+
+                        // If this is a tool call, add the corresponding responses right after
+                        if let MessageContent::ToolCalls(_) = content {
+                            // Find all tool responses we generated for this position
+                            for processed in &all_processed_content {
+                                if matches!(processed, MessageContent::ToolResponses(_)) {
+                                    new_content.push(processed.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    processed_response.content = new_content;
+
+                    // Store non-tool content from original response
+                    for content in &current_response.content {
+                        if let Some(filtered) = Self::filter_duplicate_content(
+                            content.clone(),
+                            &mut seen_tool_call_ids,
+                            &mut seen_tool_response_ids,
+                        ) {
+                            match &filtered {
+                                MessageContent::Text(text) => {
+                                    send_event(ResponseEvent::TextChunk {
+                                        text: text.clone(),
+                                        is_final: false,
+                                    })
+                                    .await;
+                                }
+                                MessageContent::ToolResponses(responses) => {
+                                    send_event(ResponseEvent::ToolResponses {
+                                        responses: responses.clone(),
+                                    })
+                                    .await;
+                                }
+                                _ => {}
+                            }
+                            if !matches!(filtered, MessageContent::ToolCalls(_)) {
+                                all_processed_content.push(filtered);
+                            }
+                        }
+                    }
+
+                    // Persist response
+                    let persist_result = self_clone
+                        .persist_response_messages(&processed_response, &agent_id)
+                        .await;
+                    if let Err(e) = persist_result {
+                        send_event(ResponseEvent::Error {
+                            message: format!("Failed to persist response: {}", e),
+                            recoverable: true,
+                        })
+                        .await;
+                    }
+
+                    // Get next response
+                    let memory_context = match context.read().await.build_context().await {
+                        Ok(ctx) => ctx,
+                        Err(e) => {
+                            send_event(ResponseEvent::Error {
+                                message: format!("Failed to rebuild context: {}", e),
+                                recoverable: false,
+                            })
+                            .await;
+                            break;
+                        }
+                    };
+
+                    let request_with_tools = Request {
+                        system: Some(vec![memory_context.system_prompt.clone()]),
+                        messages: memory_context.messages,
+                        tools: Some(memory_context.tools),
+                    };
+
+                    current_response = {
+                        let model = model.read().await;
+                        match model.complete(&options, request_with_tools).await {
+                            Ok(resp) => resp,
+                            Err(e) => {
+                                send_event(ResponseEvent::Error {
+                                    message: format!("Model error in continuation: {}", e),
+                                    recoverable: false,
+                                })
+                                .await;
+                                break;
+                            }
+                        }
+                    };
+                } else {
+                    // No tool calls, emit final content
+                    for content in &current_response.content {
+                        match content {
+                            MessageContent::Text(text) => {
+                                send_event(ResponseEvent::TextChunk {
+                                    text: text.clone(),
+                                    is_final: true,
+                                })
+                                .await;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Emit reasoning if present
+                    if let Some(reasoning) = &current_response.reasoning {
+                        send_event(ResponseEvent::ReasoningChunk {
+                            text: reasoning.clone(),
+                            is_final: true,
+                        })
+                        .await;
+                    }
+
+                    // Persist final response
+                    let persist_result = self_clone
+                        .persist_response_messages(&current_response, &agent_id)
+                        .await;
+                    if let Err(e) = persist_result {
+                        send_event(ResponseEvent::Error {
+                            message: format!("Failed to persist final response: {}", e),
+                            recoverable: true,
+                        })
+                        .await;
+                    }
+
+                    break;
+                }
+            }
+
+            // Update stats and complete
+            let stats = context.read().await.get_stats().await;
+            let _ = crate::db::ops::update_agent_stats(&db, agent_id.clone(), &stats).await;
+
+            // Reset state
+            {
+                let mut ctx = context.write().await;
+                ctx.handle.state = AgentState::Ready;
+            }
+
+            // Send completion event with the incoming message ID
+            send_event(ResponseEvent::Complete {
+                message_id: incoming_message_id,
+                metadata: current_response.metadata,
+            })
+            .await;
+        });
+
+        Ok(ReceiverStream::new(rx))
+    }
 }
 
 impl<C, M, E> std::fmt::Debug for DatabaseAgent<C, M, E>
@@ -1641,6 +1963,18 @@ where
                 cause: "Message router not initialized".to_string(),
             })
         }
+    }
+
+    async fn process_message_stream(
+        self: Arc<Self>,
+        message: Message,
+    ) -> Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>>
+    where
+        Self: 'static,
+    {
+        // Call our actual streaming implementation
+        let stream = DatabaseAgent::process_message_stream(self, message).await?;
+        Ok(Box::new(stream) as Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>)
     }
 }
 
