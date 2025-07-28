@@ -1027,7 +1027,6 @@ where
             // Capture the incoming message ID for the completion event
             let incoming_message_id = message.id.clone();
 
-            tracing::info!("First request from message: {}", incoming_message_id);
             // Update state and persist message
             {
                 let mut ctx = context.write().await;
@@ -1125,12 +1124,11 @@ where
                                     // Provider already included responses, pass them through
                                     // TODO: check if some of the tool calls here are ours, execute those,
                                     // then append out responses to them.
-                                    tracing::info!("responses already exist");
+
                                     if let Some(next_content) = content_iter.next() {
                                         processed_response.content.push(next_content.clone());
                                     }
                                 } else {
-                                    tracing::info!("executing tools");
                                     // We need to add our executed tool responses
                                     let mut our_responses = Vec::new();
 
@@ -1269,11 +1267,6 @@ where
                         }
                     }
 
-                    tracing::info!("Message buffer:");
-                    for message in &processed_response.content {
-                        tracing::info!("{:#?}", message);
-                    }
-
                     // Persist any memory changes from tool execution
                     if let Err(e) = self_clone.persist_memory_changes().await {
                         send_event(ResponseEvent::Error {
@@ -1300,8 +1293,6 @@ where
                         break;
                     }
 
-                    tracing::info!("Another request from message: {}", incoming_message_id);
-
                     // Get next response
                     let context_lock = context.read().await;
                     let memory_context = match context_lock.build_context().await {
@@ -1322,11 +1313,6 @@ where
                         messages: memory_context.messages.clone(),
                         tools: Some(memory_context.tools),
                     };
-
-                    tracing::info!("Message buffer:");
-                    for message in &memory_context.messages {
-                        tracing::info!("{:#?}", message);
-                    }
 
                     current_response = {
                         let model = model.read().await;
