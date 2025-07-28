@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use atrium_api::app::bsky::feed::post::{ReplyRef, ReplyRefData};
+use atrium_api::com::atproto::repo::strong_ref;
+use atrium_api::types::TryFromUnknown;
+use atrium_api::types::string::Language;
 use serde_json::Value;
 use surrealdb::Surreal;
 use tokio::sync::RwLock;
@@ -9,7 +13,7 @@ use tracing::{debug, info, warn};
 use crate::db::client;
 use crate::error::Result;
 use crate::id::{AgentId, GroupId, UserId};
-use crate::message::Message;
+use crate::message::{ContentPart, Message, MessageContent};
 use crate::message_queue::QueuedMessage;
 use crate::tool::builtin::{MessageTarget, TargetType};
 
@@ -114,6 +118,10 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
                     .clone()
                     .unwrap_or_else(|| Value::Object(Default::default()));
                 self.send_to_channel(channel_info, content, metadata).await
+            }
+            TargetType::Bluesky => {
+                self.send_to_bluesky(target.target_id, content, metadata)
+                    .await
             }
         }
     }
@@ -235,6 +243,36 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
         Ok(())
     }
 
+    /// Send a message to Bluesky
+    async fn send_to_bluesky(
+        &self,
+        target_uri: Option<String>,
+        content: String,
+        metadata: Option<Value>,
+    ) -> Result<()> {
+        debug!("Routing message from agent {} to Bluesky", self.agent_id);
+
+        // Look for Bluesky endpoint
+        let endpoints = self.endpoints.read().await;
+        if let Some(endpoint) = endpoints.get("bluesky") {
+            let message = Message::agent(content);
+
+            // Include the target URI in metadata if it's a reply
+            let mut final_metadata = metadata.unwrap_or_else(|| Value::Object(Default::default()));
+            if let Some(uri) = target_uri {
+                if let Some(obj) = final_metadata.as_object_mut() {
+                    obj.insert("reply_to".to_string(), Value::String(uri));
+                }
+            }
+
+            endpoint.send(message, Some(final_metadata)).await?;
+        } else {
+            warn!("No Bluesky endpoint registered");
+        }
+
+        Ok(())
+    }
+
     /// Store a queued message in the database
     async fn store_queued_message(&self, message: QueuedMessage) -> Result<()> {
         info!(
@@ -295,4 +333,225 @@ pub async fn create_router_with_global_db(agent_id: AgentId) -> Result<AgentMess
     // Clone the global DB instance
     let db = client::DB.clone();
     Ok(AgentMessageRouter::new(agent_id, db))
+}
+
+// ===== Bluesky Endpoint Implementation =====
+
+/// Endpoint for sending messages to Bluesky/ATProto
+#[derive(Clone)]
+pub struct BlueskyEndpoint {
+    agent: Arc<tokio::sync::RwLock<bsky_sdk::BskyAgent>>,
+    handle: String,
+    did: String,
+}
+
+impl BlueskyEndpoint {
+    /// Create a new Bluesky endpoint with authentication
+    pub async fn new(
+        credentials: crate::atproto_identity::AtprotoAuthCredentials,
+        handle: String,
+    ) -> Result<Self> {
+        let agent = bsky_sdk::BskyAgent::builder().build().await.map_err(|e| {
+            crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to create BskyAgent: {}", e),
+                parameters: serde_json::json!({}),
+            }
+        })?;
+
+        // Authenticate based on credential type
+        let session = match credentials {
+            crate::atproto_identity::AtprotoAuthCredentials::OAuth { access_token: _ } => {
+                // TODO: OAuth support - for now, return error
+                return Err(crate::CoreError::ToolExecutionFailed {
+                    tool_name: "bluesky_endpoint".to_string(),
+                    cause: "OAuth authentication not yet implemented for BskyAgent".to_string(),
+                    parameters: serde_json::json!({}),
+                });
+            }
+            crate::atproto_identity::AtprotoAuthCredentials::AppPassword {
+                identifier,
+                password,
+            } => agent.login(identifier, password).await.map_err(|e| {
+                crate::CoreError::ToolExecutionFailed {
+                    tool_name: "bluesky_endpoint".to_string(),
+                    cause: format!("Login failed: {}", e),
+                    parameters: serde_json::json!({}),
+                }
+            })?,
+        };
+
+        info!("Authenticated to Bluesky as {:?}", session.handle);
+
+        Ok(Self {
+            agent: Arc::new(tokio::sync::RwLock::new(agent)),
+            handle,
+            did: session.did.to_string(),
+        })
+    }
+
+    /// Create proper reply references with both parent and root
+    async fn create_reply_refs(
+        &self,
+        reply_to_uri: &str,
+    ) -> Result<atrium_api::app::bsky::feed::post::ReplyRefData> {
+        let agent = self.agent.write().await;
+
+        // Fetch the post thread to get reply information
+        let post_result = agent
+            .api
+            .app
+            .bsky
+            .feed
+            .get_posts(
+                atrium_api::app::bsky::feed::get_posts::ParametersData {
+                    uris: vec![reply_to_uri.to_string()],
+                }
+                .into(),
+            )
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to fetch post for reply: {}", e),
+                parameters: serde_json::json!({ "reply_to": reply_to_uri }),
+            })?;
+
+        let post = post_result.posts.iter().next();
+
+        let new_parent_ref = post.map(|parent_post| strong_ref::MainData {
+            cid: parent_post.cid.clone(),
+            uri: parent_post.uri.clone(),
+        });
+
+        let parent_ref: Option<ReplyRef> = post.and_then(|post| {
+            atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(post.record.clone())
+                .ok()
+                .and_then(|post| post.reply)
+        });
+
+        match (parent_ref, new_parent_ref) {
+            // Parent post isn't a reply
+            (None, Some(new_parent_ref)) => Ok(ReplyRefData {
+                parent: new_parent_ref.clone().into(),
+                root: new_parent_ref.into(),
+            }),
+            // parent post is a reply
+            (Some(parent_ref), Some(new_parent_ref)) => Ok(ReplyRefData {
+                parent: new_parent_ref.into(),
+                root: parent_ref.root.clone(),
+            }),
+            // something went wrong
+            (None, None) => Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to get post: {}", reply_to_uri),
+                parameters: serde_json::json!({}),
+            }),
+            // something went VERY wrong
+            (Some(_), None) => Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to get post: {}", reply_to_uri),
+                parameters: serde_json::json!({}),
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageEndpoint for BlueskyEndpoint {
+    async fn send(&self, message: Message, metadata: Option<Value>) -> Result<()> {
+        let text = match &message.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Parts(parts) => {
+                // Extract text from parts
+                parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => "[Non-text content]".to_string(),
+        };
+
+        debug!("Sending message to Bluesky: {}", text);
+
+        // Check if this is a reply
+        let is_reply = if let Some(meta) = &metadata {
+            if let Some(reply_to) = meta.get("reply_to").and_then(|v| v.as_str()) {
+                info!("Creating reply to: {}", reply_to);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Create reply reference if needed
+        let reply = if is_reply {
+            if let Some(meta) = &metadata {
+                if let Some(reply_to) = meta.get("reply_to").and_then(|v| v.as_str()) {
+                    Some(self.create_reply_refs(reply_to).await?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Create the post
+        let agent = self.agent.read().await;
+        let text_copy = text.clone();
+        let result = agent
+            .create_record(atrium_api::app::bsky::feed::post::RecordData {
+                created_at: atrium_api::types::string::Datetime::now(),
+                text,
+                reply: reply.map(|r| r.into()),
+                embed: None,
+                entities: None,
+                facets: None,
+                labels: None,
+                langs: None,
+                tags: None,
+            })
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to create post: {}", e),
+                parameters: serde_json::json!({ "text": text_copy }),
+            })?;
+
+        info!(
+            "Posted to Bluesky: {} ({})",
+            result.uri,
+            if is_reply { "reply" } else { "new post" }
+        );
+
+        Ok(())
+    }
+
+    fn endpoint_type(&self) -> &'static str {
+        "bluesky"
+    }
+}
+
+/// Create a Bluesky endpoint from stored credentials
+pub async fn create_bluesky_endpoint_from_identity(
+    identity: &crate::atproto_identity::AtprotoIdentity,
+) -> Result<BlueskyEndpoint> {
+    let credentials =
+        identity
+            .get_auth_credentials()
+            .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: "No authentication credentials available for ATProto identity".to_string(),
+                parameters: serde_json::json!({}),
+            })?;
+
+    BlueskyEndpoint::new(credentials, identity.handle.clone()).await
 }

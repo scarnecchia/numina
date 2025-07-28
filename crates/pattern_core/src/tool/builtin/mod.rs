@@ -4,6 +4,7 @@
 //! including memory management and inter-agent communication.
 
 mod context;
+pub mod data_source;
 mod recall;
 mod search;
 mod send_message;
@@ -13,6 +14,9 @@ mod test_schemas;
 use std::fmt::Debug;
 
 pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationType};
+pub use data_source::{
+    DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
+};
 pub use recall::{
     ArchivalMemoryOperationType, ArchivalSearchResult, RecallInput, RecallOutput, RecallTool,
 };
@@ -64,6 +68,9 @@ impl BuiltinTools {
         registry.register_dynamic(self.context_tool.clone_box());
         registry.register_dynamic(self.search_tool.clone_box());
         registry.register_dynamic(self.send_message_tool.clone_box());
+
+        // Note: DataSourceTool requires external coordinator setup.
+        // Use register_data_source_tool() function directly when you have a coordinator.
     }
 
     /// Builder pattern for customization
@@ -157,6 +164,7 @@ pub enum TargetType {
     Agent,
     Group,
     Channel,
+    Bluesky,
 }
 
 #[cfg(test)]

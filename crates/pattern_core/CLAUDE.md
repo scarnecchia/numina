@@ -2,7 +2,17 @@
 
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support. Inspired by MemGPT architecture for stateful agents.
 
-## Current Status (2025-07-24)
+## Current Status (2025-07-28)
+
+### Data Sources ✅ COMPLETE (2025-07-28)
+- **DataSource Trait**: Generic abstraction supporting pull/push patterns with cursor management
+- **FileDataSource**: Concrete implementation with ephemeral and indexed modes
+- **DataIngestionCoordinator**: Manages sources and routes data to agents via templates
+- **Prompt Templates**: Jinja2-style templates using minijinja for agent notifications
+- **DataSourceTool**: Agent-accessible operations for data source management
+- **Embedding Integration**: Reuses agent's embedding provider for indexed sources
+- **Type Erasure**: Maintains concrete types while providing Value-based interface
+- **See**: `docs/data-sources.md` for detailed implementation guide
 
 ### Agent Groups ✅ COMPLETE (2025-07-24) - NEEDS USER TESTING
 - **Configuration**: `GroupConfig` and `GroupMemberConfig` in config system
@@ -221,6 +231,13 @@ This allows agents to make informed decisions about memory swapping without need
    - SurrealKV embedded database with vector search
    - Entity system with `#[derive(Entity)]` macro
    - RELATE-based relationships (no foreign keys)
+
+6. **Data Sources** (`data_source/`)
+   - Generic `DataSource` trait for pull/push data consumption
+   - `FileDataSource` with watch and indexing support
+   - `DataIngestionCoordinator` for multi-source management
+   - Prompt templates for agent notifications
+   - Type-erased wrapper for concrete→generic bridging
 
 ### Common Patterns
 

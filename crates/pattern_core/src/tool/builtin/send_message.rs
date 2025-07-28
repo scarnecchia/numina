@@ -114,6 +114,13 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
                             params.target.target_id.as_deref().unwrap_or("default")
                         )
                     }
+                    TargetType::Bluesky => {
+                        if let Some(uri) = &params.target.target_id {
+                            format!("Reply sent to Bluesky post: {}", uri)
+                        } else {
+                            "Message posted to Bluesky".to_string()
+                        }
+                    }
                 };
 
                 Ok(SendMessageOutput {

@@ -16,8 +16,32 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
    - Integrated MessageCompressor with multiple compression strategies
 
 2. **Agent Groups** - ✅ COMPLETE (needs user testing) - Fully usable via CLI
-3. **Task Management System** - ADHD-aware task breakdown and tracking
-4. **MCP Tools Integration** - Task-related tools and agent communication
+3. **Data Source Abstraction** - ✅ COMPLETE (2025-07-28)
+   - Created flexible `DataSource` trait supporting both pull and streaming modes
+   - Implemented `FileDataSource` with watch support and optional indexing
+   - Built `DataIngestionCoordinator` to manage multiple sources
+   - Created `DataSourceTool` for agent interaction
+   - Integrated prompt templates for all agent inputs
+   - Type-erased wrapper pattern maintains concrete types while providing generic interface
+   - See `docs/data-sources.md` for detailed implementation guide
+
+4. **Bluesky/ATProto Integration** - ✅ COMPLETE (2025-07-28)
+   - Created `BlueskyFirehoseSource` using rocketman crate for Jetstream consumption
+   - Implemented core types: BlueskyPost, BlueskyFilter, BlueskyFirehoseCursor
+   - Added rich text support with Facets for mentions, links, and hashtags
+   - Created custom `PostIngestor` implementing LexiconIngestor trait
+   - Integrated with rocketman's handle_message for proper event processing
+   - Added Bluesky-specific prompt templates (post, reply, mention)
+   - ✅ Added BlueskyEndpoint for posting to Bluesky (2025-07-29 1am)
+     - Agents can now post to Bluesky via TargetType::Bluesky
+     - Basic posting functionality complete
+     - Reply threading stubbed out (returns error) - TODO for morning
+   - TODO: Test with live Jetstream connection
+   - TODO: Implement proper reply threading (get CID from parent post)
+   - See `docs/bluesky-integration-plan.md` and `docs/data-sources.md` for details
+
+5. **Task Management System** - ADHD-aware task breakdown and tracking
+6. **MCP Tools Integration** - Task-related tools and agent communication
 
 ## Agent Groups Implementation ✅ COMPLETE (needs user testing)
 
@@ -141,6 +165,7 @@ pub struct User {
 - [X] Add live query support for agent stats
 - [X] Build agent groups framework
 - [X] Create basic binary (CLI/TUI) for user testing - COMPLETE
+- [X] Implement data source abstraction for agents - COMPLETE
 - [ ] **Backend API Server** - IN PROGRESS
   - Create unified server that combines:
     - HTTP/WebSocket API for Pattern framework
@@ -158,6 +183,8 @@ pub struct User {
 - [ ] Implement time tracking with ADHD multipliers
 - [ ] Add energy/attention monitoring
 - [ ] Add vector search for archival memory using embeddings
+- [X] Implement Bluesky/ATProto firehose consumer - COMPLETE
+- [X] Add Bluesky posting endpoint to message router - COMPLETE (basic posting works, reply threading TODO)
 
 ## Backend API Server Architecture
 

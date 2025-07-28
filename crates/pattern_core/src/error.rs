@@ -309,6 +309,17 @@ pub enum CoreError {
         operation: String,
         details: String,
     },
+
+    #[error("Data source error in {source_name}: {operation} failed - {cause}")]
+    #[diagnostic(
+        code(pattern_core::data_source_error),
+        help("Check data source configuration and connectivity")
+    )]
+    DataSourceError {
+        source_name: String,
+        operation: String,
+        cause: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

@@ -130,6 +130,11 @@ where
         self.heartbeat_sender = sender;
     }
 
+    /// Get the embedding provider for this agent
+    pub fn embedding_provider(&self) -> Option<Arc<E>> {
+        self.embeddings.clone()
+    }
+
     /// Create a DatabaseAgent from a persisted AgentRecord
     ///
     /// This reconstructs the runtime agent from its stored state.

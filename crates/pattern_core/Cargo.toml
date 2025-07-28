@@ -72,6 +72,10 @@ ureq.workspace = true
 atrium-api.workspace = true
 atrium-oauth.workspace = true
 atrium-common.workspace = true
+minijinja = "2.11.0"
+rocketman = "0.2.3"
+notify = { version = "7.0", optional = true }
+bsky-sdk.workspace = true
 
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
@@ -88,10 +92,11 @@ proc-macro2-diagnostics = "0.10"
 miette = { workspace = true, features = ["fancy"] }
 
 [features]
-default = ["surreal-embedded", "embed-candle", "embed-cloud"]
-nd = []                                                       # Enable neurodivergent features when pattern-nd is ready
-export = ["zstd"]                                             # Agent export/import with compression
-oauth = ["reqwest", "reqwest-middleware", "http"]             # OAuth authentication support
+default = ["surreal-embedded", "embed-candle", "embed-cloud", "file-watch"]
+nd = []                                                                     # Enable neurodivergent features when pattern-nd is ready
+export = ["zstd"]                                                           # Agent export/import with compression
+oauth = ["reqwest", "reqwest-middleware", "http"]                           # OAuth authentication support
+file-watch = ["notify"]                                                     # File watching for data sources
 
 # Database backends
 surreal-embedded = ["surrealdb/kv-surrealkv"]

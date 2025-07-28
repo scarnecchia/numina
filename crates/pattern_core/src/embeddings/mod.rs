@@ -16,6 +16,9 @@ pub mod cloud;
 #[cfg(feature = "embed-ollama")]
 pub mod ollama;
 
+pub mod simple;
+pub use simple::SimpleEmbeddingProvider;
+
 /// Embedding provider error type
 #[derive(Error, Debug, Diagnostic)]
 pub enum EmbeddingError {
