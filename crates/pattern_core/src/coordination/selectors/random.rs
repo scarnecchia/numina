@@ -105,7 +105,7 @@ mod tests {
             AgentType::Generic
         }
 
-        async fn process_message(&self, _message: Message) -> Result<Response> {
+        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
             unimplemented!("Test agent")
         }
 

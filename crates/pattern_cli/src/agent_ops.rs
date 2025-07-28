@@ -603,7 +603,7 @@ async fn handle_slash_command(
                 target_agent, message
             ));
 
-            match current_agent.process_message(system_msg).await {
+            match current_agent.clone().process_message(system_msg).await {
                 Ok(response) => {
                     // Check if the tool was used
                     let mut tool_used = false;

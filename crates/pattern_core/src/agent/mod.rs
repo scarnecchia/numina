@@ -80,7 +80,7 @@ pub trait Agent: Send + Sync + Debug {
     fn agent_type(&self) -> AgentType;
 
     /// Process an incoming message and generate a response
-    async fn process_message(&self, message: Message) -> Result<Response>;
+    async fn process_message(self: Arc<Self>, message: Message) -> Result<Response>;
 
     /// Process a message and stream responses as they happen
     ///

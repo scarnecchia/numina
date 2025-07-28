@@ -227,7 +227,7 @@ impl PipelineManager {
         }
 
         // Process message with selected agent
-        let agent_response = awm.agent.as_ref().process_message(message.clone()).await?;
+        let agent_response = awm.agent.clone().process_message(message.clone()).await?;
         let response = AgentResponse {
             agent_id: awm.agent.as_ref().id(),
             response: agent_response,

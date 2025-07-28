@@ -110,7 +110,7 @@ impl GroupManager for SleeptimeManager {
                 };
                 let agent_response = intervention_agent
                     .agent
-                    .as_ref()
+                    .clone()
                     .process_message(intervention_message)
                     .await?;
 
@@ -307,7 +307,7 @@ mod tests {
             AgentType::Generic
         }
 
-        async fn process_message(&self, _message: Message) -> Result<Response> {
+        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
             use crate::message::ResponseMetadata;
             Ok(Response {
                 content: vec![MessageContent::Text("Sleeptime test response".to_string())],

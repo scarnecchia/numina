@@ -893,63 +893,6 @@ where
         Ok(())
     }
 
-    /// Filter duplicate tool calls or responses from content
-    fn filter_duplicate_content(
-        content: MessageContent,
-        seen_tool_call_ids: &mut std::collections::HashSet<String>,
-        seen_tool_response_ids: &mut std::collections::HashSet<String>,
-    ) -> Option<MessageContent> {
-        match content {
-            MessageContent::ToolCalls(calls) => {
-                let filtered_calls: Vec<_> = calls
-                    .into_iter()
-                    .filter(|call| {
-                        if seen_tool_call_ids.contains(&call.call_id) {
-                            tracing::debug!(
-                                "Filtering out duplicate tool call with ID: {}",
-                                call.call_id
-                            );
-                            false
-                        } else {
-                            seen_tool_call_ids.insert(call.call_id.clone());
-                            true
-                        }
-                    })
-                    .collect();
-
-                if filtered_calls.is_empty() {
-                    None
-                } else {
-                    Some(MessageContent::ToolCalls(filtered_calls))
-                }
-            }
-            MessageContent::ToolResponses(responses) => {
-                let filtered_responses: Vec<_> = responses
-                    .into_iter()
-                    .filter(|response| {
-                        if seen_tool_response_ids.contains(&response.call_id) {
-                            tracing::debug!(
-                                "Filtering out duplicate tool response with ID: {}",
-                                response.call_id
-                            );
-                            false
-                        } else {
-                            seen_tool_response_ids.insert(response.call_id.clone());
-                            true
-                        }
-                    })
-                    .collect();
-
-                if filtered_responses.is_empty() {
-                    None
-                } else {
-                    Some(MessageContent::ToolResponses(filtered_responses))
-                }
-            }
-            other => Some(other),
-        }
-    }
-
     /// Add messages to context and persist to database
     async fn persist_response_messages(
         &self,
@@ -1498,307 +1441,77 @@ where
         futures::executor::block_on(async { self.context.read().await.handle.agent_type.clone() })
     }
 
-    async fn process_message(&self, message: Message) -> Result<Response> {
-        let agent_id = {
-            let mut context = self.context.write().await;
-            context.handle.state = AgentState::Processing;
+    async fn process_message(self: Arc<Self>, message: Message) -> Result<Response> {
+        use crate::message::ResponseMetadata;
+        use futures::StreamExt;
 
-            let agent_id = context.handle.agent_id.clone();
+        let mut stream = DatabaseAgent::process_message_stream(self.clone(), message).await?;
 
-            let _ = crate::db::ops::persist_agent_message(
-                &self.db,
-                &agent_id,
-                &message,
-                crate::message::MessageRelationType::Active,
-            )
-            .await
-            .inspect_err(|e| {
-                crate::log_error!("Failed to persist incoming message", e);
-            });
+        // Collect all events from the stream
+        let mut content = Vec::new();
+        let mut reasoning: Option<String> = None;
+        let mut metadata = ResponseMetadata::default();
+        let mut has_error = false;
+        let mut error_message = String::new();
 
-            // Add message to context immediately
-
-            context.add_message(message).await;
-            agent_id
-        };
-
-        // Build the memory context for the LLM
-        let memory_context = {
-            let context = self.context.read().await;
-            context.build_context().await?
-        };
-
-        tracing::debug!(
-            "Sending request to LLM with {} messages (including the new one)",
-            memory_context.messages.len()
-        );
-        for (i, msg) in memory_context.messages.iter().enumerate() {
-            let content_preview = match &msg.content {
-                MessageContent::Text(text) => {
-                    format!("Text: {}", text.chars().take(50).collect::<String>())
-                }
-                MessageContent::ToolCalls(calls) => {
-                    format!("ToolCalls: {} calls", calls.len())
-                }
-                MessageContent::ToolResponses(responses) => {
-                    format!("ToolResponses: {} responses", responses.len())
-                }
-                MessageContent::Parts(parts) => {
-                    format!("Parts: {} parts", parts.len())
-                }
-            };
-            tracing::debug!(
-                "  Message[{}]: role={:?}, content={:?}",
-                i,
-                msg.role,
-                content_preview
-            );
-        }
-
-        let request = Request {
-            system: Some(vec![memory_context.system_prompt.clone()]),
-            messages: memory_context.messages,
-            tools: Some(memory_context.tools),
-        };
-
-        tracing::debug!(
-            "Full request to LLM: system_prompt_len={}, messages={}, tools={}",
-            request.system.as_ref().map(|s| s[0].len()).unwrap_or(0),
-            request.messages.len(),
-            request.tools.as_ref().map(|t| t.len()).unwrap_or(0)
-        );
-
-        let options = self
-            .chat_options
-            .read()
-            .await
-            .clone()
-            .expect("should have options or default");
-
-        // Note: this will usually make a network request and will need to wait for generated tokens from the LLM. it's the slowest bit.
-        let mut response = {
-            let model = self.model.read().await;
-            match model.complete(&options, request).await {
-                Ok(response) => {
-                    tracing::debug!(
-                        "Got response from LLM: {} content parts, {} tool calls",
-                        response.content.len(),
-                        response.num_tool_calls()
-                    );
-                    response
-                }
-                Err(e) => {
-                    crate::log_error!("Failed to get response from model", e);
-
-                    return Err(e);
-                }
-            }
-        };
-
-        // Log context state before processing
-        {
-            let context = self.context.read().await;
-            let history = context.history.read().await;
-            tracing::debug!(
-                "📊 Context before processing response: {} messages in history",
-                history.messages.len()
-            );
-            let start = history.messages.len().saturating_sub(5);
-            for (i, msg) in history.messages[start..].iter().enumerate() {
-                tracing::debug!(
-                    "  Message[{}]: role={:?}, content_type={:?}",
-                    i,
-                    msg.role,
-                    match &msg.content {
-                        MessageContent::Text(_) => "Text",
-                        MessageContent::Parts(_) => "Parts",
-                        MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
-                        MessageContent::ToolResponses(tr) =>
-                            &format!("ToolResponses({})", tr.len()),
-                    }
-                );
-                if let MessageContent::ToolCalls(calls) = &msg.content {
-                    for call in calls {
-                        tracing::debug!("    Tool call ID: {}", call.call_id);
+        while let Some(event) = stream.next().await {
+            match event {
+                ResponseEvent::TextChunk { text, is_final: _ } => {
+                    // Append text to response
+                    if let Some(MessageContent::Text(existing_text)) = content.last_mut() {
+                        existing_text.push_str(&text);
+                    } else {
+                        content.push(MessageContent::Text(text));
                     }
                 }
+                ResponseEvent::ReasoningChunk { text, is_final: _ } => {
+                    // Append reasoning
+                    if let Some(ref mut existing_reasoning) = reasoning {
+                        existing_reasoning.push_str(&text);
+                    } else {
+                        reasoning = Some(text);
+                    }
+                }
+                ResponseEvent::ToolCalls { calls } => {
+                    content.push(MessageContent::ToolCalls(calls));
+                }
+                ResponseEvent::ToolResponses { responses } => {
+                    content.push(MessageContent::ToolResponses(responses));
+                }
+                ResponseEvent::Complete {
+                    message_id: _,
+                    metadata: event_metadata,
+                } => {
+                    metadata = event_metadata;
+                }
+                ResponseEvent::Error {
+                    message,
+                    recoverable,
+                } => {
+                    if !recoverable {
+                        has_error = true;
+                        error_message = message;
+                    }
+                }
+                _ => {} // Ignore other events for backward compatibility
             }
         }
 
-        // Check if the response contains tool calls
-        let final_response = if response.num_tool_calls() > 0 {
-            let current_response = &mut response;
-
-            let mut all_processed_content = Vec::new();
-            let mut seen_tool_call_ids = std::collections::HashSet::<String>::new();
-            let mut seen_tool_response_ids = std::collections::HashSet::<String>::new();
-
-            while current_response.num_tool_calls() > 0 {
-                tracing::debug!(
-                    "Response contains {} tool calls, executing them",
-                    current_response.num_tool_calls()
-                );
-
-                // Execute the tool calls and get responses inline
-                let processed_response = {
-                    let context = self.context.read().await;
-                    context.process_response(current_response.clone()).await
-                };
-
-                // Persist any memory changes from tool execution
-                self.persist_memory_changes().await?;
-
-                // Store the processed content, filtering out duplicate tool calls
-                for content in processed_response.content.clone() {
-                    if let Some(filtered_content) = Self::filter_duplicate_content(
-                        content,
-                        &mut seen_tool_call_ids,
-                        &mut seen_tool_response_ids,
-                    ) {
-                        all_processed_content.push(filtered_content);
-                    }
-                }
-
-                // Add messages to conteext and persist to database
-                self.persist_response_messages(&processed_response, &agent_id)
-                    .await?;
-
-                // Build context again with the tool responses included
-                let memory_context = {
-                    let context = self.context.read().await;
-                    context.build_context().await?
-                };
-
-                // Create a new request with the updated context (including tool responses)
-                let request_with_tools = Request {
-                    system: Some(vec![memory_context.system_prompt.clone()]),
-                    messages: memory_context.messages,
-                    tools: Some(memory_context.tools),
-                };
-
-                tracing::debug!(
-                    "📤 Sending further request to LLM with tool results: {} messages",
-                    request_with_tools.messages.len()
-                );
-
-                // Log last few messages being sent
-                let start = request_with_tools.messages.len().saturating_sub(5);
-                for (i, msg) in request_with_tools.messages[start..].iter().enumerate() {
-                    tracing::debug!(
-                        "  Message[{}]: role={:?}, content_type={:?}",
-                        i,
-                        msg.role,
-                        match &msg.content {
-                            MessageContent::Text(_) => "Text",
-                            MessageContent::Parts(_) => "Parts",
-                            MessageContent::ToolCalls(tc) => &format!("ToolCalls({})", tc.len()),
-                            MessageContent::ToolResponses(tr) =>
-                                &format!("ToolResponses({})", tr.len()),
-                        }
-                    );
-                }
-
-                // Get the response from the LLM that incorporates the tool results
-                *current_response = {
-                    let model = self.model.read().await;
-                    match model.complete(&options, request_with_tools).await {
-                        Ok(response) => {
-                            tracing::debug!(
-                                "📥 Got final response from LLM after tool execution: {} content parts, {} tool calls",
-                                response.content.len(),
-                                response.num_tool_calls()
-                            );
-
-                            response
-                        }
-                        Err(e) => {
-                            crate::log_error!("Failed to get final response from model", e);
-
-                            return Err(e);
-                        }
-                    }
-                };
-
-                if current_response.num_tool_calls() == 0 {
-                    // Persist any memory changes from tool execution
-                    self.persist_memory_changes().await?;
-
-                    // Store the processed content, filtering out duplicate tool calls
-                    for content in processed_response.content.clone() {
-                        if let Some(filtered_content) = Self::filter_duplicate_content(
-                            content,
-                            &mut seen_tool_call_ids,
-                            &mut seen_tool_response_ids,
-                        ) {
-                            all_processed_content.push(filtered_content);
-                        }
-                    }
-                    // Add messages to context and persist to database
-                    self.persist_response_messages(&processed_response, &agent_id)
-                        .await?;
-                }
-            }
-            Response {
-                content: all_processed_content,
-                reasoning: current_response.reasoning.clone(),
-                metadata: current_response.metadata.clone(),
-            }
+        if has_error {
+            Err(CoreError::model_error(
+                error_message,
+                "",
+                genai::Error::NoChatResponse {
+                    model_iden: metadata.model_iden,
+                },
+            ))
         } else {
-            // No tool calls, just persist the response
-            self.persist_response_messages(&response, &agent_id).await?;
-            response
-        };
-
-        // Update stats in background
-        let (stats, db, agent_id_clone) = {
-            let context = self.context.read().await;
-            (context.get_stats().await, self.db.clone(), agent_id.clone())
-        };
-
-        let _handle = tokio::spawn(async move {
-            if let Err(e) = crate::db::ops::update_agent_stats(&db, agent_id_clone, &stats).await {
-                crate::log_error!("Failed to update agent stats", e);
-            }
-        });
-
-        // Reset state to Ready
-        {
-            let mut context = self.context.write().await;
-            context.handle.state = AgentState::Ready;
+            Ok(Response {
+                content,
+                reasoning,
+                metadata,
+            })
         }
-
-        // Check for heartbeat requests in the response
-        for content in &final_response.content {
-            if let MessageContent::ToolCalls(calls) = content {
-                for call in calls {
-                    if check_heartbeat_request(&call.fn_arguments) {
-                        tracing::debug!(
-                            "💓 Heartbeat requested by tool {} (call_id: {})",
-                            call.fn_name,
-                            call.call_id
-                        );
-
-                        let heartbeat_req = HeartbeatRequest {
-                            agent_id: agent_id.clone(),
-                            tool_name: call.fn_name.clone(),
-                            tool_call_id: call.call_id.clone(),
-                        };
-
-                        // Try to send, but don't block if the channel is full
-                        match self.heartbeat_sender.try_send(heartbeat_req) {
-                            Ok(()) => {
-                                tracing::debug!("✅ Heartbeat request sent");
-                            }
-                            Err(e) => {
-                                tracing::warn!("⚠️ Failed to send heartbeat request: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(final_response)
     }
 
     async fn get_memory(&self, key: &str) -> Result<Option<MemoryBlock>> {

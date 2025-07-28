@@ -78,7 +78,7 @@ impl GroupManager for SupervisorManager {
                 // Delegate handles the message
                 let agent_response = delegate_awm
                     .agent
-                    .as_ref()
+                    .clone()
                     .process_message(message.clone())
                     .await?;
                 vec![AgentResponse {
@@ -92,7 +92,7 @@ impl GroupManager for SupervisorManager {
                     FallbackBehavior::HandleSelf => {
                         let agent_response = leader
                             .agent
-                            .as_ref()
+                            .clone()
                             .process_message(message.clone())
                             .await?;
                         vec![AgentResponse {
@@ -123,7 +123,7 @@ impl GroupManager for SupervisorManager {
             // Leader handles directly
             let agent_response = leader
                 .agent
-                .as_ref()
+                .clone()
                 .process_message(message.clone())
                 .await?;
             vec![AgentResponse {

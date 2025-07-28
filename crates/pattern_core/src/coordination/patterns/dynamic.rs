@@ -101,7 +101,7 @@ impl GroupManager for DynamicManager {
         // Create responses for selected agents
         let mut responses = Vec::new();
         for awm in selected_agents.iter() {
-            let agent_response = awm.agent.as_ref().process_message(message.clone()).await?;
+            let agent_response = awm.agent.clone().process_message(message.clone()).await?;
             responses.push(AgentResponse {
                 agent_id: awm.agent.as_ref().id(),
                 response: agent_response,
@@ -226,7 +226,7 @@ mod tests {
             AgentType::Generic
         }
 
-        async fn process_message(&self, _message: Message) -> Result<Response> {
+        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
             use crate::message::ResponseMetadata;
             Ok(Response {
                 content: vec![MessageContent::Text("Test response".to_string())],
