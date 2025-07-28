@@ -96,6 +96,6 @@ impl<'a> MakeWriter<'a> for TracingWriter {
     type Writer = TracingWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
+        get_tracing_writer().unwrap_or(self.clone())
     }
 }

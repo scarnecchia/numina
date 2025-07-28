@@ -499,6 +499,34 @@ impl Response {
             .count()
     }
 
+    pub fn has_unpaired_tool_calls(&self) -> bool {
+        // Check for unpaired tool calls (tool calls without matching responses)
+        let tool_call_ids: std::collections::HashSet<String> = self
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                MessageContent::ToolCalls(calls) => Some(calls.iter().map(|c| c.call_id.clone())),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        let tool_response_ids: std::collections::HashSet<String> = self
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                MessageContent::ToolResponses(responses) => {
+                    Some(responses.iter().map(|r| r.call_id.clone()))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        // Check if there are any tool calls without responses
+        tool_call_ids.difference(&tool_response_ids).count() > 0
+    }
+
     pub fn only_text(&self) -> String {
         let mut text = String::new();
         for content in &self.content {

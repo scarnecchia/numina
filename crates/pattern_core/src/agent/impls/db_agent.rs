@@ -8,7 +8,7 @@ use surrealdb::Surreal;
 use tokio::sync::RwLock;
 
 use crate::id::RelationId;
-use crate::message::ToolResponse;
+use crate::message::{ContentPart, ImageSource, ToolResponse};
 use crate::tool::builtin::BuiltinTools;
 
 use crate::{
@@ -1027,6 +1027,7 @@ where
             // Capture the incoming message ID for the completion event
             let incoming_message_id = message.id.clone();
 
+            tracing::info!("First request from message: {}", incoming_message_id);
             // Update state and persist message
             {
                 let mut ctx = context.write().await;
@@ -1086,135 +1087,195 @@ where
                 }
             };
 
-            // Track deduplication
-            let mut seen_tool_call_ids = std::collections::HashSet::new();
-            let mut seen_tool_response_ids = std::collections::HashSet::new();
-
-            // Process the response in a loop for multiple rounds
-            let mut all_processed_content = Vec::new();
             let mut current_response = response;
 
             loop {
-                // Check for tool calls
-                let has_tool_calls = current_response
-                    .content
-                    .iter()
-                    .any(|content| matches!(content, MessageContent::ToolCalls(_)));
-
-                if has_tool_calls {
-                    // Emit ToolCalls events
-                    for content in &current_response.content {
-                        if let MessageContent::ToolCalls(calls) = content {
-                            // Filter duplicates
-                            let new_calls: Vec<_> = calls
-                                .iter()
-                                .filter(|call| !seen_tool_call_ids.contains(&call.call_id))
-                                .cloned()
-                                .collect();
-
-                            if !new_calls.is_empty() {
-                                send_event(ResponseEvent::ToolCalls {
-                                    calls: new_calls.clone(),
-                                })
-                                .await;
-
-                                // Execute tools and emit events
-                                for call in new_calls {
-                                    seen_tool_call_ids.insert(call.call_id.clone());
-
-                                    send_event(ResponseEvent::ToolCallStarted {
-                                        call_id: call.call_id.clone(),
-                                        fn_name: call.fn_name.clone(),
-                                        args: call.fn_arguments.clone(),
-                                    })
-                                    .await;
-
-                                    // Execute tool using the context method
-                                    let ctx = context.read().await;
-                                    let tool_response = ctx
-                                        .process_tool_call(&call)
-                                        .await
-                                        .unwrap_or_else(|e| ToolResponse {
-                                            call_id: call.call_id.clone(),
-                                            content: format!("Error executing tool: {}", e),
-                                        });
-
-                                    let tool_result = if tool_response.content.starts_with("Error:")
-                                    {
-                                        Err(tool_response.content.clone())
-                                    } else {
-                                        Ok(tool_response.content.clone())
-                                    };
-
-                                    send_event(ResponseEvent::ToolCallCompleted {
-                                        call_id: call.call_id.clone(),
-                                        result: tool_result,
-                                    })
-                                    .await;
-
-                                    // Add to processed content
-                                    all_processed_content
-                                        .push(MessageContent::ToolResponses(vec![tool_response]));
-                                }
-                            }
-                        }
+                let has_unpaired_tool_calls = current_response.has_unpaired_tool_calls();
+                if has_unpaired_tool_calls {
+                    // Emit reasoning if present
+                    if let Some(reasoning) = &current_response.reasoning {
+                        send_event(ResponseEvent::ReasoningChunk {
+                            text: reasoning.clone(),
+                            is_final: true,
+                        })
+                        .await;
                     }
-
                     // Build the processed response manually since we already executed tools
                     let mut processed_response = current_response.clone();
+                    processed_response.content.clear();
 
-                    // Find where tool calls are in the original response and insert responses after them
-                    let mut new_content = Vec::new();
-                    for (i, content) in current_response.content.iter().enumerate() {
-                        new_content.push(content.clone());
+                    // Use peekable iterator to properly handle tool call/response pairing
+                    let mut content_iter = current_response.content.iter().peekable();
 
-                        // If this is a tool call, add the corresponding responses right after
-                        if let MessageContent::ToolCalls(_) = content {
-                            // Find all tool responses we generated for this position
-                            for processed in &all_processed_content {
-                                if matches!(processed, MessageContent::ToolResponses(_)) {
-                                    new_content.push(processed.clone());
+                    while let Some(content) = content_iter.next() {
+                        match content {
+                            MessageContent::ToolCalls(calls) => {
+                                // Always include the tool calls
+                                processed_response
+                                    .content
+                                    .push(MessageContent::ToolCalls(calls.clone()));
+
+                                // Check if next item is already tool responses (provider-handled tools)
+                                let next_is_responses = content_iter
+                                    .peek()
+                                    .map(|next| matches!(next, MessageContent::ToolResponses(_)))
+                                    .unwrap_or(false);
+
+                                if next_is_responses {
+                                    // Provider already included responses, pass them through
+                                    // TODO: check if some of the tool calls here are ours, execute those,
+                                    // then append out responses to them.
+                                    tracing::info!("responses already exist");
+                                    if let Some(next_content) = content_iter.next() {
+                                        processed_response.content.push(next_content.clone());
+                                    }
+                                } else {
+                                    tracing::info!("executing tools");
+                                    // We need to add our executed tool responses
+                                    let mut our_responses = Vec::new();
+
+                                    if !calls.is_empty() {
+                                        send_event(ResponseEvent::ToolCalls {
+                                            calls: calls.clone(),
+                                        })
+                                        .await;
+                                        // Collect responses matching these tool calls
+                                        for call in calls {
+                                            send_event(ResponseEvent::ToolCallStarted {
+                                                call_id: call.call_id.clone(),
+                                                fn_name: call.fn_name.clone(),
+                                                args: call.fn_arguments.clone(),
+                                            })
+                                            .await;
+                                            if check_heartbeat_request(&call.fn_arguments) {
+                                                tracing::debug!(
+                                                    "💓 Heartbeat requested by tool {} (call_id: {})",
+                                                    call.fn_name,
+                                                    call.call_id
+                                                );
+
+                                                let heartbeat_req = HeartbeatRequest {
+                                                    agent_id: agent_id.clone(),
+                                                    tool_name: call.fn_name.clone(),
+                                                    tool_call_id: call.call_id.clone(),
+                                                };
+
+                                                // Try to send, but don't block if the channel is full
+                                                match self.heartbeat_sender.try_send(heartbeat_req)
+                                                {
+                                                    Ok(()) => {
+                                                        tracing::debug!(
+                                                            "✅ Heartbeat request sent"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            "⚠️ Failed to send heartbeat request: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
+                                            }
+
+                                            // Execute tool using the context method
+                                            let ctx = context.read().await;
+                                            let tool_response = ctx
+                                                .process_tool_call(&call)
+                                                .await
+                                                .unwrap_or_else(|e| {
+                                                    Some(ToolResponse {
+                                                        call_id: call.call_id.clone(),
+                                                        content: format!(
+                                                            "Error executing tool: {}",
+                                                            e
+                                                        ),
+                                                    })
+                                                });
+                                            if let Some(tool_response) = tool_response {
+                                                let tool_result = if tool_response
+                                                    .content
+                                                    .starts_with("Error:")
+                                                {
+                                                    Err(tool_response.content.clone())
+                                                } else {
+                                                    Ok(tool_response.content.clone())
+                                                };
+
+                                                send_event(ResponseEvent::ToolCallCompleted {
+                                                    call_id: call.call_id.clone(),
+                                                    result: tool_result,
+                                                })
+                                                .await;
+
+                                                our_responses.push(tool_response);
+                                            }
+                                        }
+                                        // Add our tool responses if we have any
+                                        if !our_responses.is_empty() {
+                                            processed_response
+                                                .content
+                                                .push(MessageContent::ToolResponses(our_responses));
+                                        }
+                                    }
                                 }
+                            }
+                            MessageContent::ToolResponses(_) => {
+                                // Ignore them here, because we have already handled them
+                                // Either they were pre-existing and added when we peeked at them,
+                                // or we literally just added them after executing the tools.
+                            }
+                            MessageContent::Text(text) => {
+                                send_event(ResponseEvent::TextChunk {
+                                    text: text.clone(),
+                                    is_final: true,
+                                })
+                                .await;
+                                processed_response.content.push(content.clone());
+                            }
+                            MessageContent::Parts(parts) => {
+                                for part in parts {
+                                    match part {
+                                        ContentPart::Text(text) => {
+                                            send_event(ResponseEvent::TextChunk {
+                                                text: text.clone(),
+                                                is_final: true,
+                                            })
+                                            .await;
+                                        }
+                                        ContentPart::Image {
+                                            content_type,
+                                            source,
+                                        } => {
+                                            let source_string = match source {
+                                                ImageSource::Url(url) => url.clone(),
+                                                ImageSource::Base64(_) => {
+                                                    "base64-encoded image".to_string()
+                                                }
+                                            };
+                                            send_event(ResponseEvent::TextChunk {
+                                                text: format!(
+                                                    "Image ({}): {}",
+                                                    content_type, source_string
+                                                ),
+                                                is_final: true,
+                                            })
+                                            .await;
+                                        }
+                                    }
+                                }
+
+                                processed_response.content.push(content.clone());
                             }
                         }
                     }
 
-                    processed_response.content = new_content;
-
-                    // Store non-tool content from original response
-                    for content in &current_response.content {
-                        if let Some(filtered) = Self::filter_duplicate_content(
-                            content.clone(),
-                            &mut seen_tool_call_ids,
-                            &mut seen_tool_response_ids,
-                        ) {
-                            match &filtered {
-                                MessageContent::Text(text) => {
-                                    send_event(ResponseEvent::TextChunk {
-                                        text: text.clone(),
-                                        is_final: false,
-                                    })
-                                    .await;
-                                }
-                                MessageContent::ToolResponses(responses) => {
-                                    send_event(ResponseEvent::ToolResponses {
-                                        responses: responses.clone(),
-                                    })
-                                    .await;
-                                }
-                                _ => {}
-                            }
-                            if !matches!(filtered, MessageContent::ToolCalls(_)) {
-                                all_processed_content.push(filtered);
-                            }
-                        }
+                    tracing::info!("Message buffer:");
+                    for message in &processed_response.content {
+                        tracing::info!("{:#?}", message);
                     }
 
-                    // Persist response
-                    let persist_result = self_clone
-                        .persist_response_messages(&processed_response, &agent_id)
-                        .await;
-                    if let Err(e) = persist_result {
+                    // Persist any memory changes from tool execution
+                    if let Err(e) = self_clone.persist_memory_changes().await {
                         send_event(ResponseEvent::Error {
                             message: format!("Failed to persist response: {}", e),
                             recoverable: true,
@@ -1222,8 +1283,28 @@ where
                         .await;
                     }
 
+                    // Persist response
+                    if let Err(e) = self_clone
+                        .persist_response_messages(&processed_response, &agent_id)
+                        .await
+                    {
+                        send_event(ResponseEvent::Error {
+                            message: format!("Failed to persist response: {}", e),
+                            recoverable: true,
+                        })
+                        .await;
+                    }
+
+                    // Only continue if there are unpaired tool calls that need responses
+                    if !has_unpaired_tool_calls {
+                        break;
+                    }
+
+                    tracing::info!("Another request from message: {}", incoming_message_id);
+
                     // Get next response
-                    let memory_context = match context.read().await.build_context().await {
+                    let context_lock = context.read().await;
+                    let memory_context = match context_lock.build_context().await {
                         Ok(ctx) => ctx,
                         Err(e) => {
                             send_event(ResponseEvent::Error {
@@ -1234,12 +1315,18 @@ where
                             break;
                         }
                     };
+                    drop(context_lock);
 
                     let request_with_tools = Request {
                         system: Some(vec![memory_context.system_prompt.clone()]),
-                        messages: memory_context.messages,
+                        messages: memory_context.messages.clone(),
                         tools: Some(memory_context.tools),
                     };
+
+                    tracing::info!("Message buffer:");
+                    for message in &memory_context.messages {
+                        tracing::info!("{:#?}", message);
+                    }
 
                     current_response = {
                         let model = model.read().await;
@@ -1251,11 +1338,47 @@ where
                                     recoverable: false,
                                 })
                                 .await;
+                                tracing::error!(
+                                    "offending request:\n{:?}",
+                                    memory_context.messages
+                                );
                                 break;
                             }
                         }
                     };
+
+                    if current_response.num_tool_calls() == 0 {
+                        // Persist any memory changes from tool execution
+                        if let Err(e) = self_clone.persist_memory_changes().await {
+                            send_event(ResponseEvent::Error {
+                                message: format!("Failed to persist response: {}", e),
+                                recoverable: true,
+                            })
+                            .await;
+                        }
+
+                        // Persist response
+                        if let Err(e) = self_clone
+                            .persist_response_messages(&current_response, &agent_id)
+                            .await
+                        {
+                            send_event(ResponseEvent::Error {
+                                message: format!("Failed to persist response: {}", e),
+                                recoverable: true,
+                            })
+                            .await;
+                        }
+                        break;
+                    }
                 } else {
+                    // Emit reasoning if present
+                    if let Some(reasoning) = &current_response.reasoning {
+                        send_event(ResponseEvent::ReasoningChunk {
+                            text: reasoning.clone(),
+                            is_final: true,
+                        })
+                        .await;
+                    }
                     // No tool calls, emit final content
                     for content in &current_response.content {
                         match content {
@@ -1266,17 +1389,40 @@ where
                                 })
                                 .await;
                             }
+                            MessageContent::Parts(parts) => {
+                                for part in parts {
+                                    match part {
+                                        ContentPart::Text(text) => {
+                                            send_event(ResponseEvent::TextChunk {
+                                                text: text.clone(),
+                                                is_final: true,
+                                            })
+                                            .await;
+                                        }
+                                        ContentPart::Image {
+                                            content_type,
+                                            source,
+                                        } => {
+                                            let source_string = match source {
+                                                ImageSource::Url(url) => url.clone(),
+                                                ImageSource::Base64(_) => {
+                                                    "base64-encoded image".to_string()
+                                                }
+                                            };
+                                            send_event(ResponseEvent::TextChunk {
+                                                text: format!(
+                                                    "Image ({}): {}",
+                                                    content_type, source_string
+                                                ),
+                                                is_final: true,
+                                            })
+                                            .await;
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
-                    }
-
-                    // Emit reasoning if present
-                    if let Some(reasoning) = &current_response.reasoning {
-                        send_event(ResponseEvent::ReasoningChunk {
-                            text: reasoning.clone(),
-                            is_final: true,
-                        })
-                        .await;
                     }
 
                     // Persist final response
@@ -1527,7 +1673,7 @@ where
                     }
                 }
 
-                // Add messages to context and persist to database
+                // Add messages to conteext and persist to database
                 self.persist_response_messages(&processed_response, &agent_id)
                     .await?;
 

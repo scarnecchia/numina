@@ -291,7 +291,7 @@ impl ModelProvider for GenAiClient {
             .await
         {
             Ok(response) => {
-                tracing::trace!("GenAI Response: {:#?}", response);
+                tracing::debug!("GenAI Response:\n{:#?}", response);
                 response
             }
             Err(e) => {
