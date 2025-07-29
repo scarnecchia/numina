@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
+    agent::tool_rules::ToolRule,
     data_source::bluesky::BlueskyFilter,
     db::DatabaseConfig,
     id::{AgentId, GroupId, UserId},
@@ -97,6 +98,175 @@ pub struct AgentConfig {
     /// Optional Bluesky handle for this agent
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky_handle: Option<String>,
+
+    /// Tool execution rules for this agent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_rules: Vec<ToolRuleConfig>,
+
+    /// Available tools for this agent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+/// Configuration for tool execution rules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRuleConfig {
+    /// Name of the tool this rule applies to
+    pub tool_name: String,
+
+    /// Type of rule
+    pub rule_type: ToolRuleTypeConfig,
+
+    /// Conditions for this rule (tool names, parameters, etc.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<String>,
+
+    /// Priority of this rule (higher numbers = higher priority)
+    #[serde(default = "default_rule_priority")]
+    pub priority: u8,
+
+    /// Optional metadata for this rule
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Configuration for tool rule types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ToolRuleTypeConfig {
+    /// Continue the conversation loop after this tool is called (no heartbeat required)
+    ContinueLoop,
+
+    /// Exit conversation loop after this tool is called
+    ExitLoop,
+
+    /// This tool must be called after specified tools (ordering dependency)
+    RequiresPrecedingTools,
+
+    /// This tool must be called before specified tools
+    RequiresFollowingTools,
+
+    /// Multiple exclusive groups - only one tool from each group can be called per conversation
+    ExclusiveGroups(Vec<Vec<String>>),
+
+    /// Call this tool at conversation start
+    StartConstraint,
+
+    /// This tool must be called before conversation ends
+    RequiredBeforeExit,
+
+    /// Required for exit if condition is met
+    RequiredBeforeExitIf,
+
+    /// Maximum number of times this tool can be called
+    MaxCalls(u32),
+
+    /// Minimum cooldown period between calls (in seconds)
+    Cooldown(u64),
+
+    /// Call this tool periodically during long conversations (in seconds)
+    Periodic(u64),
+}
+
+fn default_rule_priority() -> u8 {
+    5
+}
+
+impl ToolRuleConfig {
+    /// Convert configuration to runtime ToolRule
+    pub fn to_tool_rule(&self) -> Result<ToolRule> {
+        let rule_type = self.rule_type.to_runtime_type()?;
+        let mut tool_rule = ToolRule::new(self.tool_name.clone(), rule_type);
+
+        if !self.conditions.is_empty() {
+            tool_rule = tool_rule.with_conditions(self.conditions.clone());
+        }
+
+        tool_rule = tool_rule.with_priority(self.priority);
+
+        if let Some(metadata) = &self.metadata {
+            tool_rule = tool_rule.with_metadata(metadata.clone());
+        }
+
+        Ok(tool_rule)
+    }
+
+    /// Create configuration from runtime ToolRule
+    pub fn from_tool_rule(rule: &ToolRule) -> Self {
+        Self {
+            tool_name: rule.tool_name.clone(),
+            rule_type: ToolRuleTypeConfig::from_runtime_type(&rule.rule_type),
+            conditions: rule.conditions.clone(),
+            priority: rule.priority,
+            metadata: rule.metadata.clone(),
+        }
+    }
+}
+
+impl ToolRuleTypeConfig {
+    /// Convert configuration type to runtime type
+    pub fn to_runtime_type(&self) -> Result<crate::agent::tool_rules::ToolRuleType> {
+        use crate::agent::tool_rules::ToolRuleType;
+        use std::time::Duration;
+
+        let runtime_type = match self {
+            ToolRuleTypeConfig::ContinueLoop => ToolRuleType::ContinueLoop,
+            ToolRuleTypeConfig::ExitLoop => ToolRuleType::ExitLoop,
+            ToolRuleTypeConfig::RequiresPrecedingTools => ToolRuleType::RequiresPrecedingTools,
+            ToolRuleTypeConfig::RequiresFollowingTools => ToolRuleType::RequiresFollowingTools,
+            ToolRuleTypeConfig::ExclusiveGroups(groups) => {
+                ToolRuleType::ExclusiveGroups(groups.clone())
+            }
+            ToolRuleTypeConfig::StartConstraint => ToolRuleType::StartConstraint,
+            ToolRuleTypeConfig::RequiredBeforeExit => ToolRuleType::RequiredBeforeExit,
+            ToolRuleTypeConfig::RequiredBeforeExitIf => ToolRuleType::RequiredBeforeExitIf,
+            ToolRuleTypeConfig::MaxCalls(max) => ToolRuleType::MaxCalls(*max),
+            ToolRuleTypeConfig::Cooldown(seconds) => {
+                ToolRuleType::Cooldown(Duration::from_secs(*seconds))
+            }
+            ToolRuleTypeConfig::Periodic(seconds) => {
+                ToolRuleType::Periodic(Duration::from_secs(*seconds))
+            }
+        };
+
+        Ok(runtime_type)
+    }
+
+    /// Create configuration type from runtime type
+    pub fn from_runtime_type(runtime_type: &crate::agent::tool_rules::ToolRuleType) -> Self {
+        use crate::agent::tool_rules::ToolRuleType;
+
+        match runtime_type {
+            ToolRuleType::ContinueLoop => ToolRuleTypeConfig::ContinueLoop,
+            ToolRuleType::ExitLoop => ToolRuleTypeConfig::ExitLoop,
+            ToolRuleType::RequiresPrecedingTools => ToolRuleTypeConfig::RequiresPrecedingTools,
+            ToolRuleType::RequiresFollowingTools => ToolRuleTypeConfig::RequiresFollowingTools,
+            ToolRuleType::ExclusiveGroups(groups) => {
+                ToolRuleTypeConfig::ExclusiveGroups(groups.clone())
+            }
+            ToolRuleType::StartConstraint => ToolRuleTypeConfig::StartConstraint,
+            ToolRuleType::RequiredBeforeExit => ToolRuleTypeConfig::RequiredBeforeExit,
+            ToolRuleType::RequiredBeforeExitIf => ToolRuleTypeConfig::RequiredBeforeExitIf,
+            ToolRuleType::MaxCalls(max) => ToolRuleTypeConfig::MaxCalls(*max),
+            ToolRuleType::Cooldown(duration) => ToolRuleTypeConfig::Cooldown(duration.as_secs()),
+            ToolRuleType::Periodic(duration) => ToolRuleTypeConfig::Periodic(duration.as_secs()),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Convert tool rule configurations to runtime tool rules
+    pub fn get_tool_rules(&self) -> Result<Vec<ToolRule>> {
+        self.tool_rules
+            .iter()
+            .map(|config| config.to_tool_rule())
+            .collect()
+    }
+
+    /// Set tool rules from runtime types
+    pub fn set_tool_rules(&mut self, rules: &[ToolRule]) {
+        self.tool_rules = rules.iter().map(ToolRuleConfig::from_tool_rule).collect();
+    }
 
     /// Optional model configuration (overrides global model config)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,7 +528,6 @@ impl Default for AgentConfig {
             instructions: None,
             memory: HashMap::new(),
             bluesky_handle: None,
-            model: None,
         }
     }
 }
@@ -514,6 +683,12 @@ pub struct PartialAgentConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky_handle: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_rules: Option<Vec<ToolRuleConfig>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentConfig {
@@ -532,7 +707,6 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
             base.memory
         },
         bluesky_handle: overlay.bluesky_handle.or(base.bluesky_handle),
-        model: base.model, // Keep base model config for now (no overlay field yet)
     }
 }
 
@@ -568,6 +742,64 @@ pub async fn load_config_from_standard_locations() -> Result<PatternConfig> {
     Ok(PatternConfig::default())
 }
 
+impl PatternConfig {
+    /// Load configuration from standard locations
+    pub async fn load() -> Result<Self> {
+        load_config_from_standard_locations().await
+    }
+
+    /// Load configuration from a specific file
+    pub async fn load_from(path: &Path) -> Result<Self> {
+        load_config(path).await
+    }
+
+    /// Save configuration to a specific file
+    pub async fn save_to(&self, path: &Path) -> Result<()> {
+        save_config(self, path).await
+    }
+
+    /// Save configuration to standard location
+    pub async fn save(&self) -> Result<()> {
+        let config_path = config_paths()
+            .into_iter()
+            .find(|p| p.parent().map_or(false, |parent| parent.exists()))
+            .unwrap_or_else(|| {
+                dirs::config_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("pattern")
+                    .join("config.toml")
+            });
+
+        self.save_to(&config_path).await
+    }
+
+    /// Get tool rules for a specific agent by name
+    pub fn get_agent_tool_rules(&self, agent_name: &str) -> Result<Vec<ToolRule>> {
+        if self.agent.name == agent_name {
+            return self.agent.get_tool_rules();
+        }
+
+        // Look in groups for agents with matching names
+        for group in &self.groups {
+            for member in &group.members {
+                if member.name == agent_name {
+                    // For now, group members don't have individual tool rules
+                    // This could be extended in the future
+                    return Ok(Vec::new());
+                }
+            }
+        }
+
+        // Agent not found, return empty rules
+        Ok(Vec::new())
+    }
+
+    /// Set tool rules for the main agent
+    pub fn set_agent_tool_rules(&mut self, rules: &[ToolRule]) {
+        self.agent.set_tool_rules(rules);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +819,109 @@ mod tests {
         assert!(toml.contains("[user]"));
         assert!(toml.contains("[agent]"));
         assert!(toml.contains("[model]"));
+    }
+
+    #[test]
+    fn test_tool_rules_configuration() {
+        use crate::agent::tool_rules::{ToolRule, ToolRuleType};
+        use std::time::Duration;
+
+        // Create tool rules
+        let rules = vec![
+            ToolRule::start_constraint("setup".to_string()),
+            ToolRule::continue_loop("fast_search".to_string()),
+            ToolRule::max_calls("api_call".to_string(), 3),
+            ToolRule::cooldown("slow_tool".to_string(), Duration::from_secs(5)),
+        ];
+
+        // Create agent config with tool rules
+        let mut agent_config = AgentConfig::default();
+        agent_config.set_tool_rules(&rules);
+
+        // Test conversion
+        let loaded_rules = agent_config.get_tool_rules().unwrap();
+        assert_eq!(loaded_rules.len(), 4);
+
+        // Test individual rule types
+        assert_eq!(loaded_rules[0].tool_name, "setup");
+        assert!(matches!(
+            loaded_rules[0].rule_type,
+            ToolRuleType::StartConstraint
+        ));
+
+        assert_eq!(loaded_rules[1].tool_name, "fast_search");
+        assert!(matches!(
+            loaded_rules[1].rule_type,
+            ToolRuleType::ContinueLoop
+        ));
+
+        assert_eq!(loaded_rules[2].tool_name, "api_call");
+        assert!(matches!(
+            loaded_rules[2].rule_type,
+            ToolRuleType::MaxCalls(3)
+        ));
+
+        assert_eq!(loaded_rules[3].tool_name, "slow_tool");
+        assert!(matches!(
+            loaded_rules[3].rule_type,
+            ToolRuleType::Cooldown(_)
+        ));
+    }
+
+    #[test]
+    fn test_tool_rule_config_serialization() {
+        use crate::agent::tool_rules::ToolRule;
+        use std::time::Duration;
+
+        let rule = ToolRule::cooldown("test_tool".to_string(), Duration::from_secs(30));
+        let config_rule = ToolRuleConfig::from_tool_rule(&rule);
+
+        // Test serialization
+        let serialized = toml::to_string(&config_rule).unwrap();
+        assert!(serialized.contains("tool_name"));
+        assert!(serialized.contains("rule_type"));
+
+        // Test deserialization
+        let deserialized: ToolRuleConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.tool_name, "test_tool");
+
+        // Convert back to runtime type
+        let runtime_rule = deserialized.to_tool_rule().unwrap();
+        assert_eq!(runtime_rule.tool_name, "test_tool");
+        assert!(matches!(
+            runtime_rule.rule_type,
+            crate::agent::tool_rules::ToolRuleType::Cooldown(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_pattern_config_with_tool_rules() {
+        use crate::agent::tool_rules::ToolRule;
+
+        // Create a config with tool rules
+        let mut config = PatternConfig::default();
+        let rules = vec![
+            ToolRule::start_constraint("init".to_string()),
+            ToolRule::continue_loop("search".to_string()),
+        ];
+        config.set_agent_tool_rules(&rules);
+
+        // Test getting rules back
+        let loaded_rules = config.get_agent_tool_rules(&config.agent.name).unwrap();
+        assert_eq!(loaded_rules.len(), 2);
+        assert_eq!(loaded_rules[0].tool_name, "init");
+        assert_eq!(loaded_rules[1].tool_name, "search");
+
+        // Test serialization roundtrip
+        let toml_content = toml::to_string_pretty(&config).unwrap();
+        let deserialized_config: PatternConfig = toml::from_str(&toml_content).unwrap();
+
+        let reloaded_rules = deserialized_config
+            .get_agent_tool_rules(&config.agent.name)
+            .unwrap();
+        assert_eq!(reloaded_rules.len(), 2);
+        assert_eq!(reloaded_rules[0].tool_name, "init");
+        assert_eq!(reloaded_rules[1].tool_name, "search");
     }
 
     #[test]

@@ -6,10 +6,15 @@ mod entity;
 mod impls;
 #[cfg(test)]
 mod tests;
+pub mod tool_rules;
 
 use compact_str::CompactString;
 pub use entity::{AgentMemoryRelation, AgentRecord, get_next_message_position};
 pub use impls::{AgentDbExt, DatabaseAgent};
+pub use tool_rules::{
+    ExecutionPhase, ToolExecution, ToolExecutionState, ToolRule, ToolRuleEngine, ToolRuleType,
+    ToolRuleViolation,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
