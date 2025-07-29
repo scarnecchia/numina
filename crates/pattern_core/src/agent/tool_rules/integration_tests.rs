@@ -66,16 +66,14 @@ impl MockTool {
 /// Mock agent state for agent-level integration testing
 #[derive(Debug, Clone)]
 struct MockAgentState {
-    agent_id: String,
     executed_tools: Arc<Mutex<Vec<String>>>,
     tool_results: Arc<Mutex<HashMap<String, String>>>,
     rule_engine: Arc<Mutex<ToolRuleEngine>>,
 }
 
 impl MockAgentState {
-    fn new(agent_id: String, rules: Vec<ToolRule>) -> Self {
+    fn new(rules: Vec<ToolRule>) -> Self {
         Self {
-            agent_id,
             executed_tools: Arc::new(Mutex::new(Vec::new())),
             tool_results: Arc::new(Mutex::new(HashMap::new())),
             rule_engine: Arc::new(Mutex::new(ToolRuleEngine::new(rules))),
@@ -753,7 +751,7 @@ async fn test_agent_lifecycle_with_exit_requirements() {
         ToolRule::max_calls("process_data".to_string(), 3),
     ];
 
-    let agent = MockAgentState::new("lifecycle_agent".to_string(), rules);
+    let agent = MockAgentState::new(rules);
 
     // Initially cannot exit - no tools executed
     assert!(!agent.can_exit());
@@ -803,6 +801,206 @@ async fn test_agent_lifecycle_with_exit_requirements() {
             "cleanup",
             "save_state"
         ]
+    );
+}
+
+/// Test tool failure scenarios and error handling
+#[tokio::test]
+async fn test_tool_failure_scenarios() {
+    let mut registry = MockToolRegistry::new();
+
+    // Create normal and failing tools
+    registry.add_tool(MockTool::new("setup"));
+    registry.add_tool(MockTool::new("reliable_task"));
+    registry.add_tool(MockTool::new("flaky_task").with_failure());
+    registry.add_tool(MockTool::new("cleanup"));
+
+    let rules = vec![
+        ToolRule::start_constraint("setup".to_string()),
+        ToolRule::requires_preceding_tools("reliable_task".to_string(), vec!["setup".to_string()]),
+        ToolRule::requires_preceding_tools(
+            "flaky_task".to_string(),
+            vec!["reliable_task".to_string()],
+        ),
+        ToolRule::required_before_exit("cleanup".to_string()),
+        ToolRule::max_calls("flaky_task".to_string(), 3),
+    ];
+
+    let mut engine = ToolRuleEngine::new(rules);
+
+    // Execute setup successfully
+    assert!(engine.can_execute_tool("setup").is_ok());
+    let result = registry.execute_tool("setup").await;
+    assert!(result.is_ok());
+    engine.record_execution(ToolExecution {
+        tool_name: "setup".to_string(),
+        call_id: "setup_1".to_string(),
+        timestamp: Instant::now(),
+        success: true,
+        metadata: None,
+    });
+
+    // Execute reliable task successfully
+    assert!(engine.can_execute_tool("reliable_task").is_ok());
+    let result = registry.execute_tool("reliable_task").await;
+    assert!(result.is_ok());
+    engine.record_execution(ToolExecution {
+        tool_name: "reliable_task".to_string(),
+        call_id: "reliable_1".to_string(),
+        timestamp: Instant::now(),
+        success: true,
+        metadata: None,
+    });
+
+    // Attempt flaky task multiple times - should fail but rules still allow retries
+    for attempt in 1..=3 {
+        assert!(
+            engine.can_execute_tool("flaky_task").is_ok(),
+            "Rule engine should allow attempt {}",
+            attempt
+        );
+
+        let result = registry.execute_tool("flaky_task").await;
+        assert!(
+            result.is_err(),
+            "Flaky task should fail on attempt {}",
+            attempt
+        );
+
+        // Record failed execution
+        engine.record_execution(ToolExecution {
+            tool_name: "flaky_task".to_string(),
+            call_id: format!("flaky_attempt_{}", attempt),
+            timestamp: Instant::now(),
+            success: false,
+            metadata: None,
+        });
+    }
+
+    // Fourth attempt should be blocked by max calls rule
+    assert!(
+        engine.can_execute_tool("flaky_task").is_err(),
+        "Should be blocked by max calls after 3 attempts"
+    );
+
+    // Cleanup should still be required and executable
+    let exit_tools = engine.get_required_before_exit_tools();
+    assert!(exit_tools.contains(&"cleanup".to_string()));
+
+    assert!(engine.can_execute_tool("cleanup").is_ok());
+    let result = registry.execute_tool("cleanup").await;
+    assert!(result.is_ok());
+    engine.record_execution(ToolExecution {
+        tool_name: "cleanup".to_string(),
+        call_id: "cleanup_1".to_string(),
+        timestamp: Instant::now(),
+        success: true,
+        metadata: None,
+    });
+
+    // Verify execution counts
+    assert_eq!(registry.get_tool("setup").unwrap().execution_count(), 1);
+    assert_eq!(
+        registry
+            .get_tool("reliable_task")
+            .unwrap()
+            .execution_count(),
+        1
+    );
+    assert_eq!(
+        registry.get_tool("flaky_task").unwrap().execution_count(),
+        3
+    );
+    assert_eq!(registry.get_tool("cleanup").unwrap().execution_count(), 1);
+}
+
+/// Test performance and timing with slow tools
+#[tokio::test]
+async fn test_tool_timing_scenarios() {
+    let mut registry = MockToolRegistry::new();
+
+    // Create tools with different execution times
+    registry.add_tool(MockTool::new("fast_task")); // Default 10ms
+    registry.add_tool(MockTool::new("slow_task").with_execution_time(Duration::from_millis(100)));
+    registry
+        .add_tool(MockTool::new("very_slow_task").with_execution_time(Duration::from_millis(200)));
+
+    let rules = vec![
+        ToolRule::requires_preceding_tools("slow_task".to_string(), vec!["fast_task".to_string()]),
+        ToolRule::requires_preceding_tools(
+            "very_slow_task".to_string(),
+            vec!["slow_task".to_string()],
+        ),
+    ];
+
+    let mut engine = ToolRuleEngine::new(rules);
+
+    // Measure execution times
+    let start = Instant::now();
+
+    // Fast task should complete quickly
+    assert!(engine.can_execute_tool("fast_task").is_ok());
+    let result = registry.execute_tool("fast_task").await;
+    assert!(result.is_ok());
+    engine.record_execution(ToolExecution {
+        tool_name: "fast_task".to_string(),
+        call_id: "fast_1".to_string(),
+        timestamp: Instant::now(),
+        success: true,
+        metadata: None,
+    });
+
+    let after_fast = Instant::now();
+    assert!(
+        after_fast.duration_since(start) < Duration::from_millis(50),
+        "Fast task took too long"
+    );
+
+    // Slow task should take longer
+    assert!(engine.can_execute_tool("slow_task").is_ok());
+    let result = registry.execute_tool("slow_task").await;
+    assert!(result.is_ok());
+    engine.record_execution(ToolExecution {
+        tool_name: "slow_task".to_string(),
+        call_id: "slow_1".to_string(),
+        timestamp: Instant::now(),
+        success: true,
+        metadata: None,
+    });
+
+    let after_slow = Instant::now();
+    assert!(
+        after_slow.duration_since(after_fast) >= Duration::from_millis(90),
+        "Slow task didn't take expected time"
+    );
+
+    // Very slow task should take even longer
+    assert!(engine.can_execute_tool("very_slow_task").is_ok());
+    let result = registry.execute_tool("very_slow_task").await;
+    assert!(result.is_ok());
+    engine.record_execution(ToolExecution {
+        tool_name: "very_slow_task".to_string(),
+        call_id: "very_slow_1".to_string(),
+        timestamp: Instant::now(),
+        success: true,
+        metadata: None,
+    });
+
+    let total_time = Instant::now().duration_since(start);
+    assert!(
+        total_time >= Duration::from_millis(300),
+        "Total execution time should reflect cumulative delays"
+    );
+
+    // Verify all tools executed once
+    assert_eq!(registry.get_tool("fast_task").unwrap().execution_count(), 1);
+    assert_eq!(registry.get_tool("slow_task").unwrap().execution_count(), 1);
+    assert_eq!(
+        registry
+            .get_tool("very_slow_task")
+            .unwrap()
+            .execution_count(),
+        1
     );
 }
 
