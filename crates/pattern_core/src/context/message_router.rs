@@ -54,6 +54,10 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
         }
     }
 
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
     /// Set the default endpoint for user messages (builder pattern)
     pub fn with_default_user_endpoint(self, endpoint: Arc<dyn MessageEndpoint>) -> Self {
         // Can't modify self here since we moved it, so we'll lock and set

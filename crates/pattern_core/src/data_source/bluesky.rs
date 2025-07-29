@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Mutex};
 
 use super::{
     StreamBuffer,
-    traits::{DataSource, DataSourceMetadata, DataSourceStatus, StreamEvent},
+    traits::{DataSource, DataSourceMetadata, DataSourceStatus, Searchable, StreamEvent},
 };
 use crate::error::Result;
 use async_trait::async_trait;
@@ -201,7 +201,7 @@ struct SourceStats {
 }
 
 /// Consumes Bluesky Jetstream firehose
-//#[derive(Debug)]
+#[derive(Debug)]
 pub struct BlueskyFirehoseSource {
     source_id: String,
     endpoint: String,
@@ -211,6 +211,7 @@ pub struct BlueskyFirehoseSource {
     buffer: Option<
         std::sync::Arc<parking_lot::Mutex<StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>>>,
     >,
+    notifications_enabled: bool,
 }
 
 impl BlueskyFirehoseSource {
@@ -222,6 +223,7 @@ impl BlueskyFirehoseSource {
             current_cursor: None,
             stats: SourceStats::default(),
             buffer: None,
+            notifications_enabled: true,
         }
     }
 
@@ -394,6 +396,80 @@ impl DataSource for BlueskyFirehoseSource {
             ]),
         }
     }
+
+    fn buffer_config(&self) -> super::BufferConfig {
+        // High-volume firehose needs large buffer and short TTL
+        super::BufferConfig {
+            max_items: 10_000,
+            max_age: std::time::Duration::from_secs(300), // 5 minutes
+            notify_changes: true,
+            persist_to_db: false, // Too high volume for DB
+            index_content: false, // Would overwhelm the index
+        }
+    }
+
+    fn format_notification(&self, item: &Self::Item) -> Option<String> {
+        // Format based on post type
+        let mut message = String::new();
+
+        // Header with author
+        message.push_str(&format!("💬 @{}", item.handle));
+
+        // Add context for replies/mentions
+        if let Some(_reply) = &item.reply {
+            message.push_str(" replied");
+        } else if item.mentions(&self.source_id) {
+            message.push_str(" mentioned you");
+        }
+
+        message.push_str(":\n\n");
+
+        // Text preview (truncate if too long)
+        let text_preview = if item.text.len() > 280 {
+            format!("{}...", &item.text[..280])
+        } else {
+            item.text.clone()
+        };
+        message.push_str(&text_preview);
+
+        // Add link
+        message.push_str(&format!("\n\n🔗 {}", item.uri));
+
+        // Add image indicator if present
+        if item.has_images() {
+            let alt_texts = item.image_alt_texts();
+            if !alt_texts.is_empty() {
+                message.push_str(&format!("\n📸 {} image(s)", alt_texts.len()));
+            }
+        }
+
+        Some(message)
+    }
+
+    fn get_buffer_stats(&self) -> Option<super::BufferStats> {
+        self.buffer.as_ref().map(|b| b.lock().stats())
+    }
+
+    fn set_notifications_enabled(&mut self, enabled: bool) {
+        self.notifications_enabled = enabled;
+    }
+
+    fn notifications_enabled(&self) -> bool {
+        self.notifications_enabled
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<Self::Item>> {
+        if let Some(buffer) = &self.buffer {
+            let buf = buffer.lock();
+            let results = buf.search(query, limit);
+            Ok(results
+                .into_iter()
+                .map(|event| event.item.clone())
+                .collect())
+        } else {
+            Ok(vec![])
+        }
+    }
 }
 
 /// Ingestor that processes Bluesky posts and sends them to our channel
@@ -463,17 +539,22 @@ impl LexiconIngestor for PostIngestor {
             };
 
             if should_include_post(&mut post_to_filter, &self.filter, &self.resolver).await {
+                let event = StreamEvent {
+                    item: post_to_filter.clone(),
+                    cursor: BlueskyFirehoseCursor {
+                        seq: now.timestamp_micros() as u64,
+                        time_us: now.timestamp_micros() as u64,
+                    },
+                    timestamp: now,
+                };
                 self.tx
-                    .send(Ok(StreamEvent {
-                        item: post_to_filter.clone(),
-                        cursor: BlueskyFirehoseCursor {
-                            seq: now.timestamp_micros() as u64,
-                            time_us: now.timestamp_micros() as u64,
-                        },
-                        timestamp: now,
-                    }))
+                    .send(Ok(event.clone()))
                     .await
                     .inspect_err(|e| tracing::error!("{}", e))?;
+                if let Some(buffer) = &self.buffer {
+                    let mut buffer_guard = buffer.lock();
+                    buffer_guard.push(event);
+                }
             }
         }
 
@@ -573,6 +654,81 @@ async fn should_include_post(
         .unwrap_or(post.did.clone());
 
     true
+}
+
+impl Searchable for BlueskyPost {
+    fn matches(&self, query: &str) -> bool {
+        let query_lower = query.to_lowercase();
+
+        // Search in text
+        if self.text.to_lowercase().contains(&query_lower) {
+            return true;
+        }
+
+        // Search in handle
+        if self.handle.to_lowercase().contains(&query_lower) {
+            return true;
+        }
+
+        // Search in hashtags
+        for facet in &self.facets {
+            for feature in &facet.features {
+                if let FacetFeature::Tag { tag } = feature {
+                    if tag.to_lowercase().contains(&query_lower) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Search in alt text
+        for alt in self.image_alt_texts() {
+            if alt.to_lowercase().contains(&query_lower) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn relevance(&self, query: &str) -> f32 {
+        if !self.matches(query) {
+            return 0.0;
+        }
+
+        let query_lower = query.to_lowercase();
+        let mut score = 0.0;
+
+        // Exact match in text gets highest score
+        if self.text.to_lowercase() == query_lower {
+            score += 5.0;
+        } else if self.text.to_lowercase().contains(&query_lower) {
+            // Count occurrences
+            let count = self.text.to_lowercase().matches(&query_lower).count() as f32;
+            score += 1.0 + (count * 0.2);
+        }
+
+        // Handle match
+        if self.handle.to_lowercase().contains(&query_lower) {
+            score += 2.0;
+        }
+
+        // Hashtag match
+        for facet in &self.facets {
+            for feature in &facet.features {
+                if let FacetFeature::Tag { tag } = feature {
+                    if tag.to_lowercase() == query_lower {
+                        score += 3.0; // Exact hashtag match is very relevant
+                    } else if tag.to_lowercase().contains(&query_lower) {
+                        score += 1.5;
+                    }
+                }
+            }
+        }
+
+        // Normalize to 0.0-1.0 range (max theoretical score ~10)
+        (score / 10.0).min(1.0)
+    }
 }
 
 #[cfg(test)]

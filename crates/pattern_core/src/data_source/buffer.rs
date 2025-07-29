@@ -3,23 +3,24 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::Surreal;
+use surrealdb::{Connection, Surreal};
 
-use super::traits::StreamEvent;
+use super::traits::{Searchable, StreamEvent};
 
 /// Buffer for stream history with optional persistence
 #[derive(Debug)]
-pub struct StreamBuffer<T, C> {
+pub struct StreamBuffer<T, C, D: Connection = surrealdb::engine::any::Any> {
     items: VecDeque<StreamEvent<T, C>>,
     max_items: usize,
     max_age: Duration,
-    db: Option<Surreal<surrealdb::engine::any::Any>>,
+    db: Option<Surreal<D>>,
 }
 
-impl<T, C> StreamBuffer<T, C>
+impl<T, C, D> StreamBuffer<T, C, D>
 where
     T: Serialize + for<'de> Deserialize<'de> + Clone,
     C: Serialize + for<'de> Deserialize<'de> + Clone,
+    D: Connection,
 {
     pub fn new(max_items: usize, max_age: Duration) -> Self {
         Self {
@@ -30,7 +31,7 @@ where
         }
     }
 
-    pub fn with_persistence(mut self, db: Surreal<surrealdb::engine::any::Any>) -> Self {
+    pub fn with_persistence(mut self, db: Surreal<D>) -> Self {
         self.db = Some(db);
         self
     }
@@ -107,6 +108,38 @@ where
     pub fn clear(&mut self) {
         self.items.clear();
     }
+
+    /// Search buffer contents if items implement Searchable
+    pub fn search(&self, query: &str, limit: usize) -> Vec<&StreamEvent<T, C>>
+    where
+        T: Searchable,
+    {
+        let mut results: Vec<(&StreamEvent<T, C>, f32)> = self
+            .items
+            .iter()
+            .filter_map(|event| {
+                let relevance = event.item.relevance(query);
+                if relevance > 0.0 {
+                    Some((event, relevance))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by relevance descending, then by timestamp descending
+        results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.0.timestamp.cmp(&a.0.timestamp))
+        });
+
+        results
+            .into_iter()
+            .take(limit)
+            .map(|(event, _)| event)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,4 +158,5 @@ pub struct BufferConfig {
     pub max_age: Duration,
     pub persist_to_db: bool,
     pub index_content: bool,
+    pub notify_changes: bool,
 }

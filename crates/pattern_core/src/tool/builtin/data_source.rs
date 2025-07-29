@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,9 +5,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::data_source::{BufferConfig, DataIngestionCoordinator, FileDataSource, FileStorageMode};
+use crate::data_source::DataIngestionCoordinator;
 use crate::error::Result;
 use crate::tool::{AiTool, ToolRegistry};
+
+fn default_limit() -> i64 {
+    10
+}
 
 /// Tool for managing data sources that feed into agents
 #[derive(Debug, Clone)]
@@ -25,16 +28,19 @@ impl DataSourceTool {
 /// Operation types for data source management
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(inline)]
 pub enum DataSourceOperation {
-    ReadFile,
-    IndexFile,
-    WatchFile,
-    SearchBuffer,
-    ListSources,
-    PauseSource,
-    ResumeSource,
-    GetBufferStats,
+    /// Read recent items from a configured source
+    Read,
+    /// Search within a source (if supported)
+    Search,
+    /// Start monitoring a source with notifications
+    Monitor,
+    /// Pause notifications from a source
+    Pause,
+    /// Resume notifications from a source
+    Resume,
+    /// List all configured sources
+    List,
 }
 
 /// Input for data source operations
@@ -43,44 +49,21 @@ pub struct DataSourceInput {
     /// The operation to perform
     pub operation: DataSourceOperation,
 
-    /// File path (for read_file, index_file, watch_file)
-    #[schemars(default, with = "String")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-
-    /// Source identifier (for search_buffer, pause_source, resume_source, get_buffer_stats)
+    /// Source ID to operate on (not needed for list)
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
 
-    /// Search query (for search_buffer)
+    /// Query for read/search operations
+    /// For read: can be "lines 10-20", "last 50", "chunk 1024"
+    /// For search: the search query
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 
-    /// Template name for notifications (for watch_file)
-    #[schemars(default, with = "String")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub template_name: Option<String>,
-
-    /// Line range for reading files (format: "start-end", e.g., "10-20")
-    #[schemars(default, with = "String")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub line_range: Option<String>,
-
-    /// Chunk size for indexing files
-    #[schemars(default, with = "i64")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_size: Option<i64>,
-
-    /// Maximum number of results
-    #[schemars(default, with = "i64")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<i64>,
-
-    /// DEPRECATED: watch_file always enables notifications
-    #[serde(default)]
-    pub notify: bool,
+    /// Maximum number of results (for read/search operations)
+    #[schemars(default = "default_limit", with = "i64")]
+    pub limit: i64,
 
     /// Request another turn after this tool executes
     #[serde(default)]
@@ -88,19 +71,21 @@ pub struct DataSourceInput {
 }
 
 /// Output from data source operations
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DataSourceOutput {
-    /// Whether the operation was successful
+    /// Whether the operation succeeded
     pub success: bool,
 
-    /// Message about the operation
-    #[schemars(default, with = "String")]
+    /// Human-readable message about the result
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 
-    /// Content returned by the operation (file content, source list, etc.)
-    #[serde(default)]
+    /// The actual content returned (for read/search/list operations)
     pub content: serde_json::Value,
+
+    /// Whether another turn was requested
+    #[serde(default)]
+    pub request_heartbeat: bool,
 }
 
 #[async_trait]
@@ -108,329 +93,242 @@ impl AiTool for DataSourceTool {
     type Input = DataSourceInput;
     type Output = DataSourceOutput;
 
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "data_source"
     }
 
-    fn description(&self) -> &'static str {
-        "Manage data sources that feed information to agents. Read files, search buffers, manage streams."
+    fn description(&self) -> &str {
+        "Manage data sources that feed information to the agent"
     }
 
     fn usage_rule(&self) -> Option<&'static str> {
         Some(
-            r#"Use data_source for file operations and stream management:
-- read_file: Read file contents (supports line ranges like "10-20")
-- index_file: Create indexed file source for semantic search
-- watch_file: Monitor file changes (automatically sends notifications)
-- list_sources: See all active data sources
-- pause_source/resume_source: Control data flow
-- get_buffer_stats: Check source buffer status
-- search_buffer: Search buffered data (not yet implemented)
+            r#"Use this tool to interact with configured data sources.
 
-For simple file reads, use read_file. For monitoring changes, use watch_file."#,
+Operations:
+- read: Read from a source. Use query for filtering (e.g., "lines 10-20", "last 50")
+- search: Search within a source (if supported)
+- monitor: Start receiving notifications from a source when new data arrives
+- pause: Stop notifications temporarily
+- resume: Resume notifications
+- list: Show all configured sources
+
+Sources must be configured separately before they can be used."#,
         )
     }
 
     async fn execute(&self, input: Self::Input) -> Result<Self::Output> {
-        // Extract values to avoid partial move issues
-        let operation = input.operation.clone();
-        let path = input.path;
-        let source_id = input.source_id;
-        let query = input.query;
-        let template_name = input.template_name;
-        let line_range = input.line_range;
-        let chunk_size = input.chunk_size;
-        let limit = input.limit;
-        let _notify = input.notify; // deprecated field
-        let _request_heartbeat = input.request_heartbeat;
+        match input.operation {
+            DataSourceOperation::Read => {
+                let source_id =
+                    input
+                        .source_id
+                        .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                            tool_name: self.name().to_string(),
+                            cause: "Missing required parameter 'source_id' for read".to_string(),
+                            parameters: json!({}),
+                        })?;
 
-        match operation {
-            DataSourceOperation::ReadFile => {
-                let path = path.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'path' for read_file".to_string(),
-                    parameters: json!({}),
-                })?;
+                // Parse query for read modifiers
+                let mut limit = input.limit as usize;
+                let mut offset = 0;
+                let mut cursor = None;
 
-                let path_buf = PathBuf::from(path);
-
-                if !path_buf.exists() {
-                    return Ok(DataSourceOutput {
-                        success: false,
-                        message: Some(format!("File not found: {}", path_buf.display())),
-                        content: json!(null),
-                    });
+                if let Some(query) = &input.query {
+                    if query.starts_with("last ") {
+                        if let Ok(n) = query[5..].trim().parse::<usize>() {
+                            limit = n;
+                        }
+                    } else if query.starts_with("lines ") {
+                        // Parse line range like "lines 10-20"
+                        if let Some(range) = query[6..].trim().split_once('-') {
+                            if let (Ok(start), Ok(end)) =
+                                (range.0.parse::<usize>(), range.1.parse::<usize>())
+                            {
+                                offset = start.saturating_sub(1); // Convert to 0-based
+                                limit = end - start + 1;
+                            }
+                        }
+                    } else if query.starts_with("after ") {
+                        // Parse cursor like "after <cursor_value>"
+                        let cursor_str = query[6..].trim();
+                        cursor = Some(json!(cursor_str));
+                    }
                 }
 
-                // Parse line range if provided
-                let content = if let Some(range_str) = line_range {
-                    // Parse "start-end" format
-                    let parts: Vec<&str> = range_str.split('-').collect();
-                    if parts.len() == 2 {
-                        if let (Ok(start), Ok(end)) =
-                            (parts[0].parse::<usize>(), parts[1].parse::<usize>())
-                        {
-                            let text = tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
-                                crate::CoreError::ToolExecutionFailed {
-                                    tool_name: self.name().to_string(),
-                                    cause: format!("Failed to read file: {}", e),
-                                    parameters: json!({}),
-                                }
-                            })?;
+                // Read from source
+                let coordinator = self.coordinator.read().await;
+                let items = coordinator.read_source(&source_id, limit, cursor).await?;
 
-                            let lines: Vec<&str> = text.lines().collect();
-                            let start = start.saturating_sub(1).min(lines.len()); // Convert to 0-based
-                            let end = end.min(lines.len());
-
-                            lines[start..end].join("\n")
-                        } else {
-                            return Ok(DataSourceOutput {
-                                success: false,
-                                message: Some(
-                                    "Invalid line range format. Use 'start-end' (e.g., '10-20')"
-                                        .to_string(),
-                                ),
-                                content: json!(null),
-                            });
-                        }
-                    } else {
-                        return Ok(DataSourceOutput {
-                            success: false,
-                            message: Some(
-                                "Invalid line range format. Use 'start-end' (e.g., '10-20')"
-                                    .to_string(),
-                            ),
-                            content: json!(null),
-                        });
-                    }
+                // Apply offset if needed
+                let items = if offset > 0 {
+                    items.into_iter().skip(offset).collect()
                 } else {
-                    // Read entire file
-                    tokio::fs::read_to_string(&path_buf).await.map_err(|e| {
-                        crate::CoreError::ToolExecutionFailed {
-                            tool_name: self.name().to_string(),
-                            cause: format!("Failed to read file: {}", e),
-                            parameters: json!({}),
-                        }
-                    })?
+                    items
                 };
-
-                let metadata = tokio::fs::metadata(&path_buf).await.map_err(|e| {
-                    crate::CoreError::ToolExecutionFailed {
-                        tool_name: self.name().to_string(),
-                        cause: format!("Failed to read metadata: {}", e),
-                        parameters: json!({}),
-                    }
-                })?;
 
                 Ok(DataSourceOutput {
                     success: true,
                     message: Some(format!(
-                        "Read {} bytes from {}",
-                        content.len(),
-                        path_buf.display()
+                        "Read {} items from source '{}'",
+                        items.len(),
+                        source_id
                     )),
-                    content: json!({
-                        "text": content,
-                        "path": path_buf.display().to_string(),
-                        "size_bytes": metadata.len(),
-                        "is_dir": metadata.is_dir(),
-                    }),
+                    content: json!(items),
+                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
-            DataSourceOperation::IndexFile => {
-                let path = path.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'path' for index_file".to_string(),
-                    parameters: json!({}),
-                })?;
+            DataSourceOperation::Search => {
+                let source_id =
+                    input
+                        .source_id
+                        .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                            tool_name: self.name().to_string(),
+                            cause: "Missing required parameter 'source_id' for search".to_string(),
+                            parameters: json!({}),
+                        })?;
 
-                let chunk_size = chunk_size.unwrap_or(512);
+                let query = input
+                    .query
+                    .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                        tool_name: self.name().to_string(),
+                        cause: "Missing required parameter 'query' for search".to_string(),
+                        parameters: json!({}),
+                    })?;
 
-                // Get embedding provider from coordinator
-                let coordinator_read = self.coordinator.read().await;
-                let embedding_provider = coordinator_read.embedding_provider();
-                drop(coordinator_read);
-
-                if let Some(provider) = embedding_provider {
-                    // Create an indexed file data source
-                    let source = FileDataSource::new(
-                        path.clone(),
-                        FileStorageMode::Indexed {
-                            embedding_provider: provider,
-                            chunk_size,
-                        },
-                    );
-
-                    let config = BufferConfig {
-                        max_items: 1000,
-                        max_age: std::time::Duration::from_secs(86400), // 24 hours
-                        persist_to_db: true,
-                        index_content: true,
-                    };
-
-                    let mut coordinator = self.coordinator.write().await;
-                    coordinator
-                        .add_source(source, config, "file_changed".to_string())
-                        .await?;
-
-                    Ok(DataSourceOutput {
-                        success: true,
-                        message: Some(format!("Indexed file source created for: {}", path)),
-                        content: json!(null),
-                    })
-                } else {
-                    Ok(DataSourceOutput {
-                        success: false,
-                        message: Some("No embedding provider available. Indexed file sources require embeddings.".to_string()),
-                        content: json!(null),
-                    })
-                }
-            }
-
-            DataSourceOperation::WatchFile => {
-                let path = path.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'path' for watch_file".to_string(),
-                    parameters: json!({}),
-                })?;
-
-                let template_name = template_name.unwrap_or_else(|| "file_changed".to_string());
-
-                // Create a file data source with watching enabled
-                let source =
-                    FileDataSource::new(path.clone(), FileStorageMode::Ephemeral).with_watch();
-
-                let config = BufferConfig {
-                    max_items: 100,
-                    max_age: std::time::Duration::from_secs(3600), // 1 hour
-                    persist_to_db: false,
-                    index_content: false,
-                };
-
-                // watch_file always enables notifications
-                let mut coordinator = self.coordinator.write().await;
-                coordinator
-                    .add_source(source, config, template_name)
+                // Search in source
+                let coordinator = self.coordinator.read().await;
+                let results = coordinator
+                    .search_source(&source_id, &query, input.limit as usize)
                     .await?;
 
                 Ok(DataSourceOutput {
                     success: true,
-                    message: Some(format!("Watching file with notifications: {}", path)),
+                    message: Some(format!(
+                        "Found {} results for '{}' in source '{}'",
+                        results.len(),
+                        query,
+                        source_id
+                    )),
+                    content: json!(results),
+                    request_heartbeat: input.request_heartbeat,
+                })
+            }
+
+            DataSourceOperation::Monitor => {
+                let source_id =
+                    input
+                        .source_id
+                        .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                            tool_name: self.name().to_string(),
+                            cause: "Missing required parameter 'source_id' for monitor".to_string(),
+                            parameters: json!({}),
+                        })?;
+
+                // Start monitoring
+                let mut coordinator = self.coordinator.write().await;
+                coordinator.start_monitoring(&source_id).await?;
+
+                Ok(DataSourceOutput {
+                    success: true,
+                    message: Some(format!("Started monitoring source '{}'", source_id)),
                     content: json!(null),
+                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
-            DataSourceOperation::ListSources => {
-                let coordinator = self.coordinator.read().await;
-                let sources = coordinator.list_sources().await;
-
-                let mut source_list: Vec<_> = sources
-                    .into_iter()
-                    .map(|(id, source_type)| {
-                        json!({
-                            "source_id": id,
-                            "source_type": source_type,
-                            "status": "active"
-                        })
-                    })
-                    .collect();
-
-                // Apply limit if specified
-                if let Some(max_items) = limit {
-                    source_list.truncate(max_items as usize);
-                }
-
-                Ok(DataSourceOutput {
-                    success: true,
-                    message: Some(format!("Found {} active sources", source_list.len())),
-                    content: json!(source_list),
-                })
-            }
-
-            DataSourceOperation::GetBufferStats => {
-                let source_id = source_id.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'source_id' for get_buffer_stats"
-                        .to_string(),
-                    parameters: json!({}),
-                })?;
-
-                let coordinator = self.coordinator.read().await;
-                let stats = coordinator.get_buffer_stats(&source_id).await?;
-
-                Ok(DataSourceOutput {
-                    success: true,
-                    message: Some(format!("Buffer stats for source '{}'", source_id)),
-                    content: stats,
-                })
-            }
-
-            DataSourceOperation::PauseSource => {
-                let source_id = source_id.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'source_id' for pause_source".to_string(),
-                    parameters: json!({}),
-                })?;
+            DataSourceOperation::Pause => {
+                let source_id =
+                    input
+                        .source_id
+                        .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                            tool_name: self.name().to_string(),
+                            cause: "Missing required parameter 'source_id' for pause".to_string(),
+                            parameters: json!({}),
+                        })?;
 
                 let coordinator = self.coordinator.read().await;
                 coordinator.pause_source(&source_id).await?;
 
                 Ok(DataSourceOutput {
                     success: true,
-                    message: Some(format!("Source '{}' paused", source_id)),
+                    message: Some(format!("Paused notifications from source '{}'", source_id)),
                     content: json!(null),
+                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
-            DataSourceOperation::ResumeSource => {
-                let source_id = source_id.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'source_id' for resume_source".to_string(),
-                    parameters: json!({}),
-                })?;
+            DataSourceOperation::Resume => {
+                let source_id =
+                    input
+                        .source_id
+                        .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                            tool_name: self.name().to_string(),
+                            cause: "Missing required parameter 'source_id' for resume".to_string(),
+                            parameters: json!({}),
+                        })?;
 
                 let coordinator = self.coordinator.read().await;
                 coordinator.resume_source(&source_id).await?;
 
                 Ok(DataSourceOutput {
                     success: true,
-                    message: Some(format!("Source '{}' resumed", source_id)),
+                    message: Some(format!("Resumed notifications from source '{}'", source_id)),
                     content: json!(null),
+                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
-            DataSourceOperation::SearchBuffer => {
-                let _source_id =
-                    source_id.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                        tool_name: self.name().to_string(),
-                        cause: "Missing required parameter 'source_id' for search_buffer"
-                            .to_string(),
-                        parameters: json!({}),
-                    })?;
+            DataSourceOperation::List => {
+                let coordinator = self.coordinator.read().await;
+                let sources = coordinator.list_sources().await;
+                let source_list: Vec<_> = sources
+                    .into_iter()
+                    .map(|(id, source_type)| {
+                        json!({
+                            "id": id,
+                            "type": source_type,
+                        })
+                    })
+                    .collect();
 
-                let _query = query.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: self.name().to_string(),
-                    cause: "Missing required parameter 'query' for search_buffer".to_string(),
-                    parameters: json!({}),
-                })?;
-
-                // TODO: Implement buffer search
                 Ok(DataSourceOutput {
-                    success: false,
-                    message: Some("Buffer search not yet implemented".to_string()),
-                    content: json!(null),
+                    success: true,
+                    message: Some(format!("Found {} configured sources", source_list.len())),
+                    content: json!(source_list),
+                    request_heartbeat: input.request_heartbeat,
                 })
             }
         }
     }
 }
 
-/// Register data source tool in the registry
+/// Register the data source tool with the registry
 pub fn register_data_source_tool(
-    registry: &ToolRegistry,
+    registry: &mut ToolRegistry,
     coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator>>,
-) {
-    let tool = DataSourceTool::new(coordinator);
-    registry.register(tool);
+) -> Result<()> {
+    registry.register(DataSourceTool::new(coordinator));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_parsing() {
+        // Test "last N" parsing
+        let query = "last 50";
+        assert!(query.starts_with("last "));
+        assert_eq!(query[5..].trim().parse::<i64>().unwrap(), 50);
+
+        // Test "lines X-Y" parsing
+        let query = "lines 10-20";
+        assert!(query.starts_with("lines "));
+        let range = query[6..].trim().split_once('-').unwrap();
+        assert_eq!(range.0.parse::<i64>().unwrap(), 10);
+        assert_eq!(range.1.parse::<i64>().unwrap(), 20);
+    }
 }

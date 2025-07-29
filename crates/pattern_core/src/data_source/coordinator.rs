@@ -8,9 +8,8 @@ use tokio::sync::RwLock;
 use crate::context::message_router::AgentMessageRouter;
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
-use crate::prompt_template::TemplateRegistry;
 
-use super::buffer::{BufferConfig, StreamBuffer};
+use super::buffer::{BufferConfig, BufferStats};
 use super::traits::{DataSource, StreamEvent};
 
 use async_trait::async_trait;
@@ -27,11 +26,10 @@ pub struct DataIngestionEvent {
 }
 
 /// Manages multiple data sources and routes their output to agents
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DataIngestionCoordinator {
     sources: Arc<RwLock<HashMap<String, SourceHandle>>>,
     agent_router: AgentMessageRouter,
-    template_registry: Arc<TemplateRegistry>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
@@ -164,23 +162,57 @@ where
             .current_cursor()
             .map(|cursor| serde_json::to_value(cursor).unwrap_or(Value::Null))
     }
+
+    fn buffer_config(&self) -> BufferConfig {
+        self.inner.buffer_config()
+    }
+
+    fn format_notification(&self, item: &Self::Item) -> Option<String> {
+        // Deserialize Value back to concrete type and delegate
+        if let Ok(typed_item) = serde_json::from_value::<S::Item>(item.clone()) {
+            self.inner.format_notification(&typed_item)
+        } else {
+            None
+        }
+    }
+
+    fn get_buffer_stats(&self) -> Option<BufferStats> {
+        self.inner.get_buffer_stats()
+    }
+
+    fn set_notifications_enabled(&mut self, enabled: bool) {
+        self.inner.set_notifications_enabled(enabled)
+    }
+
+    fn notifications_enabled(&self) -> bool {
+        self.inner.notifications_enabled()
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<Self::Item>> {
+        let results = self.inner.search(query, limit).await?;
+        // Convert concrete items to Values
+        results
+            .into_iter()
+            .map(|item| {
+                serde_json::to_value(item).map_err(|e| crate::CoreError::SerializationError {
+                    data_type: "item".to_string(),
+                    cause: e,
+                })
+            })
+            .collect()
+    }
 }
 
 struct SourceHandle {
     source: Box<dyn DataSource<Item = Value, Filter = Value, Cursor = Value>>,
-    buffer_config: BufferConfig,
-    buffer: Box<dyn std::any::Any + Send + Sync>,
-    last_cursor: Option<Value>,
-    template_name: String,
+    monitoring_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for SourceHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceHandle")
             .field("source_id", &self.source.source_id())
-            .field("buffer_config", &self.buffer_config)
-            .field("last_cursor", &self.last_cursor)
-            .field("template_name", &self.template_name)
+            .field("has_monitor", &self.monitoring_handle.is_some())
             .finish()
     }
 }
@@ -189,15 +221,12 @@ impl DataIngestionCoordinator {
     pub fn new(
         agent_router: AgentMessageRouter,
         embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    ) -> Result<Self> {
-        let template_registry = TemplateRegistry::new().with_defaults()?;
-
-        Ok(Self {
+    ) -> Self {
+        Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             agent_router,
-            template_registry: Arc::new(template_registry),
             embedding_provider,
-        })
+        }
     }
 
     /// Get the embedding provider if available
@@ -206,12 +235,7 @@ impl DataIngestionCoordinator {
     }
 
     /// Register a source and start monitoring
-    pub async fn add_source<S>(
-        &mut self,
-        source: S,
-        config: BufferConfig,
-        template_name: String,
-    ) -> Result<()>
+    pub async fn add_source<S>(&mut self, source: S) -> Result<()>
     where
         S: DataSource + 'static,
         S::Item: Serialize + for<'de> Deserialize<'de> + Send,
@@ -219,90 +243,85 @@ impl DataIngestionCoordinator {
         S::Cursor: Serialize + for<'de> Deserialize<'de> + Send,
     {
         let source_id = source.source_id().to_string();
+        let buffer_config = source.buffer_config();
 
         // Create a type-erased wrapper
-        let erased_source = Box::new(TypeErasedSource::new(source));
+        let mut erased_source = Box::new(TypeErasedSource::new(source));
 
-        // Create buffer based on config
-        let buffer: Box<dyn std::any::Any + Send + Sync> = Box::new(
-            StreamBuffer::<Value, Value>::new(config.max_items, config.max_age),
-        );
+        // Start monitoring if needed
+        let monitoring_handle = if buffer_config.notify_changes {
+            let stream = erased_source.subscribe(None).await?;
+            let source_id_clone = source_id.clone();
+            let coordinator = self.clone();
+
+            Some(tokio::spawn(async move {
+                coordinator.monitor_source(source_id_clone, stream).await;
+            }))
+        } else {
+            None
+        };
 
         let handle = SourceHandle {
             source: erased_source,
-            buffer_config: config,
-            buffer,
-            last_cursor: None,
-            template_name,
+            monitoring_handle,
         };
 
         let mut sources = self.sources.write().await;
         sources.insert(source_id.clone(), handle);
 
-        // TODO: Start monitoring task for this source
-
         Ok(())
     }
 
-    /// Handle incoming data and prompt agent if needed
-    pub async fn handle_ingestion_event(&self, event: DataIngestionEvent) -> Result<()> {
-        // Get template
-        let template = self
-            .template_registry
-            .get(&event.template_name)
-            .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                tool_name: "data_ingestion".to_string(),
-                cause: format!("Template '{}' not found", event.template_name),
-                parameters: serde_json::json!({ "template": event.template_name }),
-            })?;
+    /// Monitor a source stream and send notifications
+    async fn monitor_source(
+        &self,
+        source_id: String,
+        mut stream: Box<dyn Stream<Item = Result<StreamEvent<Value, Value>>> + Send + Unpin>,
+    ) {
+        use futures::StreamExt;
 
-        // Build context for template
-        let mut context = event.metadata.clone();
-        context.insert("source_id".to_string(), serde_json::json!(event.source_id));
-        context.insert(
-            "item_count".to_string(),
-            serde_json::json!(event.items.len()),
-        );
+        while let Some(event_result) = stream.next().await {
+            match event_result {
+                Ok(event) => {
+                    // Get source to format notification
+                    if let Some(handle) = self.sources.read().await.get(&source_id) {
+                        // Check if notifications are enabled before formatting
+                        if handle.source.notifications_enabled() {
+                            if let Some(message) = handle.source.format_notification(&event.item) {
+                                // Send notification to agent
+                                let target = crate::tool::builtin::MessageTarget {
+                                    target_type: crate::tool::builtin::TargetType::Agent,
+                                    target_id: Some(self.agent_router.agent_id().to_string()),
+                                };
 
-        // If single item with common fields, extract them
-        if event.items.len() == 1 {
-            if let Some(item) = event.items.first() {
-                // Extract common fields like author, content, text
-                if let Some(obj) = item.as_object() {
-                    for (key, value) in obj {
-                        if matches!(
-                            key.as_str(),
-                            "author" | "content" | "text" | "title" | "uri"
-                        ) {
-                            context.insert(key.clone(), value.clone());
+                                if let Err(e) = self
+                                    .agent_router
+                                    .send_message(
+                                        target,
+                                        message,
+                                        Some(serde_json::json!({
+                                            "source": "data_ingestion",
+                                            "source_id": source_id,
+                                            "item": event.item,
+                                            "cursor": event.cursor,
+                                        })),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!("Failed to send notification: {}", e);
+                                }
+                            }
                         }
                     }
+                }
+                Err(e) => {
+                    tracing::error!("Error from source {}: {}", source_id, e);
+                    // TODO: Consider reconnection strategy
                 }
             }
         }
 
-        // Render prompt
-        let prompt = template.render(&context)?;
-
-        // Send to agent via router
-        let target = crate::tool::builtin::MessageTarget {
-            target_type: crate::tool::builtin::TargetType::User,
-            target_id: None, // Will go to default user endpoint
-        };
-
-        self.agent_router
-            .send_message(
-                target,
-                prompt,
-                Some(serde_json::json!({
-                    "source": "data_ingestion",
-                    "source_id": event.source_id,
-                    "items": event.items,
-                })),
-            )
-            .await?;
-
-        Ok(())
+        tracing::info!("Source {} stream ended", source_id);
     }
 
     /// List all registered sources
@@ -318,8 +337,8 @@ impl DataIngestionCoordinator {
     pub async fn pause_source(&self, source_id: &str) -> Result<()> {
         let mut sources = self.sources.write().await;
 
-        if let Some(_handle) = sources.get_mut(source_id) {
-            // TODO: Implement pause logic
+        if let Some(handle) = sources.get_mut(source_id) {
+            handle.source.set_notifications_enabled(false);
             Ok(())
         } else {
             Err(crate::CoreError::ToolExecutionFailed {
@@ -334,8 +353,8 @@ impl DataIngestionCoordinator {
     pub async fn resume_source(&self, source_id: &str) -> Result<()> {
         let mut sources = self.sources.write().await;
 
-        if let Some(_handle) = sources.get_mut(source_id) {
-            // TODO: Implement resume logic
+        if let Some(handle) = sources.get_mut(source_id) {
+            handle.source.set_notifications_enabled(true);
             Ok(())
         } else {
             Err(crate::CoreError::ToolExecutionFailed {
@@ -351,9 +370,8 @@ impl DataIngestionCoordinator {
         let sources = self.sources.read().await;
 
         if let Some(handle) = sources.get(source_id) {
-            // Downcast buffer to get stats
-            if let Some(buffer) = handle.buffer.downcast_ref::<StreamBuffer<Value, Value>>() {
-                Ok(serde_json::to_value(buffer.stats()).map_err(|e| {
+            if let Some(stats) = handle.source.get_buffer_stats() {
+                Ok(serde_json::to_value(stats).map_err(|e| {
                     crate::CoreError::SerializationError {
                         data_type: "buffer stats".to_string(),
                         cause: e,
@@ -361,9 +379,93 @@ impl DataIngestionCoordinator {
                 })?)
             } else {
                 Ok(serde_json::json!({
-                    "error": "Buffer type mismatch"
+                    "message": "Source has no buffer"
                 }))
             }
+        } else {
+            Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "data_ingestion".to_string(),
+                cause: format!("Source '{}' not found", source_id),
+                parameters: serde_json::json!({ "source_id": source_id }),
+            })
+        }
+    }
+
+    /// Read items from a source
+    pub async fn read_source(
+        &self,
+        source_id: &str,
+        limit: usize,
+        cursor: Option<Value>,
+    ) -> Result<Vec<Value>> {
+        let mut sources = self.sources.write().await;
+
+        if let Some(handle) = sources.get_mut(source_id) {
+            handle.source.pull(limit, cursor).await
+        } else {
+            Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "data_ingestion".to_string(),
+                cause: format!("Source '{}' not found", source_id),
+                parameters: serde_json::json!({ "source_id": source_id }),
+            })
+        }
+    }
+
+    /// Search within a source (if supported)
+    pub async fn search_source(
+        &self,
+        source_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let sources = self.sources.read().await;
+
+        if let Some(handle) = sources.get(source_id) {
+            // Use the source's search method
+            handle.source.search(query, limit).await
+        } else {
+            Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "data_ingestion".to_string(),
+                cause: format!("Source '{}' not found", source_id),
+                parameters: serde_json::json!({ "source_id": source_id }),
+            })
+        }
+    }
+
+    /// Start monitoring a source
+    pub async fn start_monitoring(&mut self, source_id: &str) -> Result<()> {
+        // First check if already monitoring
+        {
+            let sources = self.sources.read().await;
+            if let Some(handle) = sources.get(source_id) {
+                if handle.monitoring_handle.is_some() {
+                    return Ok(()); // Already monitoring
+                }
+            } else {
+                return Err(crate::CoreError::ToolExecutionFailed {
+                    tool_name: "data_ingestion".to_string(),
+                    cause: format!("Source '{}' not found", source_id),
+                    parameters: serde_json::json!({ "source_id": source_id }),
+                });
+            }
+        }
+
+        // Start monitoring
+        let mut sources = self.sources.write().await;
+        if let Some(handle) = sources.get_mut(source_id) {
+            // Enable notifications
+            handle.source.set_notifications_enabled(true);
+
+            // Start monitoring task
+            let stream = handle.source.subscribe(None).await?;
+            let source_id_clone = source_id.to_string();
+            let coordinator = self.clone();
+
+            handle.monitoring_handle = Some(tokio::spawn(async move {
+                coordinator.monitor_source(source_id_clone, stream).await;
+            }));
+
+            Ok(())
         } else {
             Err(crate::CoreError::ToolExecutionFailed {
                 tool_name: "data_ingestion".to_string(),

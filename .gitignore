@@ -4,6 +4,7 @@
 .direnv
 .pattern_cache
 pattern.toml
+pattern-bsky.toml
 **.env
 .claude/settings.local.json
 /.pre-commit-config.yaml

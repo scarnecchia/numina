@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
 
-use super::traits::{DataSource, DataSourceMetadata, DataSourceStatus, StreamEvent};
+use super::traits::{DataSource, DataSourceMetadata, DataSourceStatus, Searchable, StreamEvent};
 
 /// File-specific implementation
 pub struct FileDataSource {
@@ -22,6 +22,7 @@ pub struct FileDataSource {
     current_cursor: Option<FileCursor>,
     filter: FileFilter,
     metadata: DataSourceMetadata,
+    notifications_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +96,7 @@ impl FileDataSource {
             current_cursor: None,
             filter: FileFilter::default(),
             metadata,
+            notifications_enabled: true,
         }
     }
 
@@ -333,5 +335,160 @@ impl DataSource for FileDataSource {
 
     fn metadata(&self) -> DataSourceMetadata {
         self.metadata.clone()
+    }
+
+    fn buffer_config(&self) -> super::BufferConfig {
+        // Files typically have lower volume and benefit from persistence
+        super::BufferConfig {
+            max_items: 1000,
+            max_age: std::time::Duration::from_secs(86400), // 24 hours
+            notify_changes: self.watch,                     // Only notify if watching
+            persist_to_db: true,
+            index_content: matches!(self.storage_mode, FileStorageMode::Indexed { .. }),
+        }
+    }
+
+    fn format_notification(&self, item: &Self::Item) -> Option<String> {
+        let path_str = item.path.display();
+        let size_str = if item.metadata.size_bytes > 1024 * 1024 {
+            format!(
+                "{:.1}MB",
+                item.metadata.size_bytes as f64 / (1024.0 * 1024.0)
+            )
+        } else if item.metadata.size_bytes > 1024 {
+            format!("{:.1}KB", item.metadata.size_bytes as f64 / 1024.0)
+        } else {
+            format!("{} bytes", item.metadata.size_bytes)
+        };
+
+        match &item.content {
+            FileContent::Text(text) => {
+                let preview = if text.lines().count() > 5 {
+                    let lines: Vec<&str> = text.lines().take(5).collect();
+                    format!(
+                        "\n\nPreview:\n{}\n... ({} more lines)",
+                        lines.join("\n"),
+                        text.lines().count() - 5
+                    )
+                } else {
+                    format!("\n\nContent:\n{}", text)
+                };
+                Some(format!("📄 File: {} ({}){}", path_str, size_str, preview))
+            }
+            FileContent::Lines(lines) => {
+                let preview = if lines.len() > 5 {
+                    format!(
+                        "\n\nFirst 5 lines:\n{}\n... ({} more lines)",
+                        lines[..5].join("\n"),
+                        lines.len() - 5
+                    )
+                } else {
+                    format!("\n\nLines:\n{}", lines.join("\n"))
+                };
+                Some(format!("📋 File: {} ({}){}", path_str, size_str, preview))
+            }
+            FileContent::Chunk {
+                text,
+                start_line,
+                end_line,
+            } => Some(format!(
+                "📄 File: {} (lines {}-{})\n\n{}",
+                path_str, start_line, end_line, text
+            )),
+        }
+    }
+
+    fn set_notifications_enabled(&mut self, enabled: bool) {
+        self.notifications_enabled = enabled;
+    }
+
+    fn notifications_enabled(&self) -> bool {
+        self.notifications_enabled
+    }
+
+    async fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Self::Item>> {
+        // For files, we could implement a simple search by reading the file
+        // and searching within it, but for now we'll use the default
+        // TODO: Implement file content search
+        Ok(vec![])
+    }
+}
+
+impl Searchable for FileItem {
+    fn matches(&self, query: &str) -> bool {
+        let query_lower = query.to_lowercase();
+
+        // Search in file path
+        if self
+            .path
+            .to_string_lossy()
+            .to_lowercase()
+            .contains(&query_lower)
+        {
+            return true;
+        }
+
+        // Search in content
+        match &self.content {
+            FileContent::Text(text) => text.to_lowercase().contains(&query_lower),
+            FileContent::Lines(lines) => lines
+                .iter()
+                .any(|line| line.to_lowercase().contains(&query_lower)),
+            FileContent::Chunk { text, .. } => text.to_lowercase().contains(&query_lower),
+        }
+    }
+
+    fn relevance(&self, query: &str) -> f32 {
+        if !self.matches(query) {
+            return 0.0;
+        }
+
+        let query_lower = query.to_lowercase();
+        let mut score = 0.0;
+
+        // Filename match is highly relevant
+        if let Some(filename) = self.path.file_name() {
+            let filename_str = filename.to_string_lossy().to_lowercase();
+            if filename_str == query_lower {
+                score += 5.0; // Exact filename match
+            } else if filename_str.contains(&query_lower) {
+                score += 2.0;
+            }
+        }
+
+        // Path match
+        let path_str = self.path.to_string_lossy().to_lowercase();
+        if path_str.contains(&query_lower) {
+            score += 0.5;
+        }
+
+        // Content matches
+        match &self.content {
+            FileContent::Text(text) => {
+                let text_lower = text.to_lowercase();
+                if text_lower == query_lower {
+                    score += 3.0; // Exact content match (rare)
+                } else {
+                    let count = text_lower.matches(&query_lower).count() as f32;
+                    score += (count * 0.3).min(2.0);
+                }
+            }
+            FileContent::Lines(lines) => {
+                let mut line_matches = 0;
+                for line in lines {
+                    if line.to_lowercase().contains(&query_lower) {
+                        line_matches += 1;
+                    }
+                }
+                score += (line_matches as f32 * 0.5).min(2.0);
+            }
+            FileContent::Chunk { text, .. } => {
+                let count = text.to_lowercase().matches(&query_lower).count() as f32;
+                score += (count * 0.3).min(2.0);
+            }
+        }
+
+        // Normalize to 0.0-1.0 range
+        (score / 10.0).min(1.0)
     }
 }

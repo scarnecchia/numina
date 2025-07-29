@@ -6,6 +6,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::{BufferConfig, BufferStats};
 use crate::error::Result;
 
 /// Core trait for data sources that agents can consume from
@@ -35,6 +36,29 @@ pub trait DataSource: Send + Sync {
 
     /// Get source metadata (type, status, stats)
     fn metadata(&self) -> DataSourceMetadata;
+
+    /// Get buffer configuration for this source
+    fn buffer_config(&self) -> BufferConfig;
+
+    /// Format an item for notification to agents (returns None if item shouldn't notify)
+    fn format_notification(&self, item: &Self::Item) -> Option<String>;
+
+    /// Get buffer statistics if source maintains a buffer
+    fn get_buffer_stats(&self) -> Option<BufferStats> {
+        None // Default: no buffer
+    }
+
+    /// Enable or disable notifications
+    fn set_notifications_enabled(&mut self, enabled: bool);
+
+    /// Check if notifications are enabled
+    fn notifications_enabled(&self) -> bool;
+
+    /// Search within buffered items (if source maintains a searchable buffer)
+    async fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Self::Item>> {
+        // Default: not implemented
+        Ok(vec![])
+    }
 }
 
 /// Event from a streaming data source
@@ -62,4 +86,15 @@ pub enum DataSourceStatus {
     Paused,
     Error(String),
     Disconnected,
+}
+
+/// Trait for items that can be searched
+pub trait Searchable {
+    /// Check if the item matches a search query
+    fn matches(&self, query: &str) -> bool;
+
+    /// Get a relevance score for the query (0.0 to 1.0)
+    fn relevance(&self, query: &str) -> f32 {
+        if self.matches(query) { 1.0 } else { 0.0 }
+    }
 }

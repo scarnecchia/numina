@@ -324,11 +324,11 @@ pub async fn create_agent_from_record(
         top_p: None,
         stop_sequences: vec![],
         capture_usage: Some(true),
-        capture_reasoning_content: None,
+        capture_reasoning_content: Some(true),
         capture_raw_body: None,
         response_format: None,
-        normalize_reasoning_content: None,
-        reasoning_effort: None,
+        normalize_reasoning_content: Some(true),
+        reasoning_effort: Some(genai::chat::ReasoningEffort::Medium),
     };
 
     // Enable reasoning mode if the model supports it
@@ -517,11 +517,11 @@ pub async fn create_agent(
         top_p: None,
         stop_sequences: vec![],
         capture_usage: Some(true),
-        capture_reasoning_content: None,
+        capture_reasoning_content: Some(true),
         capture_raw_body: None,
         response_format: None,
-        normalize_reasoning_content: None,
-        reasoning_effort: None,
+        normalize_reasoning_content: Some(true),
+        reasoning_effort: Some(genai::chat::ReasoningEffort::Medium),
     };
 
     // Enable reasoning mode if the model supports it
