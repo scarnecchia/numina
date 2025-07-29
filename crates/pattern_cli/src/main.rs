@@ -96,6 +96,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: AtprotoCommands,
     },
+    /// Bluesky firehose testing
+    Firehose {
+        #[command(subcommand)]
+        cmd: FirehoseCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -183,6 +188,50 @@ enum GroupCommands {
     Status {
         /// Group name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FirehoseCommands {
+    /// Listen to the Jetstream firehose with filters
+    Listen {
+        /// How many events to receive before stopping (0 for unlimited)
+        #[arg(long, default_value = "10")]
+        limit: usize,
+
+        /// NSIDs to filter (e.g., app.bsky.feed.post)
+        #[arg(long)]
+        nsid: Vec<String>,
+
+        /// DIDs to filter
+        #[arg(long)]
+        did: Vec<String>,
+
+        /// Handles to filter mentions
+        #[arg(long)]
+        mention: Vec<String>,
+
+        /// Keywords to filter
+        #[arg(long)]
+        keyword: Vec<String>,
+
+        /// Languages to filter (e.g., en, ja)
+        #[arg(long)]
+        lang: Vec<String>,
+
+        /// Custom Jetstream endpoint URL
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Output format (pretty, json, raw)
+        #[arg(long, default_value = "pretty")]
+        format: String,
+    },
+    /// Test connection to Jetstream
+    Test {
+        /// Custom Jetstream endpoint URL
+        #[arg(long)]
+        endpoint: Option<String>,
     },
 }
 
@@ -544,6 +593,34 @@ async fn main() -> Result<()> {
                 commands::atproto::unlink(identifier, &config).await?
             }
             AtprotoCommands::Test => commands::atproto::test(&config).await?,
+        },
+        Commands::Firehose { cmd } => match cmd {
+            FirehoseCommands::Listen {
+                limit,
+                nsid,
+                did,
+                mention,
+                keyword,
+                lang,
+                endpoint,
+                format,
+            } => {
+                commands::firehose::listen(
+                    *limit,
+                    nsid.clone(),
+                    did.clone(),
+                    mention.clone(),
+                    keyword.clone(),
+                    lang.clone(),
+                    endpoint.clone(),
+                    format.clone(),
+                    &config,
+                )
+                .await?
+            }
+            FirehoseCommands::Test { endpoint } => {
+                commands::firehose::test_connection(endpoint.clone(), &config).await?
+            }
         },
     }
 

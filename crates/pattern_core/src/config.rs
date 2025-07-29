@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
+    data_source::bluesky::BlueskyFilter,
     db::DatabaseConfig,
     id::{AgentId, GroupId, UserId},
     memory::{MemoryPermission, MemoryType},
@@ -34,6 +35,10 @@ pub struct PatternConfig {
     /// Agent groups configuration
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupConfig>,
+
+    /// Bluesky configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bluesky: Option<BlueskyConfig>,
 }
 
 /// User configuration
@@ -77,6 +82,10 @@ pub struct AgentConfig {
     /// Initial memory blocks
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub memory: HashMap<String, MemoryBlockConfig>,
+
+    /// Optional Bluesky handle for this agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bluesky_handle: Option<String>,
 }
 
 /// Configuration for a memory block
@@ -187,6 +196,26 @@ fn default_skip_unavailable() -> bool {
     true
 }
 
+/// Bluesky/ATProto configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueskyConfig {
+    /// Default filters for the firehose
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_filters: Vec<BlueskyFilter>,
+
+    /// Whether to automatically connect to firehose on startup
+    #[serde(default)]
+    pub auto_connect_firehose: bool,
+
+    /// Jetstream endpoint URL (defaults to public endpoint)
+    #[serde(default = "default_jetstream_endpoint")]
+    pub jetstream_endpoint: String,
+}
+
+fn default_jetstream_endpoint() -> String {
+    "wss://jetstream2.us-east.bsky.network/subscribe".to_string()
+}
+
 /// Model provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
@@ -215,6 +244,7 @@ impl Default for PatternConfig {
             model: ModelConfig::default(),
             database: DatabaseConfig::default(),
             groups: Vec::new(),
+            bluesky: None,
         }
     }
 }
@@ -238,6 +268,7 @@ impl Default for AgentConfig {
             persona: None,
             instructions: None,
             memory: HashMap::new(),
+            bluesky_handle: None,
         }
     }
 }
@@ -325,6 +356,7 @@ pub fn merge_configs(base: PatternConfig, overlay: PartialConfig) -> PatternConf
         model: overlay.model.unwrap_or(base.model),
         database: overlay.database.unwrap_or(base.database),
         groups: overlay.groups.unwrap_or(base.groups),
+        bluesky: overlay.bluesky.or(base.bluesky),
     }
 }
 
@@ -345,6 +377,9 @@ pub struct PartialConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<GroupConfig>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bluesky: Option<BlueskyConfig>,
 }
 
 /// Partial agent configuration for overlaying
@@ -367,6 +402,9 @@ pub struct PartialAgentConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<HashMap<String, MemoryBlockConfig>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bluesky_handle: Option<String>,
 }
 
 fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentConfig {
@@ -384,6 +422,7 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
         } else {
             base.memory
         },
+        bluesky_handle: overlay.bluesky_handle.or(base.bluesky_handle),
     }
 }
 

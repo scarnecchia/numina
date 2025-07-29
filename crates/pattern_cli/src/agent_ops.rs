@@ -4,9 +4,12 @@ use pattern_core::{
     Agent, ModelProvider,
     agent::{AgentRecord, AgentType, DatabaseAgent, ResponseEvent},
     config::PatternConfig,
-    context::heartbeat,
+    context::{heartbeat, message_router::BlueskyEndpoint},
     coordination::groups::{AgentGroup, GroupManager},
-    db::{client::DB, ops},
+    db::{
+        client::DB,
+        ops::{self, atproto::get_user_atproto_identities},
+    },
     embeddings::cloud::OpenAIEmbedder,
     id::{AgentId, RelationId},
     memory::{Memory, MemoryBlock},
@@ -21,6 +24,75 @@ use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::{endpoints::CliEndpoint, output::Output};
+
+/// Set up Bluesky endpoint for an agent if configured
+async fn setup_bluesky_endpoint(
+    agent: &Arc<dyn Agent>,
+    config: &PatternConfig,
+    output: &Output,
+) -> Result<()> {
+    // Check if agent has a bluesky_handle configured
+    let bluesky_handle = if let Some(handle) = &config.agent.bluesky_handle {
+        handle.clone()
+    } else {
+        // No Bluesky handle configured for this agent
+        return Ok(());
+    };
+
+    output.status(&format!(
+        "Checking Bluesky credentials for {}",
+        bluesky_handle.bright_cyan()
+    ));
+
+    // Look up ATProto identity for this handle
+    let identities = get_user_atproto_identities(&DB, &config.user.id)
+        .await
+        .into_diagnostic()?;
+
+    // Find identity matching the handle
+    let identity = identities
+        .into_iter()
+        .find(|i| i.handle == bluesky_handle || i.id.to_string() == bluesky_handle);
+
+    if let Some(identity) = identity {
+        // Get credentials
+        if let Some(creds) = identity.get_auth_credentials() {
+            output.status(&format!(
+                "Setting up Bluesky endpoint for {}",
+                identity.handle.bright_cyan()
+            ));
+
+            // Create Bluesky endpoint
+            match BlueskyEndpoint::new(creds, identity.handle.clone()).await {
+                Ok(endpoint) => {
+                    // Register as the Bluesky endpoint for this agent
+                    agent
+                        .register_endpoint("bluesky".to_string(), Arc::new(endpoint))
+                        .await?;
+                    output.success(&format!(
+                        "✓ Bluesky endpoint configured for {}",
+                        identity.handle.bright_green()
+                    ));
+                }
+                Err(e) => {
+                    output.warning(&format!("Failed to create Bluesky endpoint: {:?}", e));
+                }
+            }
+        } else {
+            output.warning(&format!(
+                "No credentials available for Bluesky account {}",
+                bluesky_handle
+            ));
+        }
+    } else {
+        output.warning(&format!(
+            "No ATProto identity found for handle '{}'. Run 'pattern-cli atproto login' to authenticate.",
+            bluesky_handle
+        ));
+    }
+
+    Ok(())
+}
 
 /// Load an existing agent from the database or create a new one
 pub async fn load_or_create_agent(
@@ -240,7 +312,7 @@ pub async fn create_agent_from_record(
     let tools = ToolRegistry::new();
 
     // Create response options with the selected model
-    let response_options = ResponseOptions {
+    let mut response_options = ResponseOptions {
         model_info: model_info.clone(),
         temperature: Some(0.7),
         max_tokens: Some(pattern_core::model::defaults::calculate_max_tokens(
@@ -258,6 +330,17 @@ pub async fn create_agent_from_record(
         normalize_reasoning_content: None,
         reasoning_effort: None,
     };
+
+    // Enable reasoning mode if the model supports it
+    if model_info
+        .capabilities
+        .contains(&pattern_core::model::ModelCapability::ExtendedThinking)
+    {
+        response_options.capture_reasoning_content = Some(true);
+        response_options.normalize_reasoning_content = Some(true);
+        // Use medium effort by default
+        response_options.reasoning_effort = Some(genai::chat::ReasoningEffort::Medium);
+    }
 
     // Create agent from the record
     let agent = DatabaseAgent::from_record(
@@ -282,7 +365,18 @@ pub async fn create_agent_from_record(
     agent.clone().start_memory_sync().await?;
     agent.clone().start_message_monitoring().await?;
 
-    Ok(agent)
+    // Convert to trait object for endpoint setup
+    let agent_dyn: Arc<dyn Agent> = agent;
+
+    // Set up Bluesky endpoint if configured
+    let output = Output::new();
+    setup_bluesky_endpoint(&agent_dyn, config, &output)
+        .await
+        .inspect_err(|e| {
+            tracing::error!("{:?}", e);
+        })?;
+
+    Ok(agent_dyn)
 }
 
 /// Create an agent with the specified configuration
@@ -411,7 +505,7 @@ pub async fn create_agent(
     let user_id = config.user.id.clone();
 
     // Create response options with the selected model
-    let response_options = ResponseOptions {
+    let mut response_options = ResponseOptions {
         model_info: model_info.clone(),
         temperature: Some(0.7),
         max_tokens: Some(pattern_core::model::defaults::calculate_max_tokens(
@@ -429,6 +523,17 @@ pub async fn create_agent(
         normalize_reasoning_content: None,
         reasoning_effort: None,
     };
+
+    // Enable reasoning mode if the model supports it
+    if model_info
+        .capabilities
+        .contains(&pattern_core::model::ModelCapability::ExtendedThinking)
+    {
+        response_options.capture_reasoning_content = Some(true);
+        response_options.normalize_reasoning_content = Some(true);
+        // Use medium effort by default
+        response_options.reasoning_effort = Some(genai::chat::ReasoningEffort::Medium);
+    }
 
     // Create agent
     let agent = DatabaseAgent::new(
@@ -550,7 +655,17 @@ pub async fn create_agent(
         }
     }
 
-    Ok(agent)
+    // Convert to trait object
+    let agent_dyn: Arc<dyn Agent> = agent;
+
+    // Set up Bluesky endpoint if configured
+    setup_bluesky_endpoint(&agent_dyn, config, &output)
+        .await
+        .inspect_err(|e| {
+            tracing::error!("{:?}", e);
+        })?;
+
+    Ok(agent_dyn)
 }
 
 /// Handle slash commands in chat
@@ -861,9 +976,9 @@ pub fn print_response_event(event: ResponseEvent, output: &Output) {
                 output.error(&format!("Tool error ({}): {}", call_id, error));
             }
         },
-        ResponseEvent::TextChunk { .. } => {
-            // Skip displaying here - CliEndpoint already shows it
-            // output.agent_message(&agent_name, &text);
+        ResponseEvent::TextChunk { text, .. } => {
+            // Display agent's response text
+            output.agent_message("Agent", &text);
         }
         ResponseEvent::ReasoningChunk { text, is_final: _ } => {
             output.status(&format!("💭 Reasoning: {}", text));

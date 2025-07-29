@@ -3,8 +3,20 @@
 //! Allows Pattern users to authenticate using their Bluesky/ATProto accounts
 //! while maintaining Pattern's internal user system.
 
-use crate::id::{Did, UserId};
+use std::sync::Arc;
+
+use crate::{
+    data_source::bluesky::PatternHttpClient,
+    id::{Did, UserId},
+};
+use atrium_common::resolver::Resolver;
+use atrium_identity::{
+    did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL},
+    handle::{AtprotoHandleResolver, AtprotoHandleResolverConfig, DnsTxtResolver},
+    identity_resolver::{IdentityResolver, IdentityResolverConfig},
+};
 use chrono::{DateTime, Utc};
+use hickory_resolver::TokioAsyncResolver;
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 
@@ -243,6 +255,71 @@ pub struct AtprotoProfile {
     pub description: Option<String>,
     pub avatar_url: Option<String>,
     pub indexed_at: Option<DateTime<Utc>>,
+}
+
+/// DNS TXT resolver for handle resolution
+pub struct HickoryDnsTxtResolver {
+    resolver: TokioAsyncResolver,
+}
+
+impl Default for HickoryDnsTxtResolver {
+    fn default() -> Self {
+        Self {
+            resolver: TokioAsyncResolver::tokio_from_system_conf()
+                .expect("failed to create resolver"),
+        }
+    }
+}
+
+impl DnsTxtResolver for HickoryDnsTxtResolver {
+    async fn resolve(
+        &self,
+        query: &str,
+    ) -> core::result::Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self
+            .resolver
+            .txt_lookup(query)
+            .await?
+            .iter()
+            .map(|txt| txt.to_string())
+            .collect())
+    }
+}
+
+/// Resolve a handle to its PDS URL using proper ATProto resolution
+pub async fn resolve_handle_to_pds(handle: &str) -> Result<String, String> {
+    // Set up the identity resolver
+    let http_client = Arc::new(PatternHttpClient::default());
+    let resolver_config = IdentityResolverConfig {
+        did_resolver: CommonDidResolver::new(CommonDidResolverConfig {
+            plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
+            http_client: Arc::clone(&http_client),
+        }),
+        handle_resolver: AtprotoHandleResolver::new(AtprotoHandleResolverConfig {
+            dns_txt_resolver: HickoryDnsTxtResolver::default(),
+            http_client: Arc::clone(&http_client),
+        }),
+    };
+    let resolver = IdentityResolver::new(resolver_config);
+
+    // Resolve the handle to get the identity
+    match resolver.resolve(handle).await {
+        Ok(identity) => {
+            // Successfully resolved - use the PDS from the identity
+            tracing::debug!(
+                "Resolved handle {} to DID: {} with PDS: {}",
+                handle,
+                identity.did,
+                identity.pds
+            );
+            Ok(identity.pds)
+        }
+        Err(e) => {
+            // If resolution fails, try bsky.social anyway
+            tracing::debug!("Failed to resolve handle {}: {:?}", handle, e);
+            Ok("https://bsky.social".to_string())
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,4 +5,5 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod debug;
+pub mod firehose;
 pub mod group;

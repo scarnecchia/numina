@@ -1,9 +1,20 @@
-use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::{collections::HashMap, sync::Mutex};
 
+use super::{
+    StreamBuffer,
+    traits::{DataSource, DataSourceMetadata, DataSourceStatus, StreamEvent},
+};
+use crate::error::Result;
 use async_trait::async_trait;
-use atrium_api::app::bsky::feed::post::ReplyRefData;
+use atrium_api::app::bsky::feed::post::{RecordLabelsRefs, ReplyRefData};
+use atrium_api::app::bsky::richtext::facet::MainFeaturesItem;
 use atrium_api::com::atproto::repo::strong_ref::MainData;
+use atrium_api::types::Union;
+use atrium_api::types::string::{Cid, Did};
+use atrium_identity::did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL};
+
 use chrono::{DateTime, Utc};
 use futures::Stream;
 use rocketman::{
@@ -11,23 +22,56 @@ use rocketman::{
     handler,
     ingestion::LexiconIngestor,
     options::JetstreamOptions,
-    types::event::{Commit, Event, Operation},
+    types::event::{Commit, Event},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
-use super::{
-    StreamBuffer,
-    traits::{DataSource, DataSourceMetadata, DataSourceStatus, StreamEvent},
-};
-use crate::error::Result;
+pub struct PatternHttpClient {
+    pub client: reqwest::Client,
+}
+
+impl atrium_xrpc::HttpClient for PatternHttpClient {
+    async fn send_http(
+        &self,
+        request: atrium_xrpc::http::Request<Vec<u8>>,
+    ) -> core::result::Result<
+        atrium_xrpc::http::Response<Vec<u8>>,
+        Box<dyn std::error::Error + Send + Sync + 'static>,
+    > {
+        let response = self.client.execute(request.try_into()?).await?;
+        let mut builder = atrium_xrpc::http::Response::builder().status(response.status());
+        for (k, v) in response.headers() {
+            builder = builder.header(k, v);
+        }
+        builder
+            .body(response.bytes().await?.to_vec())
+            .map_err(Into::into)
+    }
+}
+
+impl Default for PatternHttpClient {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+pub fn atproto_identity_resolver() -> CommonDidResolver<PatternHttpClient> {
+    CommonDidResolver::new(CommonDidResolverConfig {
+        plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
+        http_client: Arc::new(PatternHttpClient::default()),
+    })
+}
 
 /// A post from Bluesky/ATProto
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskyPost {
     pub uri: String,
-    pub did: String,    // Author DID
+    pub did: String, // Author DID
+    pub cid: Cid,
     pub handle: String, // Author handle
     pub text: String,
     pub created_at: DateTime<Utc>,
@@ -41,7 +85,7 @@ pub struct BlueskyPost {
 /// Reply reference - alias for atrium type
 pub type ReplyRef = ReplyRefData;
 
-/// Post reference - alias for atrium type  
+/// Post reference - alias for atrium type
 pub type PostRef = MainData;
 
 impl BlueskyPost {
@@ -157,7 +201,7 @@ struct SourceStats {
 }
 
 /// Consumes Bluesky Jetstream firehose
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct BlueskyFirehoseSource {
     source_id: String,
     endpoint: String,
@@ -170,7 +214,7 @@ pub struct BlueskyFirehoseSource {
 }
 
 impl BlueskyFirehoseSource {
-    pub fn new(source_id: impl Into<String>, endpoint: impl Into<String>) -> Self {
+    pub async fn new(source_id: impl Into<String>, endpoint: impl Into<String>) -> Self {
         Self {
             source_id: source_id.into(),
             endpoint: endpoint.into(),
@@ -229,9 +273,6 @@ impl DataSource for BlueskyFirehoseSource {
         from: Option<Self::Cursor>,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin>>
     {
-        // Build options using builder
-        let builder = JetstreamOptions::builder();
-
         // Apply collection filters (NSIDs map to collections)
         let collections = if !self.filter.nsids.is_empty() {
             self.filter.nsids.clone()
@@ -240,72 +281,88 @@ impl DataSource for BlueskyFirehoseSource {
         };
 
         // Build options with all settings
-        let options = if let Some(cursor) = from {
-            builder
+        let options = if let Some(ref cursor) = from {
+            JetstreamOptions::builder()
                 .cursor(cursor.time_us.to_string())
                 .wanted_collections(collections)
                 .build()
         } else {
-            builder.wanted_collections(collections).build()
+            JetstreamOptions::builder()
+                .wanted_collections(collections)
+                .build()
         };
 
         // Create connection - new() is sync
         let connection = JetstreamConnection::new(options);
 
         // Create channel for processed events
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(5000);
         let filter = self.filter.clone();
         let source_id = self.source_id.clone();
         let buffer = self.buffer.clone();
 
+        // Create our ingestor that sends posts to our channel
+        let post_ingestor = PostIngestor {
+            tx: tx.clone(),
+            filter,
+            buffer,
+            resolver: atproto_identity_resolver(),
+        };
+
+        let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> = HashMap::new();
+        ingestors.insert("app.bsky.feed.post".to_string(), Box::new(post_ingestor));
+
+        // tracks the last message we've processed
+        let cursor: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(from.map(|c| c.time_us)));
+
+        let msg_rx = connection.get_msg_rx();
+        let reconnect_tx = connection.get_reconnect_tx();
+
+        let c_cursor = cursor.clone();
+        let c_source_id = source_id.clone();
+        let ingestor_tx = tx.clone();
         // Spawn task to consume events
-        tokio::spawn(async move {
-            // Connect and get message channel
-            let cursor_arc = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
-            if let Err(e) = connection.connect(cursor_arc.clone()).await {
-                let _ = tx.send(Err(crate::CoreError::DataSourceError {
-                    source_name: source_id.clone(),
-                    operation: "connect".to_string(),
-                    cause: e.to_string(),
-                }));
-                return;
-            }
-
-            let msg_rx = connection.get_msg_rx();
-            let reconnect_tx = connection.get_reconnect_tx();
-
-            // Create our ingestor that sends posts to our channel
-            let post_ingestor = PostIngestor {
-                tx: tx.clone(),
-                filter,
-                buffer,
-            };
-
-            let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> =
-                HashMap::new();
-            ingestors.insert("app.bsky.feed.post".to_string(), Box::new(post_ingestor));
-
+        let handle = tokio::spawn(async move {
             // Process messages from jetstream
             while let Ok(message) = msg_rx.recv_async().await {
                 if let Err(e) = handler::handle_message(
                     message,
                     &ingestors,
                     reconnect_tx.clone(),
-                    cursor_arc.clone(),
+                    c_cursor.clone(),
                 )
                 .await
                 {
                     tracing::warn!("Error processing message: {}", e);
-                    let _ = tx.send(Err(crate::CoreError::DataSourceError {
-                        source_name: source_id.clone(),
+                    let _ = ingestor_tx.send(Err(crate::CoreError::DataSourceError {
+                        source_name: c_source_id.clone(),
                         operation: "process".to_string(),
                         cause: e.to_string(),
                     }));
-                }
+                };
             }
         });
 
-        Ok(Box::new(UnboundedReceiverStream::new(rx)))
+        // Spawn connect in its own task so it doesn't block
+        let connect_source_id = source_id.clone();
+        let connect_tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = connection.connect(cursor.clone()).await {
+                let error_msg = e.to_string();
+                tracing::error!("Jetstream connection error: {}", error_msg);
+                // Use try_send to avoid await point while holding non-Send error
+                let _ = connect_tx.try_send(Err(crate::CoreError::DataSourceError {
+                    source_name: connect_source_id,
+                    operation: "connect".to_string(),
+                    cause: error_msg,
+                }));
+            }
+            handle.abort();
+        });
+        Ok(Box::new(ReceiverStream::new(rx))
+            as Box<
+                dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin,
+            >)
     }
 
     fn set_filter(&mut self, filter: Self::Filter) {
@@ -339,169 +396,127 @@ impl DataSource for BlueskyFirehoseSource {
     }
 }
 
-fn parse_bluesky_post<T>(commit: &Commit<T>, event: &Event<T>) -> Result<BlueskyPost>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize,
-{
-    // Extract post data from commit record
-    let record_value = match &commit.record {
-        Some(rec) => serde_json::to_value(rec).unwrap_or(serde_json::Value::Null),
-        None => serde_json::Value::Null,
-    };
-
-    let record_obj = record_value
-        .as_object()
-        .ok_or_else(|| crate::CoreError::DataSourceError {
-            source_name: "bluesky".to_string(),
-            operation: "parse_post".to_string(),
-            cause: "Record is not an object".to_string(),
-        })?;
-
-    // Extract text (required field)
-    let text = record_obj
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // Extract languages
-    let langs = record_obj
-        .get("langs")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Extract reply information - parse full reply structure
-    let reply = record_obj
-        .get("reply")
-        .and_then(|v| v.as_object())
-        .and_then(|reply_obj| {
-            let root = reply_obj
-                .get("root")
-                .and_then(|r| serde_json::from_value::<MainData>(r.clone()).ok())?;
-            let parent = reply_obj
-                .get("parent")
-                .and_then(|p| serde_json::from_value::<MainData>(p.clone()).ok())?;
-            Some(ReplyRefData {
-                root: root.into(),
-                parent: parent.into(),
-            })
-        });
-
-    // Extract embed as-is
-    // TODO: Parse embed structure to extract:
-    // - Alt text from images (for accessibility)
-    // - Image data/references (for vision-capable agents)
-    // - External link cards
-    // - Quote posts
-    let embed = record_obj.get("embed").cloned();
-
-    // Parse facets for rich text features
-    let facets = record_obj
-        .get("facets")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|facet| serde_json::from_value::<Facet>(facet.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Extract labels (if present)
-    let labels = record_obj
-        .get("labels")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Parse created_at timestamp
-    let created_at = record_obj
-        .get("createdAt")
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|| Utc::now());
-
-    // Build post URI
-    let uri = format!("at://{}/{}/{}", event.did, commit.collection, commit.rkey);
-
-    Ok(BlueskyPost {
-        uri,
-        did: event.did.clone(),
-        handle: event.did.clone(), // TODO: Resolve handle from DID - rocketman might provide this
-        text,
-        created_at,
-        reply,
-        embed,
-        langs,
-        labels,
-        facets,
-    })
-}
-
 /// Ingestor that processes Bluesky posts and sends them to our channel
 struct PostIngestor {
-    tx: tokio::sync::mpsc::UnboundedSender<Result<StreamEvent<BlueskyPost, BlueskyFirehoseCursor>>>,
+    tx: tokio::sync::mpsc::Sender<Result<StreamEvent<BlueskyPost, BlueskyFirehoseCursor>>>,
     filter: BlueskyFilter,
+    #[allow(unused)]
     buffer: Option<Arc<parking_lot::Mutex<StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>>>>,
+    resolver: atrium_identity::did::CommonDidResolver<PatternHttpClient>,
 }
 
 #[async_trait]
 impl LexiconIngestor for PostIngestor {
     async fn ingest(&self, event: Event<serde_json::Value>) -> anyhow::Result<()> {
         // Only process commit events for posts
-        if let Some(ref commit) = event.commit {
-            if commit.collection == "app.bsky.feed.post"
-                && matches!(commit.operation, Operation::Create)
-            {
-                // Parse the post from the event
-                match parse_bluesky_post(&commit, &event) {
-                    Ok(post) => {
-                        // Apply filters
-                        if should_include_post(&post, &self.filter) {
-                            let cursor = BlueskyFirehoseCursor {
-                                seq: event.time_us.unwrap_or(0), // TODO: Get actual seq
-                                time_us: event.time_us.unwrap_or(0),
-                            };
+        if let Some(Commit {
+            record: Some(record),
+            cid: Some(cid),
+            rkey,
+            collection,
+            ..
+        }) = event.commit
+        {
+            let post =
+                serde_json::from_value::<atrium_api::app::bsky::feed::post::RecordData>(record)?;
 
-                            let stream_event = StreamEvent {
-                                item: post,
-                                cursor,
-                                timestamp: Utc::now(),
-                            };
+            let rcid = match atrium_api::types::string::Cid::from_str(&cid) {
+                Ok(r) => r,
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            };
 
-                            // Add to buffer if present
-                            if let Some(ref buf) = self.buffer {
-                                buf.lock().push(stream_event.clone());
-                            }
+            let uri = format!("at://{}/{}/{}", event.did, collection, rkey);
+            let now = chrono::Utc::now();
 
-                            // Send to stream
-                            if self.tx.send(Ok(stream_event)).is_err() {
-                                tracing::debug!("Receiver dropped, stopping Bluesky ingestor");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse post: {}", e);
-                    }
-                }
+            let mut post_to_filter = BlueskyPost {
+                uri,
+                did: event.did.to_string(),
+                cid: rcid,
+                handle: event.did.to_string(), // temporary, need to do handle resolution
+                text: post.text,
+                created_at: chrono::DateTime::parse_from_rfc3339(post.created_at.as_str())
+                    .expect("incorrect time format")
+                    .to_utc(),
+                reply: post.reply.map(|r| r.data),
+                embed: post
+                    .embed
+                    .map(|e| serde_json::to_value(e).expect("should be reasonably serializable")),
+                langs: post
+                    .langs
+                    .map(|l| l.iter().map(|l| format!("{:?}", l)).collect())
+                    .unwrap_or_default(),
+                labels: post.labels.map(label_convert).unwrap_or_default(),
+                facets: post
+                    .facets
+                    .map(|f| {
+                        f.iter()
+                            .map(|f| Facet {
+                                index: ByteSlice {
+                                    byte_start: f.index.byte_start,
+                                    byte_end: f.index.byte_end,
+                                },
+                                features: f.features.iter().filter_map(facet_convert).collect(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+
+            if should_include_post(&mut post_to_filter, &self.filter, &self.resolver).await {
+                self.tx
+                    .send(Ok(StreamEvent {
+                        item: post_to_filter.clone(),
+                        cursor: BlueskyFirehoseCursor {
+                            seq: now.timestamp_micros() as u64,
+                            time_us: now.timestamp_micros() as u64,
+                        },
+                        timestamp: now,
+                    }))
+                    .await
+                    .inspect_err(|e| tracing::error!("{}", e))?;
             }
         }
+
         Ok(())
     }
 }
 
-fn should_include_post(post: &BlueskyPost, filter: &BlueskyFilter) -> bool {
+fn label_convert(l: Union<RecordLabelsRefs>) -> Vec<String> {
+    match l {
+        atrium_api::types::Union::Refs(
+            atrium_api::app::bsky::feed::post::RecordLabelsRefs::ComAtprotoLabelDefsSelfLabels(l),
+        ) => l.values.iter().map(|l| l.val.clone()).collect(),
+        atrium_api::types::Union::Unknown(unknown_data) => unknown_data
+            .data
+            .iter()
+            .map(|l| format!("{:?}", l))
+            .collect(),
+    }
+}
+
+fn facet_convert(f: &Union<MainFeaturesItem>) -> Option<FacetFeature> {
+    match f {
+        atrium_api::types::Union::Refs(f) => match f {
+            MainFeaturesItem::Mention(object) => Some(FacetFeature::Mention {
+                did: object.did.to_string(),
+            }),
+            MainFeaturesItem::Link(object) => Some(FacetFeature::Link {
+                uri: object.uri.clone(),
+            }),
+            MainFeaturesItem::Tag(object) => Some(FacetFeature::Tag {
+                tag: object.tag.clone(),
+            }),
+        },
+        atrium_api::types::Union::Unknown(_) => None,
+    }
+}
+
+async fn should_include_post(
+    post: &mut BlueskyPost,
+    filter: &BlueskyFilter,
+    resolver: &atrium_identity::did::CommonDidResolver<PatternHttpClient>,
+) -> bool {
+    use atrium_common::resolver::Resolver;
     // DID filter - only from specific authors
     if !filter.dids.is_empty() && !filter.dids.contains(&post.did) {
         return false;
@@ -541,6 +556,22 @@ fn should_include_post(post: &BlueskyPost, filter: &BlueskyFilter) -> bool {
         return false;
     }
 
+    post.handle = resolver
+        .resolve(&Did::from_str(&post.did).expect("valid did"))
+        .await
+        .ok()
+        .map(|doc| {
+            let handle = doc
+                .also_known_as
+                .expect("proper did doc should have an alias in it")
+                .first()
+                .expect("proper did doc should have an alias in it")
+                .clone();
+
+            handle.strip_prefix("at://").unwrap_or(&handle).to_string()
+        })
+        .unwrap_or(post.did.clone());
+
     true
 }
 
@@ -548,10 +579,12 @@ fn should_include_post(post: &BlueskyPost, filter: &BlueskyFilter) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_filter_post() {
-        let post = BlueskyPost {
+    #[tokio::test]
+    async fn test_filter_post() {
+        let mut post = BlueskyPost {
             uri: "at://did:plc:example/app.bsky.feed.post/123".to_string(),
+            cid: Cid::from_str("bafyreieqropzcxn6nztojzr5z42u4furcrgfqppyt5e4p43vuzmbi7xdfu")
+                .unwrap(),
             did: "did:plc:example".to_string(),
             handle: "test.bsky.social".to_string(),
             text: "Hello world from Rust!".to_string(),
@@ -563,33 +596,36 @@ mod tests {
             facets: vec![],
         };
 
+        let resolver = atproto_identity_resolver();
         // Test keyword filter
         let filter = BlueskyFilter {
             keywords: vec!["rust".to_string()],
             ..Default::default()
         };
-        assert!(should_include_post(&post, &filter));
+        assert!(should_include_post(&mut post, &filter, &resolver).await);
 
         // Test language filter
         let filter = BlueskyFilter {
             languages: vec!["en".to_string()],
             ..Default::default()
         };
-        assert!(should_include_post(&post, &filter));
+        assert!(should_include_post(&mut post, &filter, &resolver).await);
 
         // Test DID filter
         let filter = BlueskyFilter {
             dids: vec!["did:plc:other".to_string()],
             ..Default::default()
         };
-        assert!(!should_include_post(&post, &filter));
+        assert!(!should_include_post(&mut post, &filter, &resolver).await);
     }
 
-    #[test]
-    fn test_mention_filter() {
+    #[tokio::test]
+    async fn test_mention_filter() {
         let mut post = BlueskyPost {
             uri: "at://did:plc:author/app.bsky.feed.post/456".to_string(),
             did: "did:plc:author".to_string(),
+            cid: Cid::from_str("bafyreieqropzcxn6nztojzr5z42u4furcrgfqppyt5e4p43vuzmbi7xdfu")
+                .unwrap(),
             handle: "author.bsky.social".to_string(),
             text: "Hey @alice.bsky.social check this out!".to_string(),
             created_at: Utc::now(),
@@ -599,6 +635,8 @@ mod tests {
             labels: vec![],
             facets: vec![],
         };
+
+        let resolver = atproto_identity_resolver();
 
         // Add mention facet
         post.facets.push(Facet {
@@ -616,14 +654,14 @@ mod tests {
             mentions: vec!["did:plc:alice".to_string()],
             ..Default::default()
         };
-        assert!(should_include_post(&post, &filter));
+        assert!(should_include_post(&mut post, &filter, &resolver).await);
 
         // Test with different mention whitelist - should exclude
         let filter = BlueskyFilter {
             mentions: vec!["did:plc:bob".to_string()],
             ..Default::default()
         };
-        assert!(!should_include_post(&post, &filter));
+        assert!(!should_include_post(&mut post, &filter, &resolver).await);
 
         // Test mentions() helper
         assert!(post.mentions("did:plc:alice"));

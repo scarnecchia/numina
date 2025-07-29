@@ -29,7 +29,7 @@ pub enum FileStorageMode {
     Ephemeral,
     Indexed {
         embedding_provider: Arc<dyn EmbeddingProvider>,
-        chunk_size: usize,
+        chunk_size: i64,
     },
 }
 
@@ -37,14 +37,14 @@ pub enum FileStorageMode {
 pub enum FileCursor {
     ModTime(SystemTime),
     LineNumber(usize),
-    ByteOffset(u64),
+    ByteOffset(i64),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileFilter {
     pub extensions: Option<Vec<String>>,
     pub pattern: Option<String>,
-    pub max_size_bytes: Option<u64>,
+    pub max_size_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,14 +60,14 @@ pub enum FileContent {
     Lines(Vec<String>),
     Chunk {
         text: String,
-        start_line: usize,
-        end_line: usize,
+        start_line: i64,
+        end_line: i64,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
-    pub size_bytes: u64,
+    pub size_bytes: i64,
     pub modified: SystemTime,
     pub created: Option<SystemTime>,
     pub is_dir: bool,
@@ -114,7 +114,7 @@ impl FileDataSource {
                 })?;
 
         let file_metadata = FileMetadata {
-            size_bytes: metadata.len(),
+            size_bytes: metadata.len() as i64,
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             created: metadata.created().ok(),
             is_dir: metadata.is_dir(),
@@ -130,7 +130,7 @@ impl FileDataSource {
 
         // Check filter
         if let Some(max_size) = self.filter.max_size_bytes {
-            if metadata.len() > max_size {
+            if metadata.len() as i64 > max_size {
                 return Err(crate::CoreError::ToolExecutionFailed {
                     tool_name: "file_data_source".to_string(),
                     cause: format!("File too large: {} bytes", metadata.len()),
@@ -178,11 +178,11 @@ impl FileDataSource {
                         current_chunk.push(line);
                         line_num += 1;
 
-                        if current_chunk.len() >= *chunk_size {
+                        if current_chunk.len() as i64 >= *chunk_size {
                             let text = current_chunk.join("\n");
                             chunks.push(FileContent::Chunk {
                                 text,
-                                start_line: line_num - current_chunk.len(),
+                                start_line: line_num - current_chunk.len() as i64,
                                 end_line: line_num - 1,
                             });
                             current_chunk.clear();
@@ -194,7 +194,7 @@ impl FileDataSource {
                         let text = current_chunk.join("\n");
                         chunks.push(FileContent::Chunk {
                             text,
-                            start_line: line_num - current_chunk.len(),
+                            start_line: line_num - current_chunk.len() as i64,
                             end_line: line_num - 1,
                         });
                     }

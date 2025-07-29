@@ -1,0 +1,59 @@
+# Example Pattern Configuration File
+
+[user]
+# User ID will be auto-generated if not specified
+# name = "Your Name"
+
+[agent]
+name = "MyAssistant"
+# Optional: Bluesky handle for this agent
+# bluesky_handle = "alice.bsky.social"
+
+# Optional: Agent persona
+persona = """
+You are a helpful assistant focused on productivity and organization.
+You help users manage their tasks and stay focused.
+"""
+
+# Optional: Additional memory blocks
+[agent.memory.preferences]
+content = "User prefers concise responses and bullet points."
+permission = "Append"
+memory_type = "Core"
+
+[model]
+provider = "Gemini"
+# Optional: Specify a particular model
+# model = "gemini-2.5-flash"
+
+[database]
+# Uses embedded SurrealDB by default
+
+# Optional: Agent groups
+[[groups]]
+name = "Planning Team"
+description = "Agents focused on planning and organization"
+pattern = { type = "round_robin", skip_unavailable = true }
+
+[[groups.members]]
+name = "TaskManager"
+role = "Regular"
+capabilities = ["task_breakdown", "scheduling"]
+
+# Optional: Bluesky configuration
+[bluesky]
+# Default filters for the firehose
+default_filters = [
+    { nsids = [
+        "app.bsky.feed.post",
+    ], mentions = [
+        "pattern.atproto.systems",
+        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+    ], dids = [
+        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+    ], keywords = [
+    ], languages = [
+    ] },
+]
+auto_connect_firehose = false
+# jetstream_endpoint = "wss://jetstream2.us-east.bsky.network/subscribe"

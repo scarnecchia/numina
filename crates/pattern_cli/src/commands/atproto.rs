@@ -3,123 +3,17 @@
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
-    atproto_identity::{AtprotoAuthCredentials, AtprotoIdentity},
+    atproto_identity::{AtprotoAuthCredentials, AtprotoIdentity, resolve_handle_to_pds},
     config::PatternConfig,
     db::{client::DB, ops::atproto::*},
     id::Did,
 };
-use std::sync::Arc;
 use std::{
     io::{self, Write},
     str::FromStr,
 };
 
-use atrium_common::resolver::Resolver;
-use atrium_identity::{
-    did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL},
-    handle::{AtprotoHandleResolver, AtprotoHandleResolverConfig, DnsTxtResolver},
-    identity_resolver::{IdentityResolver, IdentityResolverConfig},
-};
-use hickory_resolver::TokioAsyncResolver;
-
 use crate::output::Output;
-
-/// DNS TXT resolver for handle resolution
-struct HickoryDnsTxtResolver {
-    resolver: TokioAsyncResolver,
-}
-
-impl Default for HickoryDnsTxtResolver {
-    fn default() -> Self {
-        Self {
-            resolver: TokioAsyncResolver::tokio_from_system_conf()
-                .expect("failed to create resolver"),
-        }
-    }
-}
-
-impl DnsTxtResolver for HickoryDnsTxtResolver {
-    async fn resolve(
-        &self,
-        query: &str,
-    ) -> core::result::Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self
-            .resolver
-            .txt_lookup(query)
-            .await?
-            .iter()
-            .map(|txt| txt.to_string())
-            .collect())
-    }
-}
-
-/// Simple HTTP client wrapper for atrium
-struct SimpleHttpClient {
-    client: reqwest::Client,
-}
-
-impl Default for SimpleHttpClient {
-    fn default() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
-    }
-}
-
-impl atrium_xrpc::HttpClient for SimpleHttpClient {
-    async fn send_http(
-        &self,
-        request: atrium_xrpc::http::Request<Vec<u8>>,
-    ) -> core::result::Result<
-        atrium_xrpc::http::Response<Vec<u8>>,
-        Box<dyn std::error::Error + Send + Sync + 'static>,
-    > {
-        let response = self.client.execute(request.try_into()?).await?;
-        let mut builder = atrium_xrpc::http::Response::builder().status(response.status());
-        for (k, v) in response.headers() {
-            builder = builder.header(k, v);
-        }
-        builder
-            .body(response.bytes().await?.to_vec())
-            .map_err(Into::into)
-    }
-}
-
-/// Resolve a handle to its PDS URL using proper ATProto resolution
-async fn resolve_handle_to_pds(handle: &str) -> Result<String> {
-    // Set up the identity resolver
-    let http_client = Arc::new(SimpleHttpClient::default());
-    let resolver_config = IdentityResolverConfig {
-        did_resolver: CommonDidResolver::new(CommonDidResolverConfig {
-            plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
-            http_client: Arc::clone(&http_client),
-        }),
-        handle_resolver: AtprotoHandleResolver::new(AtprotoHandleResolverConfig {
-            dns_txt_resolver: HickoryDnsTxtResolver::default(),
-            http_client: Arc::clone(&http_client),
-        }),
-    };
-    let resolver = IdentityResolver::new(resolver_config);
-
-    // Resolve the handle to get the identity
-    match resolver.resolve(handle).await {
-        Ok(identity) => {
-            // Successfully resolved - use the PDS from the identity
-            tracing::debug!(
-                "Resolved handle {} to DID: {} with PDS: {}",
-                handle,
-                identity.did,
-                identity.pds
-            );
-            Ok(identity.pds)
-        }
-        Err(e) => {
-            // If resolution fails, try bsky.social anyway
-            tracing::debug!("Failed to resolve handle {}: {:?}", handle, e);
-            Ok("https://bsky.social".to_string())
-        }
-    }
-}
 
 /// Login with ATProto OAuth
 pub async fn oauth_login(identifier: &str, _config: &PatternConfig) -> Result<()> {
@@ -164,7 +58,10 @@ pub async fn app_password_login(
     output.info("Authenticating with Bluesky...", "");
 
     // First, we need to resolve the handle to find the correct PDS
-    let pds_url = resolve_handle_to_pds(identifier).await?;
+    let pds_url = match resolve_handle_to_pds(identifier).await {
+        Ok(url) => url,
+        Err(url) => url,
+    };
     output.info("Resolved PDS:", &pds_url);
 
     let client = atrium_api::client::AtpServiceClient::new(
@@ -191,8 +88,6 @@ pub async fn app_password_login(
 
     let did = session.data.did.to_string();
     let handle = session.data.handle.to_string();
-    // Use the PDS URL we resolved earlier
-    // Note: pds_url is already set from resolve_handle_to_pds()
 
     output.success(&format!("Authenticated as {}", handle.bright_green()));
     output.info("DID:", &did.bright_cyan().to_string());

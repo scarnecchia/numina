@@ -4,12 +4,12 @@ use std::sync::Arc;
 use atrium_api::app::bsky::feed::post::{ReplyRef, ReplyRefData};
 use atrium_api::com::atproto::repo::strong_ref;
 use atrium_api::types::TryFromUnknown;
-use atrium_api::types::string::Language;
 use serde_json::Value;
 use surrealdb::Surreal;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::atproto_identity::resolve_handle_to_pds;
 use crate::db::client;
 use crate::error::Result;
 use crate::id::{AgentId, GroupId, UserId};
@@ -341,7 +341,9 @@ pub async fn create_router_with_global_db(agent_id: AgentId) -> Result<AgentMess
 #[derive(Clone)]
 pub struct BlueskyEndpoint {
     agent: Arc<tokio::sync::RwLock<bsky_sdk::BskyAgent>>,
+    #[allow(dead_code)]
     handle: String,
+    #[allow(dead_code)]
     did: String,
 }
 
@@ -351,13 +353,25 @@ impl BlueskyEndpoint {
         credentials: crate::atproto_identity::AtprotoAuthCredentials,
         handle: String,
     ) -> Result<Self> {
-        let agent = bsky_sdk::BskyAgent::builder().build().await.map_err(|e| {
-            crate::CoreError::ToolExecutionFailed {
+        let pds_url = match resolve_handle_to_pds(&handle).await {
+            Ok(url) => url,
+            Err(url) => url,
+        };
+
+        let agent = bsky_sdk::BskyAgent::builder()
+            .config(bsky_sdk::agent::config::Config {
+                endpoint: pds_url,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
                 tool_name: "bluesky_endpoint".to_string(),
-                cause: format!("Failed to create BskyAgent: {}", e),
+                cause: format!("Failed to create BskyAgent: {:?}", e),
                 parameters: serde_json::json!({}),
-            }
-        })?;
+            })?;
+
+        info!("credentials:{:?}", credentials);
 
         // Authenticate based on credential type
         let session = match credentials {
@@ -375,7 +389,7 @@ impl BlueskyEndpoint {
             } => agent.login(identifier, password).await.map_err(|e| {
                 crate::CoreError::ToolExecutionFailed {
                     tool_name: "bluesky_endpoint".to_string(),
-                    cause: format!("Login failed: {}", e),
+                    cause: format!("Login failed: {:?}", e),
                     parameters: serde_json::json!({}),
                 }
             })?,
@@ -385,7 +399,7 @@ impl BlueskyEndpoint {
 
         Ok(Self {
             agent: Arc::new(tokio::sync::RwLock::new(agent)),
-            handle,
+            handle: handle,
             did: session.did.to_string(),
         })
     }
