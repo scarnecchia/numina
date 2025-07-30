@@ -10,7 +10,8 @@ use std::sync::Arc;
 use crate::{
     AgentId, CoreError, Result, UserId,
     agent::{Agent, AgentRecord},
-    id::{ConstellationId, GroupId},
+    db::entity::DbEntity,
+    id::{ConstellationId, GroupId, MessageId, RelationId},
     message::{Message, Response},
 };
 
@@ -46,8 +47,13 @@ pub struct Constellation {
 }
 
 /// Edge entity for constellation membership
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, Serialize, Deserialize, Entity)]
+#[entity(entity_type = "constellation_agents", edge = true)]
 pub struct ConstellationMembership {
+    pub id: RelationId,
+    pub in_id: ConstellationId,
+    pub out_id: AgentId,
     /// When this agent joined the constellation
     pub joined_at: DateTime<Utc>,
     /// Is this the primary orchestrator agent?
@@ -85,8 +91,12 @@ pub struct AgentGroup {
 }
 
 /// Edge entity for group membership
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Entity)]
+#[entity(entity_type = "group_members", edge = true)]
 pub struct GroupMembership {
+    pub id: RelationId,
+    pub in_id: AgentId,
+    pub out_id: GroupId,
     /// When this agent joined the group
     pub joined_at: DateTime<Utc>,
     /// Role of this agent in the group
@@ -123,16 +133,86 @@ pub struct AgentResponse {
     pub responded_at: DateTime<Utc>,
 }
 
+/// Events emitted during group message processing
+#[derive(Debug, Clone)]
+pub enum GroupResponseEvent {
+    /// Processing has started
+    Started {
+        group_id: GroupId,
+        pattern: String,
+        agent_count: usize,
+    },
+
+    /// An agent is starting to process the message
+    AgentStarted {
+        agent_id: AgentId,
+        agent_name: String,
+        role: GroupMemberRole,
+    },
+
+    /// Text chunk from an agent
+    TextChunk {
+        agent_id: AgentId,
+        text: String,
+        is_final: bool,
+    },
+
+    /// Reasoning chunk from an agent
+    ReasoningChunk {
+        agent_id: AgentId,
+        text: String,
+        is_final: bool,
+    },
+
+    /// Tool call started by an agent
+    ToolCallStarted {
+        agent_id: AgentId,
+        call_id: String,
+        fn_name: String,
+        args: serde_json::Value,
+    },
+
+    /// Tool call completed by an agent
+    ToolCallCompleted {
+        agent_id: AgentId,
+        call_id: String,
+        result: std::result::Result<String, String>,
+    },
+
+    /// An agent has completed processing
+    AgentCompleted {
+        agent_id: AgentId,
+        agent_name: String,
+        message_id: Option<MessageId>,
+    },
+
+    /// Group processing is complete
+    Complete {
+        group_id: GroupId,
+        pattern: String,
+        execution_time: std::time::Duration,
+        agent_responses: Vec<AgentResponse>,
+        state_changes: Option<GroupState>,
+    },
+
+    /// Error occurred during processing
+    Error {
+        agent_id: Option<AgentId>,
+        message: String,
+        recoverable: bool,
+    },
+}
+
 /// Trait for implementing group coordination managers
 #[async_trait]
 pub trait GroupManager: Send + Sync {
-    /// Route a message through this group
+    /// Route a message through this group, returning a stream of events
     async fn route_message(
         &self,
         group: &AgentGroup,
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse>;
+    ) -> Result<Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>>;
 
     /// Update group state after execution
     async fn update_state(
@@ -143,6 +223,7 @@ pub trait GroupManager: Send + Sync {
 }
 
 /// Agent with group membership metadata
+#[derive(Clone)]
 pub struct AgentWithMembership<A> {
     pub agent: A,
     pub membership: GroupMembership,

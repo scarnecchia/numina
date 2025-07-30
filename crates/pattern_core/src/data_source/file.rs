@@ -348,7 +348,7 @@ impl DataSource for FileDataSource {
         }
     }
 
-    fn format_notification(&self, item: &Self::Item) -> Option<String> {
+    async fn format_notification(&self, item: &Self::Item) -> Option<String> {
         let path_str = item.path.display();
         let size_str = if item.metadata.size_bytes > 1024 * 1024 {
             format!(

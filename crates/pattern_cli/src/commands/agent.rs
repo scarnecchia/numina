@@ -76,8 +76,23 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
     let user_id = config.user.id.clone();
     let now = chrono::Utc::now();
 
-    // Use agent ID from config if available
-    let agent_id = config.agent.id.clone().unwrap_or_else(AgentId::generate);
+    // Use config ID for first agent, generate new ID if it already exists
+    let agent_id = if let Some(config_id) = &config.agent.id {
+        // Check if an agent with this ID already exists
+        if ops::get_entity::<AgentRecord, _>(&DB, config_id)
+            .await?
+            .is_some()
+        {
+            // Agent exists, generate a new ID
+            AgentId::generate()
+        } else {
+            // First agent, use config ID
+            config_id.clone()
+        }
+    } else {
+        // No config ID, generate new
+        AgentId::generate()
+    };
 
     // Use system prompt from config or generate default
     let base_instructions = if let Some(system_prompt) = &config.agent.system_prompt {

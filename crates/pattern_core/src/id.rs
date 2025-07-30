@@ -314,7 +314,7 @@ define_id_type!(SessionId, "session");
 define_id_type!(ModelId, "model");
 define_id_type!(RequestId, "request");
 define_id_type!(GroupId, "group");
-define_id_type!(ConstellationId, "const");
+define_id_type!(ConstellationId, "constellation");
 define_id_type!(OAuthTokenId, "oauth");
 define_id_type!(AtprotoIdentityId, "atproto_identity");
 

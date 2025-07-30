@@ -155,6 +155,32 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
         Ok(block)
     }
 
+    /// Insert a new working memory to in-memory storage
+    /// Database persistence happens automatically via persist_memory_changes
+    pub async fn insert_working_memory(&self, label: &str, content: &str) -> Result<MemoryBlock> {
+        // Create the memory block in the DashMap
+        self.memory.create_block(label, content)?;
+
+        // Update it to be working type
+        if let Some(mut block) = self.memory.get_block_mut(label) {
+            block.memory_type = MemoryType::Working;
+            block.permission = MemoryPermission::ReadWrite;
+        }
+
+        // Get the created block
+        let block = self
+            .memory
+            .get_block(label)
+            .ok_or_else(|| crate::CoreError::MemoryNotFound {
+                agent_id: self.agent_id.to_string(),
+                block_name: label.to_string(),
+                available_blocks: self.memory.list_blocks(),
+            })?
+            .clone();
+
+        Ok(block)
+    }
+
     /// Delete an archival memory from the database
     pub async fn delete_archival_memory(&self, label: &str) -> Result<()> {
         let db = self.db.as_ref().ok_or_else(|| {

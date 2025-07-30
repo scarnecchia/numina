@@ -3,17 +3,15 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::{sync::Arc, time::Instant};
-use uuid::Uuid;
 
 use crate::{
     AgentId, CoreError, Result,
     agent::Agent,
     coordination::{
-        groups::{AgentResponse, AgentWithMembership, GroupManager, GroupResponse},
-        types::{
-            CoordinationPattern, GroupState, PipelineExecution, PipelineStage, StageFailureAction,
-            StageResult,
+        groups::{
+            AgentResponse, AgentWithMembership, GroupManager, GroupResponse, GroupResponseEvent,
         },
+        types::{GroupState, PipelineStage, StageFailureAction, StageResult},
         utils::text_response,
     },
     message::Message,
@@ -28,12 +26,68 @@ impl GroupManager for PipelineManager {
         group: &crate::coordination::groups::AgentGroup,
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse> {
-        let start_time = Instant::now();
+    ) -> Result<Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>> {
+        use tokio_stream::wrappers::ReceiverStream;
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        let start_time = std::time::Instant::now();
+        let group_id = group.id.clone();
+
+        // Do the full pipeline operation synchronously first
+        let result = self.do_pipeline(group, agents, message).await;
+
+        // Then send the result as a single Complete event
+        tokio::spawn(async move {
+            match result {
+                Ok((agent_responses, state_changes)) => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Complete {
+                            group_id,
+                            pattern: "pipeline".to_string(),
+                            execution_time: start_time.elapsed(),
+                            agent_responses,
+                            state_changes,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: e.to_string(),
+                            recoverable: false,
+                        })
+                        .await;
+                }
+            }
+        });
+
+        Ok(Box::new(ReceiverStream::new(rx)))
+    }
+
+    async fn update_state(
+        &self,
+        _current_state: &GroupState,
+        response: &GroupResponse,
+    ) -> Result<Option<GroupState>> {
+        // State is already updated in route_message for pipeline
+        Ok(response.state_changes.clone())
+    }
+}
+
+impl PipelineManager {
+    async fn do_pipeline(
+        &self,
+        group: &crate::coordination::groups::AgentGroup,
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
+        message: Message,
+    ) -> Result<(Vec<AgentResponse>, Option<GroupState>)> {
+        use crate::coordination::types::PipelineExecution;
+        use uuid::Uuid;
 
         // Extract pipeline config
         let (stages, parallel_stages) = match &group.coordination_pattern {
-            CoordinationPattern::Pipeline {
+            crate::coordination::types::CoordinationPattern::Pipeline {
                 stages,
                 parallel_stages,
             } => (stages, *parallel_stages),
@@ -73,84 +127,42 @@ impl GroupManager for PipelineManager {
 
         // Process stages
         if parallel_stages {
-            // Process all remaining stages in parallel
-            let remaining_stages = &stages[execution.current_stage..];
-            let mut stage_futures = Vec::new();
+            // TODO: Implement parallel processing
+            // For now, process sequentially
+        }
 
-            for (i, stage) in remaining_stages.iter().enumerate() {
-                let stage_num = execution.current_stage + i;
-                stage_futures.push(self.process_stage(
+        // Sequential processing
+        while execution.current_stage < stages.len() {
+            let stage = &stages[execution.current_stage];
+
+            match self
+                .process_stage(
                     stage,
-                    stage_num,
+                    execution.current_stage,
                     &message,
                     agents,
                     group.name.clone(),
-                ));
-            }
-
-            // Wait for all stages (in real impl, would use futures::future::join_all)
-            for (i, stage) in remaining_stages.iter().enumerate() {
-                let stage_num = execution.current_stage + i;
-                match self
-                    .process_stage(stage, stage_num, &message, agents, group.name.clone())
-                    .await
-                {
-                    Ok((response, result)) => {
-                        responses.push(response);
-                        all_stage_results.push(result);
-                    }
-                    Err(e) => {
-                        // Handle stage failure
-                        let failure_result = self
-                            .handle_stage_failure(stage, stage_num, e, agents)
-                            .await?;
-
-                        if let Some((response, result)) = failure_result {
-                            responses.push(response);
-                            all_stage_results.push(result);
-                        } else {
-                            // Pipeline aborted
-                            break;
-                        }
-                    }
+                )
+                .await
+            {
+                Ok((response, result)) => {
+                    responses.push(response);
+                    all_stage_results.push(result);
+                    execution.current_stage += 1;
                 }
-            }
+                Err(e) => {
+                    // Handle stage failure
+                    let failure_result = self
+                        .handle_stage_failure(stage, execution.current_stage, e, agents)
+                        .await?;
 
-            execution.current_stage = stages.len(); // All stages processed
-        } else {
-            // Sequential processing
-            while execution.current_stage < stages.len() {
-                let stage = &stages[execution.current_stage];
-
-                match self
-                    .process_stage(
-                        stage,
-                        execution.current_stage,
-                        &message,
-                        agents,
-                        group.name.clone(),
-                    )
-                    .await
-                {
-                    Ok((response, result)) => {
+                    if let Some((response, result)) = failure_result {
                         responses.push(response);
                         all_stage_results.push(result);
                         execution.current_stage += 1;
-                    }
-                    Err(e) => {
-                        // Handle stage failure
-                        let failure_result = self
-                            .handle_stage_failure(stage, execution.current_stage, e, agents)
-                            .await?;
-
-                        if let Some((response, result)) = failure_result {
-                            responses.push(response);
-                            all_stage_results.push(result);
-                            execution.current_stage += 1;
-                        } else {
-                            // Pipeline aborted
-                            break;
-                        }
+                    } else {
+                        // Pipeline aborted
+                        break;
                     }
                 }
             }
@@ -162,36 +174,19 @@ impl GroupManager for PipelineManager {
         // Determine if pipeline is complete
         let new_state = if execution.current_stage >= stages.len() {
             // Pipeline complete, clear execution
-            GroupState::Pipeline {
+            Some(GroupState::Pipeline {
                 active_executions: vec![],
-            }
+            })
         } else {
             // Pipeline still in progress
-            GroupState::Pipeline {
+            Some(GroupState::Pipeline {
                 active_executions: vec![execution],
-            }
+            })
         };
 
-        Ok(GroupResponse {
-            group_id: group.id.clone(),
-            pattern: "pipeline".to_string(),
-            responses,
-            execution_time: start_time.elapsed(),
-            state_changes: Some(new_state),
-        })
+        Ok((responses, new_state))
     }
 
-    async fn update_state(
-        &self,
-        _current_state: &GroupState,
-        response: &GroupResponse,
-    ) -> Result<Option<GroupState>> {
-        // State is already updated in route_message for pipeline
-        Ok(response.state_changes.clone())
-    }
-}
-
-impl PipelineManager {
     async fn process_stage(
         &self,
         stage: &PipelineStage,

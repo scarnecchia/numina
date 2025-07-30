@@ -7,6 +7,8 @@ use super::{
 use serde_json::json;
 use surrealdb::{Connection, Surreal};
 
+use crate::agent::AgentRecord;
+use crate::coordination::groups::{AgentGroup, GroupMembership};
 use crate::embeddings::EmbeddingProvider;
 use crate::id::{AgentId, GroupId, IdType, MemoryId, UserId};
 use crate::memory::MemoryBlock;
@@ -1055,7 +1057,7 @@ pub async fn query_messages_raw<C: Connection>(
 // Group Operations
 // ============================================================================
 
-use crate::coordination::groups::{AgentGroup, Constellation};
+use crate::coordination::groups::Constellation;
 
 /// Create a new agent group
 pub async fn create_group<C: Connection>(
@@ -1076,30 +1078,72 @@ pub async fn get_group<C: Connection>(
 /// Get a group by name for a specific constellation/user
 pub async fn get_group_by_name<C: Connection>(
     conn: &Surreal<C>,
-    user_id: &UserId,
+    _user_id: &UserId,
     group_name: &str,
 ) -> Result<Option<AgentGroup>> {
+    // For now, just query by name directly
+    // TODO: Add constellation filtering once we fix the relation queries
     let query = r#"
         SELECT * FROM group
         WHERE name = $name
-        AND id IN (
-            SELECT groups FROM constellation WHERE owner_id = $user_id
-        )
         LIMIT 1
     "#;
 
     let mut result = conn
         .query(query)
         .bind(("name", group_name.to_string()))
-        .bind(("user_id", RecordId::from(user_id.clone())))
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-    let groups: Vec<<AgentGroup as DbEntity>::DbModel> =
+    let db_groups: Vec<<AgentGroup as DbEntity>::DbModel> =
         result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
 
-    if let Some(db_model) = groups.into_iter().next() {
-        Ok(Some(AgentGroup::from_db_model(db_model)?))
+    if let Some(db_model) = db_groups.into_iter().next() {
+        let mut group = AgentGroup::from_db_model(db_model)?;
+        tracing::info!("Loading group with relations for group id: {:?}", group.id);
+
+        // Manually load the group members following the pattern from get_agent_memories
+        let query = r#"
+            SELECT * FROM group_members
+            WHERE out = $group_id
+            ORDER BY joined_at ASC
+        "#;
+
+        let mut result = conn
+            .query(query)
+            .bind(("group_id", surrealdb::RecordId::from(&group.id)))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        // Take the DB models for GroupMembership
+        let membership_db_models: Vec<<GroupMembership as DbEntity>::DbModel> =
+            result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+        tracing::info!("Found {} membership records", membership_db_models.len());
+
+        // Convert DB models to domain types
+        let memberships: Vec<GroupMembership> = membership_db_models
+            .into_iter()
+            .map(|db_model| GroupMembership::from_db_model(db_model).map_err(DatabaseError::from))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Now load the agents for each membership
+        let mut members = Vec::new();
+        for membership in memberships {
+            // Load the agent using the in_id (agent)
+            if let Some(agent) = AgentRecord::load_with_relations(conn, &membership.in_id).await? {
+                members.push((agent, membership));
+            } else {
+                tracing::warn!(
+                    "Agent {:?} not found for group membership",
+                    membership.in_id
+                );
+            }
+        }
+
+        group.members = members;
+        tracing::info!("Group loaded with {} members", group.members.len());
+        Ok(Some(group))
     } else {
         Ok(None)
     }
@@ -1108,18 +1152,16 @@ pub async fn get_group_by_name<C: Connection>(
 /// List all groups for a user (via their constellations)
 pub async fn list_groups_for_user<C: Connection>(
     conn: &Surreal<C>,
-    user_id: &UserId,
+    _user_id: &UserId,
 ) -> Result<Vec<AgentGroup>> {
+    // For now, just return all groups
+    // TODO: Add constellation filtering once we fix the relation queries
     let query = r#"
         SELECT * FROM group
-        WHERE id IN (
-            SELECT groups FROM constellation WHERE owner_id = $user_id
-        )
     "#;
 
     let mut result = conn
         .query(query)
-        .bind(("user_id", RecordId::from(user_id)))
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
 
@@ -1137,22 +1179,9 @@ pub async fn list_groups_for_user<C: Connection>(
 /// Add an agent to a group
 pub async fn add_agent_to_group<C: Connection>(
     conn: &Surreal<C>,
-    group_id: &GroupId,
-    agent_id: &AgentId,
-    membership: crate::coordination::groups::GroupMembership,
+    membership: &crate::coordination::groups::GroupMembership,
 ) -> Result<()> {
-    // Create the edge entity
-    let query = r#"
-        RELATE $agent_id->group_members->$group_id
-        CONTENT $membership
-    "#;
-
-    conn.query(query)
-        .bind(("agent_id", RecordId::from(agent_id)))
-        .bind(("group_id", RecordId::from(group_id)))
-        .bind(("membership", membership))
-        .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+    create_relation_typed(conn, membership).await?;
 
     Ok(())
 }

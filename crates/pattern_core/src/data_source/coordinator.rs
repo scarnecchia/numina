@@ -167,10 +167,10 @@ where
         self.inner.buffer_config()
     }
 
-    fn format_notification(&self, item: &Self::Item) -> Option<String> {
+    async fn format_notification(&self, item: &Self::Item) -> Option<String> {
         // Deserialize Value back to concrete type and delegate
         if let Ok(typed_item) = serde_json::from_value::<S::Item>(item.clone()) {
-            self.inner.format_notification(&typed_item)
+            self.inner.format_notification(&typed_item).await
         } else {
             None
         }
@@ -287,12 +287,23 @@ impl DataIngestionCoordinator {
                     if let Some(handle) = self.sources.read().await.get(&source_id) {
                         // Check if notifications are enabled before formatting
                         if handle.source.notifications_enabled() {
-                            if let Some(message) = handle.source.format_notification(&event.item) {
+                            if let Some(message) =
+                                handle.source.format_notification(&event.item).await
+                            {
                                 // Send notification to agent
                                 let target = crate::tool::builtin::MessageTarget {
                                     target_type: crate::tool::builtin::TargetType::Agent,
                                     target_id: Some(self.agent_router.agent_id().to_string()),
                                 };
+
+                                // Create origin for this data source
+                                let origin =
+                                    crate::context::message_router::MessageOrigin::DataSource {
+                                        source_id: source_id.clone(),
+                                        source_type: handle.source.metadata().source_type,
+                                        item_id: None, // Could extract from item if needed
+                                        cursor: Some(event.cursor.clone()),
+                                    };
 
                                 if let Err(e) = self
                                     .agent_router
@@ -305,6 +316,7 @@ impl DataIngestionCoordinator {
                                             "item": event.item,
                                             "cursor": event.cursor,
                                         })),
+                                        Some(origin),
                                     )
                                     .await
                                 {

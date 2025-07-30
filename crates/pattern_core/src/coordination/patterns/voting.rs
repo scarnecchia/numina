@@ -9,7 +9,9 @@ use crate::{
     CoreError, Result,
     agent::Agent,
     coordination::{
-        groups::{AgentResponse, AgentWithMembership, GroupManager, GroupResponse},
+        groups::{
+            AgentResponse, AgentWithMembership, GroupManager, GroupResponse, GroupResponseEvent,
+        },
         types::{
             CoordinationPattern, GroupState, TieBreaker, Vote, VoteOption, VotingProposal,
             VotingRules, VotingSession,
@@ -28,9 +30,63 @@ impl GroupManager for VotingManager {
         group: &crate::coordination::groups::AgentGroup,
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse> {
-        let start_time = std::time::Instant::now();
+    ) -> Result<Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>> {
+        use tokio_stream::wrappers::ReceiverStream;
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
 
+        let start_time = std::time::Instant::now();
+        let group_id = group.id.clone();
+        let _group_name = group.name.clone();
+
+        // Do the full voting operation synchronously first
+        let result = self.do_voting(group, agents, message).await;
+
+        // Then send the result as a single Complete event
+        tokio::spawn(async move {
+            match result {
+                Ok((agent_responses, state_changes)) => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Complete {
+                            group_id,
+                            pattern: "voting".to_string(),
+                            execution_time: start_time.elapsed(),
+                            agent_responses,
+                            state_changes,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: e.to_string(),
+                            recoverable: false,
+                        })
+                        .await;
+                }
+            }
+        });
+
+        Ok(Box::new(ReceiverStream::new(rx)))
+    }
+
+    async fn update_state(
+        &self,
+        _current_state: &GroupState,
+        response: &GroupResponse,
+    ) -> Result<Option<GroupState>> {
+        // State is already updated in route_message for voting
+        Ok(response.state_changes.clone())
+    }
+}
+
+impl VotingManager {
+    async fn do_voting(
+        &self,
+        group: &crate::coordination::groups::AgentGroup,
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
+        message: Message,
+    ) -> Result<(Vec<AgentResponse>, Option<GroupState>)> {
         // Extract voting config
         let (quorum, voting_rules) = match &group.coordination_pattern {
             CoordinationPattern::Voting {
@@ -159,27 +215,14 @@ impl GroupManager for VotingManager {
             }
         }
 
-        Ok(GroupResponse {
-            group_id: group.id.clone(),
-            pattern: "voting".to_string(),
-            responses,
-            execution_time: start_time.elapsed(),
-            state_changes: new_state,
-        })
+        Ok((responses, new_state))
     }
 
-    async fn update_state(
-        &self,
-        _current_state: &GroupState,
-        response: &GroupResponse,
-    ) -> Result<Option<GroupState>> {
-        // State is already updated in route_message for voting
-        Ok(response.state_changes.clone())
-    }
-}
-
-impl VotingManager {
     fn create_proposal_from_message(&self, message: &Message) -> VotingProposal {
+        Self::create_proposal_from_message_impl(message)
+    }
+
+    fn create_proposal_from_message_impl(message: &Message) -> VotingProposal {
         // In a real implementation, this would parse the message to create options
         VotingProposal {
             content: format!("Proposal based on: {:?}", message.content),
@@ -202,6 +245,10 @@ impl VotingManager {
     }
 
     fn tally_votes(&self, session: &VotingSession, rules: &VotingRules) -> Result<String> {
+        Self::tally_votes_impl(session, rules)
+    }
+
+    fn tally_votes_impl(session: &VotingSession, rules: &VotingRules) -> Result<String> {
         // Count votes by option
         let mut vote_counts: HashMap<String, f32> = HashMap::new();
 

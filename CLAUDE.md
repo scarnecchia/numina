@@ -36,6 +36,13 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
      - Agents can now post to Bluesky via TargetType::Bluesky
      - Basic posting functionality complete
      - Reply threading stubbed out (returns error) - TODO for morning
+   - ✅ Enhanced data source notifications (2025-07-30)
+     - Made format_notification async across all data sources
+     - Added AgentHandle to data sources for memory access
+     - BlueskyFirehoseSource now supports BskyAgent for API calls
+     - Fetch full thread context (up to 4 posts up) for replies
+     - Auto-create memory blocks for Bluesky users with profile info
+     - Include reply candidates in notifications for agent response
    - TODO: Test with live Jetstream connection
    - TODO: Implement proper reply threading (get CID from parent post)
    - See `docs/bluesky-integration-plan.md` and `docs/data-sources.md` for details
@@ -166,7 +173,19 @@ pub struct User {
 - [X] Build agent groups framework
 - [X] Create basic binary (CLI/TUI) for user testing - COMPLETE
 - [X] Implement data source abstraction for agents - COMPLETE
-- [ ] **Backend API Server** - IN PROGRESS
+- [ ] **Enhanced Data Source Context** - IN PROGRESS (2025-07-30)
+  - Make `format_notification` async in DataSource trait
+  - Add optional AgentHandle to data sources for memory access
+  - Enhance Bluesky notifications with thread context, user relationships
+  - Auto-create/attach memory blocks for Bluesky users
+  - Implementation plan:
+    1. Update DataSource trait: make format_notification async
+    2. Update all implementations (file, bluesky, type-erased wrapper)
+    3. Add set_agent_handle() method to trait
+    4. Pass AgentHandle when creating sources in coordinator
+    5. Add BskyAgent to BlueskyFirehoseSource for API calls
+    6. Implement memory block creation/lookup in format_notification
+- [ ] **Backend API Server**
   - Create unified server that combines:
     - HTTP/WebSocket API for Pattern framework
     - MCP client/server integration

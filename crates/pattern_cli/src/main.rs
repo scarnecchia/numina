@@ -412,7 +412,7 @@ async fn main() -> Result<()> {
 
                 // Load the group from database
                 let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
-                let group = match group {
+                let mut group = match group {
                     Some(g) => g,
                     None => {
                         output.error(&format!("Group '{}' not found", group_name));
@@ -420,7 +420,10 @@ async fn main() -> Result<()> {
                     }
                 };
 
+                // Group was already loaded with relations in get_group_by_name
+
                 // Load all agents in the group
+                tracing::info!("Group has {} members to load", group.members.len());
                 let mut agents = Vec::new();
                 for (agent_record, _membership) in &group.members {
                     // Create runtime agent from record

@@ -7,7 +7,7 @@ use pattern_core::{
         types::{CoordinationPattern, GroupMemberRole, GroupState},
     },
     db::{client::DB, ops},
-    id::{AgentId, GroupId},
+    id::{AgentId, GroupId, RelationId},
 };
 
 use crate::output::Output;
@@ -193,6 +193,9 @@ pub async fn add_member(
 
     // Create membership
     let membership = GroupMembership {
+        id: RelationId::nil(),
+        in_id: agent_id,
+        out_id: group.id,
         joined_at: Utc::now(),
         role: member_role,
         is_active: true,
@@ -200,7 +203,7 @@ pub async fn add_member(
     };
 
     // Add to group
-    ops::add_agent_to_group(&DB, &group.id, &agent_id, membership).await?;
+    ops::add_agent_to_group(&DB, &membership).await?;
 
     output.success(&format!(
         "Added '{}' to group '{}' as {}",

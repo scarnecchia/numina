@@ -76,7 +76,7 @@ pub async fn listen(
     output.status("Connecting to Jetstream...");
 
     // Create firehose source
-    let mut source = BlueskyFirehoseSource::new("cli-test", jetstream_endpoint)
+    let mut source = BlueskyFirehoseSource::new("cli-test", jetstream_endpoint, None)
         .await
         .with_filter(filter);
 
@@ -206,7 +206,7 @@ pub async fn test_connection(endpoint: Option<String>, config: &PatternConfig) -
         ..Default::default()
     };
 
-    let mut source = BlueskyFirehoseSource::new("connection-test", jetstream_endpoint)
+    let mut source = BlueskyFirehoseSource::new("connection-test", jetstream_endpoint, None)
         .await
         .with_filter(filter);
 

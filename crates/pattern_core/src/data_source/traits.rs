@@ -41,7 +41,7 @@ pub trait DataSource: Send + Sync {
     fn buffer_config(&self) -> BufferConfig;
 
     /// Format an item for notification to agents (returns None if item shouldn't notify)
-    fn format_notification(&self, item: &Self::Item) -> Option<String>;
+    async fn format_notification(&self, item: &Self::Item) -> Option<String>;
 
     /// Get buffer statistics if source maintains a buffer
     fn get_buffer_stats(&self) -> Option<BufferStats> {

@@ -5,10 +5,12 @@ use chrono::{Duration as ChronoDuration, Utc};
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    CoreError, Result,
+    Result,
     agent::Agent,
     coordination::{
-        groups::{AgentResponse, AgentWithMembership, GroupManager, GroupResponse},
+        groups::{
+            AgentResponse, AgentWithMembership, GroupManager, GroupResponse, GroupResponseEvent,
+        },
         types::{
             CoordinationPattern, GroupState, SleeptimeTrigger, TriggerCondition, TriggerEvent,
             TriggerPriority,
@@ -27,154 +29,324 @@ impl GroupManager for SleeptimeManager {
         group: &crate::coordination::groups::AgentGroup,
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse> {
+    ) -> Result<Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>> {
+        use tokio_stream::wrappers::ReceiverStream;
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        let group_id = group.id.clone();
+        let _group_name = group.name.clone();
         let start_time = std::time::Instant::now();
+        let coordination_pattern = group.coordination_pattern.clone();
+        let group_state = group.state.clone();
+        let agents = agents.to_vec();
 
-        // Extract sleeptime config
-        let (check_interval, triggers, intervention_agent_id) = match &group.coordination_pattern {
-            CoordinationPattern::Sleeptime {
-                check_interval,
-                triggers,
-                intervention_agent_id,
-            } => (check_interval, triggers, intervention_agent_id),
-            _ => {
-                return Err(CoreError::AgentGroupError {
-                    group_name: group.name.clone(),
-                    operation: "route_message".to_string(),
-                    cause: "Invalid pattern for SleeptimeManager".to_string(),
-                });
-            }
-        };
-
-        // Get current state
-        let (last_check, mut trigger_history) = match &group.state {
-            GroupState::Sleeptime {
-                last_check,
-                trigger_history,
-            } => (*last_check, trigger_history.clone()),
-            _ => (Utc::now() - ChronoDuration::hours(1), Vec::new()),
-        };
-
-        // Check if it's time to run checks
-        let time_since_last_check = Utc::now() - last_check;
-        let should_check = time_since_last_check
-            > ChronoDuration::from_std(*check_interval).unwrap_or(ChronoDuration::minutes(20));
-
-        let mut responses = Vec::new();
-
-        if should_check {
-            // Evaluate all triggers
-            let mut fired_triggers = Vec::new();
-
-            for trigger in triggers {
-                if self
-                    .evaluate_trigger(trigger, &message, &trigger_history)
-                    .await?
-                {
-                    fired_triggers.push(trigger);
+        tokio::spawn(async move {
+            // Extract sleeptime config
+            let (check_interval, triggers, intervention_agent_id) = match &coordination_pattern {
+                CoordinationPattern::Sleeptime {
+                    check_interval,
+                    triggers,
+                    intervention_agent_id,
+                } => (check_interval, triggers, intervention_agent_id),
+                _ => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: format!("Invalid pattern for SleeptimeManager"),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
                 }
-            }
+            };
 
-            // Sort by priority (highest first)
-            fired_triggers.sort_by(|a, b| b.priority.cmp(&a.priority));
+            // Get current state
+            let (last_check, mut trigger_history) = match &group_state {
+                GroupState::Sleeptime {
+                    last_check,
+                    trigger_history,
+                } => (*last_check, trigger_history.clone()),
+                _ => (Utc::now() - ChronoDuration::hours(1), Vec::new()),
+            };
 
-            if !fired_triggers.is_empty() {
-                // Find intervention agent
-                let intervention_agent = agents
-                    .iter()
-                    .find(|awm| &awm.agent.as_ref().id() == intervention_agent_id)
-                    .ok_or_else(|| CoreError::agent_not_found(intervention_agent_id.to_string()))?;
+            // Check if it's time to run checks
+            let time_since_last_check = Utc::now() - last_check;
+            let should_check = time_since_last_check
+                > ChronoDuration::from_std(*check_interval).unwrap_or(ChronoDuration::minutes(20));
 
-                // Create intervention response - process the message with context about triggers
-                let trigger_names: Vec<_> =
-                    fired_triggers.iter().map(|t| t.name.as_str()).collect();
-                let mut intervention_context = format!(
-                    "[Sleeptime Intervention] Triggers fired: {}. {}",
-                    trigger_names.join(", "),
-                    self.get_intervention_message(&fired_triggers)
-                );
+            // Send start event
+            let _ = tx
+                .send(GroupResponseEvent::Started {
+                    group_id: group_id.clone(),
+                    pattern: "sleeptime".to_string(),
+                    agent_count: 1, // Always uses intervention agent
+                })
+                .await;
 
-                let text = message
-                    .content
-                    .text()
-                    .map(String::from)
-                    .unwrap_or(intervention_context.clone());
-                intervention_context.push_str(&text);
+            let mut agent_responses = Vec::new();
 
-                // A bit dirty, we need more elegant helper methods here.
-                let intervention_message = match message.role {
-                    ChatRole::System => Message::system(intervention_context),
-                    ChatRole::User => Message::user(intervention_context),
-                    ChatRole::Assistant => Message::agent(intervention_context),
-                    ChatRole::Tool => Message::system(intervention_context),
-                };
-                let agent_response = intervention_agent
-                    .agent
-                    .clone()
-                    .process_message(intervention_message)
-                    .await?;
+            if should_check {
+                // Evaluate all triggers
+                let mut fired_triggers = Vec::new();
 
-                responses.push(AgentResponse {
-                    agent_id: intervention_agent.agent.as_ref().id(),
-                    response: agent_response,
-                    responded_at: Utc::now(),
-                });
+                for trigger in triggers {
+                    if let Ok(fired) =
+                        Self::evaluate_trigger_static(trigger, &message, &trigger_history).await
+                    {
+                        if fired {
+                            fired_triggers.push(trigger);
+                        }
+                    }
+                }
 
-                // Record trigger events
-                for trigger in fired_triggers {
-                    trigger_history.push(TriggerEvent {
-                        trigger_name: trigger.name.clone(),
-                        timestamp: Utc::now(),
-                        intervention_activated: true,
-                        metadata: Default::default(),
+                // Sort by priority (highest first)
+                fired_triggers.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+                if !fired_triggers.is_empty() {
+                    // Find intervention agent
+                    if let Some(intervention_agent) = agents
+                        .iter()
+                        .find(|awm| &awm.agent.as_ref().id() == intervention_agent_id)
+                    {
+                        let agent_id = intervention_agent.agent.as_ref().id();
+                        let agent_name = intervention_agent.agent.name();
+
+                        // Send agent started event
+                        let _ = tx
+                            .send(GroupResponseEvent::AgentStarted {
+                                agent_id: agent_id.clone(),
+                                agent_name: agent_name.clone(),
+                                role: intervention_agent.membership.role.clone(),
+                            })
+                            .await;
+
+                        // Create intervention response - process the message with context about triggers
+                        let trigger_names: Vec<_> =
+                            fired_triggers.iter().map(|t| t.name.as_str()).collect();
+                        let mut intervention_context = format!(
+                            "[Sleeptime Intervention] Triggers fired: {}. {}",
+                            trigger_names.join(", "),
+                            Self::get_intervention_message_static(&fired_triggers)
+                        );
+
+                        let text = message.content.text().map(String::from).unwrap_or_default();
+                        if !text.is_empty() {
+                            intervention_context.push_str("\n\nContext: ");
+                            intervention_context.push_str(&text);
+                        }
+
+                        // Create intervention message
+                        let intervention_message = match message.role {
+                            ChatRole::System => Message::system(intervention_context),
+                            ChatRole::User => Message::user(intervention_context),
+                            ChatRole::Assistant => Message::agent(intervention_context),
+                            ChatRole::Tool => Message::system(intervention_context),
+                        };
+
+                        // Process with streaming
+                        match intervention_agent
+                            .agent
+                            .clone()
+                            .process_message_stream(intervention_message)
+                            .await
+                        {
+                            Ok(mut stream) => {
+                                use tokio_stream::StreamExt;
+
+                                let mut _message_id = None;
+                                while let Some(event) = stream.next().await {
+                                    // Convert ResponseEvent to GroupResponseEvent
+                                    match event {
+                                        crate::agent::ResponseEvent::TextChunk {
+                                            text,
+                                            is_final,
+                                        } => {
+                                            let _ = tx
+                                                .send(GroupResponseEvent::TextChunk {
+                                                    agent_id: agent_id.clone(),
+                                                    text,
+                                                    is_final,
+                                                })
+                                                .await;
+                                        }
+                                        crate::agent::ResponseEvent::ReasoningChunk {
+                                            text,
+                                            is_final,
+                                        } => {
+                                            let _ = tx
+                                                .send(GroupResponseEvent::ReasoningChunk {
+                                                    agent_id: agent_id.clone(),
+                                                    text,
+                                                    is_final,
+                                                })
+                                                .await;
+                                        }
+                                        crate::agent::ResponseEvent::ToolCallStarted {
+                                            call_id,
+                                            fn_name,
+                                            args,
+                                        } => {
+                                            let _ = tx
+                                                .send(GroupResponseEvent::ToolCallStarted {
+                                                    agent_id: agent_id.clone(),
+                                                    call_id,
+                                                    fn_name,
+                                                    args,
+                                                })
+                                                .await;
+                                        }
+                                        crate::agent::ResponseEvent::ToolCallCompleted {
+                                            call_id,
+                                            result,
+                                        } => {
+                                            let _ = tx
+                                                .send(GroupResponseEvent::ToolCallCompleted {
+                                                    agent_id: agent_id.clone(),
+                                                    call_id,
+                                                    result: result.map_err(|e| e.to_string()),
+                                                })
+                                                .await;
+                                        }
+                                        crate::agent::ResponseEvent::Complete {
+                                            message_id: msg_id,
+                                            ..
+                                        } => {
+                                            _message_id = Some(msg_id.clone());
+                                            let _ = tx
+                                                .send(GroupResponseEvent::AgentCompleted {
+                                                    agent_id: agent_id.clone(),
+                                                    agent_name: agent_name.clone(),
+                                                    message_id: Some(msg_id),
+                                                })
+                                                .await;
+                                        }
+                                        crate::agent::ResponseEvent::Error {
+                                            message,
+                                            recoverable,
+                                        } => {
+                                            let _ = tx
+                                                .send(GroupResponseEvent::Error {
+                                                    agent_id: Some(agent_id.clone()),
+                                                    message,
+                                                    recoverable,
+                                                })
+                                                .await;
+                                        }
+                                        _ => {} // Skip other events
+                                    }
+                                }
+
+                                // Track response for final summary
+                                agent_responses.push(AgentResponse {
+                                    agent_id: agent_id.clone(),
+                                    response: crate::message::Response {
+                                        content: vec![], // TODO: Collect actual response content
+                                        reasoning: None,
+                                        metadata: crate::message::ResponseMetadata::default(),
+                                    },
+                                    responded_at: Utc::now(),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx
+                                    .send(GroupResponseEvent::Error {
+                                        agent_id: Some(agent_id),
+                                        message: e.to_string(),
+                                        recoverable: false,
+                                    })
+                                    .await;
+                            }
+                        }
+
+                        // Record trigger events
+                        for trigger in fired_triggers {
+                            trigger_history.push(TriggerEvent {
+                                trigger_name: trigger.name.clone(),
+                                timestamp: Utc::now(),
+                                intervention_activated: true,
+                                metadata: Default::default(),
+                            });
+                        }
+                    } else {
+                        let _ = tx
+                            .send(GroupResponseEvent::Error {
+                                agent_id: None,
+                                message: format!(
+                                    "Intervention agent {} not found",
+                                    intervention_agent_id
+                                ),
+                                recoverable: false,
+                            })
+                            .await;
+                        return;
+                    }
+                } else {
+                    // No triggers fired, just emit info message
+                    let _ = tx
+                        .send(GroupResponseEvent::TextChunk {
+                            agent_id: intervention_agent_id.clone(),
+                            text: "[Sleeptime] Routine check complete. All systems nominal."
+                                .to_string(),
+                            is_final: true,
+                        })
+                        .await;
+
+                    agent_responses.push(AgentResponse {
+                        agent_id: intervention_agent_id.clone(),
+                        response: text_response(
+                            "[Sleeptime] Routine check complete. All systems nominal.",
+                        ),
+                        responded_at: Utc::now(),
                     });
                 }
+
+                // Keep trigger history to reasonable size (last 1000 events)
+                if trigger_history.len() > 1000 {
+                    trigger_history = trigger_history.into_iter().rev().take(1000).rev().collect();
+                }
             } else {
-                // No triggers fired, just log the check
-                responses.push(AgentResponse {
+                // Not time to check yet, emit status message
+                let next_check_msg = format!(
+                    "[Sleeptime] Next check in: {}",
+                    Self::format_duration_static(
+                        *check_interval - time_since_last_check.to_std().unwrap_or_default()
+                    )
+                );
+
+                let _ = tx
+                    .send(GroupResponseEvent::TextChunk {
+                        agent_id: intervention_agent_id.clone(),
+                        text: next_check_msg.clone(),
+                        is_final: true,
+                    })
+                    .await;
+
+                agent_responses.push(AgentResponse {
                     agent_id: intervention_agent_id.clone(),
-                    response: text_response(
-                        "[Sleeptime] Routine check complete. All systems nominal.",
-                    ),
+                    response: text_response(next_check_msg),
                     responded_at: Utc::now(),
                 });
             }
 
-            // Keep trigger history to reasonable size (last 1000 events)
-            if trigger_history.len() > 1000 {
-                trigger_history = trigger_history.into_iter().rev().take(1000).rev().collect();
-            }
-        } else {
-            // Not time to check yet, pass through message
-            // In real implementation, this might route to a default handler
-            responses.push(AgentResponse {
-                agent_id: agents
-                    .first()
-                    .map(|awm| awm.agent.as_ref().id())
-                    .unwrap_or_else(|| intervention_agent_id.clone()),
-                response: text_response(format!(
-                    "[Sleeptime] Next check in: {}",
-                    self.format_duration(
-                        *check_interval - time_since_last_check.to_std().unwrap_or_default()
-                    )
-                )),
-                responded_at: Utc::now(),
-            });
-        }
+            // Update state
+            let new_state = GroupState::Sleeptime {
+                last_check: if should_check { Utc::now() } else { last_check },
+                trigger_history,
+            };
 
-        // Update state
-        let new_state = GroupState::Sleeptime {
-            last_check: if should_check { Utc::now() } else { last_check },
-            trigger_history,
-        };
+            // Send completion event
+            let _ = tx
+                .send(GroupResponseEvent::Complete {
+                    group_id,
+                    pattern: "sleeptime".to_string(),
+                    execution_time: start_time.elapsed(),
+                    agent_responses,
+                    state_changes: Some(new_state),
+                })
+                .await;
+        });
 
-        Ok(GroupResponse {
-            group_id: group.id.clone(),
-            pattern: "sleeptime".to_string(),
-            responses,
-            execution_time: start_time.elapsed(),
-            state_changes: Some(new_state),
-        })
+        Ok(Box::new(ReceiverStream::new(rx)))
     }
 
     async fn update_state(
@@ -188,8 +360,15 @@ impl GroupManager for SleeptimeManager {
 }
 
 impl SleeptimeManager {
-    async fn evaluate_trigger(
-        &self,
+    async fn evaluate_trigger_static(
+        trigger: &SleeptimeTrigger,
+        _message: &Message,
+        history: &[TriggerEvent],
+    ) -> Result<bool> {
+        Self::evaluate_trigger_impl(trigger, _message, history).await
+    }
+
+    async fn evaluate_trigger_impl(
         trigger: &SleeptimeTrigger,
         _message: &Message,
         history: &[TriggerEvent],
@@ -227,7 +406,11 @@ impl SleeptimeManager {
         }
     }
 
-    fn get_intervention_message(&self, triggers: &[&SleeptimeTrigger]) -> &'static str {
+    fn get_intervention_message_static(triggers: &[&SleeptimeTrigger]) -> &'static str {
+        Self::get_intervention_message_impl(triggers)
+    }
+
+    fn get_intervention_message_impl(triggers: &[&SleeptimeTrigger]) -> &'static str {
         // Determine intervention based on highest priority trigger
         if let Some(trigger) = triggers.first() {
             match trigger.priority {
@@ -247,7 +430,11 @@ impl SleeptimeManager {
         }
     }
 
-    fn format_duration(&self, duration: Duration) -> String {
+    fn format_duration_static(duration: Duration) -> String {
+        Self::format_duration_impl(duration)
+    }
+
+    fn format_duration_impl(duration: Duration) -> String {
         let total_secs = duration.as_secs();
         let hours = total_secs / 3600;
         let minutes = (total_secs % 3600) / 60;
@@ -269,142 +456,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentId, MemoryBlock, UserId,
-        agent::{Agent, AgentState, AgentType},
         coordination::{
             AgentGroup,
             groups::{AgentWithMembership, GroupMembership},
+            test_utils::test::{collect_complete_event, create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
         id::GroupId,
-        memory::MemoryPermission,
-        message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
-        tool::DynamicTool,
     };
-
-    // Test agent implementation
-    #[derive(Debug)]
-    struct TestAgent {
-        id: AgentId,
-        name: String,
-    }
-
-    impl AsRef<TestAgent> for TestAgent {
-        fn as_ref(&self) -> &TestAgent {
-            self
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Agent for TestAgent {
-        fn id(&self) -> AgentId {
-            self.id.clone()
-        }
-        fn name(&self) -> String {
-            self.name.to_string()
-        }
-        fn agent_type(&self) -> AgentType {
-            AgentType::Generic
-        }
-
-        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
-            use crate::message::ResponseMetadata;
-            Ok(Response {
-                content: vec![MessageContent::Text("Sleeptime test response".to_string())],
-                reasoning: None,
-                metadata: ResponseMetadata::default(),
-            })
-        }
-
-        async fn get_memory(&self, _key: &str) -> Result<Option<MemoryBlock>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn update_memory(&self, _key: &str, _memory: MemoryBlock) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn execute_tool(
-            &self,
-            _tool_name: &str,
-            _params: serde_json::Value,
-        ) -> Result<serde_json::Value> {
-            unimplemented!("Test agent")
-        }
-
-        async fn list_memory_keys(&self) -> Result<Vec<compact_str::CompactString>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn share_memory_with(
-            &self,
-            _memory_key: &str,
-            _target_agent_id: AgentId,
-            _access_level: MemoryPermission,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn get_shared_memories(
-            &self,
-        ) -> Result<Vec<(AgentId, compact_str::CompactString, MemoryBlock)>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn system_prompt(&self) -> Vec<String> {
-            vec![]
-        }
-
-        async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
-            vec![]
-        }
-
-        async fn state(&self) -> AgentState {
-            AgentState::Ready
-        }
-
-        async fn set_state(&self, _state: AgentState) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-        async fn register_endpoint(
-            &self,
-            _name: String,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        /// Set the default user endpoint
-        async fn set_default_user_endpoint(
-            &self,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-    }
-
-    fn create_test_agent(name: &str) -> TestAgent {
-        TestAgent {
-            id: AgentId::generate(),
-            name: name.to_string(),
-        }
-    }
-
-    fn create_test_message(content: &str) -> Message {
-        Message {
-            id: crate::id::MessageId::generate(),
-            role: ChatRole::User,
-            owner_id: Some(UserId::generate()),
-            content: MessageContent::Text(content.to_string()),
-            metadata: MessageMetadata::default(),
-            options: MessageOptions::default(),
-            has_tool_calls: false,
-            word_count: content.split_whitespace().count() as u32,
-            created_at: Utc::now(),
-            embedding: None,
-            embedding_model: None,
-        }
-    }
 
     #[tokio::test]
     async fn test_sleeptime_trigger_check() {
@@ -412,15 +471,16 @@ mod tests {
         let intervention_agent = create_test_agent("Pattern");
         let intervention_id = intervention_agent.id.clone();
 
-        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![AgentWithMembership {
-            agent: Arc::new(intervention_agent),
-            membership: GroupMembership {
-                joined_at: Utc::now(),
-                role: GroupMemberRole::Supervisor,
-                is_active: true,
-                capabilities: vec!["intervention".to_string()],
-            },
-        }];
+        let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> =
+            vec![AgentWithMembership {
+                agent: Arc::new(intervention_agent) as Arc<dyn crate::agent::Agent>,
+                membership: GroupMembership {
+                    joined_at: Utc::now(),
+                    role: GroupMemberRole::Supervisor,
+                    is_active: true,
+                    capabilities: vec!["intervention".to_string()],
+                },
+            }];
 
         let triggers = vec![
             SleeptimeTrigger {
@@ -461,19 +521,21 @@ mod tests {
 
         let message = create_test_message("Working on code");
 
-        let response = manager
+        let stream = manager
             .route_message(&group, &agents, message)
             .await
             .unwrap();
 
+        let (agent_responses, state_changes) = collect_complete_event(stream).await;
+
         // Should have at least one response
-        assert!(!response.responses.is_empty());
+        assert!(!agent_responses.is_empty());
 
         // Response should be from intervention agent
-        assert_eq!(response.responses[0].agent_id, intervention_id);
+        assert_eq!(agent_responses[0].agent_id, intervention_id);
 
         // State should be updated with new last_check time
-        if let Some(GroupState::Sleeptime { last_check, .. }) = response.state_changes {
+        if let Some(GroupState::Sleeptime { last_check, .. }) = state_changes {
             assert!(last_check > group.created_at);
         } else {
             panic!("Expected Sleeptime state");

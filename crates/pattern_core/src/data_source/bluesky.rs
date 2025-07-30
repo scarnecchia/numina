@@ -6,13 +6,14 @@ use super::{
     StreamBuffer,
     traits::{DataSource, DataSourceMetadata, DataSourceStatus, Searchable, StreamEvent},
 };
+use crate::context::AgentHandle;
 use crate::error::Result;
 use async_trait::async_trait;
 use atrium_api::app::bsky::feed::post::{RecordLabelsRefs, ReplyRefData};
 use atrium_api::app::bsky::richtext::facet::MainFeaturesItem;
 use atrium_api::com::atproto::repo::strong_ref::MainData;
-use atrium_api::types::Union;
 use atrium_api::types::string::{Cid, Did};
+use atrium_api::types::{TryFromUnknown, Union};
 use atrium_identity::did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL};
 
 use chrono::{DateTime, Utc};
@@ -201,7 +202,6 @@ struct SourceStats {
 }
 
 /// Consumes Bluesky Jetstream firehose
-#[derive(Debug)]
 pub struct BlueskyFirehoseSource {
     source_id: String,
     endpoint: String,
@@ -212,10 +212,83 @@ pub struct BlueskyFirehoseSource {
         std::sync::Arc<parking_lot::Mutex<StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>>>,
     >,
     notifications_enabled: bool,
+    agent_handle: Option<AgentHandle>,
+    bsky_agent: Option<Arc<tokio::sync::RwLock<bsky_sdk::BskyAgent>>>,
+}
+
+impl std::fmt::Debug for BlueskyFirehoseSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlueskyFirehoseSource")
+            .field("source_id", &self.source_id)
+            .field("endpoint", &self.endpoint)
+            .field("filter", &self.filter)
+            .field("current_cursor", &self.current_cursor)
+            .field("stats", &self.stats)
+            .field("buffer", &self.buffer.is_some())
+            .field("notifications_enabled", &self.notifications_enabled)
+            .field("agent_handle", &self.agent_handle.is_some())
+            .field("bsky_agent", &self.bsky_agent.is_some())
+            .finish()
+    }
 }
 
 impl BlueskyFirehoseSource {
-    pub async fn new(source_id: impl Into<String>, endpoint: impl Into<String>) -> Self {
+    /// Fetch user profile and format memory content
+    async fn fetch_user_profile_for_memory(
+        agent: &bsky_sdk::BskyAgent,
+        handle: &str,
+        did: &str,
+    ) -> String {
+        let mut memory_content = format!(
+            "Bluesky user @{} (DID: {})\nFirst seen: {}\n",
+            handle,
+            did,
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        );
+
+        // Try to fetch the user's profile
+        if let Ok(profile_result) = agent
+            .api
+            .app
+            .bsky
+            .actor
+            .get_profile(
+                atrium_api::app::bsky::actor::get_profile::ParametersData {
+                    actor: atrium_api::types::string::AtIdentifier::Did(
+                        Did::from_str(did)
+                            .unwrap_or_else(|_| Did::new("did:plc:unknown".to_string()).unwrap()),
+                    ),
+                }
+                .into(),
+            )
+            .await
+        {
+            // Add profile information
+            if let Some(display_name) = &profile_result.display_name {
+                memory_content.push_str(&format!("Display name: {}\n", display_name));
+            }
+            if let Some(description) = &profile_result.description {
+                memory_content.push_str(&format!("\nBio:\n{}\n", description));
+            }
+            if let Some(followers_count) = profile_result.followers_count {
+                memory_content.push_str(&format!("\nFollowers: {}", followers_count));
+            }
+            if let Some(follows_count) = profile_result.follows_count {
+                memory_content.push_str(&format!(", Following: {}", follows_count));
+            }
+            if let Some(posts_count) = profile_result.posts_count {
+                memory_content.push_str(&format!(", Posts: {}\n", posts_count));
+            }
+        }
+
+        memory_content
+    }
+
+    pub async fn new(
+        source_id: impl Into<String>,
+        endpoint: impl Into<String>,
+        agent_handle: Option<AgentHandle>,
+    ) -> Self {
         Self {
             source_id: source_id.into(),
             endpoint: endpoint.into(),
@@ -224,6 +297,8 @@ impl BlueskyFirehoseSource {
             stats: SourceStats::default(),
             buffer: None,
             notifications_enabled: true,
+            agent_handle,
+            bsky_agent: None,
         }
     }
 
@@ -235,6 +310,59 @@ impl BlueskyFirehoseSource {
     pub fn with_buffer(mut self, buffer: StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>) -> Self {
         self.buffer = Some(std::sync::Arc::new(parking_lot::Mutex::new(buffer)));
         self
+    }
+
+    /// Set Bluesky authentication credentials
+    pub async fn with_auth(
+        mut self,
+        credentials: crate::atproto_identity::AtprotoAuthCredentials,
+        handle: String,
+    ) -> Result<Self> {
+        use crate::atproto_identity::resolve_handle_to_pds;
+
+        let pds_url = match resolve_handle_to_pds(&handle).await {
+            Ok(url) => url,
+            Err(url) => url,
+        };
+
+        let agent = bsky_sdk::BskyAgent::builder()
+            .config(bsky_sdk::agent::config::Config {
+                endpoint: pds_url,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_firehose".to_string(),
+                cause: format!("Failed to create BskyAgent: {:?}", e),
+                parameters: serde_json::json!({}),
+            })?;
+
+        // Authenticate based on credential type
+        match credentials {
+            crate::atproto_identity::AtprotoAuthCredentials::OAuth { access_token: _ } => {
+                return Err(crate::CoreError::ToolExecutionFailed {
+                    tool_name: "bluesky_firehose".to_string(),
+                    cause: "OAuth authentication not yet implemented for BskyAgent".to_string(),
+                    parameters: serde_json::json!({}),
+                });
+            }
+            crate::atproto_identity::AtprotoAuthCredentials::AppPassword {
+                identifier,
+                password,
+            } => {
+                agent.login(identifier, password).await.map_err(|e| {
+                    crate::CoreError::ToolExecutionFailed {
+                        tool_name: "bluesky_firehose".to_string(),
+                        cause: format!("Login failed: {:?}", e),
+                        parameters: serde_json::json!({}),
+                    }
+                })?;
+            }
+        };
+
+        self.bsky_agent = Some(Arc::new(tokio::sync::RwLock::new(agent)));
+        Ok(self)
     }
 }
 
@@ -408,38 +536,264 @@ impl DataSource for BlueskyFirehoseSource {
         }
     }
 
-    fn format_notification(&self, item: &Self::Item) -> Option<String> {
+    async fn format_notification(&self, item: &Self::Item) -> Option<String> {
         // Format based on post type
         let mut message = String::new();
+        let mut reply_candidates = Vec::new();
 
         // Header with author
         message.push_str(&format!("💬 @{}", item.handle));
 
         // Add context for replies/mentions
-        if let Some(_reply) = &item.reply {
+        if let Some(reply) = &item.reply {
             message.push_str(" replied");
+
+            // If we have a BskyAgent, try to fetch thread context
+            if let Some(bsky_agent) = &self.bsky_agent {
+                if let Ok(agent) = bsky_agent.try_read() {
+                    // Try to fetch the parent post for context
+                    if let Ok(thread_result) = agent
+                        .api
+                        .app
+                        .bsky
+                        .feed
+                        .get_post_thread(
+                            atrium_api::app::bsky::feed::get_post_thread::ParametersData {
+                                uri: reply.parent.uri.clone(),
+                                depth: None, // Use default depth
+                                parent_height: None,
+                            }
+                            .into(),
+                        )
+                        .await
+                    {
+                        // Extract thread context
+                        use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
+                        if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
+                            thread_view,
+                        )) = &thread_result.thread
+                        {
+                            message.push_str(" in thread:\n\n");
+
+                            // Walk up the parent chain to collect thread context
+                            let mut current_thread = thread_view;
+                            let mut thread_posts = Vec::new();
+                            let mut depth = 0;
+
+                            // Collect the immediate parent and up to 4 posts up the chain
+                            loop {
+                                if let Some((text, langs, features, alt_texts)) =
+                                    extract_post_data(&current_thread.post)
+                                {
+                                    let handle =
+                                        current_thread.post.author.handle.as_str().to_string();
+                                    let mentions: Vec<_> = features
+                                        .iter()
+                                        .filter_map(|f| match f {
+                                            FacetFeature::Mention { did } => {
+                                                Some(format!("@{}", did))
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+
+                                    thread_posts.push((
+                                        handle,
+                                        text,
+                                        current_thread.post.uri.clone(),
+                                        depth,
+                                        mentions,
+                                        langs,
+                                        alt_texts,
+                                    ));
+
+                                    // Add as reply candidate
+                                    reply_candidates
+                                        .push(thread_post_to_candidate(&current_thread.post));
+                                }
+
+                                depth += 1;
+                                if depth >= 4 {
+                                    break;
+                                }
+
+                                // Check if there's a parent
+                                if let Some(parent) = &current_thread.parent {
+                                    use atrium_api::app::bsky::feed::defs::ThreadViewPostParentRefs;
+                                    if let Union::Refs(ThreadViewPostParentRefs::ThreadViewPost(
+                                        parent_thread,
+                                    )) = parent
+                                    {
+                                        current_thread = parent_thread;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            // Display thread posts in reverse order (root to leaf)
+                            for (handle, text, _uri, depth, mentions, langs, alt_texts) in
+                                thread_posts.iter().rev()
+                            {
+                                let indent = "  ".repeat(*depth);
+                                let bullet = if *depth == 0 { "•" } else { "└─" };
+
+                                message.push_str(&format!(
+                                    "{}{} @{}: {}\n",
+                                    indent, bullet, handle, text
+                                ));
+
+                                // Show mentions if any
+                                if !mentions.is_empty() {
+                                    message.push_str(&format!(
+                                        "{}   [mentions: {}]\n",
+                                        indent,
+                                        mentions.join(", ")
+                                    ));
+                                }
+
+                                // Show language if not English
+                                if !langs.is_empty() && !langs.contains(&"en".to_string()) {
+                                    message.push_str(&format!(
+                                        "{}   [langs: {}]\n",
+                                        indent,
+                                        langs.join(", ")
+                                    ));
+                                }
+
+                                // Show images if any
+                                if !alt_texts.is_empty() {
+                                    message.push_str(&format!(
+                                        "{}   [📸 {} image(s)]\n",
+                                        indent,
+                                        alt_texts.len()
+                                    ));
+                                }
+                            }
+
+                            // Mark the main post clearly
+                            message.push_str("\n>>> MAIN POST >>>\n");
+                        }
+                    }
+                }
+            }
         } else if item.mentions(&self.source_id) {
             message.push_str(" mentioned you");
         }
 
-        message.push_str(":\n\n");
+        message.push_str(":\n");
 
-        // Text preview (truncate if too long)
-        let text_preview = if item.text.len() > 280 {
-            format!("{}...", &item.text[..280])
-        } else {
-            item.text.clone()
-        };
-        message.push_str(&text_preview);
-
-        // Add link
-        message.push_str(&format!("\n\n🔗 {}", item.uri));
+        // Full post text
+        message.push_str(&format!("@{}: {}", item.handle, item.text));
 
         // Add image indicator if present
         if item.has_images() {
             let alt_texts = item.image_alt_texts();
             if !alt_texts.is_empty() {
-                message.push_str(&format!("\n📸 {} image(s)", alt_texts.len()));
+                message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
+            }
+        }
+
+        // Add link
+        message.push_str(&format!("\n🔗 {}", item.uri));
+
+        // Show replies after main post if we're in a thread
+        if let Some(reply) = &item.reply {
+            if let Some(bsky_agent) = &self.bsky_agent {
+                if let Ok(agent) = bsky_agent.try_read() {
+                    if let Ok(thread_result) = agent
+                        .api
+                        .app
+                        .bsky
+                        .feed
+                        .get_post_thread(
+                            atrium_api::app::bsky::feed::get_post_thread::ParametersData {
+                                uri: reply.parent.uri.clone(),
+                                depth: None,
+                                parent_height: None,
+                            }
+                            .into(),
+                        )
+                        .await
+                    {
+                        use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
+                        if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
+                            thread_view,
+                        )) = &thread_result.thread
+                        {
+                            // Add some reply context
+                            if let Some(replies) = &thread_view.replies {
+                                message.push_str("\n<<< REPLIES <<<\n");
+                                use atrium_api::app::bsky::feed::defs::ThreadViewPostRepliesItem;
+                                for reply in replies.iter().take(2) {
+                                    if let Union::Refs(ThreadViewPostRepliesItem::ThreadViewPost(
+                                        reply_thread,
+                                    )) = reply
+                                    {
+                                        if let Some((reply_text, _langs, _features, _alt_texts)) =
+                                            extract_post_data(&reply_thread.post)
+                                        {
+                                            message.push_str(&format!(
+                                                "  └─ @{}: {}\n",
+                                                reply_thread.post.author.handle.as_str(),
+                                                reply_text
+                                            ));
+
+                                            // Add as reply candidate
+                                            reply_candidates
+                                                .push(thread_post_to_candidate(&reply_thread.post));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for memory blocks if we have an agent handle
+        if let Some(agent_handle) = &self.agent_handle {
+            // Look for or create memory block for this user
+            let memory_label = format!("bluesky_user_{}", item.handle);
+            if let Ok(memories) = agent_handle.search_archival_memories(&item.handle, 1).await {
+                if memories.is_empty() {
+                    // Fetch user profile if we have a BskyAgent
+                    let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
+                        if let Ok(agent) = bsky_agent.try_read() {
+                            Self::fetch_user_profile_for_memory(&*agent, &item.handle, &item.did)
+                                .await
+                        } else {
+                            create_basic_memory_content(&item.handle, &item.did)
+                        }
+                    } else {
+                        create_basic_memory_content(&item.handle, &item.did)
+                    };
+
+                    if let Err(e) = agent_handle
+                        .insert_archival_memory(&memory_label, &memory_content)
+                        .await
+                    {
+                        tracing::warn!("Failed to create memory block for {}: {}", item.handle, e);
+                    } else {
+                        message.push_str(&format!("\n\n📝 Memory created: {}", memory_label));
+                    }
+                } else {
+                    message.push_str(&format!("\n\n📝 Memory exists: {}", memory_label));
+                }
+            }
+        }
+
+        // Add the original post as a reply candidate too
+        reply_candidates.push((item.uri.clone(), format!("@{}", item.handle)));
+
+        // Add reply guidance at the very end
+        if !reply_candidates.is_empty() {
+            message.push_str("\n\n💭 Reply options (choose at most one):\n");
+            for (uri, handle) in &reply_candidates {
+                message.push_str(&format!("  • {} ({})\n", handle, uri));
             }
         }
 
@@ -504,12 +858,15 @@ impl LexiconIngestor for PostIngestor {
             let uri = format!("at://{}/{}/{}", event.did, collection, rkey);
             let now = chrono::Utc::now();
 
+            // Extract all the post data using our helper first
+            let (text, langs, labels, facets) = extract_post_from_record(&post);
+
             let mut post_to_filter = BlueskyPost {
                 uri,
                 did: event.did.to_string(),
                 cid: rcid,
                 handle: event.did.to_string(), // temporary, need to do handle resolution
-                text: post.text,
+                text,
                 created_at: chrono::DateTime::parse_from_rfc3339(post.created_at.as_str())
                     .expect("incorrect time format")
                     .to_utc(),
@@ -517,25 +874,9 @@ impl LexiconIngestor for PostIngestor {
                 embed: post
                     .embed
                     .map(|e| serde_json::to_value(e).expect("should be reasonably serializable")),
-                langs: post
-                    .langs
-                    .map(|l| l.iter().map(|l| format!("{:?}", l)).collect())
-                    .unwrap_or_default(),
-                labels: post.labels.map(label_convert).unwrap_or_default(),
-                facets: post
-                    .facets
-                    .map(|f| {
-                        f.iter()
-                            .map(|f| Facet {
-                                index: ByteSlice {
-                                    byte_start: f.index.byte_start,
-                                    byte_end: f.index.byte_end,
-                                },
-                                features: f.features.iter().filter_map(facet_convert).collect(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                langs,
+                labels,
+                facets,
             };
 
             if should_include_post(&mut post_to_filter, &self.filter, &self.resolver).await {
@@ -562,7 +903,115 @@ impl LexiconIngestor for PostIngestor {
     }
 }
 
-fn label_convert(l: Union<RecordLabelsRefs>) -> Vec<String> {
+/// Extract post record data into our BlueskyPost format
+fn extract_post_from_record(
+    post: &atrium_api::app::bsky::feed::post::RecordData,
+) -> (String, Vec<String>, Vec<String>, Vec<Facet>) {
+    let text = post.text.clone();
+
+    // Extract languages
+    let langs = post
+        .langs
+        .as_ref()
+        .map(|l| l.iter().map(|lang| lang.as_ref().to_string()).collect())
+        .unwrap_or_default();
+
+    // Extract labels
+    let labels = post.labels.as_ref().map(label_convert).unwrap_or_default();
+
+    // Extract facets
+    let facets = post
+        .facets
+        .as_ref()
+        .map(|f| {
+            f.iter()
+                .map(|f| Facet {
+                    index: ByteSlice {
+                        byte_start: f.index.byte_start,
+                        byte_end: f.index.byte_end,
+                    },
+                    features: f.features.iter().filter_map(facet_convert).collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (text, langs, labels, facets)
+}
+
+/// Extract post data from a PostView (for thread display)
+fn extract_post_data(
+    post_view: &atrium_api::app::bsky::feed::defs::PostView,
+) -> Option<(String, Vec<String>, Vec<FacetFeature>, Vec<String>)> {
+    if let Ok(post_record) =
+        atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(post_view.record.clone())
+    {
+        let (text, langs, _labels, facets) = extract_post_from_record(&post_record);
+
+        // Flatten facet features for easier access
+        let features: Vec<FacetFeature> = facets.into_iter().flat_map(|f| f.features).collect();
+
+        // Extract image alt texts from embed if present
+        let alt_texts = extract_image_alt_texts(&post_view.embed);
+
+        Some((text, langs, features, alt_texts))
+    } else {
+        None
+    }
+}
+
+/// Extract alt texts from post embed
+fn extract_image_alt_texts(
+    embed: &Option<Union<atrium_api::app::bsky::feed::defs::PostViewEmbedRefs>>,
+) -> Vec<String> {
+    use atrium_api::app::bsky::feed::defs::PostViewEmbedRefs;
+
+    if let Some(embed) = embed {
+        match embed {
+            Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => images_view
+                .images
+                .iter()
+                .map(|img| img.alt.clone())
+                .collect(),
+            Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(record_with_media)) => {
+                // Images can be in the media part of record with media
+                match &record_with_media.media {
+                    Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedImagesView(images)) => {
+                        images.images.iter()
+                            .map(|img| img.alt.clone())
+                            .collect()
+                    }
+                    _ => vec![]
+                }
+            }
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    }
+}
+
+/// Convert a thread post to a reply candidate tuple
+fn thread_post_to_candidate(
+    post: &atrium_api::app::bsky::feed::defs::PostView,
+) -> (String, String) {
+    (
+        post.uri.clone(),
+        format!("@{}", post.author.handle.as_str()),
+    )
+}
+
+/// Create a basic memory content string for a user
+fn create_basic_memory_content(handle: &str, did: &str) -> String {
+    format!(
+        "Bluesky user @{} (DID: {})\nFirst seen: {}\n",
+        handle,
+        did,
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    )
+}
+
+fn label_convert(l: &Union<RecordLabelsRefs>) -> Vec<String> {
     match l {
         atrium_api::types::Union::Refs(
             atrium_api::app::bsky::feed::post::RecordLabelsRefs::ComAtprotoLabelDefsSelfLabels(l),

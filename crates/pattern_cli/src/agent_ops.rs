@@ -1089,50 +1089,99 @@ pub async fn chat_with_group<M: GroupManager>(
                     .route_message(&group, &agents_with_membership, message)
                     .await
                 {
-                    Ok(group_response) => {
-                        // Display responses from each agent
-                        for agent_response in &group_response.responses {
-                            // Find agent name
-                            let agent_name = agents_with_membership
-                                .iter()
-                                .find(|a| a.agent.id() == agent_response.agent_id)
-                                .map(|a| a.agent.name())
-                                .unwrap_or("Unknown Agent".to_string());
+                    Ok(mut stream) => {
+                        use tokio_stream::StreamExt;
 
-                            // Display the response
-                            for content in &agent_response.response.content {
-                                match content {
-                                    MessageContent::Text(text) => {
-                                        output.agent_message(&agent_name, text);
+                        let mut execution_time = None;
+
+                        // Process the stream of events
+                        while let Some(event) = stream.next().await {
+                            match event {
+                                pattern_core::coordination::groups::GroupResponseEvent::Started { pattern, agent_count, .. } => {
+                                    output.status(&format!("Starting {} pattern with {} agents", pattern, agent_count));
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::AgentStarted { agent_name, role, .. } => {
+                                    output.status(&format!("Agent {} ({:?}) processing...", agent_name, role));
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id, text, is_final } => {
+                                    if is_final || !text.is_empty() {
+                                        // Find agent name
+                                        let agent_name = agents_with_membership
+                                            .iter()
+                                            .find(|a| a.agent.id() == agent_id)
+                                            .map(|a| a.agent.name())
+                                            .unwrap_or("Unknown Agent".to_string());
+
+                                        output.agent_message(&agent_name, &text);
                                     }
-                                    MessageContent::ToolCalls(calls) => {
-                                        for call in calls {
-                                            output.tool_call(
-                                                &call.fn_name,
-                                                &serde_json::to_string_pretty(&call.fn_arguments)
-                                                    .unwrap_or_else(|_| {
-                                                        call.fn_arguments.to_string()
-                                                    }),
-                                            );
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::ReasoningChunk { agent_id, text, is_final } => {
+                                    if is_final || !text.is_empty() {
+                                        // Find agent name
+                                        let agent_name = agents_with_membership
+                                            .iter()
+                                            .find(|a| a.agent.id() == agent_id)
+                                            .map(|a| a.agent.name())
+                                            .unwrap_or("Unknown Agent".to_string());
+
+                                        output.info(&format!("{} reasoning:", agent_name), &text);
+                                    }
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id, fn_name, args, .. } => {
+                                    let agent_name = agents_with_membership
+                                        .iter()
+                                        .find(|a| a.agent.id() == agent_id)
+                                        .map(|a| a.agent.name())
+                                        .unwrap_or("Unknown Agent".to_string());
+
+                                    output.status(&format!("{} calling tool: {}", agent_name, fn_name));
+                                    output.tool_call(
+                                        &fn_name,
+                                        &serde_json::to_string_pretty(&args)
+                                            .unwrap_or_else(|_| args.to_string()),
+                                    );
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallCompleted { agent_id: _, call_id, result } => {
+                                    match result {
+                                        Ok(result) => {
+                                            output.tool_result(&result);
+                                        }
+                                        Err(error) => {
+                                            output.error(&format!("Tool error (call {}): {}", call_id, error));
                                         }
                                     }
-                                    MessageContent::ToolResponses(responses) => {
-                                        for resp in responses {
-                                            output.tool_result(&resp.content);
-                                        }
-                                    }
-                                    MessageContent::Parts(_) => {
-                                        output.status("[Multi-part content]");
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::AgentCompleted { agent_name, .. } => {
+                                    output.status(&format!("{} completed", agent_name));
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::Complete { execution_time: exec_time, .. } => {
+                                    execution_time = Some(exec_time);
+                                }
+                                pattern_core::coordination::groups::GroupResponseEvent::Error { agent_id, message, recoverable } => {
+                                    let prefix = if let Some(agent_id) = agent_id {
+                                        let agent_name = agents_with_membership
+                                            .iter()
+                                            .find(|a| a.agent.id() == agent_id)
+                                            .map(|a| a.agent.name())
+                                            .unwrap_or("Unknown Agent".to_string());
+                                        format!("{} error", agent_name)
+                                    } else {
+                                        "Group error".to_string()
+                                    };
+
+                                    if recoverable {
+                                        output.warning(&format!("{}: {}", prefix, message));
+                                    } else {
+                                        output.error(&format!("{}: {}", prefix, message));
                                     }
                                 }
                             }
                         }
 
-                        // Show execution time
-                        output.info(
-                            "Execution time:",
-                            &format!("{:?}", group_response.execution_time),
-                        );
+                        // Show execution time if we got it
+                        if let Some(execution_time) = execution_time {
+                            output.info("Execution time:", &format!("{:?}", execution_time));
+                        }
                     }
                     Err(e) => {
                         output.error(&format!("Error routing message: {}", e));

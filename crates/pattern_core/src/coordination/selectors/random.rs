@@ -67,129 +67,15 @@ impl AgentSelector for RandomSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{Agent, AgentState, AgentType};
-    use crate::coordination::groups::GroupMembership;
-    use crate::coordination::types::GroupMemberRole;
-    use crate::memory::MemoryPermission;
     use crate::{
-        AgentId, UserId,
-        message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
+        AgentId,
+        coordination::{
+            groups::GroupMembership,
+            test_utils::test::{TestAgent, create_test_message},
+            types::GroupMemberRole,
+        },
     };
-    use crate::{MemoryBlock, tool::DynamicTool};
-    use async_trait::async_trait;
     use chrono::Utc;
-    use compact_str::CompactString;
-
-    // Simple test agent implementation
-    #[derive(Debug)]
-    struct TestAgent {
-        id: AgentId,
-        name: String,
-    }
-
-    impl AsRef<TestAgent> for TestAgent {
-        fn as_ref(&self) -> &TestAgent {
-            self
-        }
-    }
-
-    #[async_trait]
-    impl Agent for TestAgent {
-        fn id(&self) -> AgentId {
-            self.id.clone()
-        }
-        fn name(&self) -> String {
-            self.name.to_string()
-        }
-        fn agent_type(&self) -> AgentType {
-            AgentType::Generic
-        }
-
-        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
-            unimplemented!("Test agent")
-        }
-
-        async fn get_memory(&self, _key: &str) -> Result<Option<MemoryBlock>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn update_memory(&self, _key: &str, _memory: MemoryBlock) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn execute_tool(
-            &self,
-            _tool_name: &str,
-            _params: serde_json::Value,
-        ) -> Result<serde_json::Value> {
-            unimplemented!("Test agent")
-        }
-
-        async fn list_memory_keys(&self) -> Result<Vec<CompactString>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn share_memory_with(
-            &self,
-            _memory_key: &str,
-            _target_agent_id: AgentId,
-            _access_level: MemoryPermission,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn get_shared_memories(&self) -> Result<Vec<(AgentId, CompactString, MemoryBlock)>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn system_prompt(&self) -> Vec<String> {
-            vec![]
-        }
-
-        async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
-            vec![]
-        }
-
-        async fn state(&self) -> AgentState {
-            AgentState::Ready
-        }
-
-        async fn set_state(&self, _state: AgentState) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn register_endpoint(
-            &self,
-            _name: String,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        /// Set the default user endpoint
-        async fn set_default_user_endpoint(
-            &self,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-    }
-
-    fn create_test_message(content: &str) -> Message {
-        Message {
-            id: crate::id::MessageId::generate(),
-            role: ChatRole::User,
-            owner_id: Some(UserId::generate()),
-            content: MessageContent::Text(content.to_string()),
-            metadata: MessageMetadata::default(),
-            options: MessageOptions::default(),
-            has_tool_calls: false,
-            word_count: content.split_whitespace().count() as u32,
-            created_at: Utc::now(),
-            embedding: None,
-            embedding_model: None,
-        }
-    }
 
     #[tokio::test]
     async fn test_random_selector() {
@@ -201,7 +87,7 @@ mod tests {
                 agent: Arc::new(TestAgent {
                     id: AgentId::generate(),
                     name: "agent1".to_string(),
-                }),
+                }) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -213,7 +99,7 @@ mod tests {
                 agent: Arc::new(TestAgent {
                     id: AgentId::generate(),
                     name: "agent2".to_string(),
-                }),
+                }) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -225,7 +111,7 @@ mod tests {
                 agent: Arc::new(TestAgent {
                     id: AgentId::generate(),
                     name: "agent3".to_string(),
-                }),
+                }) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,

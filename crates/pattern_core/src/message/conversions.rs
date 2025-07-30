@@ -28,6 +28,33 @@ impl From<genai::chat::MessageContent> for MessageContent {
             genai::chat::MessageContent::ToolResponses(responses) => {
                 MessageContent::ToolResponses(responses.into_iter().map(Into::into).collect())
             }
+            genai::chat::MessageContent::Blocks(blocks) => {
+                // Convert genai blocks to Pattern blocks
+                MessageContent::Blocks(
+                    blocks
+                        .into_iter()
+                        .map(|block| match block {
+                            genai::chat::ContentBlock::Text { text } => ContentBlock::Text { text },
+                            genai::chat::ContentBlock::Thinking { text, signature } => {
+                                ContentBlock::Thinking { text, signature }
+                            }
+                            genai::chat::ContentBlock::RedactedThinking { data } => {
+                                ContentBlock::RedactedThinking { data }
+                            }
+                            genai::chat::ContentBlock::ToolUse { id, name, input } => {
+                                ContentBlock::ToolUse { id, name, input }
+                            }
+                            genai::chat::ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                            } => ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                            },
+                        })
+                        .collect(),
+                )
+            }
         }
     }
 }
@@ -117,6 +144,33 @@ impl From<MessageContent> for genai::chat::MessageContent {
             MessageContent::ToolResponses(responses) => genai::chat::MessageContent::ToolResponses(
                 responses.into_iter().map(Into::into).collect(),
             ),
+            MessageContent::Blocks(blocks) => {
+                // Convert Pattern's blocks to genai's blocks
+                genai::chat::MessageContent::Blocks(
+                    blocks
+                        .into_iter()
+                        .map(|block| match block {
+                            ContentBlock::Text { text } => genai::chat::ContentBlock::Text { text },
+                            ContentBlock::Thinking { text, signature } => {
+                                genai::chat::ContentBlock::Thinking { text, signature }
+                            }
+                            ContentBlock::RedactedThinking { data } => {
+                                genai::chat::ContentBlock::RedactedThinking { data }
+                            }
+                            ContentBlock::ToolUse { id, name, input } => {
+                                genai::chat::ContentBlock::ToolUse { id, name, input }
+                            }
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                            } => genai::chat::ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                            },
+                        })
+                        .collect(),
+                )
+            }
         }
     }
 }

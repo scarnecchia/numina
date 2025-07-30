@@ -9,6 +9,9 @@ pub mod selectors;
 pub mod types;
 pub mod utils;
 
+#[cfg(test)]
+pub mod test_utils;
+
 // Re-export main types
 pub use groups::{AgentGroup, Constellation, GroupManager, GroupResponse};
 pub use patterns::{

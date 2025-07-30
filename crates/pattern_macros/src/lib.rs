@@ -707,22 +707,52 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             if let Some((entity_type, edge_type)) = extract_tuple_types_from_container(field_type) {
                 quote! {
                     // Load Vec<(Entity, EdgeEntity)> with edge entity relations
-                    // Query the edge entities with the related entity data
-                    let query = format!("SELECT *, out.* as related_data FROM {} WHERE in = $parent ORDER BY id ASC", #relation_name);
+                    // Query the edge entities - need to check if this is group_members which has reversed in/out
+                    let query = if #relation_name == "group_members" {
+                        format!("SELECT * FROM {} WHERE out = $parent ORDER BY id ASC", #relation_name)
+                    } else {
+                        format!("SELECT * FROM {} WHERE in = $parent ORDER BY id ASC", #relation_name)
+                    };
+
+                    tracing::info!("Loading edge entities with query: {}, parent: {:?}", query, self.id);
 
                     let mut result = db.query(&query)
                         .bind(("parent", ::surrealdb::RecordId::from(self.id.clone())))
                         .await?;
 
-                    // Extract edge records - we need to get them as the DbModel type
-                    let edge_db_models: Vec<<#edge_type as #crate_path::db::entity::DbEntity>::DbModel> = result.take(0)
-                        ?;
+                    // Take the edge DB models directly
+                    let edge_db_models: Vec<<#edge_type as #crate_path::db::entity::DbEntity>::DbModel> = result.take(0)?;
 
-                    // Process the edge records with related data
+                    tracing::info!("Found {} {} relations", edge_db_models.len(), #relation_name);
+
+                    // Convert DB models to domain types
+                    let edge_entities: Vec<#edge_type> = edge_db_models
+                        .into_iter()
+                        .map(|db_model| <#edge_type as #crate_path::db::entity::DbEntity>::from_db_model(db_model)
+                            .map_err(#crate_path::db::DatabaseError::from))
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    // Now fetch the related entities
                     let mut entities = Vec::<(#entity_type, #edge_type)>::new();
 
-                    // TODO: Implement proper loading of edge entity relations
-                    // For now, just return an empty vec to get past type inference
+                    for edge in edge_entities {
+                        // Get the related entity - for group_members we need in_id (agent), otherwise out_id
+                        let related_id = if #relation_name == "group_members" {
+                            ::surrealdb::RecordId::from(&edge.in_id)
+                        } else {
+                            ::surrealdb::RecordId::from(&edge.out_id)
+                        };
+
+                        let related_db: Option<<#entity_type as #crate_path::db::entity::DbEntity>::DbModel> =
+                            db.select(related_id).await?;
+
+                        if let Some(db_model) = related_db {
+                            let related = <#entity_type as #crate_path::db::entity::DbEntity>::from_db_model(db_model)
+                                .map_err(|e| #crate_path::db::DatabaseError::from(e))?;
+                            entities.push((related, edge));
+                        }
+                    }
+
                     self.#field_name = entities;
                 }
             } else {
@@ -1085,7 +1115,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             pub async fn store_relations<C: ::surrealdb::Connection>(
                 &self,
                 db: &::surrealdb::Surreal<C>,
-            ) -> std::result::Result<(), #crate_path::db::DatabaseError> {
+            ) -> ::std::result::Result<(), #crate_path::db::DatabaseError> {
                 #(#store_relation_calls)*
                 #(#store_edge_entity_calls)*
                 Ok(())
@@ -1095,7 +1125,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
             pub async fn load_relations<C: ::surrealdb::Connection>(
                 &mut self,
                 db: &::surrealdb::Surreal<C>,
-            ) -> std::result::Result<(), #crate_path::db::DatabaseError> {
+            ) -> ::std::result::Result<(), #crate_path::db::DatabaseError> {
                 #(#load_relation_calls)*
                 #(#load_edge_entity_calls)*
                 Ok(())
@@ -1152,7 +1182,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn from_db_model(db_model: Self::DbModel) -> std::result::Result<Self::Domain, #crate_path::db::entity::EntityError> {
+            fn from_db_model(db_model: Self::DbModel) -> ::std::result::Result<Self::Domain, #crate_path::db::entity::EntityError> {
                 Ok(Self {
                     #(#from_storage_conversions),*
                 })

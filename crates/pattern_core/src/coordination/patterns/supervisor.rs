@@ -5,10 +5,12 @@ use chrono::Utc;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    AgentId, CoreError, Result,
+    AgentId, Result,
     agent::Agent,
     coordination::{
-        groups::{AgentResponse, AgentWithMembership, GroupManager, GroupResponse},
+        groups::{
+            AgentResponse, AgentWithMembership, GroupManager, GroupResponse, GroupResponseEvent,
+        },
         types::{CoordinationPattern, DelegationStrategy, FallbackBehavior, GroupState},
         utils::text_response,
     },
@@ -24,135 +26,508 @@ impl GroupManager for SupervisorManager {
         group: &crate::coordination::groups::AgentGroup,
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse> {
+    ) -> Result<Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>> {
+        use tokio_stream::wrappers::ReceiverStream;
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
         let start_time = std::time::Instant::now();
+        let group_id = group.id.clone();
+        let _group_name = group.name.clone();
+        let coordination_pattern = group.coordination_pattern.clone();
+        let group_state = group.state.clone();
+        let agents = agents.to_vec();
 
-        // Extract supervisor config
-        let (leader_id, delegation_rules) = match &group.coordination_pattern {
-            CoordinationPattern::Supervisor {
-                leader_id,
-                delegation_rules,
-            } => (leader_id, delegation_rules),
-            _ => {
-                return Err(CoreError::AgentGroupError {
-                    group_name: group.name.clone(),
-                    operation: "route_message".to_string(),
-                    cause: "Invalid pattern for SupervisorManager".to_string(),
-                });
-            }
-        };
+        tokio::spawn(async move {
+            // Extract supervisor config
+            let (leader_id, delegation_rules) = match &coordination_pattern {
+                CoordinationPattern::Supervisor {
+                    leader_id,
+                    delegation_rules,
+                } => (leader_id, delegation_rules),
+                _ => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: format!("Invalid pattern for SupervisorManager"),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
+                }
+            };
 
-        // Extract current delegations from state
-        let current_delegations = match &group.state {
-            GroupState::Supervisor {
-                current_delegations,
-            } => current_delegations.clone(),
-            _ => HashMap::new(),
-        };
+            // Extract current delegations from state
+            let current_delegations = match &group_state {
+                GroupState::Supervisor {
+                    current_delegations,
+                } => current_delegations.clone(),
+                _ => HashMap::new(),
+            };
 
-        // Find the leader agent
-        let leader = agents
-            .iter()
-            .find(|awm| awm.agent.as_ref().id() == *leader_id)
-            .ok_or_else(|| CoreError::agent_not_found(leader_id.to_string()))?;
+            // Find the leader agent
+            let leader = match agents
+                .iter()
+                .find(|awm| awm.agent.as_ref().id() == *leader_id)
+            {
+                Some(l) => l,
+                None => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: format!("Leader agent {} not found", leader_id),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
+                }
+            };
 
-        // Decide if leader should delegate
-        let should_delegate = self.should_delegate(
-            &message,
-            &current_delegations,
-            leader_id,
-            delegation_rules.max_delegations_per_agent,
-        );
+            // Send start event
+            let _ = tx
+                .send(GroupResponseEvent::Started {
+                    group_id: group_id.clone(),
+                    pattern: "supervisor".to_string(),
+                    agent_count: agents.len(),
+                })
+                .await;
 
-        let responses = if should_delegate {
-            // Select delegate based on strategy
-            let delegate = self.select_delegate(
-                agents,
-                leader_id,
-                &delegation_rules.delegation_strategy,
+            // Decide if leader should delegate
+            let should_delegate = Self::should_delegate_static(
+                &message,
                 &current_delegations,
+                leader_id,
                 delegation_rules.max_delegations_per_agent,
-            )?;
+            );
 
-            if let Some(delegate_awm) = delegate {
-                // Delegate handles the message
-                let agent_response = delegate_awm
+            let mut agent_responses = Vec::new();
+            let mut new_delegations = current_delegations.clone();
+
+            if should_delegate {
+                // Select delegate based on strategy
+                let delegate = Self::select_delegate_static(
+                    &agents,
+                    leader_id,
+                    &delegation_rules.delegation_strategy,
+                    &current_delegations,
+                    delegation_rules.max_delegations_per_agent,
+                );
+
+                if let Ok(Some(delegate_awm)) = delegate {
+                    // Delegate handles the message
+                    let agent_id = delegate_awm.agent.as_ref().id();
+                    let agent_name = delegate_awm.agent.name();
+
+                    let _ = tx
+                        .send(GroupResponseEvent::AgentStarted {
+                            agent_id: agent_id.clone(),
+                            agent_name: agent_name.clone(),
+                            role: delegate_awm.membership.role.clone(),
+                        })
+                        .await;
+
+                    // Process with streaming
+                    match delegate_awm
+                        .agent
+                        .clone()
+                        .process_message_stream(message.clone())
+                        .await
+                    {
+                        Ok(mut stream) => {
+                            use tokio_stream::StreamExt;
+
+                            while let Some(event) = stream.next().await {
+                                match event {
+                                    crate::agent::ResponseEvent::TextChunk { text, is_final } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::TextChunk {
+                                                agent_id: agent_id.clone(),
+                                                text,
+                                                is_final,
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::ReasoningChunk {
+                                        text,
+                                        is_final,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::ReasoningChunk {
+                                                agent_id: agent_id.clone(),
+                                                text,
+                                                is_final,
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::ToolCallStarted {
+                                        call_id,
+                                        fn_name,
+                                        args,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::ToolCallStarted {
+                                                agent_id: agent_id.clone(),
+                                                call_id,
+                                                fn_name,
+                                                args,
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::ToolCallCompleted {
+                                        call_id,
+                                        result,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::ToolCallCompleted {
+                                                agent_id: agent_id.clone(),
+                                                call_id,
+                                                result: result.map_err(|e| e.to_string()),
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::Complete {
+                                        message_id, ..
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::AgentCompleted {
+                                                agent_id: agent_id.clone(),
+                                                agent_name: agent_name.clone(),
+                                                message_id: Some(message_id),
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::Error {
+                                        message,
+                                        recoverable,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::Error {
+                                                agent_id: Some(agent_id.clone()),
+                                                message,
+                                                recoverable,
+                                            })
+                                            .await;
+                                    }
+                                    _ => {} // Skip other events
+                                }
+                            }
+
+                            // Update delegation count
+                            *new_delegations.entry(agent_id.clone()).or_insert(0) += 1;
+
+                            agent_responses.push(AgentResponse {
+                                agent_id: agent_id.clone(),
+                                response: crate::message::Response {
+                                    content: vec![],
+                                    reasoning: None,
+                                    metadata: crate::message::ResponseMetadata::default(),
+                                },
+                                responded_at: Utc::now(),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(GroupResponseEvent::Error {
+                                    agent_id: Some(agent_id),
+                                    message: e.to_string(),
+                                    recoverable: false,
+                                })
+                                .await;
+                        }
+                    }
+                } else {
+                    // No delegate available, use fallback behavior
+                    match &delegation_rules.fallback_behavior {
+                        FallbackBehavior::HandleSelf => {
+                            // Leader handles it
+                            let agent_id = leader.agent.as_ref().id();
+                            let agent_name = leader.agent.name();
+
+                            let _ = tx
+                                .send(GroupResponseEvent::AgentStarted {
+                                    agent_id: agent_id.clone(),
+                                    agent_name: agent_name.clone(),
+                                    role: leader.membership.role.clone(),
+                                })
+                                .await;
+
+                            match leader
+                                .agent
+                                .clone()
+                                .process_message_stream(message.clone())
+                                .await
+                            {
+                                Ok(mut stream) => {
+                                    use tokio_stream::StreamExt;
+
+                                    while let Some(event) = stream.next().await {
+                                        match event {
+                                            crate::agent::ResponseEvent::TextChunk {
+                                                text,
+                                                is_final,
+                                            } => {
+                                                let _ = tx
+                                                    .send(GroupResponseEvent::TextChunk {
+                                                        agent_id: agent_id.clone(),
+                                                        text,
+                                                        is_final,
+                                                    })
+                                                    .await;
+                                            }
+                                            crate::agent::ResponseEvent::ReasoningChunk {
+                                                text,
+                                                is_final,
+                                            } => {
+                                                let _ = tx
+                                                    .send(GroupResponseEvent::ReasoningChunk {
+                                                        agent_id: agent_id.clone(),
+                                                        text,
+                                                        is_final,
+                                                    })
+                                                    .await;
+                                            }
+                                            crate::agent::ResponseEvent::ToolCallStarted {
+                                                call_id,
+                                                fn_name,
+                                                args,
+                                            } => {
+                                                let _ = tx
+                                                    .send(GroupResponseEvent::ToolCallStarted {
+                                                        agent_id: agent_id.clone(),
+                                                        call_id,
+                                                        fn_name,
+                                                        args,
+                                                    })
+                                                    .await;
+                                            }
+                                            crate::agent::ResponseEvent::ToolCallCompleted {
+                                                call_id,
+                                                result,
+                                            } => {
+                                                let _ = tx
+                                                    .send(GroupResponseEvent::ToolCallCompleted {
+                                                        agent_id: agent_id.clone(),
+                                                        call_id,
+                                                        result: result.map_err(|e| e.to_string()),
+                                                    })
+                                                    .await;
+                                            }
+                                            crate::agent::ResponseEvent::Complete {
+                                                message_id,
+                                                ..
+                                            } => {
+                                                let _ = tx
+                                                    .send(GroupResponseEvent::AgentCompleted {
+                                                        agent_id: agent_id.clone(),
+                                                        agent_name: agent_name.clone(),
+                                                        message_id: Some(message_id),
+                                                    })
+                                                    .await;
+                                            }
+                                            crate::agent::ResponseEvent::Error {
+                                                message,
+                                                recoverable,
+                                            } => {
+                                                let _ = tx
+                                                    .send(GroupResponseEvent::Error {
+                                                        agent_id: Some(agent_id.clone()),
+                                                        message,
+                                                        recoverable,
+                                                    })
+                                                    .await;
+                                            }
+                                            _ => {} // Skip other events
+                                        }
+                                    }
+
+                                    agent_responses.push(AgentResponse {
+                                        agent_id: leader_id.clone(),
+                                        response: crate::message::Response {
+                                            content: vec![],
+                                            reasoning: None,
+                                            metadata: crate::message::ResponseMetadata::default(),
+                                        },
+                                        responded_at: Utc::now(),
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::Error {
+                                            agent_id: Some(leader_id.clone()),
+                                            message: e.to_string(),
+                                            recoverable: false,
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                        FallbackBehavior::Queue => {
+                            let _ = tx
+                                .send(GroupResponseEvent::TextChunk {
+                                    agent_id: leader_id.clone(),
+                                    text: "[Supervisor] Message queued for later processing"
+                                        .to_string(),
+                                    is_final: true,
+                                })
+                                .await;
+
+                            agent_responses.push(AgentResponse {
+                                agent_id: leader_id.clone(),
+                                response: text_response(
+                                    "[Supervisor] Message queued for later processing",
+                                ),
+                                responded_at: Utc::now(),
+                            });
+                        }
+                        FallbackBehavior::Fail => {
+                            let _ = tx
+                                .send(GroupResponseEvent::Error {
+                                    agent_id: None,
+                                    message: "No delegates available and fallback is set to fail"
+                                        .to_string(),
+                                    recoverable: false,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
+            } else {
+                // Leader handles directly
+                let agent_id = leader.agent.as_ref().id();
+                let agent_name = leader.agent.name();
+
+                let _ = tx
+                    .send(GroupResponseEvent::AgentStarted {
+                        agent_id: agent_id.clone(),
+                        agent_name: agent_name.clone(),
+                        role: leader.membership.role.clone(),
+                    })
+                    .await;
+
+                match leader
                     .agent
                     .clone()
-                    .process_message(message.clone())
-                    .await?;
-                vec![AgentResponse {
-                    agent_id: delegate_awm.agent.as_ref().id(),
-                    response: agent_response,
-                    responded_at: Utc::now(),
-                }]
-            } else {
-                // No delegate available, use fallback behavior
-                match &delegation_rules.fallback_behavior {
-                    FallbackBehavior::HandleSelf => {
-                        let agent_response = leader
-                            .agent
-                            .clone()
-                            .process_message(message.clone())
-                            .await?;
-                        vec![AgentResponse {
+                    .process_message_stream(message.clone())
+                    .await
+                {
+                    Ok(mut stream) => {
+                        use tokio_stream::StreamExt;
+
+                        while let Some(event) = stream.next().await {
+                            match event {
+                                crate::agent::ResponseEvent::TextChunk { text, is_final } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::TextChunk {
+                                            agent_id: agent_id.clone(),
+                                            text,
+                                            is_final,
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::ReasoningChunk { text, is_final } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::ReasoningChunk {
+                                            agent_id: agent_id.clone(),
+                                            text,
+                                            is_final,
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::ToolCallStarted {
+                                    call_id,
+                                    fn_name,
+                                    args,
+                                } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::ToolCallStarted {
+                                            agent_id: agent_id.clone(),
+                                            call_id,
+                                            fn_name,
+                                            args,
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::ToolCallCompleted {
+                                    call_id,
+                                    result,
+                                } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::ToolCallCompleted {
+                                            agent_id: agent_id.clone(),
+                                            call_id,
+                                            result: result.map_err(|e| e.to_string()),
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::Complete { message_id, .. } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::AgentCompleted {
+                                            agent_id: agent_id.clone(),
+                                            agent_name: agent_name.clone(),
+                                            message_id: Some(message_id),
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::Error {
+                                    message,
+                                    recoverable,
+                                } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::Error {
+                                            agent_id: Some(agent_id.clone()),
+                                            message,
+                                            recoverable,
+                                        })
+                                        .await;
+                                }
+                                _ => {} // Skip other events
+                            }
+                        }
+
+                        agent_responses.push(AgentResponse {
                             agent_id: leader_id.clone(),
-                            response: agent_response,
+                            response: crate::message::Response {
+                                content: vec![],
+                                reasoning: None,
+                                metadata: crate::message::ResponseMetadata::default(),
+                            },
                             responded_at: Utc::now(),
-                        }]
-                    }
-                    FallbackBehavior::Queue => {
-                        vec![AgentResponse {
-                            agent_id: leader_id.clone(),
-                            response: text_response(
-                                "[Supervisor] Message queued for later processing",
-                            ),
-                            responded_at: Utc::now(),
-                        }]
-                    }
-                    FallbackBehavior::Fail => {
-                        return Err(CoreError::AgentGroupError {
-                            group_name: group.name.clone(),
-                            operation: "delegate".to_string(),
-                            cause: "No delegates available and fallback is set to fail".to_string(),
                         });
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(GroupResponseEvent::Error {
+                                agent_id: Some(leader_id.clone()),
+                                message: e.to_string(),
+                                recoverable: false,
+                            })
+                            .await;
                     }
                 }
             }
-        } else {
-            // Leader handles directly
-            let agent_response = leader
-                .agent
-                .clone()
-                .process_message(message.clone())
-                .await?;
-            vec![AgentResponse {
-                agent_id: leader_id.clone(),
-                response: agent_response,
-                responded_at: Utc::now(),
-            }]
-        };
 
-        // Update state with new delegation counts
-        let new_state = if should_delegate {
-            let mut new_delegations = current_delegations.clone();
-            if let Some(delegate_id) = responses.first().map(|r| &r.agent_id) {
-                *new_delegations.entry(delegate_id.clone()).or_insert(0) += 1;
-            }
-            Some(GroupState::Supervisor {
-                current_delegations: new_delegations,
-            })
-        } else {
-            None
-        };
+            // Update state with new delegation counts
+            let new_state = if should_delegate && !new_delegations.is_empty() {
+                Some(GroupState::Supervisor {
+                    current_delegations: new_delegations,
+                })
+            } else {
+                None
+            };
 
-        Ok(GroupResponse {
-            group_id: group.id.clone(),
-            pattern: "supervisor".to_string(),
-            responses,
-            execution_time: start_time.elapsed(),
-            state_changes: new_state,
-        })
+            // Send completion event
+            let _ = tx
+                .send(GroupResponseEvent::Complete {
+                    group_id,
+                    pattern: "supervisor".to_string(),
+                    execution_time: start_time.elapsed(),
+                    agent_responses,
+                    state_changes: new_state,
+                })
+                .await;
+        });
+
+        Ok(Box::new(ReceiverStream::new(rx)))
     }
 
     async fn update_state(
@@ -166,8 +541,16 @@ impl GroupManager for SupervisorManager {
 }
 
 impl SupervisorManager {
-    fn should_delegate(
-        &self,
+    fn should_delegate_static(
+        _message: &Message,
+        current_delegations: &HashMap<AgentId, usize>,
+        leader_id: &AgentId,
+        max_delegations: Option<usize>,
+    ) -> bool {
+        Self::should_delegate_impl(_message, current_delegations, leader_id, max_delegations)
+    }
+
+    fn should_delegate_impl(
         _message: &Message,
         current_delegations: &HashMap<AgentId, usize>,
         leader_id: &AgentId,
@@ -183,8 +566,23 @@ impl SupervisorManager {
         }
     }
 
-    fn select_delegate<'a>(
-        &self,
+    fn select_delegate_static<'a>(
+        agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
+        leader_id: &AgentId,
+        strategy: &DelegationStrategy,
+        current_delegations: &HashMap<AgentId, usize>,
+        max_delegations: Option<usize>,
+    ) -> Result<Option<&'a AgentWithMembership<Arc<dyn Agent>>>> {
+        Self::select_delegate_impl(
+            agents,
+            leader_id,
+            strategy,
+            current_delegations,
+            max_delegations,
+        )
+    }
+
+    fn select_delegate_impl<'a>(
         agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         leader_id: &AgentId,
         strategy: &DelegationStrategy,
@@ -198,7 +596,11 @@ impl SupervisorManager {
                 let agent_id = awm.agent.as_ref().id();
                 agent_id != *leader_id
                     && awm.membership.is_active
-                    && self.can_accept_delegation(&agent_id, current_delegations, max_delegations)
+                    && Self::can_accept_delegation_impl(
+                        &agent_id,
+                        current_delegations,
+                        max_delegations,
+                    )
             })
             .collect();
 
@@ -239,8 +641,7 @@ impl SupervisorManager {
         }
     }
 
-    fn can_accept_delegation(
-        &self,
+    fn can_accept_delegation_impl(
         agent_id: &AgentId,
         current_delegations: &HashMap<AgentId, usize>,
         max_delegations: Option<usize>,

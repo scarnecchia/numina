@@ -3,6 +3,7 @@ use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::context::message_router::MessageOrigin;
 use crate::id::{QueuedMessageId, WakeupId};
 use crate::{AgentId, UserId};
 
@@ -45,6 +46,9 @@ pub struct QueuedMessage {
     /// When this message was read (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<DateTime<Utc>>,
+
+    #[entity(db_type = "object")]
+    pub origin: Option<MessageOrigin>,
 }
 
 impl QueuedMessage {
@@ -54,6 +58,7 @@ impl QueuedMessage {
         to: AgentId,
         content: String,
         metadata: Option<Value>,
+        origin: Option<MessageOrigin>,
     ) -> Self {
         let call_chain = vec![from.clone()];
 
@@ -68,6 +73,7 @@ impl QueuedMessage {
             read: false,
             created_at: Utc::now(),
             read_at: None,
+            origin,
         }
     }
 
@@ -77,6 +83,7 @@ impl QueuedMessage {
         to: AgentId,
         content: String,
         metadata: Option<Value>,
+        origin: Option<MessageOrigin>,
     ) -> Self {
         Self {
             id: QueuedMessageId::generate(),
@@ -89,6 +96,7 @@ impl QueuedMessage {
             read: false,
             created_at: Utc::now(),
             read_at: None,
+            origin,
         }
     }
 

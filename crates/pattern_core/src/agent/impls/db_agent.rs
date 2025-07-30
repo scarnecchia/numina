@@ -8,7 +8,7 @@ use surrealdb::Surreal;
 use tokio::sync::RwLock;
 
 use crate::id::RelationId;
-use crate::message::{ContentPart, ImageSource, ToolResponse};
+use crate::message::{ContentBlock, ContentPart, ImageSource, ToolCall, ToolResponse};
 use crate::tool::builtin::BuiltinTools;
 
 use crate::{
@@ -227,6 +227,9 @@ where
                         }
                         crate::message::MessageContent::Parts(parts) => {
                             format!("Parts: {} parts", parts.len())
+                        }
+                        crate::message::MessageContent::Blocks(blocks) => {
+                            format!("Blocks: {} blocks", blocks.len())
                         }
                     };
                     tracing::trace!(
@@ -919,6 +922,7 @@ where
                         MessageContent::Parts(_) => "Parts",
                         MessageContent::ToolCalls(_) => "ToolCalls",
                         MessageContent::ToolResponses(_) => "ToolResponses",
+                        MessageContent::Blocks(_) => "Blocks",
                     }
                 );
 
@@ -1039,13 +1043,20 @@ where
             loop {
                 let has_unpaired_tool_calls = current_response.has_unpaired_tool_calls();
                 if has_unpaired_tool_calls {
-                    // Emit reasoning if present
-                    if let Some(reasoning) = &current_response.reasoning {
-                        send_event(ResponseEvent::ReasoningChunk {
-                            text: reasoning.clone(),
-                            is_final: true,
-                        })
-                        .await;
+                    // Check if we have thinking blocks - if so, we'll emit reasoning from those instead
+                    let has_thinking_blocks = current_response.content.iter().any(|content| {
+                        matches!(content, MessageContent::Blocks(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::Thinking { .. })))
+                    });
+
+                    // Only emit aggregated reasoning if we don't have thinking blocks
+                    if !has_thinking_blocks {
+                        if let Some(reasoning) = &current_response.reasoning {
+                            send_event(ResponseEvent::ReasoningChunk {
+                                text: reasoning.clone(),
+                                is_final: true,
+                            })
+                            .await;
+                        }
                     }
                     // Build the processed response manually since we already executed tools
                     let mut processed_response = current_response.clone();
@@ -1156,7 +1167,8 @@ where
                                                 our_responses.push(tool_response);
                                             }
                                         }
-                                        // Add our tool responses if we have any
+                                        // Emit tool responses event but don't add to assistant message
+                                        // Tool responses should be in a separate message with role Tool
                                         if !our_responses.is_empty() {
                                             processed_response
                                                 .content
@@ -1184,7 +1196,7 @@ where
                                         ContentPart::Text(text) => {
                                             send_event(ResponseEvent::TextChunk {
                                                 text: text.clone(),
-                                                is_final: true,
+                                                is_final: false,
                                             })
                                             .await;
                                         }
@@ -1211,6 +1223,107 @@ where
                                 }
 
                                 processed_response.content.push(content.clone());
+                            }
+                            MessageContent::Blocks(blocks) => {
+                                // Extract tool calls from blocks if any
+                                let mut block_tool_calls = Vec::new();
+                                let mut other_blocks = Vec::new();
+
+                                for block in blocks {
+                                    match block {
+                                        ContentBlock::Text { text } => {
+                                            send_event(ResponseEvent::TextChunk {
+                                                text: text.clone(),
+                                                is_final: false,
+                                            })
+                                            .await;
+                                            other_blocks.push(block.clone());
+                                        }
+                                        ContentBlock::Thinking { text, .. } => {
+                                            send_event(ResponseEvent::ReasoningChunk {
+                                                text: text.clone(),
+                                                is_final: false,
+                                            })
+                                            .await;
+                                            other_blocks.push(block.clone());
+                                        }
+                                        ContentBlock::RedactedThinking { .. } => {
+                                            other_blocks.push(block.clone());
+                                        }
+                                        ContentBlock::ToolUse { id, name, input } => {
+                                            // Convert to ToolCall
+                                            let tool_call = ToolCall {
+                                                call_id: id.clone(),
+                                                fn_name: name.clone(),
+                                                fn_arguments: input.clone(),
+                                            };
+                                            other_blocks.push(block.clone());
+                                            block_tool_calls.push(tool_call);
+                                        }
+                                        ContentBlock::ToolResult { .. } => {
+                                            // Tool results shouldn't appear in assistant responses
+                                            tracing::warn!(
+                                                "Unexpected tool result in assistant message"
+                                            );
+                                            other_blocks.push(block.clone());
+                                        }
+                                    }
+                                }
+
+                                // If we found tool calls in blocks, execute them
+                                if !block_tool_calls.is_empty() {
+                                    // Emit tool call event
+                                    send_event(ResponseEvent::ToolCalls {
+                                        calls: block_tool_calls.clone(),
+                                    })
+                                    .await;
+
+                                    // Execute the tools
+                                    let mut tool_responses = Vec::new();
+                                    for tool_call in block_tool_calls {
+                                        // Execute tool
+                                        match self_clone
+                                            .execute_tool(
+                                                &tool_call.fn_name,
+                                                tool_call.fn_arguments.clone(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(result) => {
+                                                tool_responses.push(ToolResponse {
+                                                    call_id: tool_call.call_id.clone(),
+                                                    content: result.to_string(),
+                                                });
+                                            }
+                                            Err(e) => {
+                                                tool_responses.push(ToolResponse {
+                                                    call_id: tool_call.call_id.clone(),
+                                                    content: format!("Error: {}", e),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    // Add the non-tool blocks to processed response
+                                    if !other_blocks.is_empty() {
+                                        processed_response
+                                            .content
+                                            .push(MessageContent::Blocks(other_blocks));
+                                    }
+                                    // Emit tool responses event but don't add to assistant message
+                                    // Tool responses should be in a separate message with role Tool
+                                    if !tool_responses.is_empty() {
+                                        send_event(ResponseEvent::ToolResponses {
+                                            responses: tool_responses.clone(),
+                                        })
+                                        .await;
+                                        processed_response
+                                            .content
+                                            .push(MessageContent::ToolResponses(tool_responses));
+                                    }
+                                } else {
+                                    // No tool calls, just add the blocks as-is
+                                    processed_response.content.push(content.clone());
+                                }
                             }
                         }
                     }
@@ -1305,13 +1418,20 @@ where
                         break;
                     }
                 } else {
-                    // Emit reasoning if present
-                    if let Some(reasoning) = &current_response.reasoning {
-                        send_event(ResponseEvent::ReasoningChunk {
-                            text: reasoning.clone(),
-                            is_final: true,
-                        })
-                        .await;
+                    // Check if we have thinking blocks - if so, we'll emit reasoning from those instead
+                    let has_thinking_blocks = current_response.content.iter().any(|content| {
+                        matches!(content, MessageContent::Blocks(blocks) if blocks.iter().any(|b| matches!(b, ContentBlock::Thinking { .. })))
+                    });
+
+                    // Only emit aggregated reasoning if we don't have thinking blocks
+                    if !has_thinking_blocks {
+                        if let Some(reasoning) = &current_response.reasoning {
+                            send_event(ResponseEvent::ReasoningChunk {
+                                text: reasoning.clone(),
+                                is_final: true,
+                            })
+                            .await;
+                        }
                     }
                     // No tool calls, emit final content
                     for content in &current_response.content {
@@ -1351,6 +1471,47 @@ where
                                                 is_final: true,
                                             })
                                             .await;
+                                        }
+                                    }
+                                }
+                            }
+                            MessageContent::Blocks(blocks) => {
+                                // Process blocks in sequence
+                                for block in blocks {
+                                    match block {
+                                        ContentBlock::Text { text } => {
+                                            send_event(ResponseEvent::TextChunk {
+                                                text: text.clone(),
+                                                is_final: true,
+                                            })
+                                            .await;
+                                        }
+                                        ContentBlock::Thinking { text, .. } => {
+                                            // Thinking content is already handled via reasoning_content
+                                            // but we could emit it as a ReasoningChunk if not already done
+                                            send_event(ResponseEvent::ReasoningChunk {
+                                                text: text.clone(),
+                                                is_final: true,
+                                            })
+                                            .await;
+                                        }
+                                        ContentBlock::RedactedThinking { .. } => {
+                                            // Skip redacted thinking in the stream
+                                        }
+                                        ContentBlock::ToolUse { id, name, input } => {
+                                            // Convert to ToolCall and emit
+                                            let tool_call = ToolCall {
+                                                call_id: id.clone(),
+                                                fn_name: name.clone(),
+                                                fn_arguments: input.clone(),
+                                            };
+                                            send_event(ResponseEvent::ToolCalls {
+                                                calls: vec![tool_call],
+                                            })
+                                            .await;
+                                        }
+                                        ContentBlock::ToolResult { .. } => {
+                                            // Tool results shouldn't appear in assistant messages
                                         }
                                     }
                                 }

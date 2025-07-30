@@ -5,10 +5,12 @@ use chrono::Utc;
 use std::sync::Arc;
 
 use crate::{
-    CoreError, Result,
+    Result,
     agent::Agent,
     coordination::{
-        groups::{AgentResponse, AgentWithMembership, GroupManager, GroupResponse},
+        groups::{
+            AgentResponse, AgentWithMembership, GroupManager, GroupResponse, GroupResponseEvent,
+        },
         types::{CoordinationPattern, GroupState, SelectionContext},
     },
     message::Message,
@@ -31,113 +33,273 @@ impl GroupManager for DynamicManager {
         group: &crate::coordination::groups::AgentGroup,
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
         message: Message,
-    ) -> Result<GroupResponse> {
+    ) -> Result<Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>> {
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
         let start_time = std::time::Instant::now();
 
-        // Extract dynamic config
-        let (selector_name, selector_config) = match &group.coordination_pattern {
-            CoordinationPattern::Dynamic {
-                selector_name,
-                selector_config,
-            } => (selector_name, selector_config),
-            _ => {
-                return Err(CoreError::AgentGroupError {
-                    group_name: group.name.clone(),
-                    operation: "route_message".to_string(),
-                    cause: "Invalid pattern for DynamicManager".to_string(),
-                });
-            }
-        };
+        // Clone data for the spawned task
+        let group_id = group.id.clone();
+        let _group_name = group.name.clone();
+        let coordination_pattern = group.coordination_pattern.clone();
+        let agents = agents.to_vec();
+        let selectors = self.selectors.clone();
+        let group_state = group.state.clone();
 
-        // Get recent selections from state
-        let recent_selections = match &group.state {
-            GroupState::Dynamic { recent_selections } => recent_selections.clone(),
-            _ => Vec::new(),
-        };
+        // Spawn task to handle the routing
+        tokio::spawn(async move {
+            // Extract dynamic config
+            let (selector_name, selector_config) = match &coordination_pattern {
+                CoordinationPattern::Dynamic {
+                    selector_name,
+                    selector_config,
+                } => (selector_name.clone(), selector_config.clone()),
+                _ => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: format!("Invalid pattern for DynamicManager"),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
+                }
+            };
 
-        // Get the selector
-        let selector =
-            self.selectors
-                .get(selector_name)
-                .ok_or_else(|| CoreError::AgentGroupError {
-                    group_name: group.name.clone(),
-                    operation: "get_selector".to_string(),
-                    cause: format!("Selector '{}' not found", selector_name),
-                })?;
+            // Get recent selections from state
+            let recent_selections = match &group_state {
+                GroupState::Dynamic { recent_selections } => recent_selections.clone(),
+                _ => Vec::new(),
+            };
 
-        // Build selection context
-        let available_agents = agents
-            .iter()
-            .filter(|awm| awm.membership.is_active)
-            .map(|awm| (awm.agent.as_ref().id(), crate::AgentState::Ready))
-            .collect();
+            // Get the selector
+            let selector = match selectors.get(&selector_name) {
+                Some(s) => s,
+                None => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: format!("Selector '{}' not found", selector_name),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
+                }
+            };
 
-        let agent_capabilities = agents
-            .iter()
-            .filter(|awm| awm.membership.is_active)
-            .map(|awm| (awm.agent.as_ref().id(), awm.membership.capabilities.clone()))
-            .collect();
-
-        let context = SelectionContext {
-            message: message.clone(),
-            recent_selections: recent_selections.clone(),
-            available_agents,
-            agent_capabilities,
-        };
-
-        // Use the actual selector to select agents
-        let selected_agents = selector
-            .select_agents(agents, &context, selector_config)
-            .await?;
-
-        if selected_agents.is_empty() {
-            return Err(CoreError::AgentGroupError {
-                group_name: group.name.clone(),
-                operation: "select_agents".to_string(),
-                cause: "No agents selected by dynamic selector".to_string(),
-            });
-        }
-
-        // Create responses for selected agents
-        let mut responses = Vec::new();
-        for awm in selected_agents.iter() {
-            let agent_response = awm.agent.clone().process_message(message.clone()).await?;
-            responses.push(AgentResponse {
-                agent_id: awm.agent.as_ref().id(),
-                response: agent_response,
-                responded_at: Utc::now(),
-            });
-        }
-
-        // Update recent selections
-        let mut new_recent_selections = recent_selections;
-        for awm in selected_agents {
-            new_recent_selections.push((Utc::now(), awm.agent.as_ref().id()));
-        }
-
-        // Keep only recent selections (last 100 or from last hour)
-        let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
-        new_recent_selections.retain(|(timestamp, _)| *timestamp > one_hour_ago);
-        if new_recent_selections.len() > 100 {
-            new_recent_selections = new_recent_selections
-                .into_iter()
-                .rev()
-                .take(100)
-                .rev()
+            // Build selection context
+            let available_agents = agents
+                .iter()
+                .filter(|awm| awm.membership.is_active)
+                .map(|awm| (awm.agent.as_ref().id(), crate::AgentState::Ready))
                 .collect();
-        }
 
-        let new_state = GroupState::Dynamic {
-            recent_selections: new_recent_selections,
-        };
+            let agent_capabilities = agents
+                .iter()
+                .filter(|awm| awm.membership.is_active)
+                .map(|awm| (awm.agent.as_ref().id(), awm.membership.capabilities.clone()))
+                .collect();
 
-        Ok(GroupResponse {
-            group_id: group.id.clone(),
-            pattern: format!("dynamic:{}", selector_name),
-            responses,
-            execution_time: start_time.elapsed(),
-            state_changes: Some(new_state),
-        })
+            let context = SelectionContext {
+                message: message.clone(),
+                recent_selections: recent_selections.clone(),
+                available_agents,
+                agent_capabilities,
+            };
+
+            // Use the actual selector to select agents
+            let selected_agents = match selector
+                .select_agents(&agents, &context, &selector_config)
+                .await
+            {
+                Ok(agents) => agents,
+                Err(e) => {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: e.to_string(),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
+                }
+            };
+
+            if selected_agents.is_empty() {
+                let _ = tx
+                    .send(GroupResponseEvent::Error {
+                        agent_id: None,
+                        message: format!("No agents selected by dynamic selector"),
+                        recoverable: false,
+                    })
+                    .await;
+                return;
+            }
+
+            // Send start event
+            let _ = tx
+                .send(GroupResponseEvent::Started {
+                    group_id: group_id.clone(),
+                    pattern: format!("dynamic:{}", selector_name),
+                    agent_count: selected_agents.len(),
+                })
+                .await;
+
+            // Process each selected agent
+            let mut agent_responses = Vec::new();
+            let mut new_recent_selections = recent_selections.clone();
+
+            for awm in selected_agents {
+                let agent_id = awm.agent.as_ref().id();
+                let agent_name = awm.agent.name();
+
+                // Send agent started event
+                let _ = tx
+                    .send(GroupResponseEvent::AgentStarted {
+                        agent_id: agent_id.clone(),
+                        agent_name: agent_name.clone(),
+                        role: awm.membership.role.clone(),
+                    })
+                    .await;
+
+                // Process message with streaming
+                match awm
+                    .agent
+                    .clone()
+                    .process_message_stream(message.clone())
+                    .await
+                {
+                    Ok(mut stream) => {
+                        use tokio_stream::StreamExt;
+
+                        while let Some(event) = stream.next().await {
+                            // Convert ResponseEvent to GroupResponseEvent
+                            match event {
+                                crate::agent::ResponseEvent::TextChunk { text, is_final } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::TextChunk {
+                                            agent_id: agent_id.clone(),
+                                            text,
+                                            is_final,
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::ReasoningChunk { text, is_final } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::ReasoningChunk {
+                                            agent_id: agent_id.clone(),
+                                            text,
+                                            is_final,
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::ToolCallStarted {
+                                    call_id,
+                                    fn_name,
+                                    args,
+                                } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::ToolCallStarted {
+                                            agent_id: agent_id.clone(),
+                                            call_id,
+                                            fn_name,
+                                            args,
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::ToolCallCompleted {
+                                    call_id,
+                                    result,
+                                } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::ToolCallCompleted {
+                                            agent_id: agent_id.clone(),
+                                            call_id,
+                                            result: result.map_err(|e| e.to_string()),
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::Complete { message_id, .. } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::AgentCompleted {
+                                            agent_id: agent_id.clone(),
+                                            agent_name: agent_name.clone(),
+                                            message_id: Some(message_id),
+                                        })
+                                        .await;
+                                }
+                                crate::agent::ResponseEvent::Error {
+                                    message,
+                                    recoverable,
+                                } => {
+                                    let _ = tx
+                                        .send(GroupResponseEvent::Error {
+                                            agent_id: Some(agent_id.clone()),
+                                            message,
+                                            recoverable,
+                                        })
+                                        .await;
+                                }
+                                _ => {} // Skip other events
+                            }
+                        }
+
+                        // Track response for final summary
+                        agent_responses.push(AgentResponse {
+                            agent_id: agent_id.clone(),
+                            response: crate::message::Response {
+                                content: vec![], // TODO: Collect actual response content
+                                reasoning: None,
+                                metadata: crate::message::ResponseMetadata::default(),
+                            },
+                            responded_at: Utc::now(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(GroupResponseEvent::Error {
+                                agent_id: Some(agent_id.clone()),
+                                message: e.to_string(),
+                                recoverable: false,
+                            })
+                            .await;
+                    }
+                }
+
+                // Update recent selections
+                new_recent_selections.push((Utc::now(), agent_id));
+            }
+
+            // Keep only recent selections (last 100 or from last hour)
+            let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+            new_recent_selections.retain(|(timestamp, _)| *timestamp > one_hour_ago);
+            if new_recent_selections.len() > 100 {
+                new_recent_selections = new_recent_selections
+                    .into_iter()
+                    .rev()
+                    .take(100)
+                    .rev()
+                    .collect();
+            }
+
+            let new_state = GroupState::Dynamic {
+                recent_selections: new_recent_selections,
+            };
+
+            // Send completion event
+            let _ = tx
+                .send(GroupResponseEvent::Complete {
+                    group_id,
+                    pattern: format!("dynamic:{}", selector_name),
+                    execution_time: start_time.elapsed(),
+                    agent_responses,
+                    state_changes: Some(new_state),
+                })
+                .await;
+        });
+
+        Ok(Box::new(ReceiverStream::new(rx)))
     }
 
     async fn update_state(
@@ -154,16 +316,14 @@ impl GroupManager for DynamicManager {
 mod tests {
     use super::*;
     use crate::{
-        AgentId, MemoryBlock, UserId,
-        agent::{Agent, AgentState, AgentType},
         coordination::{
             AgentGroup, AgentSelector,
             groups::{AgentWithMembership, GroupMembership},
             selectors::SelectorRegistry,
+            test_utils::test::{create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
         id::GroupId,
-        message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -201,139 +361,14 @@ mod tests {
         }
     }
 
-    // Simple test agent implementation
-    #[derive(Debug)]
-    struct TestAgent {
-        id: AgentId,
-        name: String,
-    }
-
-    impl AsRef<TestAgent> for TestAgent {
-        fn as_ref(&self) -> &TestAgent {
-            self
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Agent for TestAgent {
-        fn id(&self) -> AgentId {
-            self.id.clone()
-        }
-        fn name(&self) -> String {
-            self.name.to_string()
-        }
-        fn agent_type(&self) -> AgentType {
-            AgentType::Generic
-        }
-
-        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
-            use crate::message::ResponseMetadata;
-            Ok(Response {
-                content: vec![MessageContent::Text("Test response".to_string())],
-                reasoning: None,
-                metadata: ResponseMetadata::default(),
-            })
-        }
-
-        async fn get_memory(&self, _key: &str) -> Result<Option<MemoryBlock>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn update_memory(&self, _key: &str, _memory: MemoryBlock) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn execute_tool(
-            &self,
-            _tool_name: &str,
-            _params: serde_json::Value,
-        ) -> Result<serde_json::Value> {
-            unimplemented!("Test agent")
-        }
-
-        async fn list_memory_keys(&self) -> Result<Vec<compact_str::CompactString>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn share_memory_with(
-            &self,
-            _memory_key: &str,
-            _target_agent_id: AgentId,
-            _access_level: crate::memory::MemoryPermission,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn get_shared_memories(
-            &self,
-        ) -> Result<Vec<(AgentId, compact_str::CompactString, MemoryBlock)>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn system_prompt(&self) -> Vec<String> {
-            vec![]
-        }
-
-        async fn available_tools(&self) -> Vec<Box<dyn crate::tool::DynamicTool>> {
-            vec![]
-        }
-
-        async fn state(&self) -> AgentState {
-            AgentState::Ready
-        }
-
-        async fn set_state(&self, _state: AgentState) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn register_endpoint(
-            &self,
-            _name: String,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        /// Set the default user endpoint
-        async fn set_default_user_endpoint(
-            &self,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-    }
-
-    fn create_test_agent(name: &str) -> TestAgent {
-        TestAgent {
-            id: AgentId::generate(),
-            name: name.to_string(),
-        }
-    }
-
-    fn create_test_message(content: &str) -> Message {
-        Message {
-            id: crate::id::MessageId::generate(),
-            role: ChatRole::User,
-            owner_id: Some(UserId::generate()),
-            content: MessageContent::Text(content.to_string()),
-            metadata: MessageMetadata::default(),
-            options: MessageOptions::default(),
-            has_tool_calls: false,
-            word_count: content.split_whitespace().count() as u32,
-            created_at: Utc::now(),
-            embedding: None,
-            embedding_model: None,
-        }
-    }
-
     #[tokio::test]
     async fn test_dynamic_with_random_selector() {
         let registry = Arc::new(MockSelectorRegistry::new());
         let manager = DynamicManager::new(registry);
 
-        let agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = vec![
+        let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> = vec![
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent1")),
+                agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -342,7 +377,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent2")),
+                agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -351,7 +386,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent3")),
+                agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
@@ -380,21 +415,48 @@ mod tests {
 
         let message = create_test_message("Test message");
 
-        let response = manager
+        let mut stream = manager
             .route_message(&group, &agents, message)
             .await
             .unwrap();
 
+        // Collect all events from the stream
+        use tokio_stream::StreamExt;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+
+        // Should have at least one event
+        assert!(!events.is_empty());
+
+        // Find the Complete event
+        let (agent_responses, state_changes) = events
+            .iter()
+            .find_map(|event| {
+                if let crate::coordination::groups::GroupResponseEvent::Complete {
+                    agent_responses,
+                    state_changes,
+                    ..
+                } = event
+                {
+                    Some((agent_responses, state_changes))
+                } else {
+                    None
+                }
+            })
+            .expect("Should have a Complete event");
+
         // Should have selected at least one agent
-        assert!(!response.responses.is_empty());
+        assert!(!agent_responses.is_empty());
 
         // Selected agent should be active (not Agent3)
-        let selected_id = &response.responses[0].agent_id;
+        let selected_id = &agent_responses[0].agent_id;
         assert!(selected_id != &agents[2].agent.id());
 
         // State should be updated with recent selection
-        if let Some(GroupState::Dynamic { recent_selections }) = response.state_changes {
-            assert_eq!(recent_selections.len(), response.responses.len());
+        if let Some(GroupState::Dynamic { recent_selections }) = state_changes {
+            assert_eq!(recent_selections.len(), agent_responses.len());
         } else {
             panic!("Expected Dynamic state");
         }

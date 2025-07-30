@@ -26,6 +26,26 @@ impl MessageContentExt for MessageContent {
             MessageContent::ToolResponses(responses) => {
                 format!("[Tool responses: {}]", responses.len())
             }
+            MessageContent::Blocks(blocks) => {
+                // Convert blocks to string representation
+                blocks
+                    .iter()
+                    .map(|block| match block {
+                        genai::chat::ContentBlock::Text { text } => text.clone(),
+                        genai::chat::ContentBlock::Thinking { text, .. } => {
+                            format!("[Thinking: {}]", text)
+                        }
+                        genai::chat::ContentBlock::ToolUse { name, .. } => {
+                            format!("[Tool use: {}]", name)
+                        }
+                        genai::chat::ContentBlock::ToolResult { .. } => "[Tool result]".to_string(),
+                        genai::chat::ContentBlock::RedactedThinking { .. } => {
+                            "[Thinking: <redacted>]".to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
         }
     }
 }

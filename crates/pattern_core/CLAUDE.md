@@ -180,8 +180,13 @@ This allows agents to make informed decisions about memory swapping without need
    - Run two agents in separate terminals
    - Use `/send` command to send messages between them
    - Verify messages are received and processed
-5. Add scheduled wakeups (enables time-based features)
-6. Implement additional endpoints as needed
+5. Add message origin context
+   - Create MessageOrigin struct with origin_type, source_id, description, context
+   - Update send_message to accept optional origin
+   - Use ChatRole::User for external sources, ChatRole::Assistant for agent's own messages
+   - Include origin in message metadata for agent awareness
+6. Add scheduled wakeups (enables time-based features)
+7. Implement additional endpoints as needed
 
 ### 💡 Design Decisions
 - Each agent has its own router (not a singleton) for flexibility

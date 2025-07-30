@@ -315,7 +315,6 @@ pub fn register_data_source_tool(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_query_parsing() {

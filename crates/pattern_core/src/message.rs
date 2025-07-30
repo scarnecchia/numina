@@ -83,6 +83,18 @@ impl Message {
                 .iter()
                 .map(|r| r.content.split_whitespace().count() as u32)
                 .sum(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => text.split_whitespace().count() as u32,
+                    ContentBlock::Thinking { text, .. } => text.split_whitespace().count() as u32,
+                    ContentBlock::RedactedThinking { .. } => 10, // Estimate
+                    ContentBlock::ToolUse { .. } => 10,          // Estimate
+                    ContentBlock::ToolResult { content, .. } => {
+                        content.split_whitespace().count() as u32
+                    }
+                })
+                .sum(),
         }
     }
 
@@ -139,6 +151,11 @@ impl Message {
                 }
                 ChatRole::User => self.content.clone(),
             },
+            MessageContent::Blocks(_) => {
+                // Blocks are preserved as-is for providers that support them
+                tracing::trace!("Preserving Blocks message with role {:?}", role);
+                self.content.clone()
+            }
         };
 
         genai::chat::ChatMessage {
@@ -268,6 +285,9 @@ pub enum MessageContent {
 
     /// Tool responses
     ToolResponses(Vec<ToolResponse>),
+
+    /// Content blocks - for providers that need exact block sequence preservation (e.g. Anthropic with thinking)
+    Blocks(Vec<ContentBlock>),
 }
 
 /// Constructors
@@ -321,6 +341,7 @@ impl MessageContent {
             MessageContent::Parts(parts) => parts.is_empty(),
             MessageContent::ToolCalls(calls) => calls.is_empty(),
             MessageContent::ToolResponses(responses) => responses.is_empty(),
+            MessageContent::Blocks(blocks) => blocks.is_empty(),
         }
     }
 }
@@ -435,6 +456,31 @@ pub struct ToolResponse {
     pub content: String,
 }
 
+/// Content blocks for providers that need exact sequence preservation (e.g. Anthropic with thinking)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub enum ContentBlock {
+    /// Text content
+    Text { text: String },
+    /// Thinking content (Anthropic)
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
+    /// Redacted thinking content (Anthropic) - encrypted/hidden thinking
+    RedactedThinking { data: String },
+    /// Tool use request
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    /// Tool result response
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+}
+
 impl ToolResponse {
     /// Create a new tool response
     pub fn new(call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -501,7 +547,7 @@ impl Response {
 
     pub fn has_unpaired_tool_calls(&self) -> bool {
         // Check for unpaired tool calls (tool calls without matching responses)
-        let tool_call_ids: std::collections::HashSet<String> = self
+        let mut tool_call_ids: std::collections::HashSet<String> = self
             .content
             .iter()
             .filter_map(|content| match content {
@@ -511,7 +557,18 @@ impl Response {
             .flatten()
             .collect();
 
-        let tool_response_ids: std::collections::HashSet<String> = self
+        // Also check for tool calls inside blocks
+        for content in &self.content {
+            if let MessageContent::Blocks(blocks) = content {
+                for block in blocks {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        tool_call_ids.insert(id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut tool_response_ids: std::collections::HashSet<String> = self
             .content
             .iter()
             .filter_map(|content| match content {
@@ -522,6 +579,17 @@ impl Response {
             })
             .flatten()
             .collect();
+
+        // Also check for tool responses inside blocks
+        for content in &self.content {
+            if let MessageContent::Blocks(blocks) = content {
+                for block in blocks {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        tool_response_ids.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
 
         // Check if there are any tool calls without responses
         tool_call_ids.difference(&tool_response_ids).count() > 0
@@ -543,6 +611,7 @@ impl Response {
                 }
                 MessageContent::ToolCalls(_) => {}
                 MessageContent::ToolResponses(_) => {}
+                MessageContent::Blocks(_) => {}
             }
             text.push('\n');
         }
@@ -832,6 +901,7 @@ impl Message {
             }
             MessageContent::ToolCalls(calls) => calls.len() * 50, // Rough estimate
             MessageContent::ToolResponses(responses) => responses.len() * 30, // Rough estimate
+            MessageContent::Blocks(blocks) => blocks.len() * 50,  // Rough estimate
         }
     }
 }

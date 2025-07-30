@@ -74,12 +74,19 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
                     parameters: serde_json::to_value(&params).unwrap_or_default(),
                 })?;
 
+        // When agent uses send_message tool, origin is the agent itself
+        let origin = crate::context::message_router::MessageOrigin::Agent {
+            agent_id: router.agent_id().clone(),
+            reason: "send_message tool invocation".to_string(),
+        };
+
         // Send the message through the router
         match router
             .send_message(
                 params.target.clone(),
                 params.content.clone(),
                 params.metadata.clone(),
+                Some(origin),
             )
             .await
         {
