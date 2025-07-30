@@ -8,7 +8,7 @@ use tokio::io::AsyncRead;
 use crate::{
     AgentId, CoreError, Result, UserId,
     agent::AgentRecord,
-    export::types::{ConstellationExport, GroupExport},
+    export::types::{ConstellationExport, ExportManifest, ExportType, GroupExport},
 };
 
 /// Options for importing an agent
@@ -68,14 +68,6 @@ pub struct ImportResult {
 
     /// Mapping of old agent IDs to new agent IDs
     pub agent_id_map: HashMap<AgentId, AgentId>,
-}
-
-/// Type of export detected in a CAR file
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExportType {
-    Agent,
-    Group,
-    Constellation,
 }
 
 /// Agent importer
@@ -151,7 +143,12 @@ where
                 })?
         {
             if cid == root_cid {
-                // Try to decode as each type
+                // First try to decode as ExportManifest (new format)
+                if let Ok(manifest) = decode_dag_cbor::<ExportManifest>(&data) {
+                    return Ok((manifest.export_type, buffer));
+                }
+
+                // Fall back to old format detection for backwards compatibility
                 if let Ok(_) = decode_dag_cbor::<AgentRecord>(&data) {
                     return Ok((ExportType::Agent, buffer));
                 }
@@ -189,8 +186,8 @@ where
                 cause: e,
             })?;
 
-        // Get the root CID (should be the agent)
-        let agent_cid = {
+        // Get the root CID (should be the manifest)
+        let root_cid = {
             let roots = car_reader.header().roots();
             if roots.is_empty() {
                 return Err(CoreError::CarError {
@@ -216,21 +213,46 @@ where
             blocks.insert(cid, data);
         }
 
-        // Get the agent block
-        let agent_data = blocks.get(&agent_cid).ok_or_else(|| CoreError::CarError {
-            operation: "finding agent block".to_string(),
-            cause: iroh_car::Error::Parsing(format!(
-                "Agent block not found for CID: {}",
-                agent_cid
-            )),
+        // Get the root block (should be manifest)
+        let root_data = blocks.get(&root_cid).ok_or_else(|| CoreError::CarError {
+            operation: "finding root block".to_string(),
+            cause: iroh_car::Error::Parsing(format!("Root block not found for CID: {}", root_cid)),
         })?;
 
-        // Decode the agent
-        let mut agent: AgentRecord =
-            decode_dag_cbor(agent_data).map_err(|e| CoreError::DagCborDecodingError {
+        // Try to decode as manifest first (new format)
+        let agent_export_cid = if let Ok(manifest) = decode_dag_cbor::<ExportManifest>(root_data) {
+            // New format - get the data CID from manifest
+            manifest.data_cid
+        } else {
+            // Old format - root is the agent directly
+            root_cid
+        };
+
+        // Get the agent export block
+        let agent_export_data =
+            blocks
+                .get(&agent_export_cid)
+                .ok_or_else(|| CoreError::CarError {
+                    operation: "finding agent export block".to_string(),
+                    cause: iroh_car::Error::Parsing(format!(
+                        "Agent export block not found for CID: {}",
+                        agent_export_cid
+                    )),
+                })?;
+
+        // Try to decode as AgentExport first (new format)
+        let mut agent: AgentRecord = if let Ok(agent_export) =
+            decode_dag_cbor::<crate::export::AgentExport>(agent_export_data)
+        {
+            // New format - extract agent from AgentExport
+            agent_export.agent
+        } else {
+            // Old format - decode directly as AgentRecord
+            decode_dag_cbor(agent_export_data).map_err(|e| CoreError::DagCborDecodingError {
                 data_type: "AgentRecord".to_string(),
                 details: e.to_string(),
-            })?;
+            })?
+        };
 
         // Store the original ID for mapping
         let original_id = agent.id.clone();
@@ -310,7 +332,7 @@ where
                 cause: e,
             })?;
 
-        let group_cid = {
+        let root_cid = {
             let roots = car_reader.header().roots();
             if roots.is_empty() {
                 return Err(CoreError::CarError {
@@ -336,18 +358,36 @@ where
             blocks.insert(cid, data);
         }
 
-        // Get the group export block
-        let group_data = blocks.get(&group_cid).ok_or_else(|| CoreError::CarError {
-            operation: "finding group block".to_string(),
-            cause: iroh_car::Error::Parsing(format!(
-                "Group block not found for CID: {}",
-                group_cid
-            )),
+        // Get the root block
+        let root_data = blocks.get(&root_cid).ok_or_else(|| CoreError::CarError {
+            operation: "finding root block".to_string(),
+            cause: iroh_car::Error::Parsing(format!("Root block not found for CID: {}", root_cid)),
         })?;
+
+        // Try to decode as manifest first (new format)
+        let group_export_cid = if let Ok(manifest) = decode_dag_cbor::<ExportManifest>(root_data) {
+            // New format - get the data CID from manifest
+            manifest.data_cid
+        } else {
+            // Old format - root is the group export directly
+            root_cid
+        };
+
+        // Get the group export block
+        let group_export_data =
+            blocks
+                .get(&group_export_cid)
+                .ok_or_else(|| CoreError::CarError {
+                    operation: "finding group export block".to_string(),
+                    cause: iroh_car::Error::Parsing(format!(
+                        "Group export block not found for CID: {}",
+                        group_export_cid
+                    )),
+                })?;
 
         // Decode the group export
         let group_export: GroupExport =
-            decode_dag_cbor(group_data).map_err(|e| CoreError::DagCborDecodingError {
+            decode_dag_cbor(group_export_data).map_err(|e| CoreError::DagCborDecodingError {
                 data_type: "GroupExport".to_string(),
                 details: e.to_string(),
             })?;
@@ -491,7 +531,7 @@ where
                 cause: e,
             })?;
 
-        let constellation_cid = {
+        let root_cid = {
             let roots = car_reader.header().roots();
             if roots.is_empty() {
                 return Err(CoreError::CarError {
@@ -517,20 +557,36 @@ where
             blocks.insert(cid, data);
         }
 
+        // Get the root block
+        let root_data = blocks.get(&root_cid).ok_or_else(|| CoreError::CarError {
+            operation: "finding root block".to_string(),
+            cause: iroh_car::Error::Parsing(format!("Root block not found for CID: {}", root_cid)),
+        })?;
+
+        // Try to decode as manifest first (new format)
+        let constellation_export_cid =
+            if let Ok(manifest) = decode_dag_cbor::<ExportManifest>(root_data) {
+                // New format - get the data CID from manifest
+                manifest.data_cid
+            } else {
+                // Old format - root is the constellation export directly
+                root_cid
+            };
+
         // Get the constellation export block
-        let constellation_data =
+        let constellation_export_data =
             blocks
-                .get(&constellation_cid)
+                .get(&constellation_export_cid)
                 .ok_or_else(|| CoreError::CarError {
-                    operation: "finding constellation block".to_string(),
+                    operation: "finding constellation export block".to_string(),
                     cause: iroh_car::Error::Parsing(format!(
-                        "Constellation block not found for CID: {}",
-                        constellation_cid
+                        "Constellation export block not found for CID: {}",
+                        constellation_export_cid
                     )),
                 })?;
 
         // Decode the constellation export
-        let constellation_export: ConstellationExport = decode_dag_cbor(constellation_data)
+        let constellation_export: ConstellationExport = decode_dag_cbor(constellation_export_data)
             .map_err(|e| CoreError::DagCborDecodingError {
                 data_type: "ConstellationExport".to_string(),
                 details: e.to_string(),

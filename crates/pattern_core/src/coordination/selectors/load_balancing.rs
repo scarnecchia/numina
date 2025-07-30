@@ -96,6 +96,7 @@ mod tests {
             test_utils::test::{TestAgent, create_test_message},
             types::GroupMemberRole,
         },
+        id::{GroupId, RelationId},
     };
     use chrono::Utc;
 
@@ -115,6 +116,9 @@ mod tests {
                     name: "agent1".to_string(),
                 }) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -127,6 +131,9 @@ mod tests {
                     name: "agent2".to_string(),
                 }) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -139,6 +146,9 @@ mod tests {
                     name: "agent3".to_string(),
                 }) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,

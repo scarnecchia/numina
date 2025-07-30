@@ -462,7 +462,7 @@ mod tests {
             test_utils::test::{collect_complete_event, create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
-        id::GroupId,
+        id::{AgentId, GroupId, RelationId},
     };
 
     #[tokio::test]
@@ -475,6 +475,9 @@ mod tests {
             vec![AgentWithMembership {
                 agent: Arc::new(intervention_agent) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Supervisor,
                     is_active: true,

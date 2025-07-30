@@ -17,8 +17,8 @@ use crate::{
     export::{
         DEFAULT_CHUNK_SIZE, EXPORT_VERSION,
         types::{
-            ConstellationExport, ExportManifest, ExportStats, GroupExport, MemoryChunk,
-            MessageChunk,
+            AgentExport, ConstellationExport, ExportManifest, ExportStats, ExportType, GroupExport,
+            MemoryChunk, MessageChunk,
         },
     },
     id::{ConstellationId, GroupId},
@@ -87,56 +87,76 @@ where
         options: ExportOptions,
     ) -> Result<ExportManifest> {
         let start_time = Utc::now();
-        let mut stats = ExportStats {
-            memory_count: 0,
-            message_count: 0,
-            chunk_count: 0,
-            total_blocks: 0,
-            uncompressed_size: 0,
-            compressed_size: None,
-        };
 
         // Load the agent record
         let agent = AgentRecord::load_with_relations(&self.db, &agent_id)
             .await?
             .ok_or_else(|| CoreError::agent_not_found(agent_id.to_string()))?;
 
-        // Serialize agent to DAG-CBOR
-        let agent_data = encode_dag_cbor(&agent).map_err(|e| CoreError::DagCborEncodingError {
-            data_type: "AgentRecord".to_string(),
-            cause: e,
-        })?;
+        // First export the agent and collect all blocks
+        let (agent_export, agent_blocks, mut stats) =
+            self.export_agent_to_blocks(&agent, &options).await?;
 
-        // Create CID for agent
-        let agent_cid = Self::create_cid(&agent_data)?;
-        stats.total_blocks += 1;
-        stats.uncompressed_size += agent_data.len() as u64;
+        // Create the agent export data
+        let agent_export_data =
+            encode_dag_cbor(&agent_export).map_err(|e| CoreError::DagCborEncodingError {
+                data_type: "AgentExport".to_string(),
+                cause: e,
+            })?;
+        let agent_export_cid = Self::create_cid(&agent_export_data)?;
 
-        // Create CAR writer with agent as root
-        let header = CarHeader::new_v1(vec![agent_cid]);
+        // Update stats
+        stats.total_blocks += 1; // For the AgentExport itself
+
+        // Create manifest
+        let manifest = ExportManifest {
+            version: EXPORT_VERSION,
+            exported_at: start_time,
+            export_type: ExportType::Agent,
+            stats,
+            data_cid: agent_export_cid,
+        };
+
+        // Serialize manifest
+        let manifest_data =
+            encode_dag_cbor(&manifest).map_err(|e| CoreError::DagCborEncodingError {
+                data_type: "ExportManifest".to_string(),
+                cause: e,
+            })?;
+        let manifest_cid = Self::create_cid(&manifest_data)?;
+
+        // Create CAR writer with manifest as root
+        let header = CarHeader::new_v1(vec![manifest_cid]);
         let mut car_writer = CarWriter::new(header, &mut output);
 
-        // Write agent block
+        // Write manifest first
         car_writer
-            .write(agent_cid, &agent_data)
+            .write(manifest_cid, &manifest_data)
             .await
             .map_err(|e| CoreError::CarError {
-                operation: "writing agent to CAR".to_string(),
+                operation: "writing manifest to CAR".to_string(),
                 cause: e,
             })?;
 
-        // Export memories
-        let memories_cid = self
-            .export_memories(&agent, &mut car_writer, &mut stats)
-            .await?;
+        // Write agent export
+        car_writer
+            .write(agent_export_cid, &agent_export_data)
+            .await
+            .map_err(|e| CoreError::CarError {
+                operation: "writing agent export to CAR".to_string(),
+                cause: e,
+            })?;
 
-        // Export messages if requested
-        let messages_cid = if options.include_messages {
-            self.export_messages(&agent, &mut car_writer, &mut stats, &options)
-                .await?
-        } else {
-            None
-        };
+        // Write all the agent blocks (agent record, memories, messages)
+        for (cid, data) in agent_blocks {
+            car_writer
+                .write(cid, &data)
+                .await
+                .map_err(|e| CoreError::CarError {
+                    operation: "writing agent block to CAR".to_string(),
+                    cause: e,
+                })?;
+        }
 
         // Flush the writer
         car_writer.finish().await.map_err(|e| CoreError::CarError {
@@ -144,167 +164,7 @@ where
             cause: e,
         })?;
 
-        // Create and return manifest
-        let manifest = ExportManifest {
-            version: EXPORT_VERSION,
-            exported_at: start_time,
-            agent_id,
-            stats,
-            agent_cid,
-            memories_cid,
-            messages_cid,
-            compression: None,
-        };
-
         Ok(manifest)
-    }
-
-    /// Export memory blocks with their relations as a single chunk
-    async fn export_memories(
-        &self,
-        agent: &AgentRecord,
-        writer: &mut CarWriter<impl AsyncWrite + Unpin + Send>,
-        stats: &mut ExportStats,
-    ) -> Result<Option<Cid>> {
-        use crate::export::types::MemoryChunk;
-
-        if agent.memories.is_empty() {
-            return Ok(None);
-        }
-
-        // Create a single memory chunk with all memories and their relations
-        let memory_chunk = MemoryChunk {
-            chunk_id: 0,
-            memories: agent.memories.clone(),
-            next_chunk: None,
-        };
-
-        // Serialize the chunk to DAG-CBOR
-        let chunk_data =
-            encode_dag_cbor(&memory_chunk).map_err(|e| CoreError::DagCborEncodingError {
-                data_type: "MemoryChunk".to_string(),
-                cause: e,
-            })?;
-
-        // Create CID
-        let chunk_cid = Self::create_cid(&chunk_data)?;
-
-        // Write to CAR
-        writer
-            .write(chunk_cid, &chunk_data)
-            .await
-            .map_err(|e| CoreError::CarError {
-                operation: "writing memory chunk to CAR".to_string(),
-                cause: e,
-            })?;
-
-        stats.memory_count = agent.memories.len() as u64;
-        stats.total_blocks += 1;
-        stats.uncompressed_size += chunk_data.len() as u64;
-
-        Ok(Some(chunk_cid))
-    }
-
-    /// Export messages in chunks using the messages from the agent record
-    async fn export_messages(
-        &self,
-        agent: &AgentRecord,
-        writer: &mut CarWriter<impl AsyncWrite + Unpin + Send>,
-        stats: &mut ExportStats,
-        options: &ExportOptions,
-    ) -> Result<Option<Cid>> {
-        // Filter messages based on time if needed
-        let messages_with_positions: Vec<_> = if let Some(since) = options.messages_since {
-            agent
-                .messages
-                .iter()
-                .filter(|(msg, _)| msg.created_at >= since)
-                .collect()
-        } else {
-            agent.messages.iter().collect()
-        };
-
-        if messages_with_positions.is_empty() {
-            return Ok(None);
-        }
-
-        // Process messages in chunks
-        let mut first_chunk_cid = None;
-        let mut prev_chunk_cid: Option<Cid> = None;
-
-        for (chunk_id, chunk) in messages_with_positions
-            .chunks(options.chunk_size)
-            .enumerate()
-        {
-            let chunk_cid = self
-                .write_message_chunk_with_positions(
-                    chunk_id as u32,
-                    chunk,
-                    prev_chunk_cid,
-                    writer,
-                    stats,
-                )
-                .await?;
-
-            if first_chunk_cid.is_none() {
-                first_chunk_cid = Some(chunk_cid.clone());
-            }
-
-            prev_chunk_cid = Some(chunk_cid);
-            stats.chunk_count += 1;
-        }
-
-        Ok(first_chunk_cid)
-    }
-
-    /// Write a single message chunk with positions from relations
-    async fn write_message_chunk_with_positions(
-        &self,
-        chunk_id: u32,
-        messages: &[&(Message, crate::message::AgentMessageRelation)],
-        next_chunk: Option<Cid>,
-        writer: &mut CarWriter<impl AsyncWrite + Unpin + Send>,
-        stats: &mut ExportStats,
-    ) -> Result<Cid> {
-        // Clone the messages with their relations
-        let messages_with_relations: Vec<(Message, crate::message::AgentMessageRelation)> =
-            messages
-                .iter()
-                .map(|&(msg, rel)| (msg.clone(), rel.clone()))
-                .collect();
-
-        // Use positions from the relations
-        let chunk = MessageChunk {
-            chunk_id,
-            start_position: messages.first().unwrap().1.position.clone(),
-            end_position: messages.last().unwrap().1.position.clone(),
-            messages: messages_with_relations,
-            next_chunk,
-        };
-
-        stats.message_count += messages.len() as u64;
-
-        // Serialize chunk to DAG-CBOR
-        let chunk_data = encode_dag_cbor(&chunk).map_err(|e| CoreError::DagCborEncodingError {
-            data_type: "MessageChunk".to_string(),
-            cause: e,
-        })?;
-
-        // Create CID
-        let chunk_cid = Self::create_cid(&chunk_data)?;
-
-        // Write to CAR
-        writer
-            .write(chunk_cid, &chunk_data)
-            .await
-            .map_err(|e| CoreError::CarError {
-                operation: "writing message chunk to CAR".to_string(),
-                cause: e,
-            })?;
-        stats.total_blocks += 1;
-        stats.uncompressed_size += chunk_data.len() as u64;
-
-        Ok(chunk_cid)
     }
 
     /// Export an agent to blocks without writing to CAR file
@@ -312,7 +172,7 @@ where
         &self,
         agent: &AgentRecord,
         options: &ExportOptions,
-    ) -> Result<(Cid, Vec<(Cid, Vec<u8>)>, ExportStats)> {
+    ) -> Result<(AgentExport, Vec<(Cid, Vec<u8>)>, ExportStats)> {
         let mut blocks = Vec::new();
         let mut stats = ExportStats {
             memory_count: 0,
@@ -322,6 +182,9 @@ where
             uncompressed_size: 0,
             compressed_size: None,
         };
+
+        let mut memory_chunk_cids = Vec::new();
+        let mut message_chunk_cids = Vec::new();
 
         // Serialize agent to DAG-CBOR
         let agent_data = encode_dag_cbor(agent).map_err(|e| CoreError::DagCborEncodingError {
@@ -355,6 +218,7 @@ where
             stats.total_blocks += 1;
             stats.uncompressed_size += chunk_data.len() as u64;
 
+            memory_chunk_cids.push(chunk_cid);
             blocks.push((chunk_cid, chunk_data));
         }
 
@@ -402,6 +266,7 @@ where
                     })?;
 
                     let chunk_cid = Self::create_cid(&chunk_data)?;
+                    message_chunk_cids.push(chunk_cid);
                     blocks.push((chunk_cid, chunk_data));
 
                     stats.chunk_count += 1;
@@ -411,7 +276,14 @@ where
             }
         }
 
-        Ok((agent_cid, blocks, stats))
+        // Create the AgentExport
+        let agent_export = AgentExport {
+            agent: agent.clone(),
+            message_chunk_cids,
+            memory_chunk_cids,
+        };
+
+        Ok((agent_export, blocks, stats))
     }
 
     /// Export a group with all its member agents to a CAR file
@@ -420,7 +292,17 @@ where
         group_id: GroupId,
         mut output: impl AsyncWrite + Unpin + Send,
         options: ExportOptions,
-    ) -> Result<Cid> {
+    ) -> Result<ExportManifest> {
+        let start_time = Utc::now();
+        let mut total_stats = ExportStats {
+            memory_count: 0,
+            message_count: 0,
+            chunk_count: 0,
+            total_blocks: 0,
+            uncompressed_size: 0,
+            compressed_size: None,
+        };
+
         // Load the group with all members
         let group = self.load_group_with_members(&group_id).await?;
 
@@ -429,11 +311,27 @@ where
         let mut all_blocks = Vec::new();
 
         for (agent, _membership) in &group.members {
-            let (agent_cid, agent_blocks, _stats) =
+            let (agent_export, agent_blocks, stats) =
                 self.export_agent_to_blocks(agent, &options).await?;
 
-            agent_export_cids.push((agent.id.clone(), agent_cid));
+            // Serialize the agent export and get its CID
+            let agent_export_data =
+                encode_dag_cbor(&agent_export).map_err(|e| CoreError::DagCborEncodingError {
+                    data_type: "AgentExport".to_string(),
+                    cause: e,
+                })?;
+            let agent_export_cid = Self::create_cid(&agent_export_data)?;
+
+            agent_export_cids.push((agent.id.clone(), agent_export_cid));
+            all_blocks.push((agent_export_cid, agent_export_data));
             all_blocks.extend(agent_blocks);
+
+            // Accumulate stats
+            total_stats.memory_count += stats.memory_count;
+            total_stats.message_count += stats.message_count;
+            total_stats.chunk_count += stats.chunk_count;
+            total_stats.total_blocks += stats.total_blocks;
+            total_stats.uncompressed_size += stats.uncompressed_size;
         }
 
         // Create the group export
@@ -447,11 +345,39 @@ where
             })?;
         let group_cid = Self::create_cid(&group_data)?;
 
-        // Create CAR file with group as root
-        let header = CarHeader::new_v1(vec![group_cid]);
+        total_stats.total_blocks += 1; // For the group export itself
+
+        // Create manifest
+        let manifest = ExportManifest {
+            version: EXPORT_VERSION,
+            exported_at: start_time,
+            export_type: ExportType::Group,
+            stats: total_stats,
+            data_cid: group_cid,
+        };
+
+        // Serialize manifest
+        let manifest_data =
+            encode_dag_cbor(&manifest).map_err(|e| CoreError::DagCborEncodingError {
+                data_type: "ExportManifest".to_string(),
+                cause: e,
+            })?;
+        let manifest_cid = Self::create_cid(&manifest_data)?;
+
+        // Create CAR file with manifest as root
+        let header = CarHeader::new_v1(vec![manifest_cid]);
         let mut car_writer = CarWriter::new(header, &mut output);
 
-        // Write group block first
+        // Write manifest first
+        car_writer
+            .write(manifest_cid, &manifest_data)
+            .await
+            .map_err(|e| CoreError::CarError {
+                operation: "writing manifest to CAR".to_string(),
+                cause: e,
+            })?;
+
+        // Write group block
         car_writer
             .write(group_cid, &group_data)
             .await
@@ -476,7 +402,7 @@ where
             cause: e,
         })?;
 
-        Ok(group_cid)
+        Ok(manifest)
     }
 
     /// Export a constellation with all its agents and groups
@@ -485,7 +411,8 @@ where
         constellation_id: ConstellationId,
         mut output: impl AsyncWrite + Unpin + Send,
         options: ExportOptions,
-    ) -> Result<Cid> {
+    ) -> Result<ExportManifest> {
+        let start_time = Utc::now();
         // Load the constellation - load_with_relations might not work properly
         let constellation = self
             .load_constellation_with_members(&constellation_id)
@@ -505,10 +432,19 @@ where
 
         // First, export all agents in the constellation and collect their blocks
         for (agent, _membership) in &constellation.agents {
-            let (agent_cid, agent_blocks, stats) =
+            let (agent_export, agent_blocks, stats) =
                 self.export_agent_to_blocks(agent, &options).await?;
 
-            agent_export_cids.push((agent.id.clone(), agent_cid));
+            // Serialize the agent export and get its CID
+            let agent_export_data =
+                encode_dag_cbor(&agent_export).map_err(|e| CoreError::DagCborEncodingError {
+                    data_type: "AgentExport".to_string(),
+                    cause: e,
+                })?;
+            let agent_export_cid = Self::create_cid(&agent_export_data)?;
+
+            agent_export_cids.push((agent.id.clone(), agent_export_cid));
+            all_blocks.push((agent_export_cid, agent_export_data));
             all_blocks.extend(agent_blocks);
 
             // Accumulate stats
@@ -556,11 +492,39 @@ where
         })?;
         let constellation_cid = Self::create_cid(&constellation_data)?;
 
-        // Create CAR file with constellation as root
-        let header = CarHeader::new_v1(vec![constellation_cid]);
+        total_stats.total_blocks += 1; // For the constellation export itself
+
+        // Create manifest
+        let manifest = ExportManifest {
+            version: EXPORT_VERSION,
+            exported_at: start_time,
+            export_type: ExportType::Constellation,
+            stats: total_stats,
+            data_cid: constellation_cid,
+        };
+
+        // Serialize manifest
+        let manifest_data =
+            encode_dag_cbor(&manifest).map_err(|e| CoreError::DagCborEncodingError {
+                data_type: "ExportManifest".to_string(),
+                cause: e,
+            })?;
+        let manifest_cid = Self::create_cid(&manifest_data)?;
+
+        // Create CAR file with manifest as root
+        let header = CarHeader::new_v1(vec![manifest_cid]);
         let mut car_writer = CarWriter::new(header, &mut output);
 
-        // Write constellation block first
+        // Write manifest first
+        car_writer
+            .write(manifest_cid, &manifest_data)
+            .await
+            .map_err(|e| CoreError::CarError {
+                operation: "writing manifest to CAR".to_string(),
+                cause: e,
+            })?;
+
+        // Write constellation block
         car_writer
             .write(constellation_cid, &constellation_data)
             .await
@@ -585,7 +549,7 @@ where
             cause: e,
         })?;
 
-        Ok(constellation_cid)
+        Ok(manifest)
     }
 
     /// Export a group with references to its member agents

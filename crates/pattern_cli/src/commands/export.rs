@@ -62,7 +62,7 @@ pub async fn export_agent(
         .into_diagnostic()?;
 
     output_handler.success(&format!("Export complete!"));
-    output_handler.kv("Agent CID", &manifest.agent_cid.to_string());
+    output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
     output_handler.kv("Messages", &manifest.stats.message_count.to_string());
     output_handler.kv("Memories", &manifest.stats.memory_count.to_string());
     output_handler.kv("Total blocks", &manifest.stats.total_blocks.to_string());
@@ -116,13 +116,14 @@ pub async fn export_group(
 
     let file = File::create(&output_path).await.into_diagnostic()?;
 
-    let group_cid = exporter
+    let manifest = exporter
         .export_group_to_car(group.id, file, options)
         .await
         .into_diagnostic()?;
 
     output_handler.success(&format!("Export complete!"));
-    output_handler.kv("Group CID", &group_cid.to_string());
+    output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
+    output_handler.kv("Members", &manifest.stats.message_count.to_string());
 
     Ok(())
 }
@@ -159,13 +160,23 @@ pub async fn export_constellation(output: Option<PathBuf>, config: &PatternConfi
 
     let file = File::create(&output_path).await.into_diagnostic()?;
 
-    let constellation_cid = exporter
+    let manifest = exporter
         .export_constellation_to_car(constellation.id, file, options)
         .await
         .into_diagnostic()?;
 
     output_handler.success(&format!("Export complete!"));
-    output_handler.kv("Constellation CID", &constellation_cid.to_string());
+    output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
+    output_handler.kv("Agents", &manifest.stats.memory_count.to_string());
+    output_handler.kv(
+        "Groups",
+        &(manifest.stats.total_blocks
+            - manifest.stats.memory_count
+            - manifest.stats.message_count
+            - manifest.stats.chunk_count
+            - 1)
+        .to_string(),
+    );
 
     Ok(())
 }

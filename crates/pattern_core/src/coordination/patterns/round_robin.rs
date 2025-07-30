@@ -253,7 +253,7 @@ mod tests {
             test_utils::test::{collect_agent_responses, create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
-        id::GroupId,
+        id::{AgentId, GroupId, RelationId},
     };
     use chrono::Utc;
 
@@ -265,6 +265,9 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -274,6 +277,9 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -283,6 +289,9 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -331,6 +340,9 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -340,6 +352,9 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -349,6 +364,9 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
+                    id: RelationId::generate(),
+                    in_id: AgentId::generate(),
+                    out_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: false, // Inactive - should not be selected

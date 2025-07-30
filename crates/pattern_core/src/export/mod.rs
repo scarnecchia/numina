@@ -8,9 +8,10 @@ mod importer;
 mod types;
 
 pub use exporter::{AgentExporter, ExportOptions};
-pub use importer::{AgentImporter, ExportType, ImportOptions, ImportResult};
+pub use importer::{AgentImporter, ImportOptions, ImportResult};
 pub use types::{
-    ConstellationExport, ExportManifest, ExportStats, GroupExport, MemoryChunk, MessageChunk,
+    AgentExport, ConstellationExport, ExportManifest, ExportStats, ExportType, GroupExport,
+    MemoryChunk, MessageChunk,
 };
 
 /// Current export format version

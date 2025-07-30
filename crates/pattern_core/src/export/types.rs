@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AgentId, message::Message};
 
-/// Manifest describing an agent export
+/// Manifest describing any export - this is always the root of a CAR file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportManifest {
     /// Export format version
@@ -15,23 +15,35 @@ pub struct ExportManifest {
     /// When this export was created
     pub exported_at: DateTime<Utc>,
 
-    /// Agent being exported
-    pub agent_id: AgentId,
+    /// Type of export
+    pub export_type: ExportType,
 
     /// Export statistics
     pub stats: ExportStats,
 
-    /// Root CID of the agent block
-    pub agent_cid: Cid,
+    /// CID of the actual export data
+    pub data_cid: Cid,
+}
 
-    /// Root CID of the memory collection
-    pub memories_cid: Option<Cid>,
+/// Type of data being exported
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportType {
+    Agent,
+    Group,
+    Constellation,
+}
 
-    /// Root CID of the first message chunk
-    pub messages_cid: Option<Cid>,
+/// Agent export with all related data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentExport {
+    /// The agent record
+    pub agent: crate::agent::AgentRecord,
 
-    /// Compression settings if any
-    pub compression: Option<CompressionSettings>,
+    /// CIDs of message chunks
+    pub message_chunk_cids: Vec<Cid>,
+
+    /// CIDs of memory chunks
+    pub memory_chunk_cids: Vec<Cid>,
 }
 
 /// Statistics about an export
