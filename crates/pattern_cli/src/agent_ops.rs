@@ -613,12 +613,24 @@ pub async fn create_agent(
 
     // Check and update other configured memory blocks
     for (label, block_config) in &config.agent.memory {
+        // Load content from either inline or file
+        let content = match block_config.load_content().await {
+            Ok(content) => content,
+            Err(e) => {
+                output.warning(&format!(
+                    "Failed to load content for memory block '{}': {}",
+                    label, e
+                ));
+                continue;
+            }
+        };
+
         match agent.get_memory(label).await {
             Ok(Some(mut existing)) => {
                 // Update existing block preserving its ID
-                if existing.value != block_config.content {
+                if existing.value != content {
                     output.info("Updating memory block", &label.bright_yellow().to_string());
-                    existing.value = block_config.content.clone();
+                    existing.value = content;
                     existing.memory_type = block_config.memory_type;
                     existing.permission = block_config.permission;
                     if let Some(desc) = &block_config.description {
@@ -634,13 +646,10 @@ pub async fn create_agent(
             Ok(None) | Err(_) => {
                 // Create new block
                 output.info("Adding memory block", &label.bright_yellow().to_string());
-                let memory_block = MemoryBlock::owned(
-                    config.user.id.clone(),
-                    label.clone(),
-                    block_config.content.clone(),
-                )
-                .with_memory_type(block_config.memory_type)
-                .with_permission(block_config.permission);
+                let memory_block =
+                    MemoryBlock::owned(config.user.id.clone(), label.clone(), content)
+                        .with_memory_type(block_config.memory_type)
+                        .with_permission(block_config.permission);
 
                 let memory_block = if let Some(desc) = &block_config.description {
                     memory_block.with_description(desc.clone())
@@ -1007,6 +1016,181 @@ pub fn print_response_event(event: ResponseEvent, output: &Output) {
             }
         }
     }
+}
+
+/// Load or create an agent from a group member configuration
+pub async fn load_or_create_agent_from_member(
+    member: &pattern_core::config::GroupMemberConfig,
+    user_id: &pattern_core::id::UserId,
+    model_name: Option<String>,
+    enable_tools: bool,
+    heartbeat_sender: heartbeat::HeartbeatSender,
+) -> Result<Arc<dyn Agent>> {
+    let output = Output::new();
+
+    // If member has an agent_id, load that agent
+    if let Some(agent_id) = &member.agent_id {
+        output.status(&format!(
+            "Loading existing agent {} for group member",
+            agent_id.to_string().dimmed()
+        ));
+
+        // Load the existing agent
+        let agent_record = match AgentRecord::load_with_relations(&DB, agent_id).await {
+            Ok(Some(agent)) => agent,
+            Ok(None) => return Err(miette::miette!("Agent {} not found", agent_id)),
+            Err(e) => return Err(miette::miette!("Failed to load agent {}: {}", agent_id, e)),
+        };
+
+        // Create runtime agent from record (reusing existing function)
+        // Build a minimal config just for the create_agent_from_record function
+        let config = PatternConfig {
+            user: pattern_core::config::UserConfig {
+                id: user_id.clone(),
+                name: None,
+                settings: Default::default(),
+            },
+            agent: pattern_core::config::AgentConfig {
+                id: Some(agent_id.clone()),
+                name: agent_record.name.clone(),
+                system_prompt: None,
+                persona: None,
+                instructions: None,
+                memory: Default::default(),
+                bluesky_handle: None,
+            },
+            model: pattern_core::config::ModelConfig {
+                provider: "Gemini".to_string(),
+                model: model_name,
+                temperature: None,
+                settings: Default::default(),
+            },
+            database: Default::default(),
+            groups: vec![],
+            bluesky: None,
+        };
+
+        return create_agent_from_record(
+            agent_record,
+            None,
+            enable_tools,
+            &config,
+            heartbeat_sender,
+        )
+        .await;
+    }
+
+    // If member has a config_path, load the agent config from file
+    if let Some(config_path) = &member.config_path {
+        output.status(&format!(
+            "Loading agent config from {}",
+            config_path.display().bright_cyan()
+        ));
+
+        let agent_config = pattern_core::config::AgentConfig::load_from_file(config_path).await?;
+
+        // Build full config with loaded agent config
+        let config = PatternConfig {
+            user: pattern_core::config::UserConfig {
+                id: user_id.clone(),
+                name: None,
+                settings: Default::default(),
+            },
+            agent: agent_config,
+            model: pattern_core::config::ModelConfig {
+                provider: "Gemini".to_string(),
+                model: model_name,
+                temperature: None,
+                settings: Default::default(),
+            },
+            database: Default::default(),
+            groups: vec![],
+            bluesky: None,
+        };
+
+        // Use the agent name from config, or fall back to member name
+        let agent_name = if !config.agent.name.is_empty() {
+            config.agent.name.clone()
+        } else {
+            member.name.clone()
+        };
+
+        // Load or create the agent with this config
+        return load_or_create_agent(&agent_name, None, enable_tools, &config, heartbeat_sender)
+            .await;
+    }
+
+    // Check if member has an inline agent_config
+    if let Some(inline_config) = &member.agent_config {
+        output.status(&format!(
+            "Creating agent '{}' from inline config",
+            member.name.bright_cyan()
+        ));
+
+        // Build full config with inline agent config
+        let config = PatternConfig {
+            user: pattern_core::config::UserConfig {
+                id: user_id.clone(),
+                name: None,
+                settings: Default::default(),
+            },
+            agent: inline_config.clone(),
+            model: pattern_core::config::ModelConfig {
+                provider: "Gemini".to_string(),
+                model: model_name,
+                temperature: None,
+                settings: Default::default(),
+            },
+            database: Default::default(),
+            groups: vec![],
+            bluesky: None,
+        };
+
+        // Use the agent name from config, or fall back to member name
+        let agent_name = if !config.agent.name.is_empty() {
+            config.agent.name.clone()
+        } else {
+            member.name.clone()
+        };
+
+        // Load or create the agent with this config
+        return load_or_create_agent(&agent_name, None, enable_tools, &config, heartbeat_sender)
+            .await;
+    }
+
+    // Otherwise create a basic agent with just the member name
+    output.info(
+        "+",
+        &format!("Creating basic agent '{}'", member.name.bright_cyan()),
+    );
+
+    let config = PatternConfig {
+        user: pattern_core::config::UserConfig {
+            id: user_id.clone(),
+            name: None,
+            settings: Default::default(),
+        },
+        agent: pattern_core::config::AgentConfig {
+            id: None,
+            name: member.name.clone(),
+            system_prompt: None,
+            persona: None,
+            instructions: None,
+            memory: Default::default(),
+            bluesky_handle: None,
+        },
+        model: pattern_core::config::ModelConfig {
+            provider: "Gemini".to_string(),
+            model: model_name,
+            temperature: None,
+            settings: Default::default(),
+        },
+        database: Default::default(),
+        groups: vec![],
+        bluesky: None,
+    };
+
+    create_agent(&member.name, None, enable_tools, &config, heartbeat_sender).await
 }
 
 /// Chat with a group of agents

@@ -88,11 +88,37 @@ pub struct AgentConfig {
     pub bluesky_handle: Option<String>,
 }
 
+impl AgentConfig {
+    /// Load agent configuration from a file
+    pub async fn load_from_file(path: &Path) -> Result<Self> {
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            crate::CoreError::ConfigurationError {
+                field: "agent config file".to_string(),
+                config_path: path.display().to_string(),
+                expected: "valid TOML file".to_string(),
+                cause: crate::error::ConfigError::Io(e.to_string()),
+            }
+        })?;
+
+        toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
+            field: "agent config".to_string(),
+            config_path: path.display().to_string(),
+            expected: "valid agent configuration".to_string(),
+            cause: crate::error::ConfigError::TomlParse(e.to_string()),
+        })
+    }
+}
+
 /// Configuration for a memory block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlockConfig {
-    /// Content of the memory block
-    pub content: String,
+    /// Content of the memory block (inline)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+
+    /// Path to file containing the content
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_path: Option<PathBuf>,
 
     /// Permission level for this block
     #[serde(default)]
@@ -105,6 +131,33 @@ pub struct MemoryBlockConfig {
     /// Optional description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+impl MemoryBlockConfig {
+    /// Load content from either inline or file path
+    pub async fn load_content(&self) -> Result<String> {
+        if let Some(content) = &self.content {
+            Ok(content.clone())
+        } else if let Some(path) = &self.content_path {
+            tokio::fs::read_to_string(path).await.map_err(|e| {
+                crate::CoreError::ConfigurationError {
+                    field: "content_path".to_string(),
+                    config_path: path.display().to_string(),
+                    expected: "valid file path".to_string(),
+                    cause: crate::error::ConfigError::Io(e.to_string()),
+                }
+            })
+        } else {
+            Err(crate::CoreError::ConfigurationError {
+                field: "memory block".to_string(),
+                config_path: "unknown".to_string(),
+                expected: "either 'content' or 'content_path'".to_string(),
+                cause: crate::error::ConfigError::MissingField(
+                    "content or content_path".to_string(),
+                ),
+            })
+        }
+    }
 }
 
 /// Configuration for an agent group
@@ -136,6 +189,14 @@ pub struct GroupMemberConfig {
     /// Optional agent ID (if referencing existing agent)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+
+    /// Optional path to agent configuration file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<PathBuf>,
+
+    /// Optional inline agent configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<AgentConfig>,
 
     /// Role in the group
     #[serde(default)]
@@ -509,12 +570,16 @@ mod tests {
                 GroupMemberConfig {
                     name: "Executive".to_string(),
                     agent_id: None,
+                    config_path: None,
+                    agent_config: None,
                     role: GroupMemberRoleConfig::Regular,
                     capabilities: vec!["planning".to_string(), "organization".to_string()],
                 },
                 GroupMemberConfig {
                     name: "Memory".to_string(),
                     agent_id: Some(AgentId::generate()),
+                    config_path: None,
+                    agent_config: None,
                     role: GroupMemberRoleConfig::Specialist {
                         domain: "memory_management".to_string(),
                     },

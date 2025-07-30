@@ -8,16 +8,13 @@ mod importer;
 mod types;
 
 pub use exporter::{AgentExporter, ExportOptions};
-pub use importer::{AgentImporter, ImportOptions};
-pub use types::{ExportManifest, ExportStats, MessageChunk};
-
-use crate::Result;
+pub use importer::{AgentImporter, ExportType, ImportOptions, ImportResult};
+pub use types::{
+    ConstellationExport, ExportManifest, ExportStats, GroupExport, MemoryChunk, MessageChunk,
+};
 
 /// Current export format version
 pub const EXPORT_VERSION: u32 = 1;
 
 /// Default chunk size for message batching
 pub const DEFAULT_CHUNK_SIZE: usize = 1000;
-
-#[cfg(test)]
-mod tests;

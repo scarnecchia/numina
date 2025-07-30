@@ -61,12 +61,16 @@ url = "2.5"
 serde_urlencoded = "0.7"
 
 # DAG-CBOR and CAR archive support
-# libipld = { version = "0.16", features = ["dag-cbor", "derive"] }
-# iroh-car = "0.5"
+serde_cbor = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+iroh-car = "0.5"
+ipld-core.workspace = true
+cid.workspace = true
+multihash.workspace = true
+multihash-codetable.workspace = true
 
 # Compression for archives
 zstd = { version = "0.13", optional = true }
-#hyper-tls.workspace = true
 ureq.workspace = true
 
 atrium-api.workspace = true

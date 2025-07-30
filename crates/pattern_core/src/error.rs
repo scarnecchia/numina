@@ -320,6 +320,57 @@ pub enum CoreError {
         operation: String,
         cause: String,
     },
+
+    #[error("Export error: {operation} failed")]
+    #[diagnostic(
+        code(pattern_core::export_error),
+        help("Check export configuration and file permissions")
+    )]
+    ExportError {
+        operation: String,
+        #[source]
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error("DAG-CBOR encoding error")]
+    #[diagnostic(
+        code(pattern_core::dagcbor_encoding_error),
+        help("Failed to encode data as DAG-CBOR")
+    )]
+    DagCborEncodingError {
+        data_type: String,
+        #[source]
+        cause: serde_ipld_dagcbor::error::EncodeError<std::collections::TryReserveError>,
+    },
+
+    #[error("Failed to decode DAG-CBOR data for {data_type}")]
+    #[diagnostic(
+        code(pattern_core::dagcbor_decoding_error),
+        help("Failed to decode data from DAG-CBOR: {details}")
+    )]
+    DagCborDecodingError { data_type: String, details: String },
+
+    #[error("CAR archive error: {operation} failed")]
+    #[diagnostic(
+        code(pattern_core::car_error),
+        help("Check CAR file format and iroh-car compatibility")
+    )]
+    CarError {
+        operation: String,
+        #[source]
+        cause: iroh_car::Error,
+    },
+
+    #[error("IO error: {operation} failed")]
+    #[diagnostic(
+        code(pattern_core::io_error),
+        help("Check file permissions and disk space")
+    )]
+    IoError {
+        operation: String,
+        #[source]
+        cause: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

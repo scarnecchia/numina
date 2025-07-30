@@ -1,44 +1,121 @@
-# Example Pattern Configuration File
+# Pattern Configuration Example
+# Copy this file to pattern.toml or ~/.config/pattern/config.toml
 
 [user]
-# User ID will be auto-generated if not specified
+# User ID is generated automatically if not specified
+# id = "00000000-0000-0000-0000-000000000001"  # UUID format required
 # name = "Your Name"
 
 [agent]
+# Agent ID is generated on first run and then persisted
+# id = "a1234567-89ab-cdef-0123-456789abcdef"
 name = "MyAssistant"
-# Optional: Bluesky handle for this agent
-# bluesky_handle = "alice.bsky.social"
 
-# Optional: Agent persona
+# System prompt defines the agent's base behavior (optional - uses default if not set)
+# system_prompt = "You are a specialized support agent..."
+
+# Persona creates a core memory block about the agent's identity (optional)
 persona = """
 You are a helpful assistant focused on productivity and organization.
 You help users manage their tasks and stay focused.
 """
 
-# Optional: Additional memory blocks
+# Additional instructions for the agent (optional)
+# instructions = "Be understanding, patient, and supportive. Help break down tasks into manageable steps."
+
+# Optional: Bluesky handle for this agent
+# bluesky_handle = "alice.bsky.social"
+
+# Memory blocks can be pre-configured
 [agent.memory.preferences]
 content = "User prefers concise responses and bullet points."
-permission = "Append"
-memory_type = "Core"
+permission = "Append"                                         # Options: Read, Append, ReadWrite
+memory_type = "Core"                                          # Options: Core, Working, Archival
+description = "User communication preferences"
+
+# Memory content can also be loaded from files
+[agent.memory.knowledge_base]
+content_path = "knowledge/domain_expertise.txt" # Relative to config file
+permission = "Read"
+memory_type = "Archival"
+description = "Domain-specific knowledge"
 
 [model]
-provider = "Gemini"
+provider = "Gemini" # Options: Anthropic, OpenAI, Gemini, Groq, Cohere, Xai, Ollama, DeepSeek
 # Optional: Specify a particular model
 # model = "gemini-2.5-flash"
+# temperature = 0.7
 
 [database]
 # Uses embedded SurrealDB by default
+type = "embedded"
+path = "./pattern.db"
+strict_mode = false
 
-# Optional: Agent groups
+# For remote database (requires surreal-remote feature):
+# [database]
+# type = "remote"
+# url = "ws://localhost:8000"
+# username = "root"
+# password = "root"
+# namespace = "pattern"
+# database = "production"
+
+# Optional: Agent groups for multi-agent coordination
 [[groups]]
 name = "Planning Team"
 description = "Agents focused on planning and organization"
+# Coordination patterns: round_robin, supervisor, pipeline, dynamic, sleeptime
 pattern = { type = "round_robin", skip_unavailable = true }
 
+# Group members can be configured in three ways:
+
+# 1. Reference an existing agent by ID
+[[groups.members]]
+name = "Executive"
+agent_id = "a1234567-89ab-cdef-0123-456789abcdef" # Must exist in database
+role = "supervisor"
+capabilities = ["planning", "delegation"]
+
+# 2. Load agent config from external file
 [[groups.members]]
 name = "TaskManager"
-role = "Regular"
+config_path = "example_agents/task_manager.toml" # Relative to this config file
+role = "regular"
 capabilities = ["task_breakdown", "scheduling"]
+
+# 3. Define agent config inline
+[[groups.members]]
+name = "MemoryKeeper"
+role = { specialist = { domain = "memory_management" } } # Regular, Supervisor, or Specialist
+capabilities = ["recall", "context_management"]
+
+# Inline agent configuration
+[groups.members.agent_config]
+name = "MemoryKeeper"
+agent_type = "assistant"
+persona = "You are the team's memory specialist, maintaining context across sessions."
+
+# Memory blocks for this agent
+[groups.members.agent_config.memory.team_context]
+content = "I maintain shared context and history for the Planning Team."
+permission = "ReadWrite"
+memory_type = "Core"
+
+[groups.members.agent_config.memory.procedures]
+content_path = "knowledge/team_procedures.md"
+permission = "Read"
+memory_type = "Archival"
+
+# Another group with different coordination pattern
+[[groups]]
+name = "Analysis Pipeline"
+description = "Sequential processing through specialized agents"
+pattern = { type = "pipeline", stages = [
+    "Researcher",
+    "Analyzer",
+    "Synthesizer",
+] }
 
 # Optional: Bluesky configuration
 [bluesky]
@@ -47,10 +124,7 @@ default_filters = [
     { nsids = [
         "app.bsky.feed.post",
     ], mentions = [
-        "pattern.atproto.systems",
-        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
     ], dids = [
-        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
     ], keywords = [
     ], languages = [
     ] },

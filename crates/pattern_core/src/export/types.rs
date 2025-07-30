@@ -2,35 +2,34 @@
 
 use chrono::{DateTime, Utc};
 use cid::Cid;
-use libipld::Ipld;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, MessageId};
+use crate::{AgentId, message::Message};
 
 /// Manifest describing an agent export
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportManifest {
     /// Export format version
     pub version: u32,
-    
+
     /// When this export was created
     pub exported_at: DateTime<Utc>,
-    
+
     /// Agent being exported
     pub agent_id: AgentId,
-    
+
     /// Export statistics
     pub stats: ExportStats,
-    
+
     /// Root CID of the agent block
     pub agent_cid: Cid,
-    
+
     /// Root CID of the memory collection
     pub memories_cid: Option<Cid>,
-    
+
     /// Root CID of the first message chunk
     pub messages_cid: Option<Cid>,
-    
+
     /// Compression settings if any
     pub compression: Option<CompressionSettings>,
 }
@@ -40,19 +39,19 @@ pub struct ExportManifest {
 pub struct ExportStats {
     /// Number of memory blocks exported
     pub memory_count: u64,
-    
+
     /// Total number of messages exported
     pub message_count: u64,
-    
+
     /// Number of message chunks
     pub chunk_count: u64,
-    
+
     /// Total blocks in the CAR file
     pub total_blocks: u64,
-    
+
     /// Uncompressed size in bytes
     pub uncompressed_size: u64,
-    
+
     /// Compressed size if compression was used
     pub compressed_size: Option<u64>,
 }
@@ -62,26 +61,57 @@ pub struct ExportStats {
 pub struct MessageChunk {
     /// Sequential chunk ID
     pub chunk_id: u32,
-    
+
     /// Snowflake ID of first message
     pub start_position: String,
-    
+
     /// Snowflake ID of last message
     pub end_position: String,
-    
-    /// Messages in this chunk
-    pub messages: Vec<MessageBlock>,
-    
+
+    /// Messages in this chunk with their relations (includes position)
+    pub messages: Vec<(Message, crate::message::AgentMessageRelation)>,
+
     /// CID of next chunk if any
     pub next_chunk: Option<Cid>,
 }
 
-/// Simplified message for export
+/// A chunk of memories for streaming
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageBlock {
-    pub id: MessageId,
-    pub content: Ipld,
-    pub metadata: Ipld,
+pub struct MemoryChunk {
+    /// Sequential chunk ID
+    pub chunk_id: u32,
+
+    /// Memories in this chunk with their agent relations (includes access_level)
+    pub memories: Vec<(
+        crate::memory::MemoryBlock,
+        crate::agent::AgentMemoryRelation,
+    )>,
+
+    /// CID of next chunk if any
+    pub next_chunk: Option<Cid>,
+}
+
+/// A complete constellation export with all relationships
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstellationExport {
+    /// The constellation record itself
+    pub constellation: crate::coordination::groups::Constellation,
+
+    /// All groups in this constellation with their full membership data
+    pub groups: Vec<GroupExport>,
+
+    /// CIDs of all agent exports in this constellation
+    pub agent_export_cids: Vec<(AgentId, Cid)>,
+}
+
+/// A complete group export with all relationships
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupExport {
+    /// The group record itself
+    pub group: crate::coordination::groups::AgentGroup,
+
+    /// CIDs of member agent exports (agents are exported separately)
+    pub member_agent_cids: Vec<(AgentId, Cid)>,
 }
 
 /// Compression settings
@@ -93,10 +123,11 @@ pub struct CompressionSettings {
 
 /// Options for chunking messages
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChunkingStrategy {
     /// Maximum messages per chunk
     pub chunk_size: usize,
-    
+
     /// Whether to compress individual chunks
     pub compress_chunks: bool,
 }

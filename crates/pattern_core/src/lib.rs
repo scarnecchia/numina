@@ -5,15 +5,15 @@
 //! cognitive support system.
 
 pub mod agent;
+pub mod atproto_identity;
 pub mod config;
 pub mod context;
 pub mod coordination;
+pub mod data_source;
 pub mod db;
 pub mod embeddings;
 pub mod error;
-//pub mod export;
-pub mod atproto_identity;
-pub mod data_source;
+pub mod export;
 pub mod id;
 pub mod memory;
 pub mod message;

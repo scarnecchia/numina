@@ -2,10 +2,12 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     agent::{AgentRecord, AgentState, AgentType},
-    config::{self, PatternConfig},
+    config::{self, AgentConfig, MemoryBlockConfig, PatternConfig},
     db::{client::DB, ops},
     id::AgentId,
 };
+use std::{collections::HashMap, path::Path};
+use surrealdb::RecordId;
 
 use crate::output::{Output, format_agent_state, format_relative_time};
 
@@ -107,7 +109,7 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
         agent_type: parsed_type.clone(),
         state: AgentState::Ready,
         base_instructions,
-        owner_id: user_id,
+        owner_id: user_id.clone(),
         created_at: now,
         updated_at: now,
         last_active: now,
@@ -117,6 +119,17 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
     // Save to database using store_with_relations since AgentRecord has relations
     match agent.store_with_relations(&DB).await {
         Ok(stored_agent) => {
+            // Add agent to constellation
+            let constellation = ops::get_or_create_constellation(&DB, &user_id).await?;
+            let membership = pattern_core::coordination::groups::ConstellationMembership {
+                id: pattern_core::id::RelationId::generate(),
+                in_id: constellation.id,
+                out_id: stored_agent.id.clone(),
+                joined_at: now,
+                is_primary: false,
+            };
+            ops::create_relation_typed(&DB, &membership).await?;
+
             println!();
             output.success("Created agent successfully!\n");
             output.info("Name:", &stored_agent.name.bright_cyan().to_string());
@@ -252,6 +265,108 @@ pub async fn status(name: &str) -> Result<()> {
                 output.list_item(&agent.name.bright_cyan().to_string());
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Export agent configuration (persona and memory only)
+pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
+    let output = Output::new();
+
+    // Query for the agent by name
+    let query = "SELECT id FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query)
+        .bind(("name", name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agent_ids: Vec<RecordId> = response.take("id").into_diagnostic()?;
+
+    if let Some(id_value) = agent_ids.first() {
+        let agent_id = AgentId::from_record(id_value.clone());
+
+        // Load the full agent record
+        let agent = match AgentRecord::load_with_relations(&DB, &agent_id).await {
+            Ok(Some(agent)) => agent,
+            Ok(None) => {
+                output.error(&format!("No agent found with name '{}'", name));
+                return Ok(());
+            }
+            Err(e) => return Err(miette::miette!("Failed to load agent: {}", e)),
+        };
+
+        output.info("Exporting agent:", &agent.name.bright_cyan().to_string());
+
+        // Create the agent config structure
+        let agent_config = AgentConfig {
+            id: Some(agent.id.clone()),
+            name: agent.name.clone(),
+            system_prompt: if agent.base_instructions.is_empty() {
+                None
+            } else {
+                Some(agent.base_instructions.clone())
+            },
+            persona: None, // Will be extracted from memory blocks
+            instructions: None,
+            bluesky_handle: None,
+            memory: HashMap::new(), // Will be populated from memory blocks
+        };
+
+        // Get memory blocks using ops function
+        let memories = ops::get_agent_memories(&DB, &agent.id).await?;
+
+        // Convert memory blocks to config format
+        let mut memory_configs = HashMap::new();
+        let mut persona_content = None;
+
+        for (memory_block, permission) in &memories {
+            // Check if this is the persona block
+            if memory_block.label == "persona" {
+                persona_content = Some(memory_block.value.clone());
+                continue;
+            }
+
+            let memory_config = MemoryBlockConfig {
+                content: Some(memory_block.value.clone()),
+                content_path: None,
+                permission: permission.clone(),
+                memory_type: memory_block.memory_type.clone(),
+                description: memory_block.description.clone(),
+            };
+
+            memory_configs.insert(memory_block.label.to_string(), memory_config);
+        }
+
+        // Create the final config with persona and memory
+        let mut final_config = agent_config;
+        final_config.persona = persona_content;
+        final_config.memory = memory_configs;
+
+        // Serialize to TOML
+        let toml_str = toml::to_string_pretty(&final_config).into_diagnostic()?;
+
+        // Determine output path
+        let output_file = if let Some(path) = output_path {
+            path.to_path_buf()
+        } else {
+            std::path::PathBuf::from(format!("{}.toml", agent.name))
+        };
+
+        // Write to file
+        tokio::fs::write(&output_file, toml_str)
+            .await
+            .into_diagnostic()?;
+
+        output.success(&format!(
+            "Exported agent configuration to: {}",
+            output_file.display().to_string().bright_green()
+        ));
+        output.status("Note: Only persona and memory blocks were exported");
+        output.status("Message history and statistics are not included");
+    } else {
+        output.error(&format!("No agent found with name '{}'", name));
     }
 
     Ok(())

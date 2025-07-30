@@ -101,6 +101,24 @@ enum Commands {
         #[command(subcommand)]
         cmd: FirehoseCommands,
     },
+    /// Export agents, groups, or constellations to CAR files
+    Export {
+        #[command(subcommand)]
+        cmd: ExportCommands,
+    },
+    /// Import from CAR files
+    Import {
+        /// Path to CAR file to import
+        file: PathBuf,
+
+        /// Rename imported entity to this name
+        #[arg(long)]
+        rename_to: Option<String>,
+
+        /// Preserve original IDs when importing
+        #[arg(long)]
+        preserve_ids: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +133,14 @@ enum AgentCommands {
     },
     /// Show agent status
     Status { name: String },
+    /// Export agent configuration (persona and memory only)
+    Export {
+        /// Agent name to export
+        name: String,
+        /// Output file path (defaults to <agent_name>.toml)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[cfg(feature = "oauth")]
@@ -188,6 +214,40 @@ enum GroupCommands {
     Status {
         /// Group name
         name: String,
+    },
+    /// Export group configuration (members and pattern only)
+    Export {
+        /// Group name to export
+        name: String,
+        /// Output file path (defaults to <group_name>_group.toml)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportCommands {
+    /// Export an agent to a CAR file
+    Agent {
+        /// Agent name to export
+        name: String,
+        /// Output file path (defaults to <name>.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+    /// Export a group with all member agents to a CAR file
+    Group {
+        /// Group name to export
+        name: String,
+        /// Output file path (defaults to <name>.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+    /// Export entire constellation to a CAR file
+    Constellation {
+        /// Output file path (defaults to constellation.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -392,6 +452,13 @@ async fn main() -> Result<()> {
     // Initialize database
     client::init_db(config.database.clone()).await?;
 
+    // Initialize groups from configuration
+    if !config.groups.is_empty() {
+        // Create a heartbeat channel for group initialization
+        let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
+        commands::group::initialize_from_config(&config, heartbeat_sender).await?;
+    }
+
     match &cli.command {
         Commands::Chat {
             agent,
@@ -412,7 +479,7 @@ async fn main() -> Result<()> {
 
                 // Load the group from database
                 let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
-                let mut group = match group {
+                let group = match group {
                     Some(g) => g,
                     None => {
                         output.error(&format!("Group '{}' not found", group_name));
@@ -511,6 +578,9 @@ async fn main() -> Result<()> {
                 commands::agent::create(name, agent_type.as_deref(), &config).await?
             }
             AgentCommands::Status { name } => commands::agent::status(name).await?,
+            AgentCommands::Export { name, output } => {
+                commands::agent::export(name, output.as_deref()).await?
+            }
         },
         Commands::Db { cmd } => match cmd {
             DbCommands::Stats => commands::db::stats(&config).await?,
@@ -573,6 +643,9 @@ async fn main() -> Result<()> {
                     .await?
             }
             GroupCommands::Status { name } => commands::group::status(name, &config).await?,
+            GroupCommands::Export { name, output } => {
+                commands::group::export(name, output.as_deref(), &config).await?
+            }
         },
         #[cfg(feature = "oauth")]
         Commands::Auth { cmd } => match cmd {
@@ -625,6 +698,25 @@ async fn main() -> Result<()> {
                 commands::firehose::test_connection(endpoint.clone(), &config).await?
             }
         },
+        Commands::Export { cmd } => match cmd {
+            ExportCommands::Agent { name, output } => {
+                commands::export::export_agent(name, output.clone(), &config).await?
+            }
+            ExportCommands::Group { name, output } => {
+                commands::export::export_group(name, output.clone(), &config).await?
+            }
+            ExportCommands::Constellation { output } => {
+                commands::export::export_constellation(output.clone(), &config).await?
+            }
+        },
+        Commands::Import {
+            file,
+            rename_to,
+            preserve_ids,
+        } => {
+            commands::export::import(file.clone(), rename_to.clone(), *preserve_ids, &config)
+                .await?
+        }
     }
 
     Ok(())
