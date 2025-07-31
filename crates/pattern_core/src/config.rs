@@ -106,6 +106,10 @@ pub struct AgentConfig {
     /// Available tools for this agent
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+
+    /// Optional model configuration (overrides global model config)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelConfig>,
 }
 
 /// Configuration for tool execution rules
@@ -267,10 +271,6 @@ impl AgentConfig {
     pub fn set_tool_rules(&mut self, rules: &[ToolRule]) {
         self.tool_rules = rules.iter().map(ToolRuleConfig::from_tool_rule).collect();
     }
-
-    /// Optional model configuration (overrides global model config)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelConfig>,
 }
 
 impl AgentConfig {
@@ -528,6 +528,9 @@ impl Default for AgentConfig {
             instructions: None,
             memory: HashMap::new(),
             bluesky_handle: None,
+            tool_rules: Vec::new(),
+            tools: Vec::new(),
+            model: None,
         }
     }
 }
@@ -689,6 +692,9 @@ pub struct PartialAgentConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelConfig>,
 }
 
 fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentConfig {
@@ -707,6 +713,9 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
             base.memory
         },
         bluesky_handle: overlay.bluesky_handle.or(base.bluesky_handle),
+        tool_rules: overlay.tool_rules.unwrap_or(base.tool_rules),
+        tools: overlay.tools.unwrap_or(base.tools),
+        model: overlay.model.or(base.model),
     }
 }
 

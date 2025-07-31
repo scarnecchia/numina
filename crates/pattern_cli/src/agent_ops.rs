@@ -1070,6 +1070,8 @@ pub async fn load_or_create_agent_from_member(
                 instructions: None,
                 memory: Default::default(),
                 bluesky_handle: None,
+                tool_rules: Vec::new(),
+                tools: Vec::new(),
                 model: None,
             },
             model: pattern_core::config::ModelConfig {
@@ -1209,6 +1211,8 @@ pub async fn load_or_create_agent_from_member(
             instructions: None,
             memory: Default::default(),
             bluesky_handle: None,
+            tool_rules: Vec::new(),
+            tools: Vec::new(),
             model: None,
         },
         model: pattern_core::config::ModelConfig {

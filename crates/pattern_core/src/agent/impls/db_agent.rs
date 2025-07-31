@@ -1366,24 +1366,6 @@ where
                                                         ),
                                                     );
                                                 }
-                                                });
-                                            if let Some(tool_response) = tool_response {
-                                                let tool_result = if tool_response
-                                                    .content
-                                                    .starts_with("Error:")
-                                                {
-                                                    Err(tool_response.content.clone())
-                                                } else {
-                                                    Ok(tool_response.content.clone())
-                                                };
-
-                                                send_event(ResponseEvent::ToolCallCompleted {
-                                                    call_id: call.call_id.clone(),
-                                                    result: tool_result,
-                                                })
-                                                .await;
-
-                                                our_responses.push(tool_response);
                                             }
                                         }
                                     }

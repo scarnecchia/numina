@@ -312,6 +312,8 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
             instructions: None,
             bluesky_handle: None,
             memory: HashMap::new(), // Will be populated from memory blocks
+            tool_rules: Vec::new(),
+            tools: Vec::new(),
             model: None,
         };
 
