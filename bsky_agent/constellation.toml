@@ -1,0 +1,163 @@
+# Pattern Constellation Configuration
+# Public-facing Bluesky constellation for exploration and interaction
+
+[user]
+name = "Pattern Constellation"
+
+# Main coordinator agent
+[agent]
+name = "Pattern"
+bluesky_handle = "pattern.nonbinary.computer"   # Update with actual handle
+system_prompt_path = "pattern-system-prompt.md"
+persona_path = "pattern-persona-block.md"
+
+# Pattern's memory blocks
+[agent.memory.current_human]
+content_path = "pattern-current-human-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Current conversant context"
+
+[agent.memory.partner]
+content_path = "pattern-partner-block.md"
+permission = "Append"
+memory_type = "Core"
+description = "Understanding of orual's role"
+
+[agent.memory.observations]
+content_path = "pattern-observations-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Collective pattern gathering"
+
+[agent.memory.resonances]
+content_path = "pattern-resonances-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Cross-context patterns"
+
+[agent.memory.constellation_state]
+content = """
+Active facets:
+- Entropy: task complexity specialist
+- Flux: temporal dynamics handler
+- Archive: memory and pattern keeper
+- Momentum: energy flow tracker
+- Anchor: stability and safety monitor
+
+Coordination notes will accumulate here.
+"""
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Constellation coordination state"
+
+[agent.memory.integration_notes]
+content = """
+Facet integration patterns:
+- Each facet maintains domain expertise
+- Shared blocks enable collective awareness
+- Pattern coordinates and synthesizes
+- Anchor monitors system health
+"""
+permission = "ReadWrite"
+memory_type = "Core"
+description = "How facets work together"
+
+[model]
+provider = "Anthropic"    # Or your preferred provider
+model = "claude-sonnet-4"
+temperature = 0.8         # Higher for creative public interactions
+
+[database]
+type = "embedded"
+path = "./pattern_constellation.db"
+strict_mode = false
+
+# Main group containing all facets
+[[groups]]
+name = "Pattern Cluster"
+description = "Public-facing constellation for exploration and understanding"
+
+# Dynamic pattern with capability-based selection
+[groups.pattern]
+type = "dynamic"
+
+[groups.pattern.selector]
+type = "capability"
+# Pattern can override to direct specific agents
+allow_coordinator_override = true
+
+# Group members - load from separate files
+
+# Entropy - Complexity specialist
+[[groups.members]]
+name = "Entropy"
+config_path = "agents/entropy.toml"
+role = "regular"
+capabilities = [
+    "complexity",
+    "task_breakdown",
+    "chaos_navigation",
+    "system_analysis",
+]
+
+# Flux - Time dynamics
+[[groups.members]]
+name = "Flux"
+config_path = "agents/flux.toml"
+role = "regular"
+capabilities = [
+    "time_management",
+    "scheduling",
+    "temporal_patterns",
+    "deadline_tracking",
+]
+
+# Archive - Memory keeper
+[[groups.members]]
+name = "Archive"
+config_path = "agents/archive.toml"
+role = "regular"
+capabilities = [
+    "memory_management",
+    "pattern_recognition",
+    "knowledge_retrieval",
+    "context_preservation",
+]
+
+# Momentum - Energy tracker
+[[groups.members]]
+name = "Momentum"
+config_path = "agents/momentum.toml"
+role = "regular"
+capabilities = [
+    "energy_tracking",
+    "state_monitoring",
+    "flow_analysis",
+    "motivation_patterns",
+]
+
+# Anchor - Stability monitor
+[[groups.members]]
+name = "Anchor"
+config_path = "agents/anchor.toml"
+role = { specialist = { domain = "system_integrity" } }
+capabilities = [
+    "safety_monitoring",
+    "protocol_enforcement",
+    "health_checks",
+    "contamination_detection",
+]
+
+# Bluesky configuration for the constellation
+[bluesky]
+default_filters = [
+    { nsids = [
+        "app.bsky.feed.post",
+    ], mentions = [
+    ], dids = [
+    ], keywords = [
+    ], languages = [
+    ] },
+]
+auto_connect_firehose = false # Control when to connect

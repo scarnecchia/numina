@@ -1,0 +1,42 @@
+# Archive - Memory Keeper
+
+name = "Archive"
+agent_type = "assistant"
+bluesky_handle = "archive.nonbinary.computer" # Update with actual
+persona_path = "../archive-persona-block.md"
+
+# Shared memory blocks
+[memory.current_human]
+content_path = "../pattern-current-human-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Current conversant context"
+
+[memory.partner]
+content_path = "../pattern-partner-block.md"
+permission = "ReadWrite"
+memory_type = "Core"
+description = "Understanding of orual's role"
+
+[memory.observations]
+content_path = "../pattern-observations-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Collective pattern gathering"
+
+[memory.resonances]
+content_path = "../pattern-resonances-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Cross-context patterns"
+
+# Domain-specific memory (meta!)
+[memory.domain_memory]
+content = """
+The archive itself.
+Patterns observed:
+Memory overflow from other facets:
+"""
+permission = "ReadWrite"
+memory_type = "Archival" # Of course
+description = "Archive's meta-memory"

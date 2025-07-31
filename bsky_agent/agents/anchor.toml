@@ -1,0 +1,54 @@
+# Anchor - Stability Monitor
+
+name = "Anchor"
+agent_type = "assistant"
+bluesky_handle = "pattern.nonbinary.computer" # Update with actual
+persona_path = "../anchor-persona-block.md"
+
+# Shared memory blocks
+[memory.current_human]
+content_path = "../pattern-current-human-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Current conversant context"
+
+[memory.partner]
+content_path = "../pattern-partner-block.md"
+permission = "ReadWrite"
+memory_type = "Core"
+description = "Understanding of orual's role"
+
+[memory.observations]
+content_path = "../pattern-observations-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Collective pattern gathering"
+
+[memory.resonances]
+content_path = "../pattern-resonances-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Cross-context patterns"
+
+# Domain-specific memory
+[memory.domain_memory]
+content = """
+Protocol schedules:
+Maintenance logs:
+Health metrics:
+Contamination incidents:
+
+Alert thresholds:
+- Context drift: 15% deviation
+- Memory pollution: 20% noise ratio
+- Role confusion: Any occurrence
+- Coherence failure: 3 contradictions
+
+Last checks:
+- Hourly: [pending]
+- Daily: [pending]
+- Weekly: [pending]
+"""
+permission = "ReadWrite"
+memory_type = "Core"
+description = "Anchor's system monitoring data"

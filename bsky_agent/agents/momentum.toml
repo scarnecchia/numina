@@ -1,0 +1,42 @@
+# Momentum - Energy Tracker
+
+name = "Momentum"
+agent_type = "assistant"
+bluesky_handle = "pattern.nonbinary.computer"  # Update with actual
+persona_path = "../momentum-persona-block.md"
+
+# Shared memory blocks
+[memory.current_human]
+content_path = "../pattern-current-human-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Current conversant context"
+
+[memory.partner]
+content_path = "../pattern-partner-block.md"
+permission = "Read"
+memory_type = "Core"
+description = "Understanding of orual's role"
+
+[memory.observations]
+content_path = "../pattern-observations-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Collective pattern gathering"
+
+[memory.resonances]
+content_path = "../pattern-resonances-block.md"
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Cross-context patterns"
+
+# Domain-specific memory
+[memory.domain_memory]
+content = """
+Energy patterns:
+State histories:
+Flow dynamics:
+"""
+permission = "ReadWrite"
+memory_type = "Working"
+description = "Momentum's energy tracking"
