@@ -8,26 +8,26 @@ persona_path = "../momentum-persona-block.md"
 # Shared memory blocks
 [memory.current_human]
 content_path = "../pattern-current-human-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Current conversant context"
 
 [memory.partner]
 content_path = "../pattern-partner-block.md"
-permission = "Read"
-memory_type = "Core"
+permission = "read_only"
+memory_type = "core"
 description = "Understanding of orual's role"
 
 [memory.observations]
 content_path = "../pattern-observations-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Collective pattern gathering"
 
 [memory.resonances]
 content_path = "../pattern-resonances-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Cross-context patterns"
 
 # Domain-specific memory
@@ -37,6 +37,6 @@ Energy patterns:
 State histories:
 Flow dynamics:
 """
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Momentum's energy tracking"

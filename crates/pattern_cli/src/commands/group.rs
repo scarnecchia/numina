@@ -379,6 +379,7 @@ pub async fn initialize_from_config(
                 None, // model_name
                 true, // enable_tools
                 heartbeat_sender.clone(),
+                Some(config),
             )
             .await?;
 
@@ -520,6 +521,7 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             instructions: None,
             bluesky_handle: None,
             memory: HashMap::new(), // Will be populated from memory blocks
+            model: None,
         };
 
         // Get memory blocks for this agent
@@ -576,6 +578,7 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             instructions: None,
             bluesky_handle: None,
             memory: HashMap::new(),
+            model: None,
         },
         model: ModelConfig::default(),
         database: DatabaseConfig::default(),

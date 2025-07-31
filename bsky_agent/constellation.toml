@@ -14,26 +14,26 @@ persona_path = "pattern-persona-block.md"
 # Pattern's memory blocks
 [agent.memory.current_human]
 content_path = "pattern-current-human-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Current conversant context"
 
 [agent.memory.partner]
 content_path = "pattern-partner-block.md"
-permission = "Append"
-memory_type = "Core"
+permission = "append"
+memory_type = "core"
 description = "Understanding of orual's role"
 
 [agent.memory.observations]
 content_path = "pattern-observations-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Collective pattern gathering"
 
 [agent.memory.resonances]
 content_path = "pattern-resonances-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Cross-context patterns"
 
 [agent.memory.constellation_state]
@@ -47,8 +47,8 @@ Active facets:
 
 Coordination notes will accumulate here.
 """
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Constellation coordination state"
 
 [agent.memory.integration_notes]
@@ -59,8 +59,8 @@ Facet integration patterns:
 - Pattern coordinates and synthesizes
 - Anchor monitors system health
 """
-permission = "ReadWrite"
-memory_type = "Core"
+permission = "read_write"
+memory_type = "core"
 description = "How facets work together"
 
 [model]
@@ -77,15 +77,8 @@ strict_mode = false
 [[groups]]
 name = "Pattern Cluster"
 description = "Public-facing constellation for exploration and understanding"
-
 # Dynamic pattern with capability-based selection
-[groups.pattern]
-type = "dynamic"
-
-[groups.pattern.selector]
-type = "capability"
-# Pattern can override to direct specific agents
-allow_coordinator_override = true
+pattern = { type = "dynamic", selector = "capability" }
 
 # Group members - load from separate files
 

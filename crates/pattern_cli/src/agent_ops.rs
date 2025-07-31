@@ -1025,6 +1025,7 @@ pub async fn load_or_create_agent_from_member(
     model_name: Option<String>,
     enable_tools: bool,
     heartbeat_sender: heartbeat::HeartbeatSender,
+    main_config: Option<&PatternConfig>,
 ) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
@@ -1058,6 +1059,7 @@ pub async fn load_or_create_agent_from_member(
                 instructions: None,
                 memory: Default::default(),
                 bluesky_handle: None,
+                model: None,
             },
             model: pattern_core::config::ModelConfig {
                 provider: "Gemini".to_string(),
@@ -1090,6 +1092,20 @@ pub async fn load_or_create_agent_from_member(
         let agent_config = pattern_core::config::AgentConfig::load_from_file(config_path).await?;
 
         // Build full config with loaded agent config
+        // Use agent's model config if available, otherwise fall back to main config, then default
+        let model_config = if let Some(agent_model) = &agent_config.model {
+            agent_model.clone()
+        } else if let Some(main_cfg) = main_config {
+            main_cfg.model.clone()
+        } else {
+            pattern_core::config::ModelConfig {
+                provider: "Gemini".to_string(),
+                model: model_name,
+                temperature: None,
+                settings: Default::default(),
+            }
+        };
+
         let config = PatternConfig {
             user: pattern_core::config::UserConfig {
                 id: user_id.clone(),
@@ -1097,12 +1113,7 @@ pub async fn load_or_create_agent_from_member(
                 settings: Default::default(),
             },
             agent: agent_config,
-            model: pattern_core::config::ModelConfig {
-                provider: "Gemini".to_string(),
-                model: model_name,
-                temperature: None,
-                settings: Default::default(),
-            },
+            model: model_config,
             database: Default::default(),
             groups: vec![],
             bluesky: None,
@@ -1128,6 +1139,20 @@ pub async fn load_or_create_agent_from_member(
         ));
 
         // Build full config with inline agent config
+        // Use agent's model config if available, otherwise fall back to main config, then default
+        let model_config = if let Some(agent_model) = &inline_config.model {
+            agent_model.clone()
+        } else if let Some(main_cfg) = main_config {
+            main_cfg.model.clone()
+        } else {
+            pattern_core::config::ModelConfig {
+                provider: "Gemini".to_string(),
+                model: model_name,
+                temperature: None,
+                settings: Default::default(),
+            }
+        };
+
         let config = PatternConfig {
             user: pattern_core::config::UserConfig {
                 id: user_id.clone(),
@@ -1135,12 +1160,7 @@ pub async fn load_or_create_agent_from_member(
                 settings: Default::default(),
             },
             agent: inline_config.clone(),
-            model: pattern_core::config::ModelConfig {
-                provider: "Gemini".to_string(),
-                model: model_name,
-                temperature: None,
-                settings: Default::default(),
-            },
+            model: model_config,
             database: Default::default(),
             groups: vec![],
             bluesky: None,
@@ -1178,6 +1198,7 @@ pub async fn load_or_create_agent_from_member(
             instructions: None,
             memory: Default::default(),
             bluesky_handle: None,
+            model: None,
         },
         model: pattern_core::config::ModelConfig {
             provider: "Gemini".to_string(),

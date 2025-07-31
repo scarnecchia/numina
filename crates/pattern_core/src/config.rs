@@ -16,6 +16,17 @@ use crate::{
     memory::{MemoryPermission, MemoryType},
 };
 
+/// Resolve a path relative to a base directory
+/// If the path is absolute, return it as-is
+/// If the path is relative, resolve it relative to the base directory
+fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
 /// Top-level configuration for Pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternConfig {
@@ -86,6 +97,10 @@ pub struct AgentConfig {
     /// Optional Bluesky handle for this agent
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky_handle: Option<String>,
+
+    /// Optional model configuration (overrides global model config)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelConfig>,
 }
 
 impl AgentConfig {
@@ -100,12 +115,25 @@ impl AgentConfig {
             }
         })?;
 
-        toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
-            field: "agent config".to_string(),
-            config_path: path.display().to_string(),
-            expected: "valid agent configuration".to_string(),
-            cause: crate::error::ConfigError::TomlParse(e.to_string()),
-        })
+        let mut config: AgentConfig =
+            toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
+                field: "agent config".to_string(),
+                config_path: path.display().to_string(),
+                expected: "valid agent configuration".to_string(),
+                cause: crate::error::ConfigError::TomlParse(e.to_string()),
+            })?;
+
+        // Resolve paths relative to the config file's directory
+        let base_dir = path.parent().unwrap_or(Path::new("."));
+
+        // Resolve memory block content_paths
+        for (_, memory_block) in config.memory.iter_mut() {
+            if let Some(ref content_path) = memory_block.content_path {
+                memory_block.content_path = Some(resolve_path(base_dir, content_path));
+            }
+        }
+
+        Ok(config)
     }
 }
 
@@ -330,6 +358,7 @@ impl Default for AgentConfig {
             instructions: None,
             memory: HashMap::new(),
             bluesky_handle: None,
+            model: None,
         }
     }
 }
@@ -360,13 +389,32 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
         }
     })?;
 
-    let config: PatternConfig =
+    let mut config: PatternConfig =
         toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
             config_path: path.display().to_string(),
             field: "content".to_string(),
             expected: "valid TOML configuration".to_string(),
             cause: crate::error::ConfigError::TomlParse(e.to_string()),
         })?;
+
+    // Resolve paths relative to the config file's directory
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+
+    // Resolve paths in main agent memory blocks
+    for (_, memory_block) in config.agent.memory.iter_mut() {
+        if let Some(ref content_path) = memory_block.content_path {
+            memory_block.content_path = Some(resolve_path(base_dir, content_path));
+        }
+    }
+
+    // Resolve paths in group members
+    for group in config.groups.iter_mut() {
+        for member in group.members.iter_mut() {
+            if let Some(ref config_path) = member.config_path {
+                member.config_path = Some(resolve_path(base_dir, config_path));
+            }
+        }
+    }
 
     Ok(config)
 }
@@ -484,6 +532,7 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
             base.memory
         },
         bluesky_handle: overlay.bluesky_handle.or(base.bluesky_handle),
+        model: base.model, // Keep base model config for now (no overlay field yet)
     }
 }
 

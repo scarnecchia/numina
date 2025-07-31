@@ -5,29 +5,35 @@ agent_type = "assistant"
 bluesky_handle = "archive.nonbinary.computer" # Update with actual
 persona_path = "../archive-persona-block.md"
 
+# Use a cheaper/faster model for Archive since it's mostly memory management
+[model]
+provider = "Gemini"
+model = "gemini-2.5-flash"
+temperature = 0.3
+
 # Shared memory blocks
 [memory.current_human]
 content_path = "../pattern-current-human-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Current conversant context"
 
 [memory.partner]
 content_path = "../pattern-partner-block.md"
-permission = "ReadWrite"
-memory_type = "Core"
+permission = "read_write"
+memory_type = "core"
 description = "Understanding of orual's role"
 
 [memory.observations]
 content_path = "../pattern-observations-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Collective pattern gathering"
 
 [memory.resonances]
 content_path = "../pattern-resonances-block.md"
-permission = "ReadWrite"
-memory_type = "Working"
+permission = "read_write"
+memory_type = "working"
 description = "Cross-context patterns"
 
 # Domain-specific memory (meta!)
@@ -37,6 +43,6 @@ The archive itself.
 Patterns observed:
 Memory overflow from other facets:
 """
-permission = "ReadWrite"
-memory_type = "Archival" # Of course
+permission = "read_write"
+memory_type = "archival" # Of course
 description = "Archive's meta-memory"
