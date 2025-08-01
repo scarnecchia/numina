@@ -450,9 +450,12 @@ The following memory blocks are currently engaged in your core memory unit:
             .iter()
             .map(|rule| {
                 if self.config.model_adjustments.use_xml_tags {
-                    format!("<tool_rule>\n{}\n</tool_rule>", rule.rule)
+                    format!(
+                        "<tool_rule>\n{}: {}\n</tool_rule>",
+                        rule.tool_name, rule.rule
+                    )
                 } else {
-                    format!("- {}", rule.rule)
+                    format!("- {}: {}", rule.tool_name, rule.rule)
                 }
             })
             .collect::<Vec<_>>()
@@ -690,12 +693,12 @@ mod tests {
         assert!(
             context
                 .system_prompt
-                .contains("requires continuing your response when called")
+                .contains("context: requires continuing your response when called")
         );
         assert!(
             context
                 .system_prompt
-                .contains("ends your response (yields control) when called")
+                .contains("send_message: ends your response (yields control) when called")
         );
     }
 }

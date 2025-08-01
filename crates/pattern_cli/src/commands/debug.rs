@@ -692,3 +692,97 @@ pub async fn list_all_memory(agent_name: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Show the current context that would be passed to the LLM
+pub async fn show_context(agent_name: &str) -> Result<()> {
+    let output = Output::new();
+
+    output.section("Agent Context Inspection");
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        output.info(
+            "Agent:",
+            &format!(
+                "{} (ID: {})",
+                agent_record.name.bright_cyan(),
+                agent_record.id.to_string().dimmed()
+            ),
+        );
+        output.info("State:", &format!("{:?}", agent_record.state));
+        println!();
+
+        // Load the agent using the standard function
+        let config = crate::config::PatternConfig::default();
+        let (heartbeat_sender, _) = pattern_core::context::heartbeat::heartbeat_channel();
+
+        match crate::agent_ops::load_or_create_agent(
+            agent_name,
+            None, // Use default model
+            true, // Enable tools
+            &config,
+            heartbeat_sender,
+        )
+        .await
+        {
+            Ok(agent) => {
+                // Get system prompt sections from agent
+                let system_prompt_parts = agent.system_prompt().await;
+                let system_prompt = system_prompt_parts.join("\n\n");
+
+                output.section("Current System Prompt (as passed to LLM)");
+                println!();
+                println!("{}", system_prompt);
+                println!();
+
+                // Get available tools
+                let available_tools = agent.available_tools().await;
+                if !available_tools.is_empty() {
+                    output.section(&format!("Available Tools ({})", available_tools.len()));
+                    println!();
+                    for tool in &available_tools {
+                        println!("• {} - {}", tool.name().cyan(), tool.description());
+                    }
+                    println!();
+                }
+
+                output.success("Context inspection complete");
+            }
+            Err(e) => {
+                output.error(&format!("Failed to load agent: {}", e));
+            }
+        }
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
+
+        // List available agents
+        let query_sql = "SELECT name FROM agent ORDER BY name";
+        let mut response = DB.query(query_sql).await.into_diagnostic()?;
+        let agent_names: Vec<String> = response
+            .take::<Vec<surrealdb::sql::Value>>(0)
+            .into_diagnostic()?
+            .into_iter()
+            .filter_map(|v| Some(v.as_string()))
+            .collect();
+
+        if !agent_names.is_empty() {
+            output.info("Available agents:", &agent_names.join(", "));
+        }
+    }
+
+    Ok(())
+}
