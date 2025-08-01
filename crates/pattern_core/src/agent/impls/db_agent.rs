@@ -133,6 +133,22 @@ where
         }
     }
 
+    /// Get tool rules from the rule engine as context-compatible format
+    async fn get_context_tool_rules(&self) -> Vec<crate::context::ToolRule> {
+        let rule_engine = self.tool_rules.read().await;
+        let descriptions = rule_engine.to_usage_descriptions();
+
+        // Convert to context::ToolRule format
+        descriptions
+            .into_iter()
+            .enumerate()
+            .map(|(i, description)| crate::context::ToolRule {
+                tool_name: format!("rule_{}", i), // Generic name since these are mixed rules
+                rule: description,
+            })
+            .collect()
+    }
+
     /// Set the heartbeat sender for this agent
     pub fn set_heartbeat_sender(&mut self, sender: HeartbeatSender) {
         self.heartbeat_sender = sender;
@@ -1173,6 +1189,13 @@ where
                 ctx.add_message(message).await;
             }
 
+            // Update context with tool rules from rule engine before building
+            {
+                let tool_rules = self.get_context_tool_rules().await;
+                let mut ctx = context.write().await;
+                ctx.update_tool_rules(tool_rules);
+            }
+
             // Build memory context
             let memory_context = match context.read().await.build_context().await {
                 Ok(ctx) => ctx,
@@ -1546,6 +1569,13 @@ where
                     // Only continue if there are unpaired tool calls that need responses
                     if !has_unpaired_tool_calls {
                         break;
+                    }
+
+                    // Update context with tool rules before rebuilding
+                    {
+                        let tool_rules = self.get_context_tool_rules().await;
+                        let mut ctx = context.write().await;
+                        ctx.update_tool_rules(tool_rules);
                     }
 
                     // Get next response

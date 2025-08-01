@@ -450,12 +450,9 @@ The following memory blocks are currently engaged in your core memory unit:
             .iter()
             .map(|rule| {
                 if self.config.model_adjustments.use_xml_tags {
-                    format!(
-                        "<tool_rule>\n{} {}\n</tool_rule>",
-                        rule.tool_name, rule.rule
-                    )
+                    format!("<tool_rule>\n{}\n</tool_rule>", rule.rule)
                 } else {
-                    format!("- {}: {}", rule.tool_name, rule.rule)
+                    format!("- {}", rule.rule)
                 }
             })
             .collect::<Vec<_>>()
@@ -464,7 +461,7 @@ The following memory blocks are currently engaged in your core memory unit:
         if self.config.model_adjustments.use_xml_tags {
             format!(
                 "<tool_usage_rules>
-The following constraints define rules for tool usage and guide desired behavior. These rules must be followed to ensure proper tool execution and workflow. A single response may contain multiple tool calls.
+You MUST follow these tool usage rules exactly (they will be enforced by the system):
 
 {}
 </tool_usage_rules>",
@@ -472,7 +469,7 @@ The following constraints define rules for tool usage and guide desired behavior
             )
         } else {
             format!(
-                "Tool Usage Rules:
+                "Tool Usage Rules (you MUST follow these exactly - they will be enforced):
 {}",
                 rules_text
             )
@@ -686,16 +683,19 @@ mod tests {
 
         let context = builder.build().await.unwrap();
 
-        // Check that tool rules were loaded from the registry
+        // Check that tool rules were loaded from the registry with new format (XML)
+        assert!(context.system_prompt.contains(
+            "You MUST follow these tool usage rules exactly (they will be enforced by the system):"
+        ));
         assert!(
             context
                 .system_prompt
-                .contains("context requires continuing your response when called")
+                .contains("requires continuing your response when called")
         );
         assert!(
             context
                 .system_prompt
-                .contains("send_message ends your response (yields control) when called")
+                .contains("ends your response (yields control) when called")
         );
     }
 }

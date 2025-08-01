@@ -64,6 +64,93 @@ pub enum ToolRuleType {
     Periodic(Duration),
 }
 
+impl ToolRuleType {
+    /// Convert rule type to natural language description for LLM context
+    pub fn to_usage_description(&self, tool_name: &str, conditions: &[String]) -> String {
+        match self {
+            ToolRuleType::ContinueLoop => {
+                format!("Continue the conversation after calling `{}`", tool_name)
+            }
+            ToolRuleType::ExitLoop => {
+                format!("End the conversation after calling `{}`", tool_name)
+            }
+            ToolRuleType::StartConstraint => {
+                format!("Call `{}` first before any other tools", tool_name)
+            }
+            ToolRuleType::RequiresPrecedingTools => {
+                if conditions.is_empty() {
+                    format!("Call other tools before calling `{}`", tool_name)
+                } else {
+                    format!(
+                        "Call `{}` only after calling: {}",
+                        tool_name,
+                        conditions.join(", ")
+                    )
+                }
+            }
+            ToolRuleType::RequiresFollowingTools => {
+                if conditions.is_empty() {
+                    format!("Call other tools after calling `{}`", tool_name)
+                } else {
+                    format!(
+                        "Call these tools after calling `{}`: {}",
+                        tool_name,
+                        conditions.join(", ")
+                    )
+                }
+            }
+            ToolRuleType::RequiredBeforeExit => {
+                format!("Call `{}` before ending the conversation", tool_name)
+            }
+            ToolRuleType::RequiredBeforeExitIf => {
+                if conditions.is_empty() {
+                    format!(
+                        "Call `{}` before ending if certain conditions are met",
+                        tool_name
+                    )
+                } else {
+                    format!(
+                        "Call `{}` before ending if: {}",
+                        tool_name,
+                        conditions.join(", ")
+                    )
+                }
+            }
+            ToolRuleType::MaxCalls(max) => {
+                format!(
+                    "Call `{}` at most {} times per conversation",
+                    tool_name, max
+                )
+            }
+            ToolRuleType::Cooldown(duration) => {
+                format!(
+                    "Wait at least {}ms between calls to `{}`",
+                    duration.as_millis(),
+                    tool_name
+                )
+            }
+            ToolRuleType::ExclusiveGroups(groups) => {
+                let group_descriptions: Vec<String> = groups
+                    .iter()
+                    .map(|group| format!("[{}]", group.join(", ")))
+                    .collect();
+                format!(
+                    "Call only one tool from each group per conversation for `{}`: {}",
+                    tool_name,
+                    group_descriptions.join(", ")
+                )
+            }
+            ToolRuleType::Periodic(interval) => {
+                format!(
+                    "Call `{}` every {}ms during long conversations",
+                    tool_name,
+                    interval.as_millis()
+                )
+            }
+        }
+    }
+}
+
 /// Execution state for tracking rule compliance
 #[derive(Debug, Clone, Default)]
 pub struct ToolExecutionState {
@@ -124,6 +211,14 @@ impl ToolRuleEngine {
             rules: sorted_rules,
             state: ToolExecutionState::default(),
         }
+    }
+
+    /// Get all rules as natural language descriptions for LLM context
+    pub fn to_usage_descriptions(&self) -> Vec<String> {
+        self.rules
+            .iter()
+            .map(|rule| rule.to_usage_description())
+            .collect()
     }
 
     /// Check if a tool can be executed given current state
@@ -494,6 +589,12 @@ impl ToolRule {
         self
     }
 
+    /// Convert this rule to a natural language description for LLM context
+    pub fn to_usage_description(&self) -> String {
+        self.rule_type
+            .to_usage_description(&self.tool_name, &self.conditions)
+    }
+
     /// Create a continue loop rule (no heartbeat required)
     pub fn continue_loop(tool_name: String) -> Self {
         Self::new(tool_name, ToolRuleType::ContinueLoop).with_priority(1)
@@ -544,11 +645,45 @@ mod tests {
     fn create_test_execution(tool_name: &str, success: bool) -> ToolExecution {
         ToolExecution {
             tool_name: tool_name.to_string(),
-            call_id: format!("test_{}", tool_name),
+            call_id: format!("call_{}", tool_name),
             timestamp: Instant::now(),
             success,
             metadata: None,
         }
+    }
+
+    #[test]
+    fn test_natural_language_rule_descriptions() {
+        let rules = vec![
+            ToolRule::start_constraint("context".to_string()),
+            ToolRule::continue_loop("search".to_string()),
+            ToolRule::exit_loop("send_message".to_string()),
+            ToolRule::required_before_exit("cleanup".to_string()),
+            ToolRule::max_calls("api_call".to_string(), 3),
+            ToolRule::cooldown("heavy_task".to_string(), Duration::from_secs(2)),
+            ToolRule::requires_preceding_tools(
+                "validate".to_string(),
+                vec!["extract".to_string(), "transform".to_string()],
+            ),
+        ];
+
+        let engine = ToolRuleEngine::new(rules);
+        let descriptions = engine.to_usage_descriptions();
+
+        println!("Natural language descriptions:");
+        for (i, desc) in descriptions.iter().enumerate() {
+            println!("{}: {}", i + 1, desc);
+        }
+
+        // Check specific rule descriptions (without repetitive enforcement language)
+        // Note: Rules are sorted by priority, so order may differ from creation order
+        assert!(descriptions[0].contains("Call `context` first before any other tools"));
+        assert!(descriptions[1].contains("Call `cleanup` before ending the conversation"));
+        assert!(descriptions[2].contains("End the conversation after calling `send_message`"));
+        assert!(descriptions[3].contains("Call `validate` only after calling: extract, transform"));
+        assert!(descriptions[4].contains("Call `api_call` at most 3 times"));
+        assert!(descriptions[5].contains("Wait at least 2000ms between calls to `heavy_task`"));
+        assert!(descriptions[6].contains("Continue the conversation after calling `search`"));
     }
 
     #[test]
