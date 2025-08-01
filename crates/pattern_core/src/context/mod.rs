@@ -74,8 +74,11 @@ pub struct ContextConfig {
     /// Whether to include thinking/reasoning in responses
     pub enable_thinking: bool,
 
-    /// Custom tool usage rules
-    pub tool_rules: Vec<ToolRule>,
+    /// Tool usage rules (basic tool behavior)
+    pub tool_usage_rules: Vec<ToolRule>,
+
+    /// Tool workflow rules (user-configured constraints)
+    pub tool_workflow_rules: Vec<ToolRule>,
 
     /// Model-specific adjustments
     pub model_adjustments: ModelAdjustments,
@@ -88,18 +91,8 @@ impl Default for ContextConfig {
             memory_char_limit: DEFAULT_CORE_MEMORY_CHAR_LIMIT,
             max_context_messages: DEFAULT_MAX_CONTEXT_MESSAGES,
             enable_thinking: true,
-            tool_rules: vec![
-                ToolRule {
-                    tool_name: "context".to_string(),
-                    rule:
-                        "requires continuing your response when called (except for read operations)"
-                            .to_string(),
-                },
-                ToolRule {
-                    tool_name: "send_message".to_string(),
-                    rule: "ends your response (yields control) when called".to_string(),
-                },
-            ],
+            tool_usage_rules: Vec::new(),
+            tool_workflow_rules: Vec::new(),
             model_adjustments: ModelAdjustments::default(),
         }
     }
@@ -186,24 +179,11 @@ impl ContextBuilder {
             .filter_map(|name| registry.get(&name).map(|entry| entry.value().clone()))
             .collect();
 
-        // Also get tool rules from the registry
+        // Also get tool usage rules from the registry
         let registry_rules = registry.get_tool_rules();
 
-        // Merge with existing rules (registry rules take precedence)
-        for registry_rule in registry_rules {
-            if let Some(existing_rule) = self
-                .config
-                .tool_rules
-                .iter_mut()
-                .find(|r| r.tool_name == registry_rule.tool_name)
-            {
-                // Update existing rule
-                existing_rule.rule = registry_rule.rule;
-            } else {
-                // Add new rule
-                self.config.tool_rules.push(registry_rule);
-            }
-        }
+        // Add usage rules from registry (these are basic tool behaviors)
+        self.config.tool_usage_rules.extend(registry_rules);
 
         self
     }
@@ -285,9 +265,14 @@ impl ContextBuilder {
         // Add memory blocks section
         sections.push(self.build_memory_blocks_section());
 
-        // Add tool usage rules if we have tools
-        if !self.tools.is_empty() {
-            sections.push(self.build_tool_rules_section());
+        // Add tool behavior section if we have tools
+        if !self.tools.is_empty() && !self.config.tool_usage_rules.is_empty() {
+            sections.push(self.build_tool_behavior_section());
+        }
+
+        // Add workflow rules section if we have any
+        if !self.config.tool_workflow_rules.is_empty() {
+            sections.push(self.build_workflow_rules_section());
         }
 
         Ok(sections.join("\n\n"))
@@ -443,15 +428,15 @@ The following memory blocks are currently engaged in your core memory unit:
     }
 
     /// Build tool usage rules section
-    fn build_tool_rules_section(&self) -> String {
+    fn build_tool_behavior_section(&self) -> String {
         let rules_text = self
             .config
-            .tool_rules
+            .tool_usage_rules
             .iter()
             .map(|rule| {
                 if self.config.model_adjustments.use_xml_tags {
                     format!(
-                        "<tool_rule>\n{}: {}\n</tool_rule>",
+                        "<tool_behavior>\n{}: {}\n</tool_behavior>",
                         rule.tool_name, rule.rule
                     )
                 } else {
@@ -463,16 +448,49 @@ The following memory blocks are currently engaged in your core memory unit:
 
         if self.config.model_adjustments.use_xml_tags {
             format!(
-                "<tool_usage_rules>
-You MUST follow these tool usage rules exactly (they will be enforced by the system):
+                "<tool_behaviors>
+The following describes what happens when you call each tool:
 
 {}
-</tool_usage_rules>",
+</tool_behaviors>",
                 rules_text
             )
         } else {
             format!(
-                "Tool Usage Rules (you MUST follow these exactly - they will be enforced):
+                "Tool Behaviors:
+{}",
+                rules_text
+            )
+        }
+    }
+
+    fn build_workflow_rules_section(&self) -> String {
+        let rules_text = self
+            .config
+            .tool_workflow_rules
+            .iter()
+            .map(|rule| {
+                if self.config.model_adjustments.use_xml_tags {
+                    format!("<workflow_rule>\n{}\n</workflow_rule>", rule.rule)
+                } else {
+                    format!("- {}", rule.rule)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if self.config.model_adjustments.use_xml_tags {
+            format!(
+                "<workflow_rules>
+You MUST follow these workflow rules exactly (they will be enforced by the system):
+
+{}
+</workflow_rules>",
+                rules_text
+            )
+        } else {
+            format!(
+                "Workflow Rules (you MUST follow these exactly - they will be enforced):
 {}",
                 rules_text
             )
@@ -677,7 +695,8 @@ mod tests {
 
         // Create a context builder with empty tool rules
         let config = ContextConfig {
-            tool_rules: vec![], // Start with no rules
+            tool_usage_rules: vec![],    // Start with no usage rules
+            tool_workflow_rules: vec![], // Start with no workflow rules
             ..Default::default()
         };
 
@@ -686,10 +705,12 @@ mod tests {
 
         let context = builder.build().await.unwrap();
 
-        // Check that tool rules were loaded from the registry with new format (XML)
-        assert!(context.system_prompt.contains(
-            "You MUST follow these tool usage rules exactly (they will be enforced by the system):"
-        ));
+        // Check that tool behaviors were loaded from the registry
+        assert!(
+            context
+                .system_prompt
+                .contains("The following describes what happens when you call each tool:")
+        );
         assert!(
             context
                 .system_prompt

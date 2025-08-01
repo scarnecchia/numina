@@ -141,6 +141,38 @@ enum AgentCommands {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
+    /// Add a workflow rule to an agent
+    AddRule {
+        /// Agent name
+        agent: String,
+        /// Rule type (start-constraint, max-calls, exit-loop, continue-loop, cooldown, requires-preceding). If not provided, interactive mode is used.
+        rule_type: Option<String>,
+        /// Tool name the rule applies to. If not provided, interactive mode is used.
+        tool: Option<String>,
+        /// Optional rule parameters (e.g., max count for max-calls, duration for cooldown)
+        #[arg(short = 'p', long)]
+        params: Option<String>,
+        /// Optional conditions (comma-separated tool names)
+        #[arg(short = 'c', long)]
+        conditions: Option<String>,
+        /// Rule priority (1-10, higher = more important)
+        #[arg(long, default_value = "5")]
+        priority: u8,
+    },
+    /// List workflow rules for an agent
+    ListRules {
+        /// Agent name
+        agent: String,
+    },
+    /// Remove a workflow rule from an agent
+    RemoveRule {
+        /// Agent name
+        agent: String,
+        /// Tool name to remove rules for
+        tool: String,
+        /// Optional rule type to remove (removes all if not specified)
+        rule_type: Option<String>,
+    },
 }
 
 #[cfg(feature = "oauth")]
@@ -582,6 +614,32 @@ async fn main() -> Result<()> {
             AgentCommands::Export { name, output } => {
                 commands::agent::export(name, output.as_deref()).await?
             }
+            AgentCommands::AddRule {
+                agent,
+                rule_type,
+                tool,
+                params,
+                conditions,
+                priority,
+            } => {
+                let rule_type_str = rule_type.as_deref().unwrap_or("");
+                let tool_str = tool.as_deref().unwrap_or("");
+                commands::agent::add_rule(
+                    agent,
+                    rule_type_str,
+                    tool_str,
+                    params.as_deref(),
+                    conditions.as_deref(),
+                    *priority,
+                )
+                .await?
+            }
+            AgentCommands::ListRules { agent } => commands::agent::list_rules(agent).await?,
+            AgentCommands::RemoveRule {
+                agent,
+                tool,
+                rule_type,
+            } => commands::agent::remove_rule(agent, tool, rule_type.as_deref()).await?,
         },
         Commands::Db { cmd } => match cmd {
             DbCommands::Stats => commands::db::stats(&config).await?,

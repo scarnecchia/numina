@@ -1,12 +1,17 @@
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
-    agent::{AgentRecord, AgentState, AgentType},
-    config::{self, AgentConfig, MemoryBlockConfig, PatternConfig},
-    db::{client::DB, ops},
+    agent::{AgentRecord, AgentState, AgentType, tool_rules::ToolRule},
+    config::{self, AgentConfig, MemoryBlockConfig, PatternConfig, ToolRuleConfig},
+    db::{DbEntity, client::DB, ops},
     id::AgentId,
 };
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+    path::Path,
+    time::Duration,
+};
 use surrealdb::RecordId;
 
 use crate::output::{Output, format_agent_state, format_relative_time};
@@ -370,6 +375,373 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
         output.status("Message history and statistics are not included");
     } else {
         output.error(&format!("No agent found with name '{}'", name));
+    }
+
+    Ok(())
+}
+
+/// Add a workflow rule to an agent
+pub async fn add_rule(
+    agent_name: &str,
+    rule_type: &str,
+    tool_name: &str,
+    params: Option<&str>,
+    conditions: Option<&str>,
+    priority: u8,
+) -> Result<()> {
+    let output = Output::new();
+
+    // If no rule type provided, make it interactive
+    let (rule_type, tool_name, params, conditions, priority) = if rule_type.is_empty() {
+        interactive_rule_builder(&output).await?
+    } else {
+        (
+            rule_type.to_string(),
+            tool_name.to_string(),
+            params.map(|s| s.to_string()),
+            conditions.map(|s| s.to_string()),
+            priority,
+        )
+    };
+
+    output.section("Adding Workflow Rule");
+    println!();
+
+    // Find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(mut agent_record) = agents.into_iter().next() {
+        // Parse rule type and create ToolRule
+        let tool_rule = match rule_type.as_str() {
+            "start-constraint" => ToolRule::start_constraint(tool_name.clone()),
+            "exit-loop" => ToolRule::exit_loop(tool_name.clone()),
+            "continue-loop" => ToolRule::continue_loop(tool_name.clone()),
+            "max-calls" => {
+                let count = params
+                    .as_ref()
+                    .and_then(|p| p.parse::<u32>().ok())
+                    .ok_or_else(|| miette::miette!("max-calls requires a numeric parameter"))?;
+                ToolRule::max_calls(tool_name.clone(), count)
+            }
+            "cooldown" => {
+                let seconds = params
+                    .as_ref()
+                    .and_then(|p| p.parse::<u64>().ok())
+                    .ok_or_else(|| miette::miette!("cooldown requires duration in seconds"))?;
+                ToolRule::cooldown(tool_name.clone(), Duration::from_secs(seconds))
+            }
+            "requires-preceding" => {
+                let condition_list = conditions
+                    .as_ref()
+                    .ok_or_else(|| miette::miette!("requires-preceding needs conditions"))?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                ToolRule::requires_preceding_tools(tool_name.clone(), condition_list)
+            }
+            _ => {
+                return Err(miette::miette!(
+                    "Unknown rule type: {}. Valid types: start-constraint, exit-loop, continue-loop, max-calls, cooldown, requires-preceding",
+                    rule_type
+                ));
+            }
+        };
+
+        // Set priority if specified
+        let tool_rule = tool_rule.with_priority(priority);
+
+        // Convert to config format and add to agent record
+        let config_rule = ToolRuleConfig::from_tool_rule(&tool_rule);
+        agent_record.tool_rules.push(config_rule);
+
+        // Save updated agent record
+        ops::update_entity(&DB, &agent_record)
+            .await
+            .into_diagnostic()?;
+
+        output.success(&format!(
+            "Added {} rule for tool '{}' to agent '{}'",
+            rule_type, tool_name, agent_name
+        ));
+
+        // Show the rule that was added
+        let description = tool_rule.to_usage_description();
+        output.info("Rule", &description);
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
+
+        // List available agents
+        let query_sql = "SELECT name FROM agent ORDER BY name";
+        let mut response = DB.query(query_sql).await.into_diagnostic()?;
+        let agent_names: Vec<String> = response
+            .take::<Vec<surrealdb::sql::Value>>(0)
+            .into_diagnostic()?
+            .into_iter()
+            .filter_map(|v| Some(v.as_string()))
+            .collect();
+
+        if !agent_names.is_empty() {
+            output.info("Available agents:", &agent_names.join(", "));
+        }
+    }
+
+    Ok(())
+}
+
+/// Interactive rule builder for step-by-step rule creation
+async fn interactive_rule_builder(
+    output: &Output,
+) -> Result<(String, String, Option<String>, Option<String>, u8)> {
+    output.section("Interactive Workflow Rule Builder");
+    println!();
+
+    // Get tool name
+    print!("Tool name: ");
+    io::stdout().flush().unwrap();
+    let mut tool_name = String::new();
+    io::stdin().read_line(&mut tool_name).into_diagnostic()?;
+    let tool_name = tool_name.trim().to_string();
+
+    // Show available rule types
+    output.info("Available rule types:", "");
+    println!("  1. start-constraint  - Call this tool first before any other tools");
+    println!("  2. exit-loop        - End the conversation after calling this tool");
+    println!("  3. continue-loop    - Continue the conversation after calling this tool");
+    println!("  4. max-calls        - Limit how many times this tool can be called");
+    println!("  5. cooldown         - Minimum time between calls to this tool");
+    println!("  6. requires-preceding - This tool can only be called after specific other tools");
+    println!();
+
+    // Get rule type
+    print!("Choose rule type (1-6): ");
+    io::stdout().flush().unwrap();
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice).into_diagnostic()?;
+    let choice = choice.trim();
+
+    let (rule_type, params, conditions) = match choice {
+        "1" => ("start-constraint".to_string(), None, None),
+        "2" => ("exit-loop".to_string(), None, None),
+        "3" => ("continue-loop".to_string(), None, None),
+        "4" => {
+            print!("Maximum number of calls: ");
+            io::stdout().flush().unwrap();
+            let mut max_calls = String::new();
+            io::stdin().read_line(&mut max_calls).into_diagnostic()?;
+            (
+                "max-calls".to_string(),
+                Some(max_calls.trim().to_string()),
+                None,
+            )
+        }
+        "5" => {
+            print!("Cooldown duration in seconds: ");
+            io::stdout().flush().unwrap();
+            let mut cooldown = String::new();
+            io::stdin().read_line(&mut cooldown).into_diagnostic()?;
+            (
+                "cooldown".to_string(),
+                Some(cooldown.trim().to_string()),
+                None,
+            )
+        }
+        "6" => {
+            print!("Required preceding tools (comma-separated): ");
+            io::stdout().flush().unwrap();
+            let mut preceding = String::new();
+            io::stdin().read_line(&mut preceding).into_diagnostic()?;
+            (
+                "requires-preceding".to_string(),
+                None,
+                Some(preceding.trim().to_string()),
+            )
+        }
+        _ => return Err(miette::miette!("Invalid choice. Please choose 1-6.")),
+    };
+
+    // Get priority
+    print!("Priority (0-255, default 100): ");
+    io::stdout().flush().unwrap();
+    let mut priority_input = String::new();
+    io::stdin()
+        .read_line(&mut priority_input)
+        .into_diagnostic()?;
+    let priority = if priority_input.trim().is_empty() {
+        100
+    } else {
+        priority_input
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| miette::miette!("Priority must be a number between 0-255"))?
+    };
+
+    Ok((rule_type, tool_name, params, conditions, priority))
+}
+
+/// List workflow rules for an agent
+pub async fn list_rules(agent_name: &str) -> Result<()> {
+    let output = Output::new();
+
+    output.section("Agent Workflow Rules");
+    println!();
+
+    // Find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.into_iter().next() {
+        output.info(
+            "Agent",
+            &format!("{} ({})", agent_record.name, agent_record.id),
+        );
+        println!();
+
+        if agent_record.tool_rules.is_empty() {
+            output.info("Workflow Rules", "No custom workflow rules configured");
+        } else {
+            output.section(&format!(
+                "Workflow Rules ({})",
+                agent_record.tool_rules.len()
+            ));
+            println!();
+
+            for (i, config_rule) in agent_record.tool_rules.iter().enumerate() {
+                match config_rule.to_tool_rule() {
+                    Ok(rule) => {
+                        let description = rule.to_usage_description();
+                        println!("{}. {}", (i + 1).to_string().dimmed(), description);
+
+                        // Show additional details
+                        println!("   Tool: {}", rule.tool_name.cyan());
+                        println!("   Type: {:?}", rule.rule_type);
+                        println!("   Priority: {}", rule.priority);
+                        if !rule.conditions.is_empty() {
+                            println!("   Conditions: {}", rule.conditions.join(", ").dimmed());
+                        }
+                        println!();
+                    }
+                    Err(e) => {
+                        println!(
+                            "{}. {}: {}",
+                            (i + 1).to_string().dimmed(),
+                            "Invalid rule".red(),
+                            e.to_string().dimmed()
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
+    }
+
+    Ok(())
+}
+
+/// Remove workflow rules from an agent
+pub async fn remove_rule(agent_name: &str, tool_name: &str, rule_type: Option<&str>) -> Result<()> {
+    let output = Output::new();
+
+    output.section("Removing Workflow Rule");
+    println!();
+
+    // Find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(mut agent_record) = agents.into_iter().next() {
+        let original_count = agent_record.tool_rules.len();
+
+        // Remove matching rules
+        agent_record.tool_rules.retain(|config_rule| {
+            if config_rule.tool_name != tool_name {
+                return true; // Keep rules for other tools
+            }
+
+            if let Some(target_type) = rule_type {
+                // Only remove specific rule type
+                let rule_type_str = format!("{:?}", config_rule.rule_type).to_lowercase();
+                let target_type_normalized = target_type.replace("-", "").to_lowercase();
+
+                // Keep if rule types don't match
+                !rule_type_str.contains(&target_type_normalized)
+            } else {
+                // Remove all rules for this tool
+                false
+            }
+        });
+
+        let removed_count = original_count - agent_record.tool_rules.len();
+
+        if removed_count > 0 {
+            // Save updated agent record
+            ops::update_entity(&DB, &agent_record)
+                .await
+                .into_diagnostic()?;
+
+            if let Some(rt) = rule_type {
+                output.success(&format!(
+                    "Removed {} {} rule(s) for tool '{}' from agent '{}'",
+                    removed_count, rt, tool_name, agent_name
+                ));
+            } else {
+                output.success(&format!(
+                    "Removed {} rule(s) for tool '{}' from agent '{}'",
+                    removed_count, tool_name, agent_name
+                ));
+            }
+        } else {
+            if let Some(rt) = rule_type {
+                output.info(
+                    "No changes",
+                    &format!(
+                        "No {} rules found for tool '{}' on agent '{}'",
+                        rt, tool_name, agent_name
+                    ),
+                );
+            } else {
+                output.info(
+                    "No changes",
+                    &format!(
+                        "No rules found for tool '{}' on agent '{}'",
+                        tool_name, agent_name
+                    ),
+                );
+            }
+        }
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
     }
 
     Ok(())

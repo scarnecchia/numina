@@ -224,6 +224,11 @@ impl ToolRuleEngine {
             .collect()
     }
 
+    /// Get all rules (for database persistence)
+    pub fn get_rules(&self) -> &[ToolRule] {
+        &self.rules
+    }
+
     /// Check if a tool can be executed given current state
     pub fn can_execute_tool(&self, tool_name: &str) -> Result<bool, ToolRuleViolation> {
         // First, check if start constraints are satisfied

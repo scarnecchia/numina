@@ -207,17 +207,35 @@ where
         // Build the context config from the record
         let context_config = record.to_context_config();
 
-        // Load tool rules from configuration
-        let tool_rules = match crate::config::PatternConfig::load().await {
-            Ok(config) => config
-                .get_agent_tool_rules(&record.name)
+        // Load tool rules from database record (with config fallback)
+        let tool_rules = if !record.tool_rules.is_empty() {
+            // Use rules from database
+            record
+                .tool_rules
+                .iter()
+                .map(|config_rule| config_rule.to_tool_rule())
+                .collect::<Result<Vec<_>>>()
                 .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to load tool rules for agent {}: {}", record.name, e);
+                    tracing::warn!("Failed to convert tool rules from database: {}", e);
                     Vec::new()
-                }),
-            Err(e) => {
-                tracing::warn!("Failed to load configuration for tool rules: {}", e);
-                Vec::new()
+                })
+        } else {
+            // Fallback to configuration file for backward compatibility
+            match crate::config::PatternConfig::load().await {
+                Ok(config) => config
+                    .get_agent_tool_rules(&record.name)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "Failed to load tool rules for agent {}: {}",
+                            record.name,
+                            e
+                        );
+                        Vec::new()
+                    }),
+                Err(e) => {
+                    tracing::warn!("Failed to load configuration for tool rules: {}", e);
+                    Vec::new()
+                }
             }
         };
 
@@ -332,6 +350,16 @@ where
             )
         };
 
+        // Get current tool rules from the rule engine
+        let tool_rules = {
+            let rule_engine = self.tool_rules.read().await;
+            rule_engine
+                .get_rules()
+                .iter()
+                .map(|rule| crate::config::ToolRuleConfig::from_tool_rule(rule))
+                .collect::<Vec<_>>()
+        };
+
         let now = chrono::Utc::now();
         let agent_record = crate::agent::AgentRecord {
             id: agent_id,
@@ -341,6 +369,7 @@ where
             base_instructions,
             max_messages,
             owner_id: self.user_id.clone(),
+            tool_rules,
             total_messages,
             total_tool_calls,
             context_rebuilds,
@@ -2443,6 +2472,13 @@ where
     }
 
     async fn system_prompt(&self) -> Vec<String> {
+        // Add workflow rules from the rule engine before building context
+        {
+            let tool_rules = self.get_context_tool_rules().await;
+            let mut ctx = self.context.write().await;
+            ctx.add_tool_rules(tool_rules);
+        }
+
         let context = self.context.read().await;
         match context.build_context().await {
             Ok(memory_context) => {
