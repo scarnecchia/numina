@@ -181,7 +181,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for ContextTool<
     }
 
     fn usage_rule(&self) -> Option<&'static str> {
-        Some("requires continuing your response when called")
+        Some("the conversation will be continued when called")
     }
 
     fn examples(&self) -> Vec<crate::tool::ToolExample<Self::Input, Self::Output>> {

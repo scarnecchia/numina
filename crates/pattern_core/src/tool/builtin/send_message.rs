@@ -192,7 +192,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
     }
 
     fn usage_rule(&self) -> Option<&'static str> {
-        Some("ends your response (yields control) when called")
+        Some("the conversation will end when called")
     }
 }
 

@@ -1189,11 +1189,11 @@ where
                 ctx.add_message(message).await;
             }
 
-            // Update context with tool rules from rule engine before building
+            // Add tool rules from rule engine to context before building
             {
                 let tool_rules = self.get_context_tool_rules().await;
                 let mut ctx = context.write().await;
-                ctx.update_tool_rules(tool_rules);
+                ctx.add_tool_rules(tool_rules);
             }
 
             // Build memory context
@@ -1571,11 +1571,11 @@ where
                         break;
                     }
 
-                    // Update context with tool rules before rebuilding
+                    // Add tool rules from rule engine before rebuilding
                     {
                         let tool_rules = self.get_context_tool_rules().await;
                         let mut ctx = context.write().await;
-                        ctx.update_tool_rules(tool_rules);
+                        ctx.add_tool_rules(tool_rules);
                     }
 
                     // Get next response

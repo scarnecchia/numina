@@ -69,10 +69,13 @@ impl ToolRuleType {
     pub fn to_usage_description(&self, tool_name: &str, conditions: &[String]) -> String {
         match self {
             ToolRuleType::ContinueLoop => {
-                format!("Continue the conversation after calling `{}`", tool_name)
+                format!(
+                    "The conversation will be continued after calling `{}`",
+                    tool_name
+                )
             }
             ToolRuleType::ExitLoop => {
-                format!("End the conversation after calling `{}`", tool_name)
+                format!("The conversation will end after calling `{}`", tool_name)
             }
             ToolRuleType::StartConstraint => {
                 format!("Call `{}` first before any other tools", tool_name)
@@ -679,11 +682,13 @@ mod tests {
         // Note: Rules are sorted by priority, so order may differ from creation order
         assert!(descriptions[0].contains("Call `context` first before any other tools"));
         assert!(descriptions[1].contains("Call `cleanup` before ending the conversation"));
-        assert!(descriptions[2].contains("End the conversation after calling `send_message`"));
+        assert!(descriptions[2].contains("The conversation will end after calling `send_message`"));
         assert!(descriptions[3].contains("Call `validate` only after calling: extract, transform"));
         assert!(descriptions[4].contains("Call `api_call` at most 3 times"));
         assert!(descriptions[5].contains("Wait at least 2000ms between calls to `heavy_task`"));
-        assert!(descriptions[6].contains("Continue the conversation after calling `search`"));
+        assert!(
+            descriptions[6].contains("The conversation will be continued after calling `search`")
+        );
     }
 
     #[test]

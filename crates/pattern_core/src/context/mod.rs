@@ -693,12 +693,12 @@ mod tests {
         assert!(
             context
                 .system_prompt
-                .contains("context: requires continuing your response when called")
+                .contains("context: the conversation will be continued when called")
         );
         assert!(
             context
                 .system_prompt
-                .contains("send_message: ends your response (yields control) when called")
+                .contains("send_message: the conversation will end when called")
         );
     }
 }

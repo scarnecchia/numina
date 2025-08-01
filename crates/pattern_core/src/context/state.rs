@@ -464,9 +464,9 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
         self.handle.clone()
     }
 
-    /// Update the tool rules in the context configuration
-    pub fn update_tool_rules(&mut self, tool_rules: Vec<crate::context::ToolRule>) {
-        self.context_config.tool_rules = tool_rules;
+    /// Add tool rules to the context configuration (merges with existing rules)
+    pub fn add_tool_rules(&mut self, mut tool_rules: Vec<crate::context::ToolRule>) {
+        self.context_config.tool_rules.append(&mut tool_rules);
     }
 
     /// Build the current context for this agent
