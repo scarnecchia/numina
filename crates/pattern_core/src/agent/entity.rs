@@ -159,7 +159,8 @@ impl AgentRecord {
             memory_char_limit: self.memory_char_limit,
             max_context_messages: self.max_messages,
             enable_thinking: self.enable_thinking,
-            tool_rules: vec![], // Will be populated by the context builder
+            tool_usage_rules: vec![],
+            tool_workflow_rules: vec![],
             model_adjustments,
         }
     }
