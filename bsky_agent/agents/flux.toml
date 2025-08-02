@@ -2,8 +2,13 @@
 
 name = "Flux"
 agent_type = "assistant"
-bluesky_handle = "pattern.nonbinary.computer"  # Update with actual
+bluesky_handle = "pattern.atproto.systems" # Update with actual
 persona_path = "../flux-persona-block.md"
+
+[model]
+provider = "Gemini"
+model = "gemini-2.5-flash"
+
 
 # Shared memory blocks
 [memory.current_human]
@@ -11,24 +16,35 @@ content_path = "../pattern-current-human-block.md"
 permission = "read_write"
 memory_type = "working"
 description = "Current conversant context"
+shared = true
 
 [memory.partner]
 content_path = "../pattern-partner-block.md"
 permission = "read_only"
 memory_type = "core"
 description = "Understanding of orual's role"
+shared = true
 
 [memory.observations]
 content_path = "../pattern-observations-block.md"
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Collective pattern gathering"
+shared = true
 
 [memory.resonances]
 content_path = "../pattern-resonances-block.md"
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Cross-context patterns"
+shared = true
+
+[memory.constellation_context]
+content_path = "../constellation-context.md"
+permission = "read_only"
+memory_type = "core"
+description = "Shared understanding of constellation purpose and members"
+shared = true
 
 # Domain-specific memory
 [memory.domain_memory]
@@ -38,5 +54,5 @@ Scheduling history:
 Temporal flows:
 """
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Flux's temporal knowledge"

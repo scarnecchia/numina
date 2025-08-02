@@ -21,7 +21,7 @@ impl AgentSelector for LoadBalancingSelector {
         agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>> {
+    ) -> Result<super::SelectionResult<'a>> {
         // Get window for considering recent selections (default 5 minutes)
         let window_minutes = config
             .get("window_minutes")
@@ -74,7 +74,10 @@ impl AgentSelector for LoadBalancingSelector {
             .map(|(_, awm)| *awm)
             .collect();
 
-        Ok(selected)
+        Ok(super::SelectionResult {
+            agents: selected,
+            selector_response: None,
+        })
     }
 
     fn name(&self) -> &str {
@@ -176,8 +179,8 @@ mod tests {
             .select_agents(&agents, &context, &HashMap::new())
             .await
             .unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].agent.id(), agent3_id);
+        assert_eq!(selected.agents.len(), 1);
+        assert_eq!(selected.agents[0].agent.id(), agent3_id);
 
         // Select multiple - should get agent3 and agent2 (least used)
         let mut config = HashMap::new();
@@ -187,8 +190,8 @@ mod tests {
             .select_agents(&agents, &context, &config)
             .await
             .unwrap();
-        assert_eq!(selected.len(), 2);
-        let selected_ids: Vec<_> = selected.iter().map(|awm| awm.agent.id()).collect();
+        assert_eq!(selected.agents.len(), 2);
+        let selected_ids: Vec<_> = selected.agents.iter().map(|awm| awm.agent.id()).collect();
         assert!(selected_ids.contains(&agent3_id));
         assert!(selected_ids.contains(&agent2_id));
         assert!(!selected_ids.contains(&agent1_id)); // Most used
@@ -201,6 +204,6 @@ mod tests {
             .select_agents(&agents, &context, &config)
             .await
             .unwrap();
-        assert_eq!(selected.len(), 2);
+        assert_eq!(selected.agents.len(), 2);
     }
 }

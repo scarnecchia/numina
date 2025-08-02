@@ -68,7 +68,7 @@ impl QueuedMessage {
             from_user: None,
             to_agent: to,
             content,
-            metadata: metadata.unwrap_or(Value::Null),
+            metadata: metadata.unwrap_or_else(|| Value::Object(Default::default())),
             call_chain,
             read: false,
             created_at: Utc::now(),
@@ -91,7 +91,7 @@ impl QueuedMessage {
             from_user: Some(from),
             to_agent: to,
             content,
-            metadata: metadata.unwrap_or(Value::Null),
+            metadata: metadata.unwrap_or_else(|| Value::Object(Default::default())),
             call_chain: vec![], // No call chain for user messages
             read: false,
             created_at: Utc::now(),
@@ -171,7 +171,7 @@ impl ScheduledWakeup {
             active: true,
             created_at: Utc::now(),
             last_triggered: None,
-            metadata: Value::Null,
+            metadata: Value::Object(Default::default()),
         }
     }
 
@@ -191,7 +191,7 @@ impl ScheduledWakeup {
             active: true,
             created_at: Utc::now(),
             last_triggered: None,
-            metadata: Value::Null,
+            metadata: Value::Object(Default::default()),
         }
     }
 

@@ -1284,7 +1284,7 @@ fn determine_storage_type(
         "embedding" => quote! { Option<Vec<f32>> },
         _ => {
             // Check if this is an ID field (ends with _id)
-            if field_str.ends_with("_id") && is_id_type(field_type) {
+            if is_id_type(field_type) {
                 // ID fields are stored as RecordId
                 if is_option_type(field_type) {
                     quote! { Option<::surrealdb::RecordId> }
@@ -1379,7 +1379,7 @@ fn generate_to_storage(
         }
         _ => {
             // Check if this is an ID field (ends with _id)
-            if field_str.ends_with("_id") && is_id_type(field_type) {
+            if is_id_type(field_type) {
                 // Special handling for MessageId
                 let type_str = quote! { #field_type }.to_string();
                 if type_str.contains("MessageId") {
@@ -1504,7 +1504,7 @@ fn generate_from_storage(
         }
         _ => {
             // Check if this is an ID field (ends with _id)
-            if field_str.ends_with("_id") && is_id_type(field_type) {
+            if is_id_type(field_type) {
                 // Special handling for MessageId
                 let type_str = quote! { #field_type }.to_string();
                 if type_str.contains("MessageId") {

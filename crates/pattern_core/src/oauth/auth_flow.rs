@@ -212,6 +212,13 @@ impl DeviceAuthFlow {
     }
 }
 
+pub fn split_callback_code(code: &str) -> Result<(String, String), CoreError> {
+    let mut split = code.split('#');
+    let code = split.next().unwrap().to_string();
+    let state = split.next().unwrap().to_string();
+    Ok((code, state))
+}
+
 /// Helper to parse authorization code from callback URL
 pub fn parse_callback_code(url: &str) -> Result<(String, String), CoreError> {
     let parsed = url::Url::parse(url).map_err(|e| CoreError::OAuthError {

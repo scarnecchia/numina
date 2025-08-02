@@ -14,7 +14,10 @@ use std::{
 };
 use surrealdb::RecordId;
 
-use crate::output::{Output, format_agent_state, format_relative_time};
+use crate::{
+    agent_ops::load_agent_memories_and_messages,
+    output::{Output, format_agent_state, format_relative_time},
+};
 
 /// List all agents in the database
 pub async fn list() -> Result<()> {
@@ -184,7 +187,22 @@ pub async fn status(name: &str) -> Result<()> {
         .await
         .into_diagnostic()?;
 
-    let agents: Vec<AgentRecord> = response.take(0).into_diagnostic()?;
+    use pattern_core::db::entity::DbEntity;
+    let agent_db_models: Vec<<AgentRecord as DbEntity>::DbModel> =
+        response.take(0).into_diagnostic()?;
+
+    // Convert DB models to domain types
+    let mut agents: Vec<AgentRecord> = agent_db_models
+        .into_iter()
+        .map(|db_model| {
+            AgentRecord::from_db_model(db_model)
+                .map_err(|e| miette::miette!("Failed to convert agent: {}", e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for agent in agents.iter_mut() {
+        load_agent_memories_and_messages(agent).await?;
+    }
 
     if let Some(agent) = agents.first() {
         output.section("Agent Status");
@@ -320,6 +338,7 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,
+            context: None,
         };
 
         // Get memory blocks using ops function
@@ -342,6 +361,8 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
                 permission: permission.clone(),
                 memory_type: memory_block.memory_type.clone(),
                 description: memory_block.description.clone(),
+                id: None,
+                shared: false,
             };
 
             memory_configs.insert(memory_block.label.to_string(), memory_config);

@@ -5,7 +5,7 @@ use pattern_core::{
     agent::{AgentRecord, AgentType, DatabaseAgent, ResponseEvent},
     config::PatternConfig,
     context::{heartbeat, message_router::BlueskyEndpoint},
-    coordination::groups::{AgentGroup, GroupManager},
+    coordination::groups::{AgentGroup, GroupManager, GroupResponseEvent},
     db::{
         client::DB,
         ops::{self, atproto::get_user_atproto_identities},
@@ -24,6 +24,40 @@ use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::{endpoints::CliEndpoint, output::Output};
+
+/// Build a ContextConfig and CompressionStrategy from an AgentConfig with optional overrides
+fn build_context_config(
+    agent_config: &pattern_core::config::AgentConfig,
+) -> (
+    pattern_core::context::ContextConfig,
+    Option<pattern_core::context::CompressionStrategy>,
+) {
+    let mut context_config = pattern_core::context::ContextConfig::default();
+    let mut compression_strategy = None;
+
+    // Set base instructions
+    if let Some(system_prompt) = &agent_config.system_prompt {
+        context_config.base_instructions = system_prompt.clone();
+    }
+
+    // Apply context options if available
+    if let Some(ctx_opts) = &agent_config.context {
+        if let Some(max_messages) = ctx_opts.max_messages {
+            context_config.max_context_messages = max_messages;
+        }
+        if let Some(memory_char_limit) = ctx_opts.memory_char_limit {
+            context_config.memory_char_limit = memory_char_limit;
+        }
+        if let Some(enable_thinking) = ctx_opts.enable_thinking {
+            context_config.enable_thinking = enable_thinking;
+        }
+        if let Some(strategy) = &ctx_opts.compression_strategy {
+            compression_strategy = Some(strategy.clone());
+        }
+    }
+
+    (context_config, compression_strategy)
+}
 
 /// Set up Bluesky endpoint for an agent if configured
 async fn setup_bluesky_endpoint(
@@ -114,7 +148,7 @@ pub async fn load_or_create_agent(
 
     let agent_ids: Vec<RecordId> = response.take("id").into_diagnostic()?;
 
-    if let Some(id_value) = agent_ids.first() {
+    let agent = if let Some(id_value) = agent_ids.first() {
         let agent_id = AgentId::from_record(id_value.clone());
 
         // Load the full agent record
@@ -127,55 +161,8 @@ pub async fn load_or_create_agent(
             Err(e) => return Err(miette::miette!("Failed to load agent: {}", e)),
         };
 
-        // Manually load message history since the macro doesn't handle edge entities properly yet
-        existing_agent.messages = existing_agent
-            .load_message_history(&DB, false)
-            .await
-            .map_err(|e| miette::miette!("Failed to load message history: {}", e))?;
-
-        tracing::debug!(
-            "After loading message history: {} messages",
-            existing_agent.messages.len()
-        );
-
-        // Also manually load memory blocks using the ops function
-        let memory_tuples = ops::get_agent_memories(&DB, &agent_id)
-            .await
-            .map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
-
-        output.status(&format!(
-            "Found {} memory blocks in database",
-            memory_tuples.len().to_string().bright_blue()
-        ));
-
-        for (block, _) in &memory_tuples {
-            output.list_item(&format!(
-                "{} ({} chars)",
-                block.label.bright_yellow(),
-                block.value.len()
-            ));
-        }
-        println!();
-
-        // Convert to the format expected by AgentRecord
-        existing_agent.memories = memory_tuples
-            .into_iter()
-            .map(|(memory_block, access_level)| {
-                let relation = pattern_core::agent::AgentMemoryRelation {
-                    id: RelationId::nil(),
-                    in_id: agent_id.clone(),
-                    out_id: memory_block.id.clone(),
-                    access_level,
-                    created_at: chrono::Utc::now(),
-                };
-                (memory_block, relation)
-            })
-            .collect();
-
-        tracing::debug!(
-            "After loading memory blocks: {} memories",
-            existing_agent.memories.len()
-        );
+        // Load memories and messages
+        load_agent_memories_and_messages(&mut existing_agent).await?;
 
         output.kv("ID", &existing_agent.id.to_string().dimmed().to_string());
         output.kv(
@@ -198,24 +185,90 @@ pub async fn load_or_create_agent(
             config,
             heartbeat_sender,
         )
-        .await
+        .await?
     } else {
         output.info("+", &format!("Creating new agent '{}'", name.bright_cyan()));
         println!();
 
         // Create a new agent
-        create_agent(name, model_name, enable_tools, config, heartbeat_sender).await
-    }
+        create_agent(name, model_name, enable_tools, config, heartbeat_sender).await?
+    };
+
+    // Set up Bluesky endpoint if configured
+    let output = Output::new();
+    setup_bluesky_endpoint(&agent, config, &output)
+        .await
+        .inspect_err(|e| {
+            tracing::error!("{:?}", e);
+        })?;
+
+    Ok(agent)
 }
 
-/// Create a runtime agent from a stored AgentRecord
-pub async fn create_agent_from_record(
-    record: AgentRecord,
+/// Load memory blocks and messages for an AgentRecord
+pub async fn load_agent_memories_and_messages(agent_record: &mut AgentRecord) -> Result<()> {
+    let output = Output::new();
+
+    // Manually load message history since the macro doesn't handle edge entities properly yet
+    agent_record.messages = agent_record
+        .load_message_history(&DB, false)
+        .await
+        .map_err(|e| miette::miette!("Failed to load message history: {}", e))?;
+
+    tracing::debug!(
+        "After loading message history: {} messages",
+        agent_record.messages.len()
+    );
+
+    // Also manually load memory blocks using the ops function
+    let memory_tuples = ops::get_agent_memories(&DB, &agent_record.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
+
+    output.status(&format!(
+        "Loaded {} memory blocks for agent {}",
+        memory_tuples.len(),
+        agent_record.name
+    ));
+
+    // Convert to the format expected by AgentRecord
+    agent_record.memories = memory_tuples
+        .into_iter()
+        .map(|(memory_block, access_level)| {
+            output.list_item(&format!(
+                "{} ({} chars)",
+                memory_block.label.bright_yellow(),
+                memory_block.value.len()
+            ));
+            let relation = pattern_core::agent::AgentMemoryRelation {
+                id: RelationId::nil(),
+                in_id: agent_record.id.clone(),
+                out_id: memory_block.id.clone(),
+                access_level,
+                created_at: chrono::Utc::now(),
+            };
+            (memory_block, relation)
+        })
+        .collect();
+
+    tracing::debug!(
+        "After loading memory blocks: {} memories",
+        agent_record.memories.len()
+    );
+
+    Ok(())
+}
+
+pub async fn load_model_embedding_providers(
     model_name: Option<String>,
-    enable_tools: bool,
     config: &PatternConfig,
-    heartbeat_sender: heartbeat::HeartbeatSender,
-) -> Result<Arc<dyn Agent>> {
+    record: Option<&AgentRecord>,
+    enable_tools: bool,
+) -> Result<(
+    Arc<RwLock<GenAiClient>>,
+    Option<Arc<OpenAIEmbedder>>,
+    ResponseOptions,
+)> {
     // Create model provider - use OAuth if available
     let model_provider = {
         #[cfg(feature = "oauth")]
@@ -258,6 +311,11 @@ pub async fn create_agent_from_record(
                         || m.name.to_lowercase().contains(&model_lower)
                 })
                 .cloned()
+        } else if let Some(record) = record
+            && let Some(stored_model) = &record.model_id
+        {
+            // Try to use the agent's stored model preference
+            models.iter().find(|m| &m.id == stored_model).cloned()
         } else if let Some(config_model) = &config.model.model {
             // Use model from config
             models
@@ -268,9 +326,6 @@ pub async fn create_agent_from_record(
                         || m.name.to_lowercase().contains(&model_lower)
                 })
                 .cloned()
-        } else if let Some(stored_model) = &record.model_id {
-            // Try to use the agent's stored model preference
-            models.iter().find(|m| &m.id == stored_model).cloned()
         } else {
             // Default to Gemini models with free tier
             models
@@ -308,9 +363,6 @@ pub async fn create_agent_from_record(
         None
     };
 
-    // Create tool registry
-    let tools = ToolRegistry::new();
-
     // Create response options with the selected model
     let mut response_options = ResponseOptions {
         model_info: model_info.clone(),
@@ -342,13 +394,29 @@ pub async fn create_agent_from_record(
         response_options.reasoning_effort = Some(genai::chat::ReasoningEffort::Medium);
     }
 
+    Ok((model_provider, embedding_provider, response_options))
+}
+
+/// Create a runtime agent from a stored AgentRecord
+pub async fn create_agent_from_record(
+    record: AgentRecord,
+    model_name: Option<String>,
+    enable_tools: bool,
+    config: &PatternConfig,
+    heartbeat_sender: heartbeat::HeartbeatSender,
+) -> Result<Arc<dyn Agent>> {
+    let (model_provider, embedding_provider, response_options) =
+        load_model_embedding_providers(model_name, config, Some(&record), enable_tools).await?;
+    // Create tool registry
+    let tools = ToolRegistry::new();
+
     // Create agent from the record
     let agent = DatabaseAgent::from_record(
         record,
         DB.clone(),
         model_provider,
         tools,
-        embedding_provider,
+        embedding_provider.clone(),
         heartbeat_sender,
     )
     .await?;
@@ -368,14 +436,6 @@ pub async fn create_agent_from_record(
     // Convert to trait object for endpoint setup
     let agent_dyn: Arc<dyn Agent> = agent;
 
-    // Set up Bluesky endpoint if configured
-    let output = Output::new();
-    setup_bluesky_endpoint(&agent_dyn, config, &output)
-        .await
-        .inspect_err(|e| {
-            tracing::error!("{:?}", e);
-        })?;
-
     Ok(agent_dyn)
 }
 
@@ -389,110 +449,8 @@ pub async fn create_agent(
 ) -> Result<Arc<dyn Agent>> {
     let output = Output::new();
 
-    // Create model provider - use OAuth if available
-    let model_provider = {
-        #[cfg(feature = "oauth")]
-        {
-            use pattern_core::oauth::resolver::OAuthClientBuilder;
-            let oauth_client =
-                OAuthClientBuilder::new(Arc::new(DB.clone()), config.user.id.clone()).build()?;
-            // Wrap in GenAiClient with all endpoints available
-            let genai_client = GenAiClient::with_endpoints(
-                oauth_client,
-                vec![
-                    genai::adapter::AdapterKind::Anthropic,
-                    genai::adapter::AdapterKind::Gemini,
-                    genai::adapter::AdapterKind::OpenAI,
-                    genai::adapter::AdapterKind::Groq,
-                    genai::adapter::AdapterKind::Cohere,
-                ],
-            );
-            Arc::new(RwLock::new(genai_client))
-        }
-        #[cfg(not(feature = "oauth"))]
-        {
-            Arc::new(RwLock::new(GenAiClient::new().await?))
-        }
-    };
-
-    // Get available models and select the one to use
-    let model_info = {
-        let provider = model_provider.read().await;
-        let models = provider.list_models().await?;
-
-        // Debug: print available models
-        for model in &models {
-            info!(
-                "Available model: {} (id: {}, provider: {})",
-                model.name, model.id, model.provider
-            );
-        }
-
-        // If a specific model was requested, try to find it
-        // First check CLI arg, then config, then defaults
-        let selected_model = if let Some(requested_model) = &model_name {
-            models
-                .iter()
-                .find(|m| {
-                    let model_lower = requested_model.to_lowercase();
-                    m.id.to_lowercase().contains(&model_lower)
-                        || m.name.to_lowercase().contains(&model_lower)
-                })
-                .cloned()
-        } else if let Some(config_model) = &config.model.model {
-            // Use model from config
-            models
-                .iter()
-                .find(|m| {
-                    let model_lower = config_model.to_lowercase();
-                    m.id.to_lowercase().contains(&model_lower)
-                        || m.name.to_lowercase().contains(&model_lower)
-                })
-                .cloned()
-        } else {
-            // Default to Gemini models with free tier, prioritizing Flash for better rate limits
-            models
-                .iter()
-                .find(|m| m.provider == "Gemini" && m.id.contains("gemini-2.5-pro"))
-                .cloned()
-                .or_else(|| {
-                    models
-                        .iter()
-                        .find(|m| {
-                            m.provider.to_lowercase() == "gemini"
-                                && m.id.contains("gemini-2.5-flash")
-                        })
-                        .cloned()
-                })
-                .or_else(|| models.into_iter().next())
-        };
-
-        let model_info = selected_model.ok_or_else(|| {
-            miette::miette!(
-                "No models available. Please set one of the following environment variables:\n\
-                - OPENAI_API_KEY\n\
-                - ANTHROPIC_API_KEY\n\
-                - GEMINI_API_KEY\n\
-                - GROQ_API_KEY\n\
-                - COHERE_API_KEY\n\n\
-                You can add these to a .env file in your project root."
-            )
-        })?;
-
-        info!("Selected model: {} ({})", model_info.name, model_info.id);
-        model_info
-    };
-
-    // Create embedding provider if API key is available
-    let embedding_provider = if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        Some(Arc::new(OpenAIEmbedder::new(
-            "text-embedding-3-small".to_string(),
-            api_key,
-            None,
-        )))
-    } else {
-        None
-    };
+    let (model_provider, embedding_provider, response_options) =
+        load_model_embedding_providers(model_name, config, None, enable_tools).await?;
 
     // Create memory with the configured user as owner
     let memory = Memory::with_owner(&config.user.id);
@@ -504,36 +462,8 @@ pub async fn create_agent(
     let agent_id = config.agent.id.clone().unwrap_or_else(AgentId::generate);
     let user_id = config.user.id.clone();
 
-    // Create response options with the selected model
-    let mut response_options = ResponseOptions {
-        model_info: model_info.clone(),
-        temperature: Some(0.7),
-        max_tokens: Some(pattern_core::model::defaults::calculate_max_tokens(
-            &model_info,
-            None,
-        )),
-        capture_content: Some(true),
-        capture_tool_calls: Some(enable_tools),
-        top_p: None,
-        stop_sequences: vec![],
-        capture_usage: Some(true),
-        capture_reasoning_content: Some(true),
-        capture_raw_body: None,
-        response_format: None,
-        normalize_reasoning_content: Some(true),
-        reasoning_effort: Some(genai::chat::ReasoningEffort::Medium),
-    };
-
-    // Enable reasoning mode if the model supports it
-    if model_info
-        .capabilities
-        .contains(&pattern_core::model::ModelCapability::ExtendedThinking)
-    {
-        response_options.capture_reasoning_content = Some(true);
-        response_options.normalize_reasoning_content = Some(true);
-        // Use medium effort by default
-        response_options.reasoning_effort = Some(genai::chat::ReasoningEffort::Medium);
-    }
+    // Build context config from agent config
+    let (context_config, compression_strategy) = build_context_config(&config.agent);
 
     // Load tool rules from configuration
     let tool_rules = config.agent.get_tool_rules().unwrap_or_else(|e| {
@@ -551,20 +481,24 @@ pub async fn create_agent(
 
     // Create agent
     let agent = DatabaseAgent::new(
-        agent_id,
+        agent_id.clone(),
         user_id,
         AgentType::Generic,
         name.to_string(),
-        // Empty base instructions - will be set later from context
-        String::new(),
+        context_config.base_instructions.clone(),
         memory,
         DB.clone(),
         model_provider,
         tools,
-        embedding_provider,
+        embedding_provider.clone(),
         heartbeat_sender,
         tool_rules,
     );
+
+    // Update the agent with the full context config
+    agent
+        .update_context_config(context_config, compression_strategy)
+        .await?;
 
     // Set the chat options with our selected model
     {
@@ -659,21 +593,136 @@ pub async fn create_agent(
                 }
             }
             Ok(None) | Err(_) => {
-                // Create new block
-                output.info("Adding memory block", &label.bright_yellow().to_string());
-                let memory_block =
-                    MemoryBlock::owned(config.user.id.clone(), label.clone(), content)
-                        .with_memory_type(block_config.memory_type)
-                        .with_permission(block_config.permission);
+                // Check if this is a shared memory that already exists
+                if block_config.shared {
+                    // Look for existing shared memory by owner and label
+                    match pattern_core::db::ops::find_memory_by_owner_and_label(
+                        &DB,
+                        &config.user.id,
+                        label,
+                    )
+                    .await
+                    {
+                        Ok(Some(existing_memory)) => {
+                            output.info(
+                                "Linking to shared memory",
+                                &label.bright_yellow().to_string(),
+                            );
 
-                let memory_block = if let Some(desc) = &block_config.description {
-                    memory_block.with_description(desc.clone())
+                            // Check if we need to update the permission to be more permissive
+                            if block_config.permission > existing_memory.permission {
+                                output.info(
+                                    "Updating shared memory permission",
+                                    &format!(
+                                        "{:?} -> {:?}",
+                                        existing_memory.permission, block_config.permission
+                                    ),
+                                );
+                                // Update the memory's permission
+                                let mut updated_memory = existing_memory.clone();
+                                updated_memory.permission = block_config.permission;
+                                updated_memory.value = content; // Also update content if different
+                                if let Some(desc) = &block_config.description {
+                                    updated_memory.description = Some(desc.clone());
+                                }
+
+                                // Update the memory block itself
+                                if let Err(e) = pattern_core::db::ops::update_memory_content(
+                                    &DB,
+                                    updated_memory.id.clone(),
+                                    updated_memory.value.clone(),
+                                    embedding_provider.as_ref().map(|p| p.as_ref()),
+                                )
+                                .await
+                                {
+                                    output.warning(&format!(
+                                        "Failed to update shared memory '{}': {}",
+                                        label, e
+                                    ));
+                                }
+                            }
+
+                            // Attach the memory to this agent with their requested permission
+                            if let Err(e) = pattern_core::db::ops::attach_memory_to_agent(
+                                &DB,
+                                &agent.id(),
+                                &existing_memory.id,
+                                block_config.permission,
+                            )
+                            .await
+                            {
+                                output.warning(&format!(
+                                    "Failed to attach shared memory '{}': {}",
+                                    label, e
+                                ));
+                            }
+                        }
+                        Ok(None) => {
+                            // No existing shared memory, create it
+                            output.info(
+                                "Creating new shared memory",
+                                &label.bright_yellow().to_string(),
+                            );
+                            let memory_block =
+                                MemoryBlock::owned(config.user.id.clone(), label.clone(), content)
+                                    .with_memory_type(block_config.memory_type)
+                                    .with_permission(block_config.permission);
+
+                            let memory_block = if let Some(desc) = &block_config.description {
+                                memory_block.with_description(desc.clone())
+                            } else {
+                                memory_block
+                            };
+
+                            if let Err(e) = agent.update_memory(label, memory_block).await {
+                                output.warning(&format!(
+                                    "Failed to add memory block '{}': {}",
+                                    label, e
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            output.warning(&format!(
+                                "Failed to check for shared memory '{}': {}",
+                                label, e
+                            ));
+                            // Fall back to creating a new memory
+                            let memory_block =
+                                MemoryBlock::owned(config.user.id.clone(), label.clone(), content)
+                                    .with_memory_type(block_config.memory_type)
+                                    .with_permission(block_config.permission);
+
+                            let memory_block = if let Some(desc) = &block_config.description {
+                                memory_block.with_description(desc.clone())
+                            } else {
+                                memory_block
+                            };
+
+                            if let Err(e) = agent.update_memory(label, memory_block).await {
+                                output.warning(&format!(
+                                    "Failed to add memory block '{}': {}",
+                                    label, e
+                                ));
+                            }
+                        }
+                    }
                 } else {
-                    memory_block
-                };
+                    // Not shared, create normally
+                    output.info("Adding memory block", &label.bright_yellow().to_string());
+                    let memory_block =
+                        MemoryBlock::owned(config.user.id.clone(), label.clone(), content)
+                            .with_memory_type(block_config.memory_type)
+                            .with_permission(block_config.permission);
 
-                if let Err(e) = agent.update_memory(label, memory_block).await {
-                    output.warning(&format!("Failed to add memory block '{}': {}", label, e));
+                    let memory_block = if let Some(desc) = &block_config.description {
+                        memory_block.with_description(desc.clone())
+                    } else {
+                        memory_block
+                    };
+
+                    if let Err(e) = agent.update_memory(label, memory_block).await {
+                        output.warning(&format!("Failed to add memory block '{}': {}", label, e));
+                    }
                 }
             }
         }
@@ -681,13 +730,6 @@ pub async fn create_agent(
 
     // Convert to trait object
     let agent_dyn: Arc<dyn Agent> = agent;
-
-    // Set up Bluesky endpoint if configured
-    setup_bluesky_endpoint(&agent_dyn, config, &output)
-        .await
-        .inspect_err(|e| {
-            tracing::error!("{:?}", e);
-        })?;
 
     Ok(agent_dyn)
 }
@@ -1048,11 +1090,14 @@ pub async fn load_or_create_agent_from_member(
         ));
 
         // Load the existing agent
-        let agent_record = match AgentRecord::load_with_relations(&DB, agent_id).await {
+        let mut agent_record = match AgentRecord::load_with_relations(&DB, agent_id).await {
             Ok(Some(agent)) => agent,
             Ok(None) => return Err(miette::miette!("Agent {} not found", agent_id)),
             Err(e) => return Err(miette::miette!("Failed to load agent {}: {}", agent_id, e)),
         };
+
+        // Load memories and messages
+        load_agent_memories_and_messages(&mut agent_record).await?;
 
         // Create runtime agent from record (reusing existing function)
         // Build a minimal config just for the create_agent_from_record function
@@ -1073,6 +1118,7 @@ pub async fn load_or_create_agent_from_member(
                 tool_rules: Vec::new(),
                 tools: Vec::new(),
                 model: None,
+                context: None,
             },
             model: pattern_core::config::ModelConfig {
                 provider: "Gemini".to_string(),
@@ -1139,9 +1185,18 @@ pub async fn load_or_create_agent_from_member(
             member.name.clone()
         };
 
+        // Extract the model name from the agent's config to pass explicitly
+        let agent_model_name = config.agent.model.as_ref().and_then(|m| m.model.clone());
+
         // Load or create the agent with this config
-        return load_or_create_agent(&agent_name, None, enable_tools, &config, heartbeat_sender)
-            .await;
+        return load_or_create_agent(
+            &agent_name,
+            agent_model_name,
+            enable_tools,
+            &config,
+            heartbeat_sender,
+        )
+        .await;
     }
 
     // Check if member has an inline agent_config
@@ -1186,9 +1241,18 @@ pub async fn load_or_create_agent_from_member(
             member.name.clone()
         };
 
+        // Extract the model name from the agent's config to pass explicitly
+        let agent_model_name = config.agent.model.as_ref().and_then(|m| m.model.clone());
+
         // Load or create the agent with this config
-        return load_or_create_agent(&agent_name, None, enable_tools, &config, heartbeat_sender)
-            .await;
+        return load_or_create_agent(
+            &agent_name,
+            agent_model_name,
+            enable_tools,
+            &config,
+            heartbeat_sender,
+        )
+        .await;
     }
 
     // Otherwise create a basic agent with just the member name
@@ -1214,6 +1278,7 @@ pub async fn load_or_create_agent_from_member(
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,
+            context: None,
         },
         model: pattern_core::config::ModelConfig {
             provider: "Gemini".to_string(),
@@ -1234,6 +1299,7 @@ pub async fn chat_with_group<M: GroupManager>(
     group: AgentGroup,
     agents: Vec<Arc<dyn Agent>>,
     pattern_manager: M,
+    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
 ) -> Result<()> {
     use pattern_core::coordination::groups::AgentWithMembership;
     use rustyline_async::{Readline, ReadlineEvent};
@@ -1272,6 +1338,64 @@ pub async fn chat_with_group<M: GroupManager>(
             membership: membership.clone(),
         })
         .collect();
+
+    // Clone agents for heartbeat handler
+    let agents_for_heartbeat: Vec<Arc<dyn Agent>> = agents_with_membership
+        .iter()
+        .map(|awm| awm.agent.clone())
+        .collect();
+
+    // Spawn heartbeat monitor task
+    let output_clone = output.clone();
+    tokio::spawn(async move {
+        while let Some(heartbeat) = heartbeat_receiver.recv().await {
+            tracing::debug!(
+                "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
+                heartbeat.agent_id,
+                heartbeat.tool_name,
+                heartbeat.tool_call_id
+            );
+
+            // Find the agent that sent the heartbeat
+            if let Some(agent) = agents_for_heartbeat
+                .iter()
+                .find(|a| a.id() == heartbeat.agent_id)
+            {
+                let agent = agent.clone();
+                let output = output_clone.clone();
+
+                // Spawn task to handle this heartbeat
+                tokio::spawn(async move {
+                    tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
+
+                    // Create a system message to trigger another turn
+                    let heartbeat_message = Message::system(format!(
+                        "[Heartbeat continuation from tool: {}]",
+                        heartbeat.tool_name
+                    ));
+
+                    match agent.process_message_stream(heartbeat_message).await {
+                        Ok(mut response_stream) => {
+                            while let Some(event) = response_stream.next().await {
+                                // Display heartbeat response
+                                output.status("💓 Heartbeat continuation:");
+                                print_response_event(event, &output);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Error processing heartbeat: {}", e);
+                        }
+                    }
+                });
+            } else {
+                tracing::warn!(
+                    "Received heartbeat from unknown agent {}",
+                    heartbeat.agent_id
+                );
+            }
+        }
+        tracing::debug!("Heartbeat monitor task exiting");
+    });
 
     loop {
         let event = rl.readline().await;
@@ -1317,13 +1441,29 @@ pub async fn chat_with_group<M: GroupManager>(
                         // Process the stream of events
                         while let Some(event) = stream.next().await {
                             match event {
-                                pattern_core::coordination::groups::GroupResponseEvent::Started { pattern, agent_count, .. } => {
-                                    output.status(&format!("Starting {} pattern with {} agents", pattern, agent_count));
+                                GroupResponseEvent::Started {
+                                    pattern,
+                                    agent_count,
+                                    ..
+                                } => {
+                                    output.status(&format!(
+                                        "Starting {} pattern with {} agents",
+                                        pattern, agent_count
+                                    ));
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::AgentStarted { agent_name, role, .. } => {
-                                    output.status(&format!("Agent {} ({:?}) processing...", agent_name, role));
+                                GroupResponseEvent::AgentStarted {
+                                    agent_name, role, ..
+                                } => {
+                                    output.status(&format!(
+                                        "Agent {} ({:?}) processing...",
+                                        agent_name, role
+                                    ));
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id, text, is_final } => {
+                                GroupResponseEvent::TextChunk {
+                                    agent_id,
+                                    text,
+                                    is_final,
+                                } => {
                                     if is_final || !text.is_empty() {
                                         // Find agent name
                                         let agent_name = agents_with_membership
@@ -1335,7 +1475,11 @@ pub async fn chat_with_group<M: GroupManager>(
                                         output.agent_message(&agent_name, &text);
                                     }
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::ReasoningChunk { agent_id, text, is_final } => {
+                                GroupResponseEvent::ReasoningChunk {
+                                    agent_id,
+                                    text,
+                                    is_final,
+                                } => {
                                     if is_final || !text.is_empty() {
                                         // Find agent name
                                         let agent_name = agents_with_membership
@@ -1347,37 +1491,57 @@ pub async fn chat_with_group<M: GroupManager>(
                                         output.info(&format!("{} reasoning:", agent_name), &text);
                                     }
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id, fn_name, args, .. } => {
+                                GroupResponseEvent::ToolCallStarted {
+                                    agent_id,
+                                    fn_name,
+                                    args,
+                                    ..
+                                } => {
                                     let agent_name = agents_with_membership
                                         .iter()
                                         .find(|a| a.agent.id() == agent_id)
                                         .map(|a| a.agent.name())
                                         .unwrap_or("Unknown Agent".to_string());
 
-                                    output.status(&format!("{} calling tool: {}", agent_name, fn_name));
+                                    output.status(&format!(
+                                        "{} calling tool: {}",
+                                        agent_name, fn_name
+                                    ));
                                     output.tool_call(
                                         &fn_name,
                                         &serde_json::to_string_pretty(&args)
                                             .unwrap_or_else(|_| args.to_string()),
                                     );
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallCompleted { agent_id: _, call_id, result } => {
-                                    match result {
-                                        Ok(result) => {
-                                            output.tool_result(&result);
-                                        }
-                                        Err(error) => {
-                                            output.error(&format!("Tool error (call {}): {}", call_id, error));
-                                        }
+                                GroupResponseEvent::ToolCallCompleted {
+                                    agent_id: _,
+                                    call_id,
+                                    result,
+                                } => match result {
+                                    Ok(result) => {
+                                        output.tool_result(&result);
                                     }
-                                }
-                                pattern_core::coordination::groups::GroupResponseEvent::AgentCompleted { agent_name, .. } => {
+                                    Err(error) => {
+                                        output.error(&format!(
+                                            "Tool error (call {}): {}",
+                                            call_id, error
+                                        ));
+                                    }
+                                },
+                                GroupResponseEvent::AgentCompleted { agent_name, .. } => {
                                     output.status(&format!("{} completed", agent_name));
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::Complete { execution_time: exec_time, .. } => {
+                                GroupResponseEvent::Complete {
+                                    execution_time: exec_time,
+                                    ..
+                                } => {
                                     execution_time = Some(exec_time);
                                 }
-                                pattern_core::coordination::groups::GroupResponseEvent::Error { agent_id, message, recoverable } => {
+                                GroupResponseEvent::Error {
+                                    agent_id,
+                                    message,
+                                    recoverable,
+                                } => {
                                     let prefix = if let Some(agent_id) = agent_id {
                                         let agent_name = agents_with_membership
                                             .iter()

@@ -340,36 +340,54 @@ pub async fn initialize_from_config(
         // Check if group already exists
         let existing = ops::get_group_by_name(&DB, &config.user.id, &group_config.name).await?;
 
-        if existing.is_some() {
+        let created_group = if let Some(existing_group) = existing {
             output.info("Group already exists", &group_config.name);
-            continue;
-        }
+            output.status("Syncing group members from configuration...");
+            existing_group
+        } else {
+            // Convert pattern from config to coordination pattern
+            let coordination_pattern = convert_pattern_config(&group_config.pattern)?;
 
-        // Convert pattern from config to coordination pattern
-        let coordination_pattern = convert_pattern_config(&group_config.pattern)?;
+            // Create the group
+            let group = AgentGroup {
+                id: group_config.id.clone().unwrap_or_else(GroupId::generate),
+                name: group_config.name.clone(),
+                description: group_config.description.clone(),
+                coordination_pattern,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                is_active: true,
+                state: GroupState::RoundRobin {
+                    current_index: 0,
+                    last_rotation: Utc::now(),
+                },
+                members: vec![],
+            };
 
-        // Create the group
-        let group = AgentGroup {
-            id: group_config.id.clone().unwrap_or_else(GroupId::generate),
-            name: group_config.name.clone(),
-            description: group_config.description.clone(),
-            coordination_pattern,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            is_active: true,
-            state: GroupState::RoundRobin {
-                current_index: 0,
-                last_rotation: Utc::now(),
-            },
-            members: vec![],
+            // Create group in database
+            let created = ops::create_group_for_user(&DB, &config.user.id, &group).await?;
+            output.success(&format!("Created group: {}", created.name));
+            created
         };
 
-        // Create group in database
-        let created_group = ops::create_group_for_user(&DB, &config.user.id, &group).await?;
-        output.success(&format!("Created group: {}", created_group.name));
+        // Get existing member names to avoid duplicates
+        let existing_member_names: std::collections::HashSet<String> = created_group
+            .members
+            .iter()
+            .map(|(agent, _)| agent.name.clone())
+            .collect();
 
         // Initialize members
         for member_config in &group_config.members {
+            // Skip if member already exists
+            if existing_member_names.contains(&member_config.name) {
+                output.info(
+                    &format!("  Member already exists: {}", member_config.name),
+                    "",
+                );
+                continue;
+            }
+
             output.status(&format!("  Adding member: {}", member_config.name));
 
             // Load or create agent from member config
@@ -451,9 +469,12 @@ fn convert_pattern_config(pattern: &GroupPatternConfig) -> Result<CoordinationPa
                 parallel_stages: false,
             }
         }
-        GroupPatternConfig::Dynamic { selector } => CoordinationPattern::Dynamic {
+        GroupPatternConfig::Dynamic {
+            selector,
+            selector_config,
+        } => CoordinationPattern::Dynamic {
             selector_name: selector.clone(),
-            selector_config: Default::default(),
+            selector_config: selector_config.clone(),
         },
         GroupPatternConfig::Sleeptime {
             interval_seconds,
@@ -524,6 +545,7 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,
+            context: None,
         };
 
         // Get memory blocks for this agent
@@ -546,6 +568,8 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
                 permission: permission.clone(),
                 memory_type: memory_block.memory_type.clone(),
                 description: memory_block.description.clone(),
+                id: None,
+                shared: false,
             };
 
             memory_configs.insert(memory_block.label.to_string(), memory_config);
@@ -583,6 +607,7 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,
+            context: None,
         },
         model: ModelConfig::default(),
         database: DatabaseConfig::default(),
@@ -652,13 +677,18 @@ fn convert_pattern_to_config(pattern: &CoordinationPattern) -> GroupPatternConfi
             // Similar issue - stages are IDs, not names
             GroupPatternConfig::Pipeline { stages: vec![] }
         }
-        CoordinationPattern::Dynamic { selector_name, .. } => GroupPatternConfig::Dynamic {
+        CoordinationPattern::Dynamic {
+            selector_name,
+            selector_config,
+        } => GroupPatternConfig::Dynamic {
             selector: selector_name.clone(),
+            selector_config: selector_config.clone(),
         },
         CoordinationPattern::Voting { .. } => {
             // GroupPatternConfig doesn't have a Voting variant, use Dynamic as fallback
             GroupPatternConfig::Dynamic {
                 selector: "voting".to_string(),
+                selector_config: Default::default(),
             }
         }
         CoordinationPattern::Sleeptime { check_interval, .. } => GroupPatternConfig::Sleeptime {

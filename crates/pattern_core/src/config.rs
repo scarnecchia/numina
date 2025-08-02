@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     agent::tool_rules::ToolRule,
+    context::compression::CompressionStrategy,
     data_source::bluesky::BlueskyFilter,
     db::DatabaseConfig,
-    id::{AgentId, GroupId, UserId},
+    id::{AgentId, GroupId, MemoryId, UserId},
     memory::{MemoryPermission, MemoryType},
 };
 
@@ -110,6 +111,10 @@ pub struct AgentConfig {
     /// Optional model configuration (overrides global model config)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
+
+    /// Optional context configuration (overrides defaults)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextConfigOptions>,
 }
 
 /// Configuration for tool execution rules
@@ -329,6 +334,14 @@ pub struct MemoryBlockConfig {
     /// Optional description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Optional ID for shared memory blocks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<MemoryId>,
+
+    /// Whether this memory should be shared with other agents
+    #[serde(default)]
+    pub shared: bool,
 }
 
 impl MemoryBlockConfig {
@@ -441,6 +454,9 @@ pub enum GroupPatternConfig {
     Dynamic {
         /// Selector strategy name
         selector: String,
+        /// Optional configuration for the selector
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        selector_config: HashMap<String, String>,
     },
     /// Background monitoring
     Sleeptime {
@@ -531,6 +547,7 @@ impl Default for AgentConfig {
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,
+            context: None,
         }
     }
 }
@@ -716,7 +733,36 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
         tool_rules: overlay.tool_rules.unwrap_or(base.tool_rules),
         tools: overlay.tools.unwrap_or(base.tools),
         model: overlay.model.or(base.model),
+        context: base.context, // Keep base context config for now (no overlay field yet)
     }
+}
+
+/// Optional context configuration for agents
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfigOptions {
+    /// Maximum messages to keep before compression
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_messages: Option<usize>,
+
+    /// Maximum age of messages in hours before archival
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_message_age_hours: Option<i64>,
+
+    /// Number of messages that triggers compression
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression_threshold: Option<usize>,
+
+    /// Compression strategy to use
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression_strategy: Option<CompressionStrategy>,
+
+    /// Characters limit per memory block
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_char_limit: Option<usize>,
+
+    /// Whether to enable thinking/reasoning
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 /// Standard config file locations

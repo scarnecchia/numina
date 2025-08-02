@@ -480,13 +480,18 @@ async fn main() -> Result<()> {
         };
     }
 
-    tracing::debug!("Using database config: {:?}", config.database);
+    tracing::info!("Using database config: {:?}", config.database);
 
     // Initialize database
     client::init_db(config.database.clone()).await?;
 
-    // Initialize groups from configuration
-    if !config.groups.is_empty() {
+    // Initialize groups from configuration (skip for auth/atproto/config commands to avoid API key issues)
+    let skip_group_init = matches!(
+        &cli.command,
+        Commands::Auth { .. } | Commands::Config { .. } | Commands::Atproto { .. }
+    );
+
+    if !config.groups.is_empty() && !skip_group_init {
         // Create a heartbeat channel for group initialization
         let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
         commands::group::initialize_from_config(&config, heartbeat_sender).await?;
@@ -525,10 +530,13 @@ async fn main() -> Result<()> {
                 // Load all agents in the group
                 tracing::info!("Group has {} members to load", group.members.len());
                 let mut agents = Vec::new();
-                for (agent_record, _membership) in &group.members {
+                for (mut agent_record, _membership) in group.members.clone() {
+                    // Load memories and messages for the agent
+                    agent_ops::load_agent_memories_and_messages(&mut agent_record).await?;
+
                     // Create runtime agent from record
                     let agent = agent_ops::create_agent_from_record(
-                        agent_record.clone(),
+                        agent_record,
                         model.clone(),
                         !*no_tools,
                         &config,
@@ -557,27 +565,33 @@ async fn main() -> Result<()> {
                 match &group.coordination_pattern {
                     CoordinationPattern::RoundRobin { .. } => {
                         let manager = RoundRobinManager;
-                        agent_ops::chat_with_group(group, agents, manager).await?;
+                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            .await?;
                     }
                     CoordinationPattern::Dynamic { .. } => {
                         let manager = DynamicManager::new(Arc::new(DefaultSelectorRegistry::new()));
-                        agent_ops::chat_with_group(group, agents, manager).await?;
+                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            .await?;
                     }
                     CoordinationPattern::Pipeline { .. } => {
                         let manager = PipelineManager;
-                        agent_ops::chat_with_group(group, agents, manager).await?;
+                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            .await?;
                     }
                     CoordinationPattern::Supervisor { .. } => {
                         let manager = SupervisorManager;
-                        agent_ops::chat_with_group(group, agents, manager).await?;
+                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            .await?;
                     }
                     CoordinationPattern::Voting { .. } => {
                         let manager = VotingManager;
-                        agent_ops::chat_with_group(group, agents, manager).await?;
+                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            .await?;
                     }
                     CoordinationPattern::Sleeptime { .. } => {
                         let manager = SleeptimeManager;
-                        agent_ops::chat_with_group(group, agents, manager).await?;
+                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            .await?;
                     }
                 }
             } else {

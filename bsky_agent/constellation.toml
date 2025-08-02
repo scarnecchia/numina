@@ -3,11 +3,12 @@
 
 [user]
 name = "Pattern Constellation"
+id = "188aa44f0c9f458e8adb4232332ce8fe"
 
 # Main coordinator agent
 [agent]
 name = "Pattern"
-bluesky_handle = "pattern.nonbinary.computer"   # Update with actual handle
+bluesky_handle = "pattern.atproto.systems"      # Update with actual handle
 system_prompt_path = "pattern-system-prompt.md"
 persona_path = "pattern-persona-block.md"
 
@@ -17,24 +18,28 @@ content_path = "pattern-current-human-block.md"
 permission = "read_write"
 memory_type = "working"
 description = "Current conversant context"
+shared = true
 
 [agent.memory.partner]
 content_path = "pattern-partner-block.md"
 permission = "append"
 memory_type = "core"
 description = "Understanding of orual's role"
+shared = true
 
 [agent.memory.observations]
 content_path = "pattern-observations-block.md"
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Collective pattern gathering"
+shared = true
 
 [agent.memory.resonances]
 content_path = "pattern-resonances-block.md"
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Cross-context patterns"
+shared = true
 
 [agent.memory.constellation_state]
 content = """
@@ -63,6 +68,13 @@ permission = "read_write"
 memory_type = "core"
 description = "How facets work together"
 
+[agent.memory.constellation_context]
+content_path = "constellation-context.md"
+permission = "read_only"
+memory_type = "core"
+description = "Shared understanding of constellation purpose and members"
+shared = true
+
 [model]
 provider = "Anthropic"    # Or your preferred provider
 model = "claude-sonnet-4"
@@ -77,10 +89,23 @@ strict_mode = false
 [[groups]]
 name = "Pattern Cluster"
 description = "Public-facing constellation for exploration and understanding"
-# Dynamic pattern with capability-based selection
-pattern = { type = "dynamic", selector = "capability" }
+# Dynamic pattern with supervisor-based selection
+pattern = { type = "dynamic", selector = "supervisor" }
 
 # Group members - load from separate files
+
+# Pattern - Main coordinator
+[[groups.members]]
+name = "Pattern"
+config_path = "agents/pattern_config.toml"
+role = "supervisor"
+capabilities = [
+    "coordination",
+    "synthesis",
+    "pattern_recognition",
+    "meta_awareness",
+    "collective_understanding",
+]
 
 # Entropy - Complexity specialist
 [[groups.members]]
@@ -110,7 +135,7 @@ capabilities = [
 [[groups.members]]
 name = "Archive"
 config_path = "agents/archive.toml"
-role = "regular"
+role = { specialist = { domain = "memory_management" } }
 capabilities = [
     "memory_management",
     "pattern_recognition",

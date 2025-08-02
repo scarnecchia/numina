@@ -88,6 +88,35 @@ impl GroupManager for DynamicManager {
                 }
             };
 
+            // Check if message directly addresses an agent by name
+            let message_text = match &message.content {
+                crate::message::MessageContent::Text(text) => Some(text.as_str()),
+                crate::message::MessageContent::Parts(parts) => {
+                    parts.iter().find_map(|p| match p {
+                        crate::message::ContentPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+
+            // Check for direct agent addressing (e.g., "entropy, ..." or "@entropy" or "hey entropy")
+            let directly_addressed_agent = if let Some(text) = message_text {
+                let lower_text = text.to_lowercase();
+                agents.iter().find(|awm| {
+                    let agent_name = awm.agent.name().to_lowercase();
+                    // Check various addressing patterns
+                    lower_text.starts_with(&format!("{},", agent_name))
+                        || lower_text.contains(&format!("@{}", agent_name))
+                        || lower_text.starts_with(&format!("{}:", agent_name))
+                        || lower_text.starts_with(&format!("{} -", agent_name))
+                        || lower_text.starts_with(&format!("hey {}", agent_name))
+                        || lower_text.starts_with(&format!("{} ", agent_name))
+                })
+            } else {
+                None
+            };
+
             // Build selection context
             let available_agents = agents
                 .iter()
@@ -108,23 +137,29 @@ impl GroupManager for DynamicManager {
                 agent_capabilities,
             };
 
-            // Use the actual selector to select agents
-            let selected_agents = match selector
-                .select_agents(&agents, &context, &selector_config)
-                .await
-            {
-                Ok(agents) => agents,
-                Err(e) => {
-                    let _ = tx
-                        .send(GroupResponseEvent::Error {
-                            agent_id: None,
-                            message: e.to_string(),
-                            recoverable: false,
-                        })
-                        .await;
-                    return;
-                }
-            };
+            // Use the actual selector to select agents, unless directly addressed
+            let (selected_agents, selector_response) =
+                if let Some(addressed_agent) = directly_addressed_agent {
+                    // Bypass selector for directly addressed agents
+                    (vec![addressed_agent], None)
+                } else {
+                    match selector
+                        .select_agents(&agents, &context, &selector_config)
+                        .await
+                    {
+                        Ok(result) => (result.agents, result.selector_response),
+                        Err(e) => {
+                            let _ = tx
+                                .send(GroupResponseEvent::Error {
+                                    agent_id: None,
+                                    message: e.to_string(),
+                                    recoverable: false,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                };
 
             if selected_agents.is_empty() {
                 let _ = tx
@@ -145,6 +180,90 @@ impl GroupManager for DynamicManager {
                     agent_count: selected_agents.len(),
                 })
                 .await;
+
+            // If supervisor provided a direct response, handle it
+            if let Some(supervisor_response) = selector_response {
+                // Find which agent is the supervisor (should be the only selected agent)
+                if selected_agents.len() == 1 {
+                    let supervisor_awm = selected_agents[0];
+                    let supervisor_id = supervisor_awm.agent.as_ref().id();
+                    let supervisor_name = supervisor_awm.agent.name();
+
+                    // Send supervisor's response as if it came from their normal processing
+                    let _ = tx
+                        .send(GroupResponseEvent::AgentStarted {
+                            agent_id: supervisor_id.clone(),
+                            agent_name: supervisor_name.clone(),
+                            role: supervisor_awm.membership.role.clone(),
+                        })
+                        .await;
+
+                    // Send the response content
+                    for content in &supervisor_response.content {
+                        match content {
+                            crate::message::MessageContent::Text(text) => {
+                                let _ = tx
+                                    .send(GroupResponseEvent::TextChunk {
+                                        agent_id: supervisor_id.clone(),
+                                        text: text.clone(),
+                                        is_final: true,
+                                    })
+                                    .await;
+                            }
+                            _ => {} // Handle other content types if needed
+                        }
+                    }
+
+                    // Send completion
+                    let _ = tx
+                        .send(GroupResponseEvent::AgentCompleted {
+                            agent_id: supervisor_id.clone(),
+                            agent_name: supervisor_name.clone(),
+                            message_id: None, // We don't have a message ID from the direct response
+                        })
+                        .await;
+
+                    // Track the response
+                    let agent_responses = vec![AgentResponse {
+                        agent_id: supervisor_id.clone(),
+                        response: supervisor_response,
+                        responded_at: Utc::now(),
+                    }];
+
+                    // Update recent selections
+                    let mut new_recent_selections = recent_selections.clone();
+                    new_recent_selections.push((Utc::now(), supervisor_id));
+
+                    // Clean up old selections
+                    let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+                    new_recent_selections.retain(|(timestamp, _)| *timestamp > one_hour_ago);
+                    if new_recent_selections.len() > 100 {
+                        new_recent_selections = new_recent_selections
+                            .into_iter()
+                            .rev()
+                            .take(100)
+                            .rev()
+                            .collect();
+                    }
+
+                    let new_state = GroupState::Dynamic {
+                        recent_selections: new_recent_selections,
+                    };
+
+                    // Send completion event and return early
+                    let _ = tx
+                        .send(GroupResponseEvent::Complete {
+                            group_id,
+                            pattern: format!("dynamic:{}", selector_name),
+                            execution_time: start_time.elapsed(),
+                            agent_responses,
+                            state_changes: Some(new_state),
+                        })
+                        .await;
+
+                    return; // Don't process the supervisor again
+                }
+            }
 
             // Process each selected agent
             let mut agent_responses = Vec::new();

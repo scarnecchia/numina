@@ -75,7 +75,7 @@ mod tests {
         // Create a handle
         let mut handle = AgentHandle::default().with_db(db.clone());
 
-        let router = AgentMessageRouter::new(handle.agent_id.clone(), db);
+        let router = AgentMessageRouter::new(handle.agent_id.clone(), handle.name.clone(), db);
         handle.message_router = Some(router);
 
         // Create and register tools

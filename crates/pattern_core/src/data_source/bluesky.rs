@@ -796,6 +796,8 @@ impl DataSource for BlueskyFirehoseSource {
                 message.push_str(&format!("  • {} ({})\n", handle, uri));
             }
         }
+        message
+            .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\n");
 
         Some(message)
     }

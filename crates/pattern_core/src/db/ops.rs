@@ -512,11 +512,12 @@ pub async fn subscribe_to_agent_messages<C: Connection>(
 ) -> Result<impl Stream<Item = (Action, crate::message_queue::QueuedMessage)>> {
     // Subscribe to messages where to_agent = agent_id AND read = false
     let query = format!(
-        "LIVE SELECT * FROM queue_msg WHERE to_agent = agent:⟨{}⟩ AND read = false",
-        agent_id.to_key()
+        "LIVE SELECT * FROM queue_msg WHERE to_agent = agent:{} AND read = false",
+        agent_id.0
     );
 
     let mut result = conn.query(query).await?;
+
     let stream = result
         .stream::<Notification<<crate::message_queue::QueuedMessage as DbEntity>::DbModel>>(0)?;
 
@@ -896,6 +897,34 @@ pub async fn archive_agent_messages<C: Connection>(
         .await?;
 
     Ok(())
+}
+
+/// Find a memory block by owner and label (for shared memory deduplication)
+pub async fn find_memory_by_owner_and_label<C: Connection>(
+    conn: &Surreal<C>,
+    owner_id: &UserId,
+    label: &str,
+) -> Result<Option<MemoryBlock>> {
+    let query = r#"
+        SELECT * FROM mem
+        WHERE owner_id = $owner_id
+        AND label = $label
+        LIMIT 1
+    "#;
+
+    let mut response = conn
+        .query(query)
+        .bind(("owner_id", RecordId::from(owner_id)))
+        .bind(("label", label.to_string()))
+        .await?;
+
+    let memories: Vec<<MemoryBlock as DbEntity>::DbModel> = response.take(0)?;
+
+    if let Some(db_model) = memories.into_iter().next() {
+        Ok(Some(MemoryBlock::from_db_model(db_model)?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Persist or update an agent's memory block with relation

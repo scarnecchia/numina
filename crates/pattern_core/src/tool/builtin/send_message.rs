@@ -74,16 +74,20 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
                     parameters: serde_json::to_value(&params).unwrap_or_default(),
                 })?;
 
+        // Handle agent name resolution if target is agent type
+        let target = params.target.clone();
+
         // When agent uses send_message tool, origin is the agent itself
         let origin = crate::context::message_router::MessageOrigin::Agent {
             agent_id: router.agent_id().clone(),
+            name: router.agent_name().clone(),
             reason: "send_message tool invocation".to_string(),
         };
 
         // Send the message through the router
         match router
             .send_message(
-                params.target.clone(),
+                target,
                 params.content.clone(),
                 params.metadata.clone(),
                 Some(origin),
@@ -138,12 +142,12 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
             }
             Err(e) => {
                 // Log the error for debugging
-                tracing::error!("Failed to send message: {}", e);
+                tracing::error!("Failed to send message: {:?}", e);
 
                 Ok(SendMessageOutput {
                     success: false,
                     message_id: None,
-                    details: Some(format!("Failed to send message: {}", e)),
+                    details: Some(format!("Failed to send message: {:?}", e)),
                 })
             }
         }
@@ -211,7 +215,7 @@ mod tests {
         let memory = Memory::with_owner(&UserId::generate());
         let mut handle = AgentHandle::test_with_memory(memory).with_db(db.clone());
 
-        let router = AgentMessageRouter::new(handle.agent_id.clone(), db);
+        let router = AgentMessageRouter::new(handle.agent_id.clone(), handle.name.clone(), db);
         handle.message_router = Some(router);
 
         let tool = SendMessageTool { handle };

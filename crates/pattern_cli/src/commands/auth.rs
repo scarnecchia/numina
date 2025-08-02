@@ -5,7 +5,7 @@ use owo_colors::OwoColorize;
 use pattern_core::{
     config::PatternConfig,
     db::{client::DB, ops},
-    oauth::{OAuthClient, OAuthProvider, OAuthToken, auth_flow::parse_callback_code},
+    oauth::{OAuthClient, OAuthProvider, OAuthToken, auth_flow::split_callback_code},
 };
 use std::io::{self, Write};
 
@@ -41,26 +41,16 @@ pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
     );
     output.success("─────────────────────────────────────────────");
     output.success("Please visit the URL above and authorize the application.");
-    output.info(
-        "After authorization, you'll be redirected to a URL like:",
-        "",
-    );
-    output.info(
-        "",
-        "https://console.anthropic.com/oauth/code/callback?code=XXX&state=YYY",
-    );
+    output.info("After authorization, copy the code shown on the page.", "");
     output.info("", "");
 
-    // Prompt for the redirect URL
-    print!("Paste the full redirect URL here: ");
+    // Prompt for the code
+    print!("Enter the authorization code: ");
     io::stdout().flush().unwrap();
 
-    let mut redirect_url = String::new();
-    io::stdin().read_line(&mut redirect_url).into_diagnostic()?;
-    let redirect_url = redirect_url.trim();
-
-    // Parse the authorization code from the redirect URL
-    let (code, state) = parse_callback_code(&redirect_url).into_diagnostic()?;
+    let mut code = String::new();
+    io::stdin().read_line(&mut code).into_diagnostic()?;
+    let (code, state) = split_callback_code(code.trim())?;
 
     // Verify state matches
     if let Some(pkce) = &device_response.pkce_challenge {

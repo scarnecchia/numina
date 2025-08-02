@@ -61,6 +61,8 @@ pub struct AgentRecord {
     pub max_messages: usize,
     pub max_message_age_hours: i64,
     pub compression_threshold: usize,
+    pub memory_char_limit: usize,
+    pub enable_thinking: bool,
     #[entity(db_type = "object")]
     pub compression_strategy: CompressionStrategy,
 
@@ -121,6 +123,8 @@ impl Default for AgentRecord {
             max_messages: 50,
             max_message_age_hours: 24,
             compression_threshold: 30,
+            memory_char_limit: 5000,
+            enable_thinking: true,
             compression_strategy: CompressionStrategy::Truncate { keep_recent: 20 },
             tool_rules: Vec::new(),
             total_messages: 0,
@@ -144,10 +148,19 @@ impl Default for AgentRecord {
 impl AgentRecord {
     /// Create a ContextConfig from the agent's stored configuration
     pub fn to_context_config(&self) -> ContextConfig {
+        // Create model adjustments based on compression settings
+        let model_adjustments = crate::context::ModelAdjustments {
+            // We'll keep defaults for now, but could be enhanced later
+            ..Default::default()
+        };
+
         ContextConfig {
             base_instructions: self.base_instructions.clone(),
+            memory_char_limit: self.memory_char_limit,
             max_context_messages: self.max_messages,
-            ..Default::default()
+            enable_thinking: self.enable_thinking,
+            tool_rules: vec![], // Will be populated by the context builder
+            model_adjustments,
         }
     }
 
@@ -448,6 +461,8 @@ impl AgentRecord {
             max_messages: 50,          // TODO: Make configurable
             max_message_age_hours: 24, // TODO: Make configurable
             compression_threshold: 30, // TODO: Make configurable
+            memory_char_limit: 5000,   // TODO: Make configurable
+            enable_thinking: true,     // TODO: Make configurable
             compression_strategy: CompressionStrategy::Truncate { keep_recent: 20 }, // TODO: Make configurable
             tool_rules: Vec::new(), // TODO: Get from agent's tool rule engine
             // Stats would need to be exposed through the Agent trait or stored externally

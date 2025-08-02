@@ -10,8 +10,9 @@ use surrealdb::Surreal;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::agent::AgentRecord;
 use crate::atproto_identity::resolve_handle_to_pds;
-use crate::db::client;
+use crate::db::{client, ops};
 use crate::error::Result;
 use crate::id::{AgentId, GroupId, UserId};
 use crate::message::{ContentPart, Message, MessageContent};
@@ -62,7 +63,11 @@ pub enum MessageOrigin {
     },
 
     /// Agent-initiated (no external origin)
-    Agent { agent_id: AgentId, reason: String },
+    Agent {
+        agent_id: AgentId,
+        name: String,
+        reason: String,
+    },
 
     /// Other origin types
     Other {
@@ -123,12 +128,93 @@ impl MessageOrigin {
                 }
                 post_framing
             }
-            Self::Agent { agent_id, reason } => format!("Agent {} - {}", agent_id, reason),
+            Self::Agent {
+                agent_id: _,
+                name,
+                reason,
+            } => format!("from {} for {}", name, reason),
             Self::Other {
                 origin_type,
                 source_id,
                 ..
             } => format!("{} from {}", origin_type, source_id),
+        }
+    }
+
+    pub fn wrap_content(&self, content: String) -> String {
+        match self {
+            MessageOrigin::DataSource { source_id, .. } => {
+                format!("New data from: {}, content:\n\n{}", source_id, content)
+            }
+            MessageOrigin::Discord {
+                server_id,
+                channel_id,
+                user_id,
+                message_id: _,
+            } => format!(
+                "Message in {}:{}, from: {}, content:\n\n{}",
+                server_id, channel_id, user_id, content
+            ),
+            MessageOrigin::Cli {
+                session_id,
+                command,
+            } => format!(
+                "Message from: {}, reason: {}, content:\n\n{}",
+                session_id,
+                command.as_ref().unwrap_or(&"".to_string()),
+                content
+            ),
+            MessageOrigin::Api {
+                client_id,
+                request_id: _,
+                endpoint,
+            } => format!(
+                "Message from: {}, reason: {}, content:\n\n{}",
+                client_id, endpoint, content
+            ),
+            MessageOrigin::Bluesky {
+                handle,
+                did: _,
+                post_uri,
+                is_mention,
+                is_reply,
+            } => {
+                let message_prefix = if *is_mention {
+                    "Mentioned by:"
+                } else if *is_reply {
+                    "Reply from:"
+                } else {
+                    "Post from:"
+                };
+                format!(
+                    "{} {}, post uri: {}, content:\n\n{}",
+                    message_prefix,
+                    handle,
+                    post_uri.as_ref().unwrap_or(&"".to_string()),
+                    content
+                )
+            }
+            MessageOrigin::Agent {
+                agent_id: _,
+                name,
+                reason,
+            } => {
+                format!(
+                    "Message from agent: {}, reason: {}, content:\n\n{}",
+                    name, reason, content
+                )
+            }
+            MessageOrigin::Other {
+                origin_type,
+                source_id,
+                metadata,
+            } => format!(
+                "Message from: {}-{}, metadata: {}\n\nContent:\n\n{}",
+                origin_type,
+                source_id,
+                serde_json::to_string(metadata).unwrap(),
+                content
+            ),
         }
     }
 }
@@ -154,6 +240,9 @@ pub struct AgentMessageRouter<C: surrealdb::Connection = surrealdb::engine::any:
     /// The agent this router belongs to
     agent_id: AgentId,
 
+    /// Agent name
+    name: String,
+
     /// Database connection for queuing messages
     db: Surreal<C>,
 
@@ -166,9 +255,10 @@ pub struct AgentMessageRouter<C: surrealdb::Connection = surrealdb::engine::any:
 
 impl<C: surrealdb::Connection> AgentMessageRouter<C> {
     /// Create a new message router for an agent
-    pub fn new(agent_id: AgentId, db: Surreal<C>) -> Self {
+    pub fn new(agent_id: AgentId, name: String, db: Surreal<C>) -> Self {
         Self {
             agent_id,
+            name,
             db,
             endpoints: Arc::new(RwLock::new(HashMap::new())),
             default_user_endpoint: Arc::new(RwLock::new(None)),
@@ -177,6 +267,10 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
 
     pub fn agent_id(&self) -> &AgentId {
         &self.agent_id
+    }
+
+    pub fn agent_name(&self) -> &String {
+        &self.name
     }
 
     /// Set the default endpoint for user messages (builder pattern)
@@ -198,6 +292,82 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
         endpoints.insert(name, endpoint);
     }
 
+    pub async fn resolve_name(
+        &self,
+        name_to_resolve: &String,
+        target: &MessageTarget,
+    ) -> Result<AgentId> {
+        let query = "SELECT id FROM agent WHERE name = $name LIMIT 1";
+        let mut response = self
+            .db
+            .query(query)
+            .bind(("name", name_to_resolve.clone()))
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "send_message".to_string(),
+                cause: format!("Failed to resolve agent name: {:?}", e),
+                parameters: serde_json::json!({ "target": target }),
+            })?;
+
+        let agent_ids: Vec<surrealdb::RecordId> =
+            response
+                .take("id")
+                .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                    tool_name: "send_message".to_string(),
+                    cause: format!("Failed to extract agent ID: {:?}", e),
+                    parameters: serde_json::json!({ "target": target }),
+                })?;
+
+        let id = agent_ids
+            .first()
+            .map(|id| AgentId::from_record(id.clone()))
+            .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                tool_name: "send_message".to_string(),
+                cause: format!("Agent '{}' not found", name_to_resolve),
+                parameters: serde_json::json!({ "target": target }),
+            })?;
+
+        Ok(id)
+    }
+
+    pub async fn resolve_group(
+        &self,
+        name_to_resolve: &String,
+        target: &MessageTarget,
+    ) -> Result<GroupId> {
+        let query = "SELECT id FROM group WHERE name = $name LIMIT 1";
+        let mut response = self
+            .db
+            .query(query)
+            .bind(("name", name_to_resolve.clone()))
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "send_message".to_string(),
+                cause: format!("Failed to resolve agent name: {:?}", e),
+                parameters: serde_json::json!({ "target": target }),
+            })?;
+
+        let agent_ids: Vec<surrealdb::RecordId> =
+            response
+                .take("id")
+                .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                    tool_name: "send_message".to_string(),
+                    cause: format!("Failed to extract agent ID: {:?}", e),
+                    parameters: serde_json::json!({ "target": target }),
+                })?;
+
+        let id = agent_ids
+            .first()
+            .map(|id| GroupId::from_record(id.clone()))
+            .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                tool_name: "send_message".to_string(),
+                cause: format!("Agent '{}' not found", name_to_resolve),
+                parameters: serde_json::json!({ "target": target }),
+            })?;
+
+        Ok(id)
+    }
+
     /// Send a message to the specified target
     pub async fn send_message(
         &self,
@@ -216,28 +386,67 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
                 self.send_to_user(user_id, content, metadata, origin).await
             }
             TargetType::Agent => {
-                let agent_id = target
-                    .target_id
-                    .as_ref()
-                    .and_then(|id| id.parse::<AgentId>().ok())
-                    .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                // Get the target string
+                let agent_id = if let Some(target_str) = target.target_id.as_ref() {
+                    // Check if it's a valid UUID - try parsing with dashes first, then simple format
+                    if let Ok(uuid) = uuid::Uuid::parse_str(target_str) {
+                        // It's a valid UUID with dashes - convert to simple format
+                        AgentId::from_uuid(uuid)
+                    } else if target_str.len() == 32 {
+                        // Try parsing as simple UUID (no dashes)
+                        match uuid::Uuid::try_parse(target_str) {
+                            Ok(uuid) => AgentId::from_uuid(uuid),
+                            Err(_) => {
+                                // Not a valid UUID, must be a name - continue to name resolution
+                                // Try to resolve as name
+                                self.resolve_name(target_str, &target).await?
+                            }
+                        }
+                    } else {
+                        // Not a UUID format at all, must be a name
+                        // Try to resolve as name
+                        self.resolve_name(target_str, &target).await?
+                    }
+                } else {
+                    return Err(crate::CoreError::ToolExecutionFailed {
                         tool_name: "send_message".to_string(),
-                        cause: "Agent ID required for agent target".to_string(),
+                        cause: "Agent name or ID required for agent target".to_string(),
                         parameters: serde_json::json!({ "target": target }),
-                    })?;
+                    });
+                };
+
                 self.send_to_agent(agent_id, content, metadata, origin)
                     .await
             }
             TargetType::Group => {
-                let group_id = target
-                    .target_id
-                    .as_ref()
-                    .and_then(|id| id.parse::<GroupId>().ok())
-                    .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
+                // Get the target string
+                let group_id = if let Some(target_str) = target.target_id.as_ref() {
+                    // Check if it's a valid UUID - try parsing with dashes first, then simple format
+                    if let Ok(uuid) = uuid::Uuid::parse_str(target_str) {
+                        // It's a valid UUID with dashes - convert to simple format
+                        GroupId::from_uuid(uuid)
+                    } else if target_str.len() == 32 {
+                        // Try parsing as simple UUID (no dashes)
+                        match uuid::Uuid::try_parse(target_str) {
+                            Ok(uuid) => GroupId::from_uuid(uuid),
+                            Err(_) => {
+                                // Not a valid UUID, must be a name - continue to name resolution
+                                // Try to resolve as name
+                                self.resolve_group(target_str, &target).await?
+                            }
+                        }
+                    } else {
+                        // Not a UUID format at all, must be a name
+                        // Try to resolve as name
+                        self.resolve_group(target_str, &target).await?
+                    }
+                } else {
+                    return Err(crate::CoreError::ToolExecutionFailed {
                         tool_name: "send_message".to_string(),
-                        cause: "Group ID required for group target".to_string(),
+                        cause: "Group name or ID required for group target".to_string(),
                         parameters: serde_json::json!({ "target": target }),
-                    })?;
+                    });
+                };
                 self.send_to_group(group_id, content, metadata, origin)
                     .await
             }
@@ -354,7 +563,7 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
                 .await?
                 .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
                     tool_name: "send_to_group".to_string(),
-                    cause: format!("Group {} not found", group_id),
+                    cause: format!("Group {:?} not found", group_id),
                     parameters: serde_json::json!({ "group_id": group_id }),
                 })?;
 
@@ -400,7 +609,7 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
 
                             if let Err(e) = self.store_queued_message(queued).await {
                                 warn!(
-                                    "Failed to queue message for group member {}: {}",
+                                    "Failed to queue message for group member {}: {:?}",
                                     agent_record.id, e
                                 );
                             } else {
@@ -505,7 +714,7 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
 
                     if let Err(e) = self.store_queued_message(queued).await {
                         warn!(
-                            "Failed to queue message for group member {}: {}",
+                            "Failed to queue message for group member {}: {:?}",
                             agent_record.id, e
                         );
                     } else {
@@ -653,7 +862,13 @@ impl MessageEndpoint for QueueEndpoint {
 pub async fn create_router_with_global_db(agent_id: AgentId) -> Result<AgentMessageRouter> {
     // Clone the global DB instance
     let db = client::DB.clone();
-    Ok(AgentMessageRouter::new(agent_id, db))
+    let agent = ops::get_entity::<AgentRecord, _>(&db, &agent_id).await?;
+    let name = if let Some(agent) = agent {
+        agent.name
+    } else {
+        agent_id.to_string()
+    };
+    Ok(AgentMessageRouter::new(agent_id, name, db))
 }
 
 // ===== Bluesky Endpoint Implementation =====

@@ -3,17 +3,27 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{groups::AgentWithMembership, types::SelectionContext};
-use crate::{Result, agent::Agent};
+use crate::{Result, agent::Agent, message::Response};
 
 mod capability;
 mod load_balancing;
 mod random;
+mod supervisor;
 
 use async_trait::async_trait;
 pub use capability::CapabilitySelector;
 use dashmap::DashMap;
 pub use load_balancing::LoadBalancingSelector;
 pub use random::RandomSelector;
+pub use supervisor::SupervisorSelector;
+
+/// Result of agent selection, optionally including a response from the selector
+pub struct SelectionResult<'a> {
+    /// The selected agents
+    pub agents: Vec<&'a AgentWithMembership<Arc<dyn Agent>>>,
+    /// Optional response from the selector (e.g., when supervisor handles directly)
+    pub selector_response: Option<Response>,
+}
 
 #[async_trait]
 pub trait AgentSelector: Send + Sync {
@@ -22,7 +32,7 @@ pub trait AgentSelector: Send + Sync {
         agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         _context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>>;
+    ) -> Result<SelectionResult<'a>>;
 
     fn name(&self) -> &str;
 
@@ -59,6 +69,7 @@ impl DefaultSelectorRegistry {
             "load_balancing".to_string(),
             Arc::new(LoadBalancingSelector),
         );
+        registry.register("supervisor".to_string(), Arc::new(SupervisorSelector));
 
         registry
     }

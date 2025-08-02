@@ -21,7 +21,7 @@ impl AgentSelector for RandomSelector {
         agents: &'a [AgentWithMembership<Arc<dyn Agent>>],
         _context: &SelectionContext,
         config: &HashMap<String, String>,
-    ) -> Result<Vec<&'a AgentWithMembership<Arc<dyn Agent>>>> {
+    ) -> Result<super::SelectionResult<'a>> {
         let mut rng = rand::rng();
 
         // Get number of agents to select (default 1)
@@ -37,7 +37,10 @@ impl AgentSelector for RandomSelector {
             .collect();
 
         if available.is_empty() {
-            return Ok(vec![]);
+            return Ok(super::SelectionResult {
+                agents: vec![],
+                selector_response: None,
+            });
         }
 
         // Randomly select up to 'count' agents
@@ -52,7 +55,10 @@ impl AgentSelector for RandomSelector {
             .map(|i| available[i])
             .collect();
 
-        Ok(selected)
+        Ok(super::SelectionResult {
+            agents: selected,
+            selector_response: None,
+        })
     }
 
     fn name(&self) -> &str {
@@ -143,7 +149,7 @@ mod tests {
             .select_agents(&agents, &context, &HashMap::new())
             .await
             .unwrap();
-        assert_eq!(selected.len(), 1);
+        assert_eq!(selected.agents.len(), 1);
 
         // Select multiple
         let mut config = HashMap::new();
@@ -152,7 +158,7 @@ mod tests {
             .select_agents(&agents, &context, &config)
             .await
             .unwrap();
-        assert_eq!(selected.len(), 2);
+        assert_eq!(selected.agents.len(), 2);
 
         // Request more than available
         config.insert("count".to_string(), "10".to_string());
@@ -160,6 +166,6 @@ mod tests {
             .select_agents(&agents, &context, &config)
             .await
             .unwrap();
-        assert_eq!(selected.len(), 3); // Only 3 available
+        assert_eq!(selected.agents.len(), 3); // Only 3 available
     }
 }

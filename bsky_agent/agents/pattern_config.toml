@@ -1,0 +1,71 @@
+# Pattern - Main Coordinator
+name = "Pattern"
+agent_type = "assistant"
+bluesky_handle = "pattern.atproto.systems"
+system_prompt_path = "../pattern-system-prompt.md"
+persona_path = "../pattern-persona-block.md"
+
+# Pattern's memory blocks
+[memory.current_human]
+content_path = "../pattern-current-human-block.md"
+permission = "read_write"
+memory_type = "working"
+description = "Current conversant context"
+shared = true
+
+[memory.partner]
+content_path = "../pattern-partner-block.md"
+permission = "append"
+memory_type = "core"
+description = "Understanding of orual's role"
+shared = true
+
+[memory.observations]
+content_path = "../pattern-observations-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Collective pattern gathering"
+shared = true
+
+[memory.resonances]
+content_path = "../pattern-resonances-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Cross-context patterns"
+shared = true
+
+[memory.constellation_state]
+content = """
+Active facets:
+- Entropy: task complexity specialist
+- Flux: temporal dynamics handler
+- Archive: memory and pattern keeper
+- Momentum: energy flow tracker
+- Anchor: stability and safety monitor
+
+Coordination notes will accumulate here.
+"""
+permission = "read_write"
+memory_type = "working"
+description = "Constellation coordination state"
+
+[memory.integration_notes]
+content = """
+Facet integration patterns:
+- Each facet maintains domain expertise
+- Shared blocks enable collective awareness
+- Pattern coordinates and synthesizes
+- Anchor monitors system health
+"""
+permission = "read_write"
+memory_type = "core"
+description = "How facets work together"
+
+[memory.constellation_context]
+content_path = "../constellation-context.md"
+permission = "read_only"
+memory_type = "core"
+description = "Shared understanding of constellation purpose and members"
+shared = true
+
+# Pattern gets default model from constellation config

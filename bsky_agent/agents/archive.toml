@@ -2,13 +2,13 @@
 
 name = "Archive"
 agent_type = "assistant"
-bluesky_handle = "archive.nonbinary.computer" # Update with actual
+bluesky_handle = "pattern.atproto.systems"   # Update with actual
 persona_path = "../archive-persona-block.md"
 
 # Use a cheaper/faster model for Archive since it's mostly memory management
 [model]
 provider = "Gemini"
-model = "gemini-2.5-flash"
+model = "gemini-2.5-pro"
 temperature = 0.3
 
 # Shared memory blocks
@@ -17,24 +17,35 @@ content_path = "../pattern-current-human-block.md"
 permission = "read_write"
 memory_type = "working"
 description = "Current conversant context"
+shared = true
 
 [memory.partner]
 content_path = "../pattern-partner-block.md"
 permission = "read_write"
 memory_type = "core"
 description = "Understanding of orual's role"
+shared = true
 
 [memory.observations]
 content_path = "../pattern-observations-block.md"
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Collective pattern gathering"
+shared = true
 
 [memory.resonances]
 content_path = "../pattern-resonances-block.md"
 permission = "read_write"
-memory_type = "working"
+memory_type = "core"
 description = "Cross-context patterns"
+shared = true
+
+[memory.constellation_context]
+content_path = "../constellation-context.md"
+permission = "read_only"
+memory_type = "core"
+description = "Shared understanding of constellation purpose and members"
+shared = true
 
 # Domain-specific memory (meta!)
 [memory.domain_memory]
@@ -44,5 +55,5 @@ Patterns observed:
 Memory overflow from other facets:
 """
 permission = "read_write"
-memory_type = "archival" # Of course
+memory_type = "core" # Of course
 description = "Archive's meta-memory"

@@ -4,13 +4,15 @@ use async_trait::async_trait;
 use compact_str::CompactString;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
-use surrealdb::Surreal;
+use surrealdb::{RecordId, Surreal};
 use tokio::sync::RwLock;
 
+use crate::db::DbEntity;
 use crate::id::RelationId;
 use crate::message::{ContentBlock, ContentPart, ImageSource, ToolCall, ToolResponse};
 use crate::tool::builtin::BuiltinTools;
 
+use crate::QueuedMessage;
 use crate::{
     CoreError, MemoryBlock, ModelProvider, Result, UserId,
     agent::{
@@ -18,7 +20,7 @@ use crate::{
         tool_rules::{ToolRule, ToolRuleEngine},
     },
     context::{
-        AgentContext, ContextConfig,
+        AgentContext, CompressionStrategy, ContextConfig,
         heartbeat::{HeartbeatRequest, HeartbeatSender, check_heartbeat_request},
     },
     db::{DatabaseError, ops, schema},
@@ -98,7 +100,7 @@ where
         // Build AgentContext with tools
         let mut context = AgentContext::new(
             agent_id.clone(),
-            name,
+            name.clone(),
             agent_type,
             memory,
             tools,
@@ -110,14 +112,16 @@ where
         context.handle = context.handle.with_db(db.clone());
 
         // Create and wire up message router
-        let router =
-            crate::context::message_router::AgentMessageRouter::new(agent_id.clone(), db.clone());
+        let router = crate::context::message_router::AgentMessageRouter::new(
+            agent_id.clone(),
+            name,
+            db.clone(),
+        );
 
         // Add router to handle - endpoints will be registered by the consumer
         context.handle = context.handle.with_message_router(router);
 
         // Register built-in tools
-        // TODO: Fix tool schema for Gemini compatibility
         let builtin = BuiltinTools::default_for_agent(context.handle());
         builtin.register_all(&context.tools);
 
@@ -148,6 +152,20 @@ where
             })
             .collect()
     }
+    // pub fn create(
+    //     agent_id: AgentId,
+    //     user_id: UserId,
+    //     agent_type: AgentType,
+    //     name: String,
+    //     system_prompt: String,
+    //     memory: Memory,
+    //     db: Surreal<C>,
+    //     model: Arc<RwLock<M>>,
+    //     tools: ToolRegistry,
+    //     embeddings: Option<Arc<E>>,
+    //     heartbeat_sender: HeartbeatSender,
+    // ) -> Arc<Self> {
+    // }
 
     /// Set the heartbeat sender for this agent
     pub fn set_heartbeat_sender(&mut self, sender: HeartbeatSender) {
@@ -317,6 +335,31 @@ where
         Ok(agent)
     }
 
+    /// Update the context configuration of this agent
+    ///
+    /// This method allows updating the context config before the agent is wrapped in Arc.
+    /// It updates both the in-memory config and optionally the compression strategy.
+    pub async fn update_context_config(
+        &self,
+        context_config: ContextConfig,
+        compression_strategy: Option<CompressionStrategy>,
+    ) -> Result<()> {
+        // Update the context config
+        {
+            let mut context = self.context.write().await;
+            context.context_config = context_config;
+        }
+
+        // Update compression strategy if provided
+        if let Some(strategy) = compression_strategy {
+            let context = self.context.read().await;
+            let mut history = context.history.write().await;
+            history.compression_strategy = strategy;
+        }
+
+        Ok(())
+    }
+
     /// Store the current agent state to the database
     pub async fn store(&self) -> Result<()> {
         // Create an AgentRecord from the current state
@@ -330,11 +373,13 @@ where
             )
         };
 
-        let (base_instructions, max_messages) = {
+        let (base_instructions, max_messages, memory_char_limit, enable_thinking) = {
             let context = self.context.read().await;
             (
                 context.context_config.base_instructions.clone(),
                 context.context_config.max_context_messages,
+                context.context_config.memory_char_limit,
+                context.context_config.enable_thinking,
             )
         };
 
@@ -359,6 +404,11 @@ where
                 .map(|rule| crate::config::ToolRuleConfig::from_tool_rule(rule))
                 .collect::<Vec<_>>()
         };
+        // Get the current model_id from chat_options
+        let model_id = {
+            let options = self.chat_options.read().await;
+            options.as_ref().map(|opt| opt.model_info.id.clone())
+        };
 
         let now = chrono::Utc::now();
         let agent_record = crate::agent::AgentRecord {
@@ -366,8 +416,11 @@ where
             name,
             agent_type,
             state,
+            model_id,
             base_instructions,
             max_messages,
+            memory_char_limit,
+            enable_thinking,
             owner_id: self.user_id.clone(),
             tool_rules,
             total_messages,
@@ -535,9 +588,87 @@ where
         };
 
         // Create a weak reference for the spawned task
-        let agent_weak = Arc::downgrade(&self);
+        let agent_clone = Arc::clone(&self);
 
         tokio::spawn(async move {
+            // First, check for any existing unread messages
+            let existing_query = format!(
+                "SELECT * FROM queue_msg WHERE to_agent = $agent AND read = false ORDER BY created_at ASC",
+            );
+
+            let agent_record_id = RecordId::from(agent_id.clone());
+            tracing::info!(
+                "Checking for messages for agent {} (record: {:?})",
+                agent_id,
+                agent_record_id
+            );
+
+            match db
+                .query(existing_query.clone())
+                .bind(("agent", agent_record_id))
+                .await
+            {
+                Ok(mut response) => {
+                    if let Ok(messages) = response
+                        .take::<Vec<<crate::message_queue::QueuedMessage as DbEntity>::DbModel>>(0)
+                    {
+                        let messages: Vec<_> = messages
+                            .into_iter()
+                            .map(|m| {
+                                QueuedMessage::from_db_model(m).expect("should be db model type")
+                            })
+                            .collect();
+                        if !messages.is_empty() {
+                            tracing::info!(
+                                "📬 Agent {} has {} unread messages",
+                                agent_id,
+                                messages.len()
+                            );
+
+                            // Process existing messages
+                            for mut queued_msg in messages {
+                                queued_msg.add_to_call_chain(agent_id.clone());
+
+                                let mut message = if let Some(_from_agent) = &queued_msg.from_agent
+                                {
+                                    Message::agent(queued_msg.content.clone())
+                                } else if let Some(from_user) = &queued_msg.from_user {
+                                    let mut msg = Message::user(queued_msg.content.clone());
+                                    msg.owner_id = Some(from_user.clone());
+                                    msg
+                                } else {
+                                    Message::system(queued_msg.content.clone())
+                                };
+
+                                if queued_msg.metadata
+                                    != serde_json::Value::Object(Default::default())
+                                {
+                                    message.metadata = crate::message::MessageMetadata {
+                                        custom: queued_msg.metadata.clone(),
+                                        ..Default::default()
+                                    };
+                                }
+
+                                // Mark message as read
+                                queued_msg.mark_read();
+                                let _ = queued_msg.store_with_relations(&db).await;
+
+                                // Process the message
+                                if let Err(e) =
+                                    agent_clone.clone().process_message(message.clone()).await
+                                {
+                                    crate::log_error!("Failed to process queued message", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to check for existing messages: {}", e);
+                }
+            }
+
+            // Now subscribe to new messages
             let stream = match crate::db::ops::subscribe_to_agent_messages(&db, &agent_id).await {
                 Ok(stream) => stream,
                 Err(e) => {
@@ -549,52 +680,57 @@ where
             tracing::info!("📬 Agent {} message monitoring started", agent_id);
 
             tokio::pin!(stream);
-            while let Some((action, mut queued_msg)) = stream.next().await {
-                match action {
-                    surrealdb::Action::Create | surrealdb::Action::Update => {
-                        tracing::info!(
-                            "📨 Agent {} received message from {:?}{:?}: {}",
-                            agent_id,
-                            queued_msg.from_agent,
-                            queued_msg.from_user,
-                            queued_msg.content
-                        );
+            loop {
+                if let Some((action, mut queued_msg)) = stream.next().await {
+                    let agent_clone = Arc::clone(&self);
+                    match action {
+                        surrealdb::Action::Create | surrealdb::Action::Update => {
+                            tracing::info!(
+                                "📨 Agent {}({}) received message from {:?}: {}",
+                                agent_clone.name(),
+                                agent_id,
+                                queued_msg.origin,
+                                queued_msg.content
+                            );
 
-                        // Update the call chain to include this agent
-                        queued_msg.add_to_call_chain(agent_id.clone());
+                            // Update the call chain to include this agent
+                            queued_msg.add_to_call_chain(agent_id.clone());
 
-                        // Convert QueuedMessage to Message
-                        let mut message = if let Some(_from_agent) = &queued_msg.from_agent {
-                            // Message from another agent
-                            Message::agent(queued_msg.content.clone())
-                        } else if let Some(from_user) = &queued_msg.from_user {
-                            // Message from a user
-                            let mut msg = Message::user(queued_msg.content.clone());
-                            msg.owner_id = Some(from_user.clone());
-                            msg
-                        } else {
-                            // System message or unknown source
-                            Message::system(queued_msg.content.clone())
-                        };
+                            // Convert QueuedMessage to Message
+                            let mut message = if let Some(_) = &queued_msg.from_agent {
+                                // Message from another agent - use User role but track origin
+                                let content = if let Some(origin) = queued_msg.origin {
+                                    origin.wrap_content(queued_msg.content)
+                                } else {
+                                    queued_msg.content
+                                };
 
-                        // Add metadata if present
-                        if queued_msg.metadata != serde_json::Value::Null {
-                            message.metadata = crate::message::MessageMetadata {
-                                custom: queued_msg.metadata.clone(),
-                                ..Default::default()
+                                Message::user(content)
+                            } else if let Some(from_user) = &queued_msg.from_user {
+                                // Message from a user
+                                let mut msg = Message::user(queued_msg.content.clone());
+                                msg.owner_id = Some(from_user.clone());
+                                msg
+                            } else {
+                                // System message or unknown source
+                                Message::user(queued_msg.content.clone())
                             };
-                        }
 
-                        // Mark message as read immediately to prevent reprocessing
-                        if let Err(e) =
-                            crate::db::ops::mark_message_as_read(&db, &queued_msg.id).await
-                        {
-                            crate::log_error!("Failed to mark message as read", e);
-                        }
+                            // Add metadata if present
+                            if queued_msg.metadata != serde_json::Value::Null {
+                                message.metadata = crate::message::MessageMetadata {
+                                    custom: queued_msg.metadata.clone(),
+                                    ..Default::default()
+                                };
+                            }
 
-                        // Process the message directly
-                        // Try to upgrade the weak reference to process the message
-                        if let Some(agent) = agent_weak.upgrade() {
+                            // Mark message as read immediately to prevent reprocessing
+                            if let Err(e) =
+                                crate::db::ops::mark_message_as_read(&db, &queued_msg.id).await
+                            {
+                                crate::log_error!("Failed to mark message as read", e);
+                            }
+
                             tracing::info!(
                                 "💬 Agent {} processing message from {:?}{:?}",
                                 agent_id,
@@ -603,7 +739,7 @@ where
                             );
 
                             // Call process_message through the Agent trait
-                            match agent.process_message(message).await {
+                            match agent_clone.process_message(message).await {
                                 Ok(response) => {
                                     tracing::debug!(
                                         "✅ Agent {} successfully processed incoming message, response has {} content parts",
@@ -632,19 +768,13 @@ where
                                         agent_id,
                                         e
                                     );
+                                    break;
                                 }
                             }
-                        } else {
-                            tracing::warn!(
-                                "⚠️ Agent {} has been dropped, cannot process incoming message",
-                                agent_id
-                            );
-                            // Exit the monitoring task since the agent is gone
-                            break;
                         }
-                    }
-                    _ => {
-                        tracing::debug!("Ignoring action {:?} for message queue", action);
+                        _ => {
+                            tracing::info!("Ignoring action {:?} for message queue", action);
+                        }
                     }
                 }
             }
@@ -2562,11 +2692,13 @@ where
         &self,
         endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
     ) -> Result<()> {
-        let mut context = self.context.write().await;
-        if let Some(router) = &mut context.handle.message_router {
+        let context = self.context.read().await;
+        if let Some(router) = &context.handle.message_router {
             router.set_default_user_endpoint(endpoint).await;
+            tracing::info!("default endpoint set for {}", self.id());
             Ok(())
         } else {
+            tracing::error!("default endpoint for {} failed to set", self.id());
             Err(crate::CoreError::AgentInitFailed {
                 agent_type: self.agent_type().as_str().to_string(),
                 cause: "Message router not initialized".to_string(),
