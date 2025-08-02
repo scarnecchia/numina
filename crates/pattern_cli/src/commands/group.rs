@@ -521,6 +521,8 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             instructions: None,
             bluesky_handle: None,
             memory: HashMap::new(), // Will be populated from memory blocks
+            tool_rules: Vec::new(),
+            tools: Vec::new(),
             model: None,
         };
 
@@ -578,6 +580,8 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             instructions: None,
             bluesky_handle: None,
             memory: HashMap::new(),
+            tool_rules: Vec::new(),
+            tools: Vec::new(),
             model: None,
         },
         model: ModelConfig::default(),

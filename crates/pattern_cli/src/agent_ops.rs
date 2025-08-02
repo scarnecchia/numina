@@ -535,6 +535,20 @@ pub async fn create_agent(
         response_options.reasoning_effort = Some(genai::chat::ReasoningEffort::Medium);
     }
 
+    // Load tool rules from configuration
+    let tool_rules = config.agent.get_tool_rules().unwrap_or_else(|e| {
+        output.warning(&format!("Failed to load tool rules from config: {}", e));
+        output.status("Agent will run without tool rules");
+        vec![]
+    });
+
+    if !tool_rules.is_empty() {
+        output.success(&format!(
+            "Loaded {} tool rules from configuration",
+            tool_rules.len()
+        ));
+    }
+
     // Create agent
     let agent = DatabaseAgent::new(
         agent_id,
@@ -549,6 +563,7 @@ pub async fn create_agent(
         tools,
         embedding_provider,
         heartbeat_sender,
+        tool_rules,
     );
 
     // Set the chat options with our selected model
@@ -873,81 +888,77 @@ pub async fn chat_with_agent(
     });
 
     loop {
-        tokio::select! {
-            // Handle user input
-            event = rl.readline() => {
-                match event {
-                    Ok(ReadlineEvent::Line(line)) => {
-                        if line.trim().is_empty() {
+        // Handle user input
+        let event = rl.readline().await;
+        match event {
+            Ok(ReadlineEvent::Line(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Check for slash commands
+                if line.trim().starts_with('/') {
+                    match handle_slash_command(&line, &agent, &output).await {
+                        Ok(should_exit) => {
+                            if should_exit {
+                                output.status("Goodbye!");
+                                break;
+                            }
                             continue;
                         }
-
-                        // Check for slash commands
-                        if line.trim().starts_with('/') {
-                            match handle_slash_command(&line, &agent, &output).await {
-                                Ok(should_exit) => {
-                                    if should_exit {
-                                        output.status("Goodbye!");
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                Err(e) => {
-                                    output.error(&format!("Command error: {}", e));
-                                    continue;
-                                }
-                            }
+                        Err(e) => {
+                            output.error(&format!("Command error: {}", e));
+                            continue;
                         }
-
-                        if line.trim() == "quit" || line.trim() == "exit" {
-                            output.status("Goodbye!");
-                            break;
-                        }
-
-                        // Add to history
-                        rl.add_history_entry(line.clone());
-
-                        // Create a message using the actual Message structure
-                        let message = Message {
-                            content: MessageContent::Text(line.clone()),
-                            word_count: line.split_whitespace().count() as u32,
-                            ..Default::default()
-                        };
-
-                        let r_agent = agent.clone();
-                        let output = output.clone();
-                        tokio::spawn(async move {
-                            // Process message with streaming
-                            output.status("Thinking...");
-
-                            use tokio_stream::StreamExt;
-
-                            match r_agent.clone().process_message_stream(message).await {
-                                Ok(mut stream) => {
-
-                                    while let Some(event) = stream.next().await {
-                                        print_response_event(event, &output);
-                                    }
-                                }
-                                Err(e) => {
-                                    output.error(&format!("Error: {}", e));
-                                }
-                            }
-                        });
-                    }
-                    Ok(ReadlineEvent::Interrupted) => {
-                        output.status("CTRL-C");
-                        continue;
-                    }
-                    Ok(ReadlineEvent::Eof) => {
-                        output.status("CTRL-D");
-                        break;
-                    }
-                    Err(err) => {
-                        output.error(&format!("Error: {:?}", err));
-                        break;
                     }
                 }
+
+                if line.trim() == "quit" || line.trim() == "exit" {
+                    output.status("Goodbye!");
+                    break;
+                }
+
+                // Add to history
+                rl.add_history_entry(line.clone());
+
+                // Create a message using the actual Message structure
+                let message = Message {
+                    content: MessageContent::Text(line.clone()),
+                    word_count: line.split_whitespace().count() as u32,
+                    ..Default::default()
+                };
+
+                let r_agent = agent.clone();
+                let output = output.clone();
+                tokio::spawn(async move {
+                    // Process message with streaming
+                    output.status("Thinking...");
+
+                    use tokio_stream::StreamExt;
+
+                    match r_agent.clone().process_message_stream(message).await {
+                        Ok(mut stream) => {
+                            while let Some(event) = stream.next().await {
+                                print_response_event(event, &output);
+                            }
+                        }
+                        Err(e) => {
+                            output.error(&format!("Error: {}", e));
+                        }
+                    }
+                });
+            }
+            Ok(ReadlineEvent::Interrupted) => {
+                output.status("CTRL-C");
+                continue;
+            }
+            Ok(ReadlineEvent::Eof) => {
+                output.status("CTRL-D");
+                break;
+            }
+            Err(err) => {
+                output.error(&format!("Error: {:?}", err));
+                break;
             }
         }
     }
@@ -1059,6 +1070,8 @@ pub async fn load_or_create_agent_from_member(
                 instructions: None,
                 memory: Default::default(),
                 bluesky_handle: None,
+                tool_rules: Vec::new(),
+                tools: Vec::new(),
                 model: None,
             },
             model: pattern_core::config::ModelConfig {
@@ -1198,6 +1211,8 @@ pub async fn load_or_create_agent_from_member(
             instructions: None,
             memory: Default::default(),
             bluesky_handle: None,
+            tool_rules: Vec::new(),
+            tools: Vec::new(),
             model: None,
         },
         model: pattern_core::config::ModelConfig {

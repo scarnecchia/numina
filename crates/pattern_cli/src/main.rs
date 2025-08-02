@@ -141,6 +141,38 @@ enum AgentCommands {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
+    /// Add a workflow rule to an agent
+    AddRule {
+        /// Agent name
+        agent: String,
+        /// Rule type (start-constraint, max-calls, exit-loop, continue-loop, cooldown, requires-preceding). If not provided, interactive mode is used.
+        rule_type: Option<String>,
+        /// Tool name the rule applies to. If not provided, interactive mode is used.
+        tool: Option<String>,
+        /// Optional rule parameters (e.g., max count for max-calls, duration for cooldown)
+        #[arg(short = 'p', long)]
+        params: Option<String>,
+        /// Optional conditions (comma-separated tool names)
+        #[arg(short = 'c', long)]
+        conditions: Option<String>,
+        /// Rule priority (1-10, higher = more important)
+        #[arg(long, default_value = "5")]
+        priority: u8,
+    },
+    /// List workflow rules for an agent
+    ListRules {
+        /// Agent name
+        agent: String,
+    },
+    /// Remove a workflow rule from an agent
+    RemoveRule {
+        /// Agent name
+        agent: String,
+        /// Tool name to remove rules for
+        tool: String,
+        /// Optional rule type to remove (removes all if not specified)
+        rule_type: Option<String>,
+    },
 }
 
 #[cfg(feature = "oauth")]
@@ -337,40 +369,41 @@ enum DebugCommands {
     /// List all archival memories for an agent
     ListArchival {
         /// Agent name
-        #[arg(long)]
         agent: String,
     },
     /// List all core memory blocks for an agent
     ListCore {
         /// Agent name
-        #[arg(long)]
         agent: String,
     },
     /// List all memory blocks for an agent (core + archival)
     ListAllMemory {
         /// Agent name
-        #[arg(long)]
         agent: String,
     },
     /// Search conversation history
     SearchConversations {
-        /// Agent name to search as
-        #[arg(long)]
+        /// Agent name to search conversations for
         agent: String,
-        /// Optional search query for message content
+        /// Search query (optional)
         query: Option<String>,
-        /// Filter by role (system, user, assistant, tool)
+        /// Filter by role (user, assistant, system, tool)
         #[arg(long)]
         role: Option<String>,
-        /// Start time (ISO 8601, e.g., 2024-01-20T00:00:00Z)
+        /// Start time filter (ISO 8601 format)
         #[arg(long)]
         start_time: Option<String>,
-        /// End time (ISO 8601, e.g., 2024-01-20T23:59:59Z)
+        /// End time filter (ISO 8601 format)
         #[arg(long)]
         end_time: Option<String>,
         /// Maximum number of results
         #[arg(long, default_value = "20")]
         limit: usize,
+    },
+    /// Show the current context that would be passed to the LLM
+    ShowContext {
+        /// Agent name
+        agent: String,
     },
 }
 
@@ -581,6 +614,32 @@ async fn main() -> Result<()> {
             AgentCommands::Export { name, output } => {
                 commands::agent::export(name, output.as_deref()).await?
             }
+            AgentCommands::AddRule {
+                agent,
+                rule_type,
+                tool,
+                params,
+                conditions,
+                priority,
+            } => {
+                let rule_type_str = rule_type.as_deref().unwrap_or("");
+                let tool_str = tool.as_deref().unwrap_or("");
+                commands::agent::add_rule(
+                    agent,
+                    rule_type_str,
+                    tool_str,
+                    params.as_deref(),
+                    conditions.as_deref(),
+                    *priority,
+                )
+                .await?
+            }
+            AgentCommands::ListRules { agent } => commands::agent::list_rules(agent).await?,
+            AgentCommands::RemoveRule {
+                agent,
+                tool,
+                rule_type,
+            } => commands::agent::remove_rule(agent, tool, rule_type.as_deref()).await?,
         },
         Commands::Db { cmd } => match cmd {
             DbCommands::Stats => commands::db::stats(&config).await?,
@@ -620,6 +679,9 @@ async fn main() -> Result<()> {
                     *limit,
                 )
                 .await?;
+            }
+            DebugCommands::ShowContext { agent } => {
+                commands::debug::show_context(&agent).await?;
             }
         },
         Commands::Config { cmd } => match cmd {

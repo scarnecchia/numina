@@ -13,7 +13,10 @@ use crate::tool::builtin::BuiltinTools;
 
 use crate::{
     CoreError, MemoryBlock, ModelProvider, Result, UserId,
-    agent::{Agent, AgentMemoryRelation, AgentState, AgentType},
+    agent::{
+        Agent, AgentMemoryRelation, AgentState, AgentType,
+        tool_rules::{ToolRule, ToolRuleEngine},
+    },
     context::{
         AgentContext, ContextConfig,
         heartbeat::{HeartbeatRequest, HeartbeatSender, check_heartbeat_request},
@@ -54,6 +57,9 @@ where
 
     /// Channel for sending heartbeat requests
     pub heartbeat_sender: HeartbeatSender,
+
+    /// Tool execution rules for this agent
+    tool_rules: Arc<RwLock<crate::agent::tool_rules::ToolRuleEngine>>,
 }
 
 impl<C, M, E> DatabaseAgent<C, M, E>
@@ -79,6 +85,7 @@ where
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
         heartbeat_sender: HeartbeatSender,
+        tool_rules: Vec<ToolRule>,
     ) -> Self {
         let context_config = if !system_prompt.is_empty() {
             ContextConfig {
@@ -117,12 +124,29 @@ where
         Self {
             user_id,
             context: Arc::new(RwLock::new(context)),
-            chat_options: Arc::new(RwLock::const_new(None)),
+            model,
+            chat_options: Arc::new(RwLock::new(None)),
             db,
             embeddings,
-            model,
             heartbeat_sender,
+            tool_rules: Arc::new(RwLock::new(ToolRuleEngine::new(tool_rules))),
         }
+    }
+
+    /// Get tool rules from the rule engine as context-compatible format
+    async fn get_context_tool_rules(&self) -> Vec<crate::context::ToolRule> {
+        let rule_engine = self.tool_rules.read().await;
+        let descriptions = rule_engine.to_usage_descriptions();
+
+        // Convert to context::ToolRule format
+        descriptions
+            .into_iter()
+            .enumerate()
+            .map(|(i, description)| crate::context::ToolRule {
+                tool_name: format!("rule_{}", i), // Generic name since these are mixed rules
+                rule: description,
+            })
+            .collect()
     }
 
     /// Set the heartbeat sender for this agent
@@ -183,6 +207,38 @@ where
         // Build the context config from the record
         let context_config = record.to_context_config();
 
+        // Load tool rules from database record (with config fallback)
+        let tool_rules = if !record.tool_rules.is_empty() {
+            // Use rules from database
+            record
+                .tool_rules
+                .iter()
+                .map(|config_rule| config_rule.to_tool_rule())
+                .collect::<Result<Vec<_>>>()
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to convert tool rules from database: {}", e);
+                    Vec::new()
+                })
+        } else {
+            // Fallback to configuration file for backward compatibility
+            match crate::config::PatternConfig::load().await {
+                Ok(config) => config
+                    .get_agent_tool_rules(&record.name)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "Failed to load tool rules for agent {}: {}",
+                            record.name,
+                            e
+                        );
+                        Vec::new()
+                    }),
+                Err(e) => {
+                    tracing::warn!("Failed to load configuration for tool rules: {}", e);
+                    Vec::new()
+                }
+            }
+        };
+
         // Create the agent with the loaded configuration
         let agent = Self::new(
             record.id.clone(),
@@ -196,6 +252,7 @@ where
             tools,
             embeddings,
             heartbeat_sender,
+            tool_rules,
         );
 
         // Restore the agent state
@@ -293,6 +350,16 @@ where
             )
         };
 
+        // Get current tool rules from the rule engine
+        let tool_rules = {
+            let rule_engine = self.tool_rules.read().await;
+            rule_engine
+                .get_rules()
+                .iter()
+                .map(|rule| crate::config::ToolRuleConfig::from_tool_rule(rule))
+                .collect::<Vec<_>>()
+        };
+
         let now = chrono::Utc::now();
         let agent_record = crate::agent::AgentRecord {
             id: agent_id,
@@ -302,6 +369,7 @@ where
             base_instructions,
             max_messages,
             owner_id: self.user_id.clone(),
+            tool_rules,
             total_messages,
             total_tool_calls,
             context_rebuilds,
@@ -949,6 +1017,160 @@ where
         Ok(())
     }
 
+    /// Execute tool calls with rule validation and state tracking
+    async fn execute_tools_with_rules(
+        &self,
+        calls: &[crate::message::ToolCall],
+        agent_id: &AgentId,
+    ) -> Result<Vec<ToolResponse>> {
+        let mut responses = Vec::new();
+
+        // Get current rule engine state
+        let mut rule_engine = self.tool_rules.write().await;
+
+        for call in calls {
+            // Check if tool can be executed according to rules
+            match rule_engine.can_execute_tool(&call.fn_name) {
+                Ok(_) => {
+                    // Tool can be executed - proceed
+                    tracing::debug!("✅ Tool {} passed rule validation", call.fn_name);
+                }
+                Err(violation) => {
+                    // Rule violation - create error response
+                    tracing::warn!(
+                        "❌ Tool {} failed rule validation: {:?}",
+                        call.fn_name,
+                        violation
+                    );
+                    let error_response = ToolResponse {
+                        call_id: call.call_id.clone(),
+                        content: format!("Tool rule violation: {}", violation),
+                    };
+                    responses.push(error_response);
+                    continue;
+                }
+            }
+
+            // Check if tool requires heartbeat (optimization)
+            let needs_heartbeat = rule_engine.requires_heartbeat(&call.fn_name);
+
+            if needs_heartbeat && check_heartbeat_request(&call.fn_arguments) {
+                tracing::debug!(
+                    "💓 Heartbeat requested by tool {} (call_id: {})",
+                    call.fn_name,
+                    call.call_id
+                );
+
+                let heartbeat_req = HeartbeatRequest {
+                    agent_id: agent_id.clone(),
+                    tool_name: call.fn_name.clone(),
+                    tool_call_id: call.call_id.clone(),
+                };
+
+                // Try to send, but don't block if the channel is full
+                match self.heartbeat_sender.try_send(heartbeat_req) {
+                    Ok(()) => {
+                        tracing::debug!("✅ Heartbeat request sent");
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️ Failed to send heartbeat request: {}", e);
+                    }
+                }
+            }
+
+            // Execute tool using the context method
+            let ctx = self.context.read().await;
+            let tool_response = ctx.process_tool_call(&call).await.unwrap_or_else(|e| {
+                Some(ToolResponse {
+                    call_id: call.call_id.clone(),
+                    content: format!("Error executing tool: {}", e),
+                })
+            });
+
+            if let Some(tool_response) = tool_response {
+                // Record successful execution in rule engine
+                let execution_success = !tool_response.content.starts_with("Error:");
+                let execution = crate::agent::tool_rules::ToolExecution {
+                    tool_name: call.fn_name.clone(),
+                    call_id: call.call_id.clone(),
+                    timestamp: std::time::Instant::now(),
+                    success: execution_success,
+                    metadata: None,
+                };
+                rule_engine.record_execution(execution);
+
+                responses.push(tool_response);
+
+                // Check if we should exit after this tool
+                if rule_engine.should_exit_loop() {
+                    tracing::info!("🛑 Tool {} triggered exit loop rule", call.fn_name);
+                    break;
+                }
+            }
+        }
+
+        Ok(responses)
+    }
+
+    /// Execute start constraint tools if any are required
+    async fn execute_start_constraint_tools(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Vec<ToolResponse>> {
+        let rule_engine = self.tool_rules.read().await;
+        let start_tools = rule_engine.get_start_constraint_tools();
+
+        if start_tools.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        tracing::info!("🎯 Executing {} start constraint tools", start_tools.len());
+
+        // Create tool calls for start constraint tools
+        let start_calls: Vec<crate::message::ToolCall> = start_tools
+            .into_iter()
+            .map(|tool_name| crate::message::ToolCall {
+                call_id: format!("start_{}", uuid::Uuid::new_v4().simple()),
+                fn_name: tool_name,
+                fn_arguments: serde_json::json!({}), // Empty args for start tools
+            })
+            .collect();
+
+        // Drop the read lock before calling execute_tools_with_rules
+        drop(rule_engine);
+
+        // Execute the start tools
+        self.execute_tools_with_rules(&start_calls, agent_id).await
+    }
+
+    /// Execute required exit tools if any are needed
+    async fn execute_required_exit_tools(&self, agent_id: &AgentId) -> Result<Vec<ToolResponse>> {
+        let rule_engine = self.tool_rules.read().await;
+        let exit_tools = rule_engine.get_required_before_exit_tools();
+
+        if exit_tools.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        tracing::info!("🏁 Executing {} required exit tools", exit_tools.len());
+
+        // Create tool calls for exit tools
+        let exit_calls: Vec<crate::message::ToolCall> = exit_tools
+            .into_iter()
+            .map(|tool_name| crate::message::ToolCall {
+                call_id: format!("exit_{}", uuid::Uuid::new_v4().simple()),
+                fn_name: tool_name,
+                fn_arguments: serde_json::json!({}), // Empty args for exit tools
+            })
+            .collect();
+
+        // Drop the read lock before calling execute_tools_with_rules
+        drop(rule_engine);
+
+        // Execute the exit tools
+        self.execute_tools_with_rules(&exit_calls, agent_id).await
+    }
+
     /// Process a message and stream responses as they happen
     pub async fn process_message_stream(
         self: Arc<Self>,
@@ -996,6 +1218,13 @@ where
                 ctx.add_message(message).await;
             }
 
+            // Add tool rules from rule engine to context before building
+            {
+                let tool_rules = self.get_context_tool_rules().await;
+                let mut ctx = context.write().await;
+                ctx.add_tool_rules(tool_rules);
+            }
+
             // Build memory context
             let memory_context = match context.read().await.build_context().await {
                 Ok(ctx) => ctx,
@@ -1008,6 +1237,32 @@ where
                     return;
                 }
             };
+
+            // Execute start constraint tools if any are required
+            match self_clone.execute_start_constraint_tools(&agent_id).await {
+                Ok(start_responses) => {
+                    if !start_responses.is_empty() {
+                        tracing::info!(
+                            "✅ Executed {} start constraint tools",
+                            start_responses.len()
+                        );
+                        // Emit events for start constraint tool execution
+                        send_event(ResponseEvent::ToolResponses {
+                            responses: start_responses,
+                        })
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to execute start constraint tools: {}", e);
+                    send_event(ResponseEvent::Error {
+                        message: format!("Start constraint tools failed: {}", e),
+                        recoverable: false,
+                    })
+                    .await;
+                    return;
+                }
+            }
 
             // Create request
             let request = Request {
@@ -1088,15 +1343,13 @@ where
                                         processed_response.content.push(next_content.clone());
                                     }
                                 } else {
-                                    // We need to add our executed tool responses
-                                    let mut our_responses = Vec::new();
-
                                     if !calls.is_empty() {
                                         send_event(ResponseEvent::ToolCalls {
                                             calls: calls.clone(),
                                         })
                                         .await;
-                                        // Collect responses matching these tool calls
+
+                                        // Send individual tool call started events
                                         for call in calls {
                                             send_event(ResponseEvent::ToolCallStarted {
                                                 call_id: call.call_id.clone(),
@@ -1104,75 +1357,68 @@ where
                                                 args: call.fn_arguments.clone(),
                                             })
                                             .await;
-                                            if check_heartbeat_request(&call.fn_arguments) {
-                                                tracing::debug!(
-                                                    "💓 Heartbeat requested by tool {} (call_id: {})",
-                                                    call.fn_name,
-                                                    call.call_id
-                                                );
+                                        }
 
-                                                let heartbeat_req = HeartbeatRequest {
-                                                    agent_id: agent_id.clone(),
-                                                    tool_name: call.fn_name.clone(),
-                                                    tool_call_id: call.call_id.clone(),
-                                                };
+                                        // Execute tools with rule validation
+                                        match self_clone
+                                            .execute_tools_with_rules(calls, &agent_id)
+                                            .await
+                                        {
+                                            Ok(our_responses) => {
+                                                // Send completion events for each response
+                                                for response in &our_responses {
+                                                    let tool_result =
+                                                        if response.content.starts_with("Error:")
+                                                            || response
+                                                                .content
+                                                                .contains("rule violation")
+                                                        {
+                                                            Err(response.content.clone())
+                                                        } else {
+                                                            Ok(response.content.clone())
+                                                        };
 
-                                                // Try to send, but don't block if the channel is full
-                                                match self.heartbeat_sender.try_send(heartbeat_req)
-                                                {
-                                                    Ok(()) => {
-                                                        tracing::debug!(
-                                                            "✅ Heartbeat request sent"
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(
-                                                            "⚠️ Failed to send heartbeat request: {}",
-                                                            e
-                                                        );
-                                                    }
+                                                    send_event(ResponseEvent::ToolCallCompleted {
+                                                        call_id: response.call_id.clone(),
+                                                        result: tool_result,
+                                                    })
+                                                    .await;
+                                                }
+
+                                                // Add responses to processed response
+                                                if !our_responses.is_empty() {
+                                                    processed_response.content.push(
+                                                        MessageContent::ToolResponses(
+                                                            our_responses,
+                                                        ),
+                                                    );
                                                 }
                                             }
-
-                                            // Execute tool using the context method
-                                            let ctx = context.read().await;
-                                            let tool_response = ctx
-                                                .process_tool_call(&call)
-                                                .await
-                                                .unwrap_or_else(|e| {
-                                                    Some(ToolResponse {
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to execute tools with rules: {}",
+                                                    e
+                                                );
+                                                // Create error responses for all calls
+                                                let error_responses: Vec<ToolResponse> = calls
+                                                    .iter()
+                                                    .map(|call| ToolResponse {
                                                         call_id: call.call_id.clone(),
                                                         content: format!(
-                                                            "Error executing tool: {}",
+                                                            "Tool execution failed: {}",
                                                             e
                                                         ),
                                                     })
-                                                });
-                                            if let Some(tool_response) = tool_response {
-                                                let tool_result = if tool_response
-                                                    .content
-                                                    .starts_with("Error:")
-                                                {
-                                                    Err(tool_response.content.clone())
-                                                } else {
-                                                    Ok(tool_response.content.clone())
-                                                };
+                                                    .collect();
 
-                                                send_event(ResponseEvent::ToolCallCompleted {
-                                                    call_id: call.call_id.clone(),
-                                                    result: tool_result,
-                                                })
-                                                .await;
-
-                                                our_responses.push(tool_response);
+                                                if !error_responses.is_empty() {
+                                                    processed_response.content.push(
+                                                        MessageContent::ToolResponses(
+                                                            error_responses,
+                                                        ),
+                                                    );
+                                                }
                                             }
-                                        }
-                                        // Emit tool responses event but don't add to assistant message
-                                        // Tool responses should be in a separate message with role Tool
-                                        if !our_responses.is_empty() {
-                                            processed_response
-                                                .content
-                                                .push(MessageContent::ToolResponses(our_responses));
                                         }
                                     }
                                 }
@@ -1352,6 +1598,13 @@ where
                     // Only continue if there are unpaired tool calls that need responses
                     if !has_unpaired_tool_calls {
                         break;
+                    }
+
+                    // Add tool rules from rule engine before rebuilding
+                    {
+                        let tool_rules = self.get_context_tool_rules().await;
+                        let mut ctx = context.write().await;
+                        ctx.add_tool_rules(tool_rules);
                     }
 
                     // Get next response
@@ -1540,6 +1793,28 @@ where
             let stats = context.read().await.get_stats().await;
             let _ = crate::db::ops::update_agent_stats(&db, agent_id.clone(), &stats).await;
 
+            // Execute required exit tools before completing
+            match self_clone.execute_required_exit_tools(&agent_id).await {
+                Ok(exit_responses) => {
+                    if !exit_responses.is_empty() {
+                        tracing::info!("✅ Executed {} required exit tools", exit_responses.len());
+                        // Emit events for exit tool execution
+                        send_event(ResponseEvent::ToolResponses {
+                            responses: exit_responses,
+                        })
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to execute required exit tools: {}", e);
+                    send_event(ResponseEvent::Error {
+                        message: format!("Required exit tools failed: {}", e),
+                        recoverable: true, // Don't fail the whole conversation
+                    })
+                    .await;
+                }
+            }
+
             // Reset state
             {
                 let mut ctx = context.write().await;
@@ -1555,6 +1830,322 @@ where
         });
 
         Ok(ReceiverStream::new(rx))
+    }
+}
+
+#[cfg(test)]
+mod tool_rules_integration_tests {
+    use crate::agent::tool_rules::ToolRule;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_tool_rules_initialization() {
+        // Create tool rules for testing
+        let tool_rules = vec![
+            // Start constraint - context tool must be called first
+            ToolRule::start_constraint("context".to_string()),
+            // Continue loop - search tool doesn't need heartbeat
+            ToolRule::continue_loop("search".to_string()),
+            // Exit loop - send_message should end conversation
+            ToolRule::exit_loop("send_message".to_string()),
+            // Required before exit - recall should be called before ending
+            ToolRule::required_before_exit("recall".to_string()),
+            // Max calls - limit search to 3 calls
+            ToolRule::max_calls("search".to_string(), 3),
+            // Cooldown - wait 1 second between recall calls
+            ToolRule::cooldown("recall".to_string(), Duration::from_secs(1)),
+        ];
+
+        // Create rule engine and test basic functionality
+        let rule_engine = crate::agent::tool_rules::ToolRuleEngine::new(tool_rules);
+
+        // Test heartbeat requirements
+        assert!(!rule_engine.requires_heartbeat("search")); // ContinueLoop rule
+        assert!(rule_engine.requires_heartbeat("recall")); // No rule, default behavior
+
+        // Test start constraint tools
+        let start_tools = rule_engine.get_start_constraint_tools();
+        assert_eq!(start_tools, vec!["context"]);
+
+        // Test required exit tools
+        let exit_tools = rule_engine.get_required_before_exit_tools();
+        assert_eq!(exit_tools, vec!["recall"]);
+
+        println!("✅ Tool rules initialization test passed");
+    }
+
+    #[tokio::test]
+    async fn test_rule_validation_logic() {
+        let tool_rules = vec![
+            ToolRule::max_calls("limited_tool".to_string(), 2),
+            ToolRule::cooldown("slow_tool".to_string(), Duration::from_millis(100)),
+        ];
+
+        let mut rule_engine = crate::agent::tool_rules::ToolRuleEngine::new(tool_rules);
+
+        // Test max calls enforcement
+        assert!(rule_engine.can_execute_tool("limited_tool").is_ok());
+
+        // Record first execution
+        rule_engine.record_execution(crate::agent::tool_rules::ToolExecution {
+            tool_name: "limited_tool".to_string(),
+            call_id: "call_1".to_string(),
+            timestamp: std::time::Instant::now(),
+            success: true,
+            metadata: None,
+        });
+
+        // Should still allow second call
+        assert!(rule_engine.can_execute_tool("limited_tool").is_ok());
+
+        // Record second execution
+        rule_engine.record_execution(crate::agent::tool_rules::ToolExecution {
+            tool_name: "limited_tool".to_string(),
+            call_id: "call_2".to_string(),
+            timestamp: std::time::Instant::now(),
+            success: true,
+            metadata: None,
+        });
+
+        // Should reject third call (max calls exceeded)
+        assert!(rule_engine.can_execute_tool("limited_tool").is_err());
+
+        println!("✅ Rule validation logic test passed");
+    }
+}
+
+/// Builder for creating DatabaseAgent instances with fluent configuration
+pub struct DatabaseAgentBuilder<C, M, E>
+where
+    C: surrealdb::Connection + Clone,
+{
+    agent_id: Option<AgentId>,
+    user_id: Option<UserId>,
+    agent_type: Option<AgentType>,
+    name: Option<String>,
+    system_prompt: Option<String>,
+    memory: Option<Memory>,
+    db: Option<Surreal<C>>,
+    model: Option<Arc<RwLock<M>>>,
+    tools: Option<ToolRegistry>,
+    embeddings: Option<Arc<E>>,
+    heartbeat_sender: Option<HeartbeatSender>,
+    tool_rules: Vec<ToolRule>,
+}
+
+impl<C, M, E> DatabaseAgentBuilder<C, M, E>
+where
+    C: surrealdb::Connection + Clone + std::fmt::Debug,
+    M: ModelProvider + 'static,
+    E: EmbeddingProvider + 'static,
+{
+    /// Create a new builder
+    pub fn new() -> Self {
+        Self {
+            agent_id: None,
+            user_id: None,
+            agent_type: None,
+            name: None,
+            system_prompt: None,
+            memory: None,
+            db: None,
+            model: None,
+            tools: None,
+            embeddings: None,
+            heartbeat_sender: None,
+            tool_rules: Vec::new(),
+        }
+    }
+
+    /// Set the agent ID
+    pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    /// Set the user ID
+    pub fn with_user_id(mut self, user_id: UserId) -> Self {
+        self.user_id = Some(user_id);
+        self
+    }
+
+    /// Set the agent type
+    pub fn with_agent_type(mut self, agent_type: AgentType) -> Self {
+        self.agent_type = Some(agent_type);
+        self
+    }
+
+    /// Set the agent name
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Set the system prompt
+    pub fn with_system_prompt(mut self, system_prompt: String) -> Self {
+        self.system_prompt = Some(system_prompt);
+        self
+    }
+
+    /// Set the memory
+    pub fn with_memory(mut self, memory: Memory) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Set the database connection
+    pub fn with_db(mut self, db: Surreal<C>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// Set the model provider
+    pub fn with_model(mut self, model: Arc<RwLock<M>>) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Set the tool registry
+    pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Set the embedding provider
+    pub fn with_embeddings(mut self, embeddings: Arc<E>) -> Self {
+        self.embeddings = Some(embeddings);
+        self
+    }
+
+    /// Set the heartbeat sender
+    pub fn with_heartbeat_sender(mut self, heartbeat_sender: HeartbeatSender) -> Self {
+        self.heartbeat_sender = Some(heartbeat_sender);
+        self
+    }
+
+    /// Add a single tool rule
+    pub fn with_tool_rule(mut self, rule: ToolRule) -> Self {
+        self.tool_rules.push(rule);
+        self
+    }
+
+    /// Add multiple tool rules
+    pub fn with_tool_rules(mut self, rules: Vec<ToolRule>) -> Self {
+        self.tool_rules.extend(rules);
+        self
+    }
+
+    /// Load tool rules from configuration for the specified agent name
+    pub async fn with_tool_rules_from_config(mut self, agent_name: &str) -> Result<Self> {
+        let config = crate::config::PatternConfig::load().await?;
+        let rules = config.get_agent_tool_rules(agent_name)?;
+        self.tool_rules.extend(rules);
+        Ok(self)
+    }
+
+    /// Add common tool rules for performance optimization
+    pub fn with_performance_rules(mut self) -> Self {
+        use crate::agent::tool_rules::ToolRule;
+
+        // Add common fast tools that don't need heartbeats
+        let fast_tools = vec![
+            "search",
+            "context",
+            "recall",
+            "calculate",
+            "format_text",
+            "validate_json",
+        ];
+
+        for tool in fast_tools {
+            self.tool_rules
+                .push(ToolRule::continue_loop(tool.to_string()));
+        }
+
+        self
+    }
+
+    /// Add common ETL workflow rules
+    pub fn with_etl_rules(mut self) -> Self {
+        use crate::agent::tool_rules::ToolRule;
+        use std::time::Duration;
+
+        self.tool_rules.extend(vec![
+            ToolRule::start_constraint("connect_database".to_string()),
+            ToolRule::requires_preceding_tools(
+                "validate_data".to_string(),
+                vec!["extract_data".to_string()],
+            ),
+            ToolRule::requires_preceding_tools(
+                "transform_data".to_string(),
+                vec!["validate_data".to_string()],
+            ),
+            ToolRule::exit_loop("load_to_warehouse".to_string()),
+            ToolRule::required_before_exit("close_connections".to_string()),
+            ToolRule::max_calls("api_request".to_string(), 10),
+            ToolRule::cooldown("heavy_compute".to_string(), Duration::from_secs(2)),
+        ]);
+
+        self
+    }
+
+    /// Build the DatabaseAgent
+    pub fn build(self) -> Result<DatabaseAgent<C, M, E>> {
+        let agent_id = self.agent_id.unwrap_or_else(AgentId::generate);
+        let user_id = self
+            .user_id
+            .ok_or_else(|| crate::CoreError::AgentInitFailed {
+                agent_type: "DatabaseAgent".to_string(),
+                cause: "user_id is required".to_string(),
+            })?;
+        let agent_type = self.agent_type.unwrap_or(AgentType::Generic);
+        let name = self.name.unwrap_or_else(|| "Agent".to_string());
+        let system_prompt = self.system_prompt.unwrap_or_default();
+        let memory = self.memory.unwrap_or_else(|| Memory::with_owner(&user_id));
+        let db = self.db.ok_or_else(|| crate::CoreError::AgentInitFailed {
+            agent_type: "DatabaseAgent".to_string(),
+            cause: "database connection is required".to_string(),
+        })?;
+        let model = self
+            .model
+            .ok_or_else(|| crate::CoreError::AgentInitFailed {
+                agent_type: "DatabaseAgent".to_string(),
+                cause: "model provider is required".to_string(),
+            })?;
+        let tools = self.tools.unwrap_or_else(ToolRegistry::new);
+        let heartbeat_sender =
+            self.heartbeat_sender
+                .ok_or_else(|| crate::CoreError::AgentInitFailed {
+                    agent_type: "DatabaseAgent".to_string(),
+                    cause: "heartbeat sender is required".to_string(),
+                })?;
+
+        Ok(DatabaseAgent::new(
+            agent_id,
+            user_id,
+            agent_type,
+            name,
+            system_prompt,
+            memory,
+            db,
+            model,
+            tools,
+            self.embeddings,
+            heartbeat_sender,
+            self.tool_rules,
+        ))
+    }
+}
+
+impl<C, M, E> DatabaseAgent<C, M, E>
+where
+    C: surrealdb::Connection + Clone + std::fmt::Debug,
+    M: ModelProvider + 'static,
+    E: EmbeddingProvider + 'static,
+{
+    /// Create a new builder for this agent type
+    pub fn builder() -> DatabaseAgentBuilder<C, M, E> {
+        DatabaseAgentBuilder::new()
     }
 }
 
@@ -1881,6 +2472,13 @@ where
     }
 
     async fn system_prompt(&self) -> Vec<String> {
+        // Add workflow rules from the rule engine before building context
+        {
+            let tool_rules = self.get_context_tool_rules().await;
+            let mut ctx = self.context.write().await;
+            ctx.add_tool_rules(tool_rules);
+        }
+
         let context = self.context.read().await;
         match context.build_context().await {
             Ok(memory_context) => {

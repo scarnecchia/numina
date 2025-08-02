@@ -64,6 +64,10 @@ pub struct AgentRecord {
     #[entity(db_type = "object")]
     pub compression_strategy: CompressionStrategy,
 
+    // Tool execution rules for this agent (serialized as JSON)
+    #[serde(default)]
+    pub tool_rules: Vec<crate::config::ToolRuleConfig>,
+
     // Runtime statistics
     pub total_messages: usize,
     pub total_tool_calls: usize,
@@ -118,6 +122,7 @@ impl Default for AgentRecord {
             max_message_age_hours: 24,
             compression_threshold: 30,
             compression_strategy: CompressionStrategy::Truncate { keep_recent: 20 },
+            tool_rules: Vec::new(),
             total_messages: 0,
             total_tool_calls: 0,
             context_rebuilds: 0,
@@ -444,6 +449,7 @@ impl AgentRecord {
             max_message_age_hours: 24, // TODO: Make configurable
             compression_threshold: 30, // TODO: Make configurable
             compression_strategy: CompressionStrategy::Truncate { keep_recent: 20 }, // TODO: Make configurable
+            tool_rules: Vec::new(), // TODO: Get from agent's tool rule engine
             // Stats would need to be exposed through the Agent trait or stored externally
             total_messages: 0,
             total_tool_calls: 0,

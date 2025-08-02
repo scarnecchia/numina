@@ -141,6 +141,7 @@ mod tests {
             tools.clone(),
             None::<Arc<MockEmbeddingProvider>>,
             heartbeat_sender.clone(),
+            vec![], // Empty tool rules for now
         );
 
         let _entropy = DatabaseAgent::new(
@@ -148,13 +149,14 @@ mod tests {
             user.id.clone(),
             AgentType::Custom("entropy".to_string()),
             "Entropy".to_string(),
-            "I am Entropy, task specialist".to_string(),
+            "I am Entropy, the chaos agent".to_string(),
             Memory::with_owner(&user.id),
             db.clone(),
             model.clone(),
             tools.clone(),
             None::<Arc<MockEmbeddingProvider>>,
-            heartbeat_sender.clone(),
+            heartbeat_sender,
+            vec![], // Empty tool rules for now
         );
 
         // Create a shared memory block
@@ -262,13 +264,14 @@ mod tests {
             user.id.clone(),
             AgentType::Generic,
             "TestAgent".to_string(),
-            "Test agent".to_string(),
+            "I am a test agent".to_string(),
             Memory::with_owner(&user.id),
             db.clone(),
             model,
             tools,
             None::<Arc<MockEmbeddingProvider>>,
             heartbeat_sender,
+            vec![], // Empty tool rules for now
         );
 
         // Create and attach some memory blocks
@@ -454,14 +457,15 @@ mod tests {
             agent_id,
             user.id.clone(),
             AgentType::Generic,
-            "TestAgent".to_string(),
-            "Test agent".to_string(),
+            "StateTestAgent".to_string(),
+            "I am a state test agent".to_string(),
             Memory::with_owner(&user.id),
             db.clone(),
             model,
             tools,
             None::<Arc<MockEmbeddingProvider>>,
             heartbeat_sender,
+            vec![], // Empty tool rules for now
         );
 
         // Check initial state
