@@ -6,16 +6,17 @@ use pattern_core::{
     config::PatternConfig,
     context::{heartbeat, message_router::BlueskyEndpoint},
     coordination::groups::{AgentGroup, GroupManager, GroupResponseEvent},
+    data_source::{BlueskyFilter, DataSourceBuilder},
     db::{
         client::DB,
         ops::{self, atproto::get_user_atproto_identities},
     },
-    embeddings::cloud::OpenAIEmbedder,
+    embeddings::{EmbeddingProvider, cloud::OpenAIEmbedder},
     id::{AgentId, RelationId},
     memory::{Memory, MemoryBlock},
     message::{Message, MessageContent},
     model::{GenAiClient, ResponseOptions},
-    tool::ToolRegistry,
+    tool::{ToolRegistry, builtin::DataSourceTool},
 };
 use std::sync::Arc;
 use surrealdb::RecordId;
@@ -415,7 +416,7 @@ pub async fn create_agent_from_record(
         record,
         DB.clone(),
         model_provider,
-        tools,
+        tools.clone(),
         embedding_provider.clone(),
         heartbeat_sender,
     )
@@ -433,10 +434,115 @@ pub async fn create_agent_from_record(
     agent.clone().start_memory_sync().await?;
     agent.clone().start_message_monitoring().await?;
 
+    // Register data sources
+    register_data_sources(agent.clone(), config, tools, embedding_provider).await;
+
     // Convert to trait object for endpoint setup
     let agent_dyn: Arc<dyn Agent> = agent;
 
+    // Set up Bluesky endpoint if configured
+    let output = Output::new();
+    setup_bluesky_endpoint(&agent_dyn, config, &output)
+        .await
+        .inspect_err(|e| {
+            tracing::error!("Failed to setup Bluesky endpoint: {:?}", e);
+        })?;
+
     Ok(agent_dyn)
+}
+
+pub async fn register_data_sources<M, E>(
+    agent: Arc<DatabaseAgent<surrealdb::engine::any::Any, M, E>>,
+    config: &PatternConfig,
+    tools: ToolRegistry,
+    embedding_provider: Option<Arc<E>>,
+) where
+    E: EmbeddingProvider + Clone + 'static,
+    M: ModelProvider + 'static,
+{
+    let config = config.clone();
+
+    // hardcoding so that only pattern gets messages initially
+    if agent.name() == "Pattern" {
+        tokio::spawn(async move {
+            let mut data_sources = DataSourceBuilder::new()
+                .with_bluesky_source(
+                    "bluesky_jetstream".to_string(),
+                    config
+                        .bluesky
+                        .as_ref()
+                        .map(|b| b.default_filters.first().unwrap())
+                        .unwrap_or(&BlueskyFilter {
+                            nsids: vec!["app.bsky.feed.post".to_string()],
+                            dids: vec![
+                                "did:plc:yfvwmnlztr4dwkb7hwz55r2g".to_string(),
+                                "did:plc:mdjhvva6vlrswsj26cftjttd".to_string(),
+                                "did:plc:mdjhvva6vlrswsj26cftjttd".to_string(),
+                                "did:plc:jqnuubqvyurc3n3km2puzpfx".to_string(),
+                                "did:plc:vw4e7blkwzdokanwp24k3igr".to_string(),
+                                "did:plc:i7ayw57idpkvkyzktdpmtgm7".to_string(),
+                            ],
+                            keywords: vec![],
+                            languages: vec![],
+                            mentions: vec![
+                                "did:plc:xivud6i24ruyki3bwjypjgy2".to_string(),
+                                // "pattern.atproto.systems".to_string(),
+                            ],
+                        })
+                        .clone(),
+                    true,
+                )
+                .build(
+                    agent.id(),
+                    agent.name(),
+                    DB.clone(),
+                    embedding_provider,
+                    Some(agent.handle().await),
+                    get_bluesky_credentials(&config).await,
+                )
+                .await
+                .unwrap();
+
+            data_sources
+                .start_monitoring("bluesky_jetstream")
+                .await
+                .unwrap();
+            tools.register(DataSourceTool::new(Arc::new(RwLock::new(data_sources))));
+        });
+    }
+}
+
+pub async fn get_bluesky_credentials(
+    config: &PatternConfig,
+) -> Option<(
+    pattern_core::atproto_identity::AtprotoAuthCredentials,
+    String,
+)> {
+    // Check if agent has a bluesky_handle configured
+    let bluesky_handle = if let Some(handle) = &config.agent.bluesky_handle {
+        handle.clone()
+    } else {
+        // No Bluesky handle configured for this agent
+        return None;
+    };
+    // Look up ATProto identity for this handle
+    let identities = get_user_atproto_identities(&DB, &config.user.id)
+        .await
+        .ok()
+        .unwrap_or_default();
+
+    // Find identity matching the handle
+    let identity = identities
+        .into_iter()
+        .find(|i| i.handle == bluesky_handle || i.id.to_string() == bluesky_handle);
+
+    if let Some(identity) = identity {
+        // Get credentials
+        if let Some(creds) = identity.get_auth_credentials() {
+            return Some((creds, bluesky_handle));
+        }
+    }
+    None
 }
 
 /// Create an agent with the specified configuration
@@ -489,7 +595,7 @@ pub async fn create_agent(
         memory,
         DB.clone(),
         model_provider,
-        tools,
+        tools.clone(),
         embedding_provider.clone(),
         heartbeat_sender,
         tool_rules,
@@ -727,6 +833,9 @@ pub async fn create_agent(
             }
         }
     }
+
+    // Register data sources
+    register_data_sources(agent.clone(), config, tools, embedding_provider).await;
 
     // Convert to trait object
     let agent_dyn: Arc<dyn Agent> = agent;
@@ -1100,7 +1209,9 @@ pub async fn load_or_create_agent_from_member(
         load_agent_memories_and_messages(&mut agent_record).await?;
 
         // Create runtime agent from record (reusing existing function)
-        // Build a minimal config just for the create_agent_from_record function
+        // Build a config that preserves the bluesky_handle from main_config if available
+        let bluesky_handle = main_config.and_then(|cfg| cfg.agent.bluesky_handle.clone());
+
         let config = PatternConfig {
             user: pattern_core::config::UserConfig {
                 id: user_id.clone(),
@@ -1114,7 +1225,7 @@ pub async fn load_or_create_agent_from_member(
                 persona: None,
                 instructions: None,
                 memory: Default::default(),
-                bluesky_handle: None,
+                bluesky_handle,
                 tool_rules: Vec::new(),
                 tools: Vec::new(),
                 model: None,
@@ -1221,13 +1332,21 @@ pub async fn load_or_create_agent_from_member(
             }
         };
 
+        // Preserve the bluesky_handle from inline config or main config
+        let mut agent_config = inline_config.clone();
+        if agent_config.bluesky_handle.is_none() {
+            if let Some(main_cfg) = main_config {
+                agent_config.bluesky_handle = main_cfg.agent.bluesky_handle.clone();
+            }
+        }
+
         let config = PatternConfig {
             user: pattern_core::config::UserConfig {
                 id: user_id.clone(),
                 name: None,
                 settings: Default::default(),
             },
-            agent: inline_config.clone(),
+            agent: agent_config,
             model: model_config,
             database: Default::default(),
             groups: vec![],
@@ -1274,7 +1393,7 @@ pub async fn load_or_create_agent_from_member(
             persona: None,
             instructions: None,
             memory: Default::default(),
-            bluesky_handle: None,
+            bluesky_handle: main_config.and_then(|cfg| cfg.agent.bluesky_handle.clone()),
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,

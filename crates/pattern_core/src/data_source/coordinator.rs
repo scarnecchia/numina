@@ -8,8 +8,10 @@ use tokio::sync::RwLock;
 use crate::context::message_router::AgentMessageRouter;
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
+use crate::id::AgentId;
 
 use super::buffer::{BufferConfig, BufferStats};
+use super::cursor_store::DataSourceCursorRecord;
 use super::traits::{DataSource, StreamEvent};
 
 use async_trait::async_trait;
@@ -26,11 +28,12 @@ pub struct DataIngestionEvent {
 }
 
 /// Manages multiple data sources and routes their output to agents
-#[derive(Debug, Clone)]
-pub struct DataIngestionCoordinator {
+#[derive(Clone)]
+pub struct DataIngestionCoordinator<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone>
+{
     sources: Arc<RwLock<HashMap<String, SourceHandle>>>,
-    agent_router: AgentMessageRouter,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    agent_router: AgentMessageRouter<C>,
+    embedding_provider: Option<Arc<E>>,
 }
 
 /// Type-erased wrapper for concrete data sources
@@ -217,11 +220,24 @@ impl std::fmt::Debug for SourceHandle {
     }
 }
 
-impl DataIngestionCoordinator {
-    pub fn new(
-        agent_router: AgentMessageRouter,
-        embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    ) -> Self {
+impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> std::fmt::Debug
+    for DataIngestionCoordinator<C, E>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataIngestionCoordinator")
+            .field(
+                "sources_count",
+                &self.sources.try_read().map(|s| s.len()).unwrap_or(0),
+            )
+            .field("has_embedding_provider", &self.embedding_provider.is_some())
+            .finish()
+    }
+}
+
+impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
+    DataIngestionCoordinator<C, E>
+{
+    pub fn new(agent_router: AgentMessageRouter<C>, embedding_provider: Option<Arc<E>>) -> Self {
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             agent_router,
@@ -230,7 +246,7 @@ impl DataIngestionCoordinator {
     }
 
     /// Get the embedding provider if available
-    pub fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+    pub fn embedding_provider(&self) -> Option<Arc<E>> {
         self.embedding_provider.clone()
     }
 

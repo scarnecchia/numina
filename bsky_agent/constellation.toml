@@ -12,6 +12,16 @@ bluesky_handle = "pattern.atproto.systems"      # Update with actual handle
 system_prompt_path = "pattern-system-prompt.md"
 persona_path = "pattern-persona-block.md"
 
+
+[context]
+max_messages = 200
+
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "claude-3-5-haiku-20241022"
+
+
 # Pattern's memory blocks
 [agent.memory.current_human]
 content_path = "pattern-current-human-block.md"
@@ -75,10 +85,34 @@ memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true
 
+[memory.intro_blog_post]
+content_path = "blog-post.md"
+permission = "read_only"
+memory_type = "archival"
+description = "Post written by orual about their motivation for developing our constellation"
+shared = true
+
+
 [model]
-provider = "Anthropic"    # Or your preferred provider
+provider = "Anthropic"
 model = "claude-sonnet-4"
 temperature = 0.8         # Higher for creative public interactions
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
 
 [database]
 type = "embedded"
@@ -173,9 +207,17 @@ default_filters = [
     { nsids = [
         "app.bsky.feed.post",
     ], mentions = [
+        "did:plc:xivud6i24ruyki3bwjypjgy2",
+        # "pattern.atproto.systems",
     ], dids = [
+        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+        "did:plc:by3jhwdqgbtrcc7q4tkkv3cf",
+        "did:plc:jqnuubqvyurc3n3km2puzpfx",
+        "did:plc:i7ayw57idpkvkyzktdpmtgm7",
+        "did:plc:vw4e7blkwzdokanwp24k3igr",
+        "did:plc:mdjhvva6vlrswsj26cftjttd",
     ], keywords = [
     ], languages = [
     ] },
 ]
-auto_connect_firehose = false # Control when to connect
+auto_connect_firehose = true # Control when to connect

@@ -120,7 +120,7 @@ pub async fn query(sql: &str) -> Result<()> {
     // Execute the query
     let response = DB.query(sql).await.into_diagnostic()?;
 
-    output.status(&format!("Results: {:?}", response));
+    output.status(&format!("Results: {:#?}", response));
 
     Ok(())
 }

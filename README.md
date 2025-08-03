@@ -95,7 +95,7 @@ Add `pattern-core` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-pattern-core = { path = "path/to/pattern/crates/pattern_core" }
+pattern-core = { git = "https://github.com/orual/pattern" }
 # or once published:
 # pattern-core = "0.1.0"
 ```
@@ -150,6 +150,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create tool registry
     let tools = ToolRegistry::new();
 
+    let tool_rules = vec![];
+
     // Create response options with the selected model
     let response_options = ResponseOptions {
         model_info: model_info.clone(),
@@ -183,6 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model_provider,
         tools,
         embedding_provider,
+        tool_rules
     );
 
     // Set the chat options with our selected model
@@ -317,14 +320,17 @@ cargo build --features full
 ```
 pattern/
 ├── crates/
+│   ├── pattern_api/      # API types
 │   ├── pattern_cli/      # Command-line testing tool
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
 │   ├── pattern_nd/       # Tools and agent personalities specific to the neurodivergent support constellation
 │   ├── pattern_mcp/      # MCP server implementation
+│   ├── pattern_macros/   # Proc macro crate providing some helpers for SurrealDB
 │   ├── pattern_discord/  # Discord bot integration
-│   └── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
+│   ├── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
+│   └── pattern_server/   # Backend server binary
 ├── docs/                 # Architecture and integration guides
-└── CLAUDE.md          # Development reference
+└── CLAUDE.md             # Development reference (LLM-focused, but...it's written in english so)
 ```
 
 ## Roadmap
@@ -334,6 +340,7 @@ pattern/
   - Vector search
   - MCP refactor
   - Discord re-integration
+- Bluesky integration for public interaction demo
 - Re-implementation of the core Pattern constellation
 - Command-line tool for chat and debugging
 
@@ -346,7 +353,7 @@ pattern/
 
 ## Acknowledgments
 
-- Inspired by Brandon Sanderson's cognitive multiplicity model in Stormlight Archive
+- Inspired by Shallan and Pattern from Brandon Sanderson's Stormlight Archive series
 - Designed by someone who gets it - time is fake but deadlines aren't
 
 ## License

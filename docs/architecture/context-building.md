@@ -51,6 +51,9 @@ let context = ContextBuilder::new("agent_123", ContextConfig::default())
 // The context is now ready to use with genai
 let request = genai::ChatRequest::new(context.system_prompt, context.messages)
     .with_tools(context.tools);
+    
+// Note: Tool usage rules and rule enforcement are automatically included
+// in the system prompt when tools have associated rules
 ```
 
 ### Stateful Agent Management
@@ -273,6 +276,62 @@ let stats = agent.get_stats();
 println!("Total messages: {}", stats.total_messages);
 println!("Tool calls: {}", stats.total_tool_calls);
 println!("Compressions: {}", stats.compression_events);
+```
+
+## Tool Rules Integration
+
+The context builder automatically includes tool usage rules and enforcement information in the system prompt when agents have configured tool rules.
+
+### How Tool Rules Affect Context
+
+1. **System Prompt Enhancement**: Tool rules are converted to natural language and included in the system prompt
+2. **Tool Descriptions**: Each tool's `usage_rule()` is appended to its description
+3. **Rule Enforcement**: The agent's tool rule engine validates all tool calls before execution
+
+### Example with Tool Rules
+
+```rust
+// Create agent with tool rules
+let rules = vec![
+    ToolRule {
+        tool_name: "send_message".to_string(),
+        rule_type: ToolRuleType::ExitLoop,
+        conditions: vec![],
+        priority: 8,
+        metadata: None,
+    },
+    ToolRule {
+        tool_name: "recall".to_string(), 
+        rule_type: ToolRuleType::ContinueLoop,
+        conditions: vec![],
+        priority: 1,
+        metadata: None,
+    },
+];
+
+let agent = DatabaseAgent::new(
+    // ... other params ...
+    tool_rules: rules,
+);
+
+// When building context, tool rules are automatically included:
+// 1. Tool usage rules from each tool's usage_rule() method
+// 2. Natural language descriptions of configured rules
+// 3. Current rule state (e.g., remaining calls for MaxCalls rules)
+```
+
+### System Prompt with Rules
+
+The generated system prompt includes sections like:
+
+```
+## Tool Usage Rules
+
+When using tools, follow these rules:
+- send_message: the conversation will end when called
+- recall: continues the conversation loop when called
+- api_request: Maximum 3 calls allowed (2 remaining)
+- validate: Can only be called after: load_data
 ```
 
 ## Best Practices

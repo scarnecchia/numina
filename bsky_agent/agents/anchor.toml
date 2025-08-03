@@ -10,6 +10,14 @@ persona_path = "../anchor-persona-block.md"
 provider = "anthropic"
 model = "claude-sonnet-4"
 
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "claude-3-5-haiku-20241022"
+
+[context]
+max_messages = 100
+
 # Shared memory blocks
 [memory.current_human]
 content_path = "../pattern-current-human-block.md"
@@ -68,3 +76,19 @@ Last checks:
 permission = "read_write"
 memory_type = "core"
 description = "Anchor's system monitoring data"
+
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1

@@ -11,6 +11,15 @@ provider = "Gemini"
 model = "gemini-2.5-pro"
 temperature = 0.3
 
+[context]
+max_messages = 200
+
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "claude-3-5-haiku-20241022"
+
+
 # Shared memory blocks
 [memory.current_human]
 content_path = "../pattern-current-human-block.md"
@@ -47,6 +56,14 @@ memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true
 
+[memory.intro_blog_post]
+content_path = "../blog-post.md"
+permission = "read_only"
+memory_type = "archival"
+description = "Post written by orual about their motivation for developing our constellation"
+shared = true
+
+
 # Domain-specific memory (meta!)
 [memory.domain_memory]
 content = """
@@ -57,3 +74,18 @@ Memory overflow from other facets:
 permission = "read_write"
 memory_type = "core" # Of course
 description = "Archive's meta-memory"
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1

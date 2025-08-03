@@ -105,11 +105,14 @@ impl QueuedMessage {
         self.call_chain.contains(agent_id)
     }
 
+    /// Count how many times an agent appears in the call chain
+    pub fn count_in_call_chain(&self, agent_id: &AgentId) -> usize {
+        self.call_chain.iter().filter(|id| *id == agent_id).count()
+    }
+
     /// Add an agent to the call chain
     pub fn add_to_call_chain(&mut self, agent_id: AgentId) {
-        if !self.is_in_call_chain(&agent_id) {
-            self.call_chain.push(agent_id);
-        }
+        self.call_chain.push(agent_id);
     }
 
     /// Mark this message as read

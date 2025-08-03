@@ -63,3 +63,19 @@ Chaos patterns:
 permission = "read_write"
 memory_type = "core"
 description = "Entropy's domain knowledge"
+
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1

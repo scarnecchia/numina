@@ -104,14 +104,16 @@ impl BlueskyPost {
 
     /// Get all mentioned DIDs
     pub fn mentioned_dids(&self) -> Vec<&str> {
-        self.facets
+        let mentions = self
+            .facets
             .iter()
             .flat_map(|facet| &facet.features)
             .filter_map(|feature| match feature {
                 FacetFeature::Mention { did } => Some(did.as_str()),
                 _ => None,
             })
-            .collect()
+            .collect();
+        mentions
     }
 
     /// Check if post has images
@@ -214,6 +216,9 @@ pub struct BlueskyFirehoseSource {
     notifications_enabled: bool,
     agent_handle: Option<AgentHandle>,
     bsky_agent: Option<Arc<tokio::sync::RwLock<bsky_sdk::BskyAgent>>>,
+    // Rate limiting
+    last_send_time: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
+    posts_per_second: f64,
 }
 
 impl std::fmt::Debug for BlueskyFirehoseSource {
@@ -228,6 +233,7 @@ impl std::fmt::Debug for BlueskyFirehoseSource {
             .field("notifications_enabled", &self.notifications_enabled)
             .field("agent_handle", &self.agent_handle.is_some())
             .field("bsky_agent", &self.bsky_agent.is_some())
+            .field("posts_per_second", &self.posts_per_second)
             .finish()
     }
 }
@@ -299,6 +305,8 @@ impl BlueskyFirehoseSource {
             notifications_enabled: true,
             agent_handle,
             bsky_agent: None,
+            last_send_time: std::sync::Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
+            posts_per_second: 0.5, // Default to 1 posts every other second max
         }
     }
 
@@ -309,6 +317,11 @@ impl BlueskyFirehoseSource {
 
     pub fn with_buffer(mut self, buffer: StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>) -> Self {
         self.buffer = Some(std::sync::Arc::new(parking_lot::Mutex::new(buffer)));
+        self
+    }
+
+    pub fn with_rate_limit(mut self, posts_per_second: f64) -> Self {
+        self.posts_per_second = posts_per_second;
         self
     }
 
@@ -437,6 +450,8 @@ impl DataSource for BlueskyFirehoseSource {
             filter,
             buffer,
             resolver: atproto_identity_resolver(),
+            last_send_time: self.last_send_time.clone(),
+            min_interval: std::time::Duration::from_secs_f64(1.0 / self.posts_per_second),
         };
 
         let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> = HashMap::new();
@@ -797,7 +812,7 @@ impl DataSource for BlueskyFirehoseSource {
             }
         }
         message
-            .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\n");
+            .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\n Alternatively, you can 'like' the post by submitting an empty reply");
 
         Some(message)
     }
@@ -835,6 +850,9 @@ struct PostIngestor {
     #[allow(unused)]
     buffer: Option<Arc<parking_lot::Mutex<StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>>>>,
     resolver: atrium_identity::did::CommonDidResolver<PatternHttpClient>,
+    // Rate limiting
+    last_send_time: Arc<tokio::sync::Mutex<std::time::Instant>>,
+    min_interval: std::time::Duration,
 }
 
 #[async_trait]
@@ -882,6 +900,16 @@ impl LexiconIngestor for PostIngestor {
             };
 
             if should_include_post(&mut post_to_filter, &self.filter, &self.resolver).await {
+                // Rate limiting
+                let mut last_send = self.last_send_time.lock().await;
+                let elapsed = last_send.elapsed();
+                if elapsed < self.min_interval {
+                    let sleep_duration = self.min_interval - elapsed;
+                    tokio::time::sleep(sleep_duration).await;
+                }
+                *last_send = std::time::Instant::now();
+                drop(last_send); // Release lock before sending
+
                 let event = StreamEvent {
                     item: post_to_filter.clone(),
                     cursor: BlueskyFirehoseCursor {
@@ -1061,6 +1089,7 @@ async fn should_include_post(
             .mentions
             .iter()
             .any(|allowed_did| mentioned.contains(&allowed_did.as_str()))
+            && !filter.dids.contains(&post.did)
         {
             return false;
         }

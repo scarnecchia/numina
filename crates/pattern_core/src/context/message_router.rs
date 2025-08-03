@@ -529,11 +529,13 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
             origin,
         );
 
-        // Check for loops - if this agent is already in the call chain, prevent sending
-        if queued.is_in_call_chain(&target_agent_id) {
+        // Check for loops - allow up to one self-response (max 2 occurrences in chain)
+        if queued.count_in_call_chain(&target_agent_id) >= 2 {
             warn!(
-                "Preventing message loop: agent {} is already in call chain {:?}",
-                target_agent_id, queued.call_chain
+                "Preventing message loop: agent {} already appears {} times in call chain {:?}",
+                target_agent_id,
+                queued.count_in_call_chain(&target_agent_id),
+                queued.call_chain
             );
             return Ok(());
         }
@@ -907,8 +909,6 @@ impl BlueskyEndpoint {
                 parameters: serde_json::json!({}),
             })?;
 
-        info!("credentials:{:?}", credentials);
-
         // Authenticate based on credential type
         let session = match credentials {
             crate::atproto_identity::AtprotoAuthCredentials::OAuth { access_token: _ } => {
@@ -1004,6 +1004,52 @@ impl BlueskyEndpoint {
             }),
         }
     }
+
+    async fn create_like(
+        &self,
+        reply_to_uri: &str,
+    ) -> Result<atrium_api::app::bsky::feed::like::RecordData> {
+        let agent = self.agent.write().await;
+
+        // Fetch the post thread to get reply information
+        let post_result = agent
+            .api
+            .app
+            .bsky
+            .feed
+            .get_posts(
+                atrium_api::app::bsky::feed::get_posts::ParametersData {
+                    uris: vec![reply_to_uri.to_string()],
+                }
+                .into(),
+            )
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to fetch post for reply: {}", e),
+                parameters: serde_json::json!({ "reply_to": reply_to_uri }),
+            })?;
+
+        let post = post_result.posts.iter().next();
+
+        let post_ref = post.map(|parent_post| strong_ref::MainData {
+            cid: parent_post.cid.clone(),
+            uri: parent_post.uri.clone(),
+        });
+
+        if let Some(post_ref) = post_ref {
+            Ok(atrium_api::app::bsky::feed::like::RecordData {
+                created_at: atrium_api::types::string::Datetime::now(),
+                subject: post_ref.into(),
+            })
+        } else {
+            Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to get post: {}", reply_to_uri),
+                parameters: serde_json::json!({}),
+            })
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1061,31 +1107,48 @@ impl MessageEndpoint for BlueskyEndpoint {
 
         // Create the post
         let agent = self.agent.read().await;
-        let text_copy = text.clone();
-        let result = agent
-            .create_record(atrium_api::app::bsky::feed::post::RecordData {
-                created_at: atrium_api::types::string::Datetime::now(),
-                text,
-                reply: reply.map(|r| r.into()),
-                embed: None,
-                entities: None,
-                facets: None,
-                labels: None,
-                langs: None,
-                tags: None,
-            })
-            .await
-            .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                tool_name: "bluesky_endpoint".to_string(),
-                cause: format!("Failed to create post: {}", e),
-                parameters: serde_json::json!({ "text": text_copy }),
-            })?;
+        if text.is_empty() {
+            if let Some(meta) = &metadata {
+                if let Some(reply_to) = meta.get("reply_to").and_then(|v| v.as_str()) {
+                    let like = self.create_like(reply_to).await?;
+                    let result = agent.create_record(like).await.map_err(|e| {
+                        crate::CoreError::ToolExecutionFailed {
+                            tool_name: "bluesky_endpoint".to_string(),
+                            cause: format!("Failed to create like: {}", e),
+                            parameters: serde_json::json!({ "uri": reply_to }),
+                        }
+                    })?;
 
-        info!(
-            "Posted to Bluesky: {} ({})",
-            result.uri,
-            if is_reply { "reply" } else { "new post" }
-        );
+                    info!("Liked on Bluesky: {}", result.uri,);
+                }
+            }
+        } else {
+            let text_copy = text.clone();
+            let result = agent
+                .create_record(atrium_api::app::bsky::feed::post::RecordData {
+                    created_at: atrium_api::types::string::Datetime::now(),
+                    text,
+                    reply: reply.map(|r| r.into()),
+                    embed: None,
+                    entities: None,
+                    facets: None,
+                    labels: None,
+                    langs: None,
+                    tags: None,
+                })
+                .await
+                .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                    tool_name: "bluesky_endpoint".to_string(),
+                    cause: format!("Failed to create post: {}", e),
+                    parameters: serde_json::json!({ "text": text_copy }),
+                })?;
+
+            info!(
+                "Posted to Bluesky: {} ({})",
+                result.uri,
+                if is_reply { "reply" } else { "new post" }
+            );
+        }
 
         Ok(())
     }

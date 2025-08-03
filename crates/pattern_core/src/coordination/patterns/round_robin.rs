@@ -99,8 +99,12 @@ impl GroupManager for RoundRobinManager {
 
             // Get the agent at the current index
             let (_original_index, awm) = &available_agents[current_index];
+            tracing::debug!("Getting agent ID...");
             let agent_id = awm.agent.id();
+            tracing::debug!("Got agent ID: {}", agent_id);
+            tracing::debug!("Getting agent name...");
             let agent_name = awm.agent.name();
+            tracing::debug!("Got agent name: {}", agent_name);
 
             // Send agent started event
             let _ = tx

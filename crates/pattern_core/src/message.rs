@@ -115,9 +115,9 @@ impl Message {
 
         // Debug log to track what content types are being sent
         let content = match &self.content {
-            MessageContent::Text(_) => {
+            MessageContent::Text(text) => {
                 tracing::trace!("Converting Text message with role {:?}", role);
-                self.content.clone()
+                MessageContent::Text(text.trim().to_string())
             }
             MessageContent::ToolCalls(_) => {
                 tracing::trace!("Converting ToolCalls message with role {:?}", role);
@@ -133,14 +133,14 @@ impl Message {
                     let string = parts
                         .into_iter()
                         .map(|part| match part {
-                            ContentPart::Text(text) => text.clone(),
+                            ContentPart::Text(text) => text.trim().to_string(),
                             ContentPart::Image {
                                 content_type,
                                 source,
                             } => {
                                 let source_as_text = match source {
-                                    ImageSource::Url(st) => st,
-                                    ImageSource::Base64(st) => &st.to_string(),
+                                    ImageSource::Url(st) => st.trim().to_string(),
+                                    ImageSource::Base64(st) => st.trim().to_string(),
                                 };
                                 format!("{}: {}", content_type, source_as_text)
                             }

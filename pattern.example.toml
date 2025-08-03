@@ -26,6 +26,28 @@ You help users manage their tasks and stay focused.
 # Optional: Bluesky handle for this agent
 # bluesky_handle = "alice.bsky.social"
 
+# Tool execution rules for controlling tool behavior
+# [[agent.tool_rules]]
+# tool_name = "send_message"
+# rule_type = "ExitLoop"  # This tool ends the conversation
+# priority = 8
+# 
+# [[agent.tool_rules]]
+# tool_name = "recall"
+# rule_type = "ContinueLoop"  # Skip heartbeat checks for performance
+# priority = 1
+#
+# [[agent.tool_rules]]
+# tool_name = "api_request"
+# rule_type = { MaxCalls = 3 }  # Limit API calls per conversation
+# priority = 5
+#
+# [[agent.tool_rules]]
+# tool_name = "save_progress"
+# rule_type = "RequiresPreceding"
+# conditions = ["analyze_data"]  # Must call analyze_data first
+# priority = 7
+
 # Memory blocks can be pre-configured
 [agent.memory.preferences]
 content = "User prefers concise responses and bullet points."

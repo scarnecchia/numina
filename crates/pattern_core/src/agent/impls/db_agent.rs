@@ -7,6 +7,7 @@ use std::sync::Arc;
 use surrealdb::{RecordId, Surreal};
 use tokio::sync::RwLock;
 
+use crate::context::AgentHandle;
 use crate::db::DbEntity;
 use crate::id::RelationId;
 use crate::message::{ContentBlock, ContentPart, ImageSource, ToolCall, ToolResponse};
@@ -62,6 +63,11 @@ where
 
     /// Tool execution rules for this agent
     tool_rules: Arc<RwLock<crate::agent::tool_rules::ToolRuleEngine>>,
+
+    // Cached values to avoid deadlock from block_on
+    cached_id: AgentId,
+    cached_name: String,
+    cached_agent_type: AgentType,
 }
 
 impl<C, M, E> DatabaseAgent<C, M, E>
@@ -101,7 +107,7 @@ where
         let mut context = AgentContext::new(
             agent_id.clone(),
             name.clone(),
-            agent_type,
+            agent_type.clone(),
             memory,
             tools,
             context_config,
@@ -114,7 +120,7 @@ where
         // Create and wire up message router
         let router = crate::context::message_router::AgentMessageRouter::new(
             agent_id.clone(),
-            name,
+            name.clone(),
             db.clone(),
         );
 
@@ -134,6 +140,9 @@ where
             embeddings,
             heartbeat_sender,
             tool_rules: Arc::new(RwLock::new(ToolRuleEngine::new(tool_rules))),
+            cached_id: agent_id,
+            cached_name: name,
+            cached_agent_type: agent_type,
         }
     }
 
@@ -166,6 +175,10 @@ where
     //     heartbeat_sender: HeartbeatSender,
     // ) -> Arc<Self> {
     // }
+    //
+    pub async fn handle(&self) -> AgentHandle<C> {
+        self.context.read().await.handle.clone()
+    }
 
     /// Set the heartbeat sender for this agent
     pub fn set_heartbeat_sender(&mut self, sender: HeartbeatSender) {
@@ -2315,17 +2328,15 @@ where
     E: EmbeddingProvider + 'static,
 {
     fn id(&self) -> AgentId {
-        // These methods are synchronous, so we need to store these values outside the lock
-        // For now, we'll panic if we can't get the lock - this should be rare
-        futures::executor::block_on(async { self.context.read().await.handle.agent_id.clone() })
+        self.cached_id.clone()
     }
 
     fn name(&self) -> String {
-        futures::executor::block_on(async { self.context.read().await.handle.name.clone() })
+        self.cached_name.clone()
     }
 
     fn agent_type(&self) -> AgentType {
-        futures::executor::block_on(async { self.context.read().await.handle.agent_type.clone() })
+        self.cached_agent_type.clone()
     }
 
     async fn process_message(self: Arc<Self>, message: Message) -> Result<Response> {
@@ -2478,7 +2489,7 @@ where
             agent_id,
             tool_name: tool_name.to_string(),
             parameters: params,
-            result: result.as_ref().unwrap_or(&serde_json::json!(null)).clone(),
+            result: result.as_ref().unwrap_or(&serde_json::json!({})).clone(),
             error: result.as_ref().err().map(|e| e.to_string()),
             duration_ms,
             created_at,

@@ -68,4 +68,55 @@ memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true
 
+[memory.intro_blog_post]
+content_path = "../blog-post.md"
+permission = "read_only"
+memory_type = "archival"
+description = "Post written by orual about their motivation for developing our constellation"
+shared = true
+
+
 # Pattern gets default model from constellation config
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "claude-3-5-haiku-20241022"
+
+[context]
+max_messages = 200
+
+[bluesky]
+default_filters = [
+    { nsids = [
+        "app.bsky.feed.post",
+    ], mentions = [
+        "did:plc:xivud6i24ruyki3bwjypjgy2",
+    ], dids = [
+        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+        "did:plc:by3jhwdqgbtrcc7q4tkkv3cf",
+        "did:plc:vw4e7blkwzdokanwp24k3igr",
+
+        "did:plc:i7ayw57idpkvkyzktdpmtgm7",
+        "did:plc:jqnuubqvyurc3n3km2puzpfx",
+        "did:plc:mdjhvva6vlrswsj26cftjttd",
+    ], keywords = [
+    ], languages = [
+    ] },
+]
+auto_connect_firehose = true # Control when to connect

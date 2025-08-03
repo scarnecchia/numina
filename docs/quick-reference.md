@@ -7,25 +7,19 @@ This guide provides a quick overview of Pattern's current state and key implemen
 ```
 pattern/
 ├── crates/
-│   ├── pattern_core/      # Core agent framework
-│   ├── pattern_nd/        # Neurodivergent tools
-│   ├── pattern_mcp/       # MCP server
-│   ├── pattern_discord/   # Discord bot
-│   └── pattern_main/      # Main orchestrator
-├── migrations/            # Database migrations
-├── docs/                  # Documentation
+│   ├── pattern_api/      # API types
+│   ├── pattern_cli/      # Command-line testing tool
+│   ├── pattern_core/     # Agent framework, memory, tools, coordination
+│   ├── pattern_nd/       # Tools and agent personalities specific to the neurodivergent support constellation
+│   ├── pattern_mcp/      # MCP server implementation
+│   ├── pattern_macros/   # Proc macro crate providing some helpers for SurrealDB
+│   ├── pattern_discord/  # Discord bot integration
+│   ├── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
+│   └── pattern_server/   # Backend server binary
+├── docs/                 # Architecture and integration guides
 └── pattern.toml          # Configuration
 ```
 
-## Key Types & IDs
-
-All IDs use underscore format: `prefix_uuid`
-
-- `user_12345678-...` - User IDs
-- `agent_12345678-...` - Agent IDs
-- `task_12345678-...` - Task IDs
-- `mem_12345678-...` - Memory IDs (note: "mem" not "memory")
-- `group_12345678-...` - Group IDs
 
 ## Agent Architecture
 
@@ -83,7 +77,7 @@ let builtin = BuiltinTools::builder()
    }
    ```
 
-2. **send_message** (stub)
+2. **send_message**
    ```json
    {
      "target": { "type": "user" },
@@ -91,6 +85,7 @@ let builtin = BuiltinTools::builder()
      "metadata": {}
    }
    ```
+   - Has built-in usage rule: "the conversation will end when called"
 
 ## Memory System
 
@@ -120,11 +115,40 @@ impl AiTool for MyTool {
     fn name(&self) -> &str { "my_tool" }
     fn description(&self) -> &str { "Does something" }
 
+    fn usage_rule(&self) -> Option<&'static str> {
+        Some("Use when user needs something done")
+    }
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         // Implementation
     }
 }
 ```
+
+### Tool Rules
+
+```rust
+// Create agent with tool rules
+let agent = DatabaseAgent::new(
+    // ... other params ...
+    tool_rules: vec![
+        ToolRule {
+            tool_name: "send_message".to_string(),
+            rule_type: ToolRuleType::ExitLoop,
+            conditions: vec![],
+            priority: 8,
+        },
+    ],
+);
+```
+
+Available rule types:
+- `StartConstraint` - Tool must run at conversation start
+- `MaxCalls(u32)` - Limit tool usage per conversation
+- `ExitLoop` - Tool ends the conversation
+- `ContinueLoop` - Tool skips heartbeat checks
+- `Cooldown(Duration)` - Minimum time between calls
+- `RequiresPreceding` - Tool needs prerequisites
 
 ### MCP Schema Compatibility
 
@@ -216,6 +240,19 @@ just pre-commit-all # Run all checks before committing
 just test          # Run all tests
 just fmt           # Format code
 just watch         # Auto-recompile on changes
+```
+
+### Tool Rules CLI
+
+```bash
+# Add tool rules to agents
+pattern-cli agent add-rule MyAgent send_message exit-loop
+pattern-cli agent add-rule MyAgent validate requires-preceding -c load_data
+pattern-cli agent add-rule MyAgent api_call max-calls -p 5
+
+# List and manage rules
+pattern-cli agent list-rules MyAgent
+pattern-cli agent remove-rule MyAgent send_message exit-loop
 ```
 
 ## Configuration

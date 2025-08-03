@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 /// OpenAI embedding provider
+///
+#[derive(Clone)]
 pub struct OpenAIEmbedder {
     model: String,
     api_key: String,

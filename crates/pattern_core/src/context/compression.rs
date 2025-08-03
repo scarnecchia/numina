@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CoreError, ModelProvider, Result,
-    message::{ChatRole, Message},
+    message::{ChatRole, ContentBlock, Message, MessageContent},
 };
 
 /// Strategy for compressing messages when context is full
@@ -45,7 +45,7 @@ pub enum CompressionStrategy {
 
 impl Default for CompressionStrategy {
     fn default() -> Self {
-        Self::Truncate { keep_recent: 50 }
+        Self::Truncate { keep_recent: 100 }
     }
 }
 
@@ -216,6 +216,26 @@ impl MessageCompressor {
         Ok(result)
     }
 
+    /// Check if a message contains tool use blocks
+    fn has_tool_use_blocks(&self, message: &Message) -> bool {
+        match &message.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. })),
+            _ => false,
+        }
+    }
+
+    /// Check if a message contains tool result blocks
+    fn has_tool_result_blocks(&self, message: &Message) -> bool {
+        match &message.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. })),
+            _ => false,
+        }
+    }
+
     /// Ensure message sequence is valid for Gemini API requirements
     /// Gemini requires function calls to come immediately after user turns or tool responses
     fn ensure_valid_message_sequence(&self, mut messages: Vec<Message>) -> Vec<Message> {
@@ -224,7 +244,9 @@ impl MessageCompressor {
             let current = &messages[i];
 
             // Check if this is an assistant message with tool calls
-            if current.role == ChatRole::Assistant && current.tool_call_count() > 0 {
+            if current.role == ChatRole::Assistant
+                && (current.tool_call_count() > 0 || self.has_tool_use_blocks(current))
+            {
                 // Check if previous message is valid for tool calls
                 if i > 0 {
                     let prev = &messages[i - 1];
@@ -273,7 +295,7 @@ impl MessageCompressor {
                 // If current is a tool response, check if previous is its tool call
                 if current.role == ChatRole::Tool {
                     if let Some(prev_msg) = prev {
-                        if prev_msg.tool_call_count() > 0 {
+                        if prev_msg.tool_call_count() > 0 || self.has_tool_use_blocks(prev_msg) {
                             // Move split point to include both the tool call and response
                             split_point -= 1;
                             continue;
@@ -282,7 +304,9 @@ impl MessageCompressor {
                 }
 
                 // If current is assistant with tool calls, check if next is tool response
-                if split_point < messages.len() - 1 && current.tool_call_count() > 0 {
+                if split_point < messages.len() - 1
+                    && (current.tool_call_count() > 0 || self.has_tool_use_blocks(current))
+                {
                     let next = &messages[split_point + 1];
                     if next.role == ChatRole::Tool {
                         // Move split point to before this tool call/response pair
@@ -305,7 +329,9 @@ impl MessageCompressor {
         // Ensure we start with a valid message after truncation
         // If we start with an assistant message with tool calls, we need a user message before it
         if let Some(first) = active.first() {
-            if first.role == ChatRole::Assistant && first.tool_call_count() > 0 {
+            if first.role == ChatRole::Assistant
+                && (first.tool_call_count() > 0 || self.has_tool_use_blocks(first))
+            {
                 // Insert a context message to make it valid
                 active.insert(
                     0,
@@ -545,7 +571,7 @@ impl MessageCompressor {
         }
 
         // Tool call bonus
-        if msg.tool_call_count() > 0 {
+        if msg.tool_call_count() > 0 || self.has_tool_use_blocks(msg) {
             score += self.scoring_config.tool_call_bonus;
         }
 

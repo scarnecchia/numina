@@ -5,6 +5,13 @@ agent_type = "assistant"
 bluesky_handle = "pattern.atproto.systems"    # Update with actual
 persona_path = "../momentum-persona-block.md"
 
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "claude-3-5-haiku-20241022"
+
+[context]
+max_messages = 100
 
 [model]
 provider = "Gemini"
@@ -57,3 +64,19 @@ Flow dynamics:
 permission = "read_write"
 memory_type = "core"
 description = "Momentum's energy tracking"
+
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1

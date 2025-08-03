@@ -18,7 +18,7 @@ pub trait AiTool: Send + Sync {
     async fn execute(&self, params: Self::Input) -> Result<Self::Output>;
 
     // Optional: Usage rules for context
-    fn usage_rule(&self) -> Option<String> { None }
+    fn usage_rule(&self) -> Option<&'static str> { None }
 }
 ```
 
@@ -32,7 +32,7 @@ pub trait DynamicTool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
-    fn usage_rule(&self) -> Option<String>;
+    fn usage_rule(&self) -> Option<&'static str>;
 
     async fn execute_dynamic(&self, params: Value) -> Result<Value>;
 }
@@ -137,8 +137,8 @@ impl AiTool for WeatherTool {
         })
     }
 
-    fn usage_rule(&self) -> Option<String> {
-        Some("Use this tool when the user asks about weather or temperature in a specific location.".to_string())
+    fn usage_rule(&self) -> Option<&'static str> {
+        Some("Use this tool when the user asks about weather or temperature in a specific location.")
     }
 }
 ```
@@ -178,6 +178,177 @@ Pattern includes several built-in tools following the Letta/MemGPT pattern:
 ### Communication (`send_message`)
 - Send messages to users or other agents
 - Supports different message types and metadata
+- Has built-in rule: "the conversation will end when called"
+
+## Tool Rules System
+
+Pattern includes a sophisticated tool rules system that allows fine-grained control over tool execution flow, dependencies, and constraints. This enables agents to follow complex workflows, enforce tool ordering, and optimize performance.
+
+### Rule Types
+
+```rust
+pub enum ToolRuleType {
+    /// Tool starts the conversation (must be called first)
+    StartConstraint,
+    
+    /// Maximum number of times this tool can be called
+    MaxCalls(u32),
+    
+    /// Tool ends the conversation loop when called
+    ExitLoop,
+    
+    /// Tool continues the conversation loop when called
+    ContinueLoop,
+    
+    /// Minimum cooldown period between calls
+    Cooldown(Duration),
+    
+    /// This tool must be called after specified tools
+    RequiresPreceding,
+}
+```
+
+### Configuring Tool Rules
+
+Tool rules can be configured in three ways:
+
+#### 1. In TOML Configuration
+
+```toml
+[agent]
+name = "DataProcessor"
+tools = ["load_data", "validate", "process", "save_results"]
+
+[[agent.tool_rules]]
+tool_name = "load_data"
+rule_type = "StartConstraint"
+priority = 10
+
+[[agent.tool_rules]]
+tool_name = "validate"
+rule_type = "RequiresPreceding"
+conditions = ["load_data"]
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "process"
+rule_type = { MaxCalls = 3 }
+priority = 5
+
+[[agent.tool_rules]]
+tool_name = "save_results"
+rule_type = "ExitLoop"
+priority = 9
+```
+
+#### 2. Via CLI Commands
+
+```bash
+# Add a rule that makes 'send_message' end the conversation
+pattern-cli agent add-rule MyAgent send_message exit-loop
+
+# Add a dependency rule
+pattern-cli agent add-rule MyAgent validate requires-preceding -c load_data
+
+# Add a max calls rule
+pattern-cli agent add-rule MyAgent api_request max-calls -p 5
+
+# List all rules for an agent
+pattern-cli agent list-rules MyAgent
+
+# Remove a specific rule
+pattern-cli agent remove-rule MyAgent send_message exit-loop
+```
+
+#### 3. Programmatically
+
+```rust
+use pattern_core::agent::tool_rules::{ToolRule, ToolRuleType};
+
+let rules = vec![
+    ToolRule {
+        tool_name: "initialize".to_string(),
+        rule_type: ToolRuleType::StartConstraint,
+        conditions: vec![],
+        priority: 10,
+        metadata: None,
+    },
+    ToolRule {
+        tool_name: "cleanup".to_string(),
+        rule_type: ToolRuleType::ExitLoop,
+        conditions: vec![],
+        priority: 9,
+        metadata: None,
+    },
+];
+
+// When creating an agent
+let agent = DatabaseAgent::new(
+    // ... other parameters ...
+    tool_rules: rules,
+);
+```
+
+### How Tool Rules Work
+
+1. **Start Constraints**: Tools marked with `StartConstraint` are automatically executed when a conversation begins
+2. **Dependencies**: Tools with `RequiresPreceding` can only be called after their prerequisite tools
+3. **Call Limits**: Tools with `MaxCalls` enforce usage limits per conversation
+4. **Loop Control**: 
+   - `ExitLoop` tools terminate the conversation after execution
+   - `ContinueLoop` tools don't require heartbeat checks (performance optimization)
+5. **Cooldowns**: Prevent rapid repeated calls to expensive tools
+
+### Rule Enforcement
+
+The tool rules engine validates every tool call before execution:
+
+```rust
+// If a tool violates a rule, the agent receives an error:
+"Tool rule violation: Tool 'process' cannot be executed: prerequisites ['validate'] not met"
+```
+
+### Performance Benefits
+
+Tool rules enable performance optimizations:
+
+1. **Heartbeat Optimization**: Tools marked with `ContinueLoop` skip heartbeat checks, reducing overhead
+2. **Early Termination**: `ExitLoop` tools prevent unnecessary continuation prompts
+3. **Automatic Initialization**: `StartConstraint` tools run automatically without LLM prompting
+
+### Example: ETL Pipeline Agent
+
+```toml
+[[agent.tool_rules]]
+tool_name = "connect_db"
+rule_type = "StartConstraint"
+priority = 10
+
+[[agent.tool_rules]]
+tool_name = "extract_data"
+rule_type = "RequiresPreceding"
+conditions = ["connect_db"]
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "transform_data"
+rule_type = "RequiresPreceding"
+conditions = ["extract_data"]
+priority = 7
+
+[[agent.tool_rules]]
+tool_name = "load_warehouse"
+rule_type = "RequiresPreceding"
+conditions = ["transform_data"]
+priority = 6
+
+[[agent.tool_rules]]
+tool_name = "disconnect_db"
+rule_type = "ExitLoop"
+priority = 10
+```
+
+This ensures the ETL pipeline executes in the correct order and terminates cleanly.
 
 ## Common Patterns
 
