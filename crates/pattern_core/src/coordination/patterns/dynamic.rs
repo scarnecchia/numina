@@ -16,6 +16,7 @@ use crate::{
     message::Message,
 };
 
+#[derive(Clone)]
 pub struct DynamicManager {
     selectors: Arc<dyn crate::coordination::selectors::SelectorRegistry>,
 }
@@ -318,6 +319,11 @@ impl GroupManager for DynamicManager {
                                     fn_name,
                                     args,
                                 } => {
+                                    tracing::debug!(
+                                        "Dynamic: Forwarding ToolCallStarted {} from agent {}",
+                                        fn_name,
+                                        agent_name
+                                    );
                                     let _ = tx
                                         .send(GroupResponseEvent::ToolCallStarted {
                                             agent_id: agent_id.clone(),

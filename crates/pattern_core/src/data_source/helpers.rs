@@ -93,10 +93,9 @@ where
     let endpoint =
         endpoint.unwrap_or_else(|| "wss://jetstream2.us-east.bsky.network/subscribe".to_string());
 
-    // Create a buffer with rate-limited processing queue
-    // 30 minutes worth at 1 post per minute = 30 posts max queue
+    // Create a buffer with processing queue for rate limiting
     let buffer = StreamBuffer::new(1000, std::time::Duration::from_secs(3600)) // 1000 items, 1 hour
-        .with_processing_queue(30); // Max 30 posts in queue (30 minutes worth)
+        .with_processing_queue(1800); // 30 minutes worth at 1 post/second
 
     // BlueskyFirehoseSource::new is async and takes 3 params
     let mut source = BlueskyFirehoseSource::new(source_id, endpoint, agent_handle)
@@ -104,7 +103,7 @@ where
         .with_cursor_file("./firehose_cursor.db")
         .with_filter(filter)
         .with_buffer(buffer)
-        .with_rate_limit(1.0); // 1 post per minute = 0.0167 posts per second
+        .with_rate_limit(1.0); // 1 post per second max
 
     if let Some((auth, handle)) = bsky_agent {
         source = source.with_auth(auth, handle).await?;

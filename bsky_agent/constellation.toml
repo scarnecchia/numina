@@ -218,6 +218,9 @@ default_filters = [
         "did:plc:mdjhvva6vlrswsj26cftjttd",
         "did:plc:r65qsoiv3gx7xvljzdngnyvg",
         "did:plc:7757w723nk675bqziinitoif",
+        "did:plc:neisyrds2fyyfqod5zq56chr",
+        "did:plc:3xu5titidud43sfemwro3j62",
+        "did:plc:mxzuau6m53jtdsbqe6f4laov",
     ], keywords = [
     ], languages = [
     ] },

@@ -20,6 +20,7 @@ use crate::{
     message::{ChatRole, Message},
 };
 
+#[derive(Clone)]
 pub struct SleeptimeManager;
 
 #[async_trait]

@@ -5,7 +5,7 @@ use pattern_core::{
     agent::{AgentRecord, AgentType, DatabaseAgent, ResponseEvent},
     config::PatternConfig,
     context::{heartbeat, message_router::BlueskyEndpoint},
-    coordination::groups::{AgentGroup, GroupManager, GroupResponseEvent},
+    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
     data_source::{BlueskyFilter, DataSourceBuilder},
     db::{
         client::DB,
@@ -483,13 +483,13 @@ pub async fn register_data_sources<M, E>(
                                 "did:plc:i7ayw57idpkvkyzktdpmtgm7".to_string(),
                                 "did:plc:r65qsoiv3gx7xvljzdngnyvg".to_string(),
                                 "did:plc:7757w723nk675bqziinitoif".to_string(),
+                                "did:plc:neisyrds2fyyfqod5zq56chr".to_string(),
+                                "did:plc:mxzuau6m53jtdsbqe6f4laov".to_string(),
+                                "did:plc:3xu5titidud43sfemwro3j62".to_string(),
                             ],
                             keywords: vec![],
                             languages: vec![],
-                            mentions: vec![
-                                "did:plc:xivud6i24ruyki3bwjypjgy2".to_string(),
-                                // "pattern.atproto.systems".to_string(),
-                            ],
+                            mentions: vec!["did:plc:xivud6i24ruyki3bwjypjgy2".to_string()],
                         })
                         .clone(),
                     true,
@@ -1421,7 +1421,7 @@ pub async fn load_or_create_agent_from_member(
 }
 
 /// Chat with a group of agents
-pub async fn chat_with_group<M: GroupManager>(
+pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
     group: AgentGroup,
     agents: Vec<Arc<dyn Agent>>,
     pattern_manager: M,
@@ -1555,148 +1555,29 @@ pub async fn chat_with_group<M: GroupManager>(
 
                 // Route through the group
                 output.status("Routing message through group...");
-                match pattern_manager
-                    .route_message(&group, &agents_with_membership, message)
-                    .await
-                {
-                    Ok(mut stream) => {
-                        use tokio_stream::StreamExt;
+                let output = output.clone();
+                let agents_with_membership = agents_with_membership.clone();
+                let group = group.clone();
+                let pattern_manager = pattern_manager.clone();
+                tokio::spawn(async move {
+                    match pattern_manager
+                        .route_message(&group, &agents_with_membership, message)
+                        .await
+                    {
+                        Ok(mut stream) => {
+                            use tokio_stream::StreamExt;
 
-                        let mut execution_time = None;
-
-                        // Process the stream of events
-                        while let Some(event) = stream.next().await {
-                            match event {
-                                GroupResponseEvent::Started {
-                                    pattern,
-                                    agent_count,
-                                    ..
-                                } => {
-                                    output.status(&format!(
-                                        "Starting {} pattern with {} agents",
-                                        pattern, agent_count
-                                    ));
-                                }
-                                GroupResponseEvent::AgentStarted {
-                                    agent_name, role, ..
-                                } => {
-                                    output.status(&format!(
-                                        "Agent {} ({:?}) processing...",
-                                        agent_name, role
-                                    ));
-                                }
-                                GroupResponseEvent::TextChunk {
-                                    agent_id,
-                                    text,
-                                    is_final,
-                                } => {
-                                    if is_final || !text.is_empty() {
-                                        // Find agent name
-                                        let agent_name = agents_with_membership
-                                            .iter()
-                                            .find(|a| a.agent.id() == agent_id)
-                                            .map(|a| a.agent.name())
-                                            .unwrap_or("Unknown Agent".to_string());
-
-                                        output.agent_message(&agent_name, &text);
-                                    }
-                                }
-                                GroupResponseEvent::ReasoningChunk {
-                                    agent_id,
-                                    text,
-                                    is_final,
-                                } => {
-                                    if is_final || !text.is_empty() {
-                                        // Find agent name
-                                        let agent_name = agents_with_membership
-                                            .iter()
-                                            .find(|a| a.agent.id() == agent_id)
-                                            .map(|a| a.agent.name())
-                                            .unwrap_or("Unknown Agent".to_string());
-
-                                        output.info(&format!("{} reasoning:", agent_name), &text);
-                                    }
-                                }
-                                GroupResponseEvent::ToolCallStarted {
-                                    agent_id,
-                                    fn_name,
-                                    args,
-                                    ..
-                                } => {
-                                    let agent_name = agents_with_membership
-                                        .iter()
-                                        .find(|a| a.agent.id() == agent_id)
-                                        .map(|a| a.agent.name())
-                                        .unwrap_or("Unknown Agent".to_string());
-
-                                    output.status(&format!(
-                                        "{} calling tool: {}",
-                                        agent_name, fn_name
-                                    ));
-                                    output.tool_call(
-                                        &fn_name,
-                                        &serde_json::to_string_pretty(&args)
-                                            .unwrap_or_else(|_| args.to_string()),
-                                    );
-                                }
-                                GroupResponseEvent::ToolCallCompleted {
-                                    agent_id: _,
-                                    call_id,
-                                    result,
-                                } => match result {
-                                    Ok(result) => {
-                                        output.tool_result(&result);
-                                    }
-                                    Err(error) => {
-                                        output.error(&format!(
-                                            "Tool error (call {}): {}",
-                                            call_id, error
-                                        ));
-                                    }
-                                },
-                                GroupResponseEvent::AgentCompleted { agent_name, .. } => {
-                                    output.status(&format!("{} completed", agent_name));
-                                }
-                                GroupResponseEvent::Complete {
-                                    execution_time: exec_time,
-                                    ..
-                                } => {
-                                    execution_time = Some(exec_time);
-                                }
-                                GroupResponseEvent::Error {
-                                    agent_id,
-                                    message,
-                                    recoverable,
-                                } => {
-                                    let prefix = if let Some(agent_id) = agent_id {
-                                        let agent_name = agents_with_membership
-                                            .iter()
-                                            .find(|a| a.agent.id() == agent_id)
-                                            .map(|a| a.agent.name())
-                                            .unwrap_or("Unknown Agent".to_string());
-                                        format!("{} error", agent_name)
-                                    } else {
-                                        "Group error".to_string()
-                                    };
-
-                                    if recoverable {
-                                        output.warning(&format!("{}: {}", prefix, message));
-                                    } else {
-                                        output.error(&format!("{}: {}", prefix, message));
-                                    }
-                                }
+                            // Process the stream of events
+                            while let Some(event) = stream.next().await {
+                                print_group_response_event(event, &output, &agents_with_membership)
+                                    .await;
                             }
                         }
-
-                        // Show execution time if we got it
-                        if let Some(execution_time) = execution_time {
-                            output.info("Execution time:", &format!("{:?}", execution_time));
+                        Err(e) => {
+                            output.error(&format!("Error routing message: {}", e));
                         }
                     }
-                    Err(e) => {
-                        output.error(&format!("Error routing message: {}", e));
-                    }
-                }
+                });
             }
             Ok(ReadlineEvent::Interrupted) => {
                 output.status("CTRL-C");
@@ -1714,4 +1595,132 @@ pub async fn chat_with_group<M: GroupManager>(
     }
 
     Ok(())
+}
+
+pub async fn print_group_response_event(
+    event: GroupResponseEvent,
+    output: &Output,
+    agents_with_membership: &Vec<AgentWithMembership<Arc<dyn Agent>>>,
+) {
+    match event {
+        GroupResponseEvent::Started {
+            pattern,
+            agent_count,
+            ..
+        } => {
+            output.status(&format!(
+                "Starting {} pattern with {} agents",
+                pattern, agent_count
+            ));
+        }
+        GroupResponseEvent::AgentStarted {
+            agent_name, role, ..
+        } => {
+            output.status(&format!("Agent {} ({:?}) processing...", agent_name, role));
+        }
+        GroupResponseEvent::TextChunk {
+            agent_id,
+            text,
+            is_final,
+        } => {
+            if is_final || !text.is_empty() {
+                // Find agent name
+                let agent_name = agents_with_membership
+                    .iter()
+                    .find(|a| a.agent.id() == agent_id)
+                    .map(|a| a.agent.name())
+                    .unwrap_or("Unknown Agent".to_string());
+
+                output.agent_message(&agent_name, &text);
+            }
+        }
+        GroupResponseEvent::ReasoningChunk {
+            agent_id,
+            text,
+            is_final,
+        } => {
+            if is_final || !text.is_empty() {
+                // Find agent name
+                let agent_name = agents_with_membership
+                    .iter()
+                    .find(|a| a.agent.id() == agent_id)
+                    .map(|a| a.agent.name())
+                    .unwrap_or("Unknown Agent".to_string());
+
+                output.info(&format!("{} reasoning:", agent_name), &text);
+            }
+        }
+        GroupResponseEvent::ToolCallStarted {
+            agent_id,
+            fn_name,
+            args,
+            ..
+        } => {
+            tracing::debug!(
+                "CLI: Received ToolCallStarted {} from agent {}",
+                fn_name,
+                agent_id
+            );
+            let agent_name = agents_with_membership
+                .iter()
+                .find(|a| a.agent.id() == agent_id)
+                .map(|a| a.agent.name())
+                .unwrap_or("Unknown Agent".to_string());
+
+            output.status(&format!("{} calling tool: {}", agent_name, fn_name));
+            let args_display = if fn_name == "send_message" {
+                let mut display_args = args.clone();
+                if let Some(args_obj) = display_args.as_object_mut() {
+                    if args_obj.contains_key("content") {
+                        args_obj.insert("content".to_string(), serde_json::json!("[shown below]"));
+                    }
+                }
+                serde_json::to_string(&display_args).unwrap_or_else(|_| display_args.to_string())
+            } else {
+                serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string())
+            };
+
+            output.tool_call(&fn_name, &args_display);
+        }
+        GroupResponseEvent::ToolCallCompleted {
+            agent_id: _,
+            call_id,
+            result,
+        } => match result {
+            Ok(result) => {
+                output.tool_result(&result);
+            }
+            Err(error) => {
+                output.error(&format!("Tool error (call {}): {}", call_id, error));
+            }
+        },
+        GroupResponseEvent::AgentCompleted { agent_name, .. } => {
+            output.status(&format!("{} completed", agent_name));
+        }
+        GroupResponseEvent::Complete { execution_time, .. } => {
+            output.info("Execution time:", &format!("{:?}", execution_time));
+        }
+        GroupResponseEvent::Error {
+            agent_id,
+            message,
+            recoverable,
+        } => {
+            let prefix = if let Some(agent_id) = agent_id {
+                let agent_name = agents_with_membership
+                    .iter()
+                    .find(|a| a.agent.id() == agent_id)
+                    .map(|a| a.agent.name())
+                    .unwrap_or("Unknown Agent".to_string());
+                format!("{} error", agent_name)
+            } else {
+                "Group error".to_string()
+            };
+
+            if recoverable {
+                output.warning(&format!("{}: {}", prefix, message));
+            } else {
+                output.error(&format!("{}: {}", prefix, message));
+            }
+        }
+    }
 }

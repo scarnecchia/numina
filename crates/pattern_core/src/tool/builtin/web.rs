@@ -107,7 +107,15 @@ impl<C: surrealdb::Connection + Clone> WebTool<C> {
 
     /// Fetch content from a URL
     async fn fetch_url(&self, url: String, format: WebFormat) -> Result<WebOutput> {
-        let response = self.client.client.get(&url).send().await.map_err(|e| {
+        let response = self.client.client.get(&url)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+                .header("Accept-Language", "en-US,en;q=0.5")
+                .header("Accept-Encoding", "gzip, deflate")
+                .header("Connection", "keep-alive")
+                .header("Upgrade-Insecure-Requests", "1")
+                .send()
+                .await.map_err(|e| {
             CoreError::ToolExecutionFailed {
                 tool_name: "web".to_string(),
                 cause: format!("Failed to fetch URL: {}", e),

@@ -21,6 +21,7 @@ use crate::{
     message::Message,
 };
 
+#[derive(Clone)]
 pub struct VotingManager;
 
 #[async_trait]

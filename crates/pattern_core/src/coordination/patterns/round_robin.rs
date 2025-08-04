@@ -15,6 +15,7 @@ use crate::{
     message::Message,
 };
 
+#[derive(Clone)]
 pub struct RoundRobinManager;
 
 #[async_trait]

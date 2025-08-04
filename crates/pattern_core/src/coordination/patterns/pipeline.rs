@@ -17,6 +17,7 @@ use crate::{
     message::Message,
 };
 
+#[derive(Clone)]
 pub struct PipelineManager;
 
 #[async_trait]

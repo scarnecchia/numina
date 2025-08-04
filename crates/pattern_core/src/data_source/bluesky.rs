@@ -509,35 +509,36 @@ impl DataSource for BlueskyFirehoseSource {
         let source_id = self.source_id.clone();
         let buffer = self.buffer.clone();
 
-        // Start queue processor if we have a buffer
+        // Spawn task to process queued posts at configured rate
         if let Some(buffer) = &self.buffer {
-            let tx_clone = tx.clone();
-            let buffer_clone = buffer.clone();
-            let last_send_time_clone = self.last_send_time.clone();
-            let min_interval = std::time::Duration::from_secs_f64(1.0 / self.posts_per_second);
+            let queue_buffer = buffer.clone();
+            let queue_tx = tx.clone();
+            let posts_per_second = self.posts_per_second;
+            let queue_last_send_time = self.last_send_time.clone();
 
             tokio::spawn(async move {
-                loop {
-                    // Wait for the rate limit interval
-                    tokio::time::sleep(min_interval).await;
+                let interval = std::time::Duration::from_secs_f64(1.0 / posts_per_second);
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                    // Check if we have anything in the queue
+                loop {
+                    ticker.tick().await;
+
+                    // Try to dequeue and send an event
                     let event = {
-                        let mut buffer_guard = buffer_clone.lock();
-                        buffer_guard.dequeue_for_processing()
+                        let mut buf = queue_buffer.lock();
+                        buf.dequeue_for_processing()
                     };
 
                     if let Some(event) = event {
-                        // Update last send time
-                        let mut last_send = last_send_time_clone.lock().await;
-                        *last_send = std::time::Instant::now();
-                        drop(last_send);
-
-                        // Send the queued event
-                        if let Err(e) = tx_clone.send(Ok(event.clone())).await {
+                        if let Err(e) = queue_tx.send(Ok(event)).await {
                             tracing::error!("Failed to send queued event: {}", e);
+                            break;
                         } else {
-                            tracing::debug!("Processed queued post: {}", event.item.uri);
+                            tracing::debug!("Sent queued post from processing queue");
+                            // Update last send time so the ingestor knows we're sending
+                            let mut last_send = queue_last_send_time.lock().await;
+                            *last_send = std::time::Instant::now();
                         }
                     }
                 }
@@ -677,46 +678,37 @@ impl DataSource for BlueskyFirehoseSource {
         message.push_str(&format!("💬 @{}", item.handle));
 
         // Add context for replies/mentions
-        if let Some(_) = &item.reply {
+        if let Some(reply) = &item.reply {
             message.push_str(" replied");
 
-            // If we have a BskyAgent, try to fetch thread context
-            if let Some(bsky_agent) = &self.bsky_agent {
-                // Try to fetch the parent post for context
-                if let Ok(thread_result) = bsky_agent
-                    .api
-                    .app
-                    .bsky
-                    .feed
-                    .get_post_thread(
-                        atrium_api::app::bsky::feed::get_post_thread::ParametersData {
-                            uri: item.uri.clone(),
-                            depth: None, // Use default depth
-                            parent_height: None,
-                        }
-                        .into(),
-                    )
-                    .await
-                {
-                    // Extract thread context
-                    use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
-                    if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
-                        thread_view,
-                    )) = &thread_result.thread
+            // If we have a BskyAgent, try to fetch thread context using get_posts
+            // (get_post_thread causes stack overflow - bug in bsky-sdk/atrium)
+            if let Some(bsky_agent_arc) = &self.bsky_agent {
+                let bsky_agent = bsky_agent_arc.clone();
+
+                // Walk up the thread to collect parent posts
+                let mut thread_posts = Vec::new();
+                let mut current_uri = Some(reply.parent.uri.clone());
+                let mut depth = 0;
+                const MAX_DEPTH: usize = 4;
+
+                // Fetch parent posts one by one, walking up the thread
+                while let Some(uri) = current_uri.take() {
+                    if depth >= MAX_DEPTH {
+                        break;
+                    }
+
+                    let params =
+                        atrium_api::app::bsky::feed::get_posts::ParametersData { uris: vec![uri] };
+
+                    if let Ok(posts_result) =
+                        bsky_agent.api.app.bsky.feed.get_posts(params.into()).await
                     {
-                        message.push_str(" in thread:\n\n");
-
-                        // Walk up the parent chain to collect thread context
-                        let mut current_thread = thread_view;
-                        let mut thread_posts = Vec::new();
-                        let mut depth = 0;
-
-                        // Collect the immediate parent and up to 4 posts up the chain
-                        loop {
+                        if let Some(post_view) = posts_result.posts.first() {
                             if let Some((text, langs, features, alt_texts)) =
-                                extract_post_data(&current_thread.post)
+                                extract_post_data(post_view)
                             {
-                                let handle = current_thread.post.author.handle.as_str().to_string();
+                                let handle = post_view.author.handle.as_str().to_string();
                                 let mentions: Vec<_> = features
                                     .iter()
                                     .filter_map(|f| match f {
@@ -738,7 +730,7 @@ impl DataSource for BlueskyFirehoseSource {
                                 thread_posts.push((
                                     handle,
                                     text,
-                                    current_thread.post.uri.clone(),
+                                    post_view.uri.clone(),
                                     depth,
                                     mentions,
                                     langs,
@@ -747,94 +739,93 @@ impl DataSource for BlueskyFirehoseSource {
                                 ));
 
                                 // Add as reply candidate
-                                reply_candidates
-                                    .push(thread_post_to_candidate(&current_thread.post));
-                            }
+                                reply_candidates.push(thread_post_to_candidate(post_view));
 
-                            depth += 1;
-                            if depth >= 10 {
-                                break;
-                            }
-
-                            // Check if there's a parent
-                            if let Some(parent) = &current_thread.parent {
-                                use atrium_api::app::bsky::feed::defs::ThreadViewPostParentRefs;
-                                if let Union::Refs(ThreadViewPostParentRefs::ThreadViewPost(
-                                    parent_thread,
-                                )) = parent
-                                {
-                                    current_thread = parent_thread;
-                                } else if let Union::Refs(ThreadViewPostParentRefs::BlockedPost(
-                                    _,
-                                )) = parent
-                                {
-                                    // immediately eject if we hit a blocked post.
-                                    return None;
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-
-                        // Display thread posts in reverse order (root to leaf)
-                        for (handle, text, _uri, depth, mentions, langs, alt_texts, links) in
-                            thread_posts.iter().rev()
-                        {
-                            let indent = "  ".repeat(*depth);
-                            let bullet = if *depth == 0 { "•" } else { "└─" };
-
-                            message
-                                .push_str(&format!("{}{} @{}: {}\n", indent, bullet, handle, text));
-
-                            // Show mentions if any
-                            if !mentions.is_empty() {
-                                message.push_str(&format!(
-                                    "{}   [mentions: {}]\n",
-                                    indent,
-                                    mentions.join(", ")
-                                ));
-                            }
-
-                            // Show links if any
-                            if !links.is_empty() {
-                                message.push_str(&format!(
-                                    "{}   [🔗 Links: {}]\n",
-                                    indent,
-                                    links.join(", ")
-                                ));
-                            }
-
-                            // Show language if not English
-                            if !langs.is_empty() && !langs.contains(&"en".to_string()) {
-                                message.push_str(&format!(
-                                    "{}   [langs: {}]\n",
-                                    indent,
-                                    langs.join(", ")
-                                ));
-                            }
-
-                            // Show images if any
-                            if !alt_texts.is_empty() {
-                                message.push_str(&format!(
-                                    "{}   [📸 {} image(s)]\n",
-                                    indent,
-                                    alt_texts.len()
-                                ));
-                                for alt_text in alt_texts {
-                                    message.push_str(&format!(
-                                        "{}    alt text: {}\n",
-                                        indent, alt_text
-                                    ));
+                                // Check if this post has a parent to continue walking up
+                                // Parse the record to check for reply field
+                                // First convert Unknown to serde_json::Value
+                                if let Ok(record_value) = serde_json::to_value(&post_view.record) {
+                                    if let Ok(post_record) =
+                                        serde_json::from_value::<
+                                            atrium_api::app::bsky::feed::post::RecordData,
+                                        >(record_value)
+                                    {
+                                        if let Some(reply_ref) = post_record.reply {
+                                            current_uri = Some(reply_ref.parent.uri.clone());
+                                            depth += 1;
+                                        }
+                                    }
                                 }
                             }
                         }
-
-                        // Mark the main post clearly
-                        message.push_str("\n>>> MAIN POST >>>\n");
+                    } else {
+                        // Failed to fetch, stop walking
+                        break;
                     }
                 }
+
+                if !thread_posts.is_empty() {
+                    message.push_str(" in thread:\n\n");
+
+                    // Display thread posts in reverse order (root to leaf)
+                    for (handle, text, _uri, depth, mentions, langs, alt_texts, links) in
+                        thread_posts.iter().rev()
+                    {
+                        let indent = "  ".repeat(*depth);
+                        let bullet = if *depth == 0 { "•" } else { "└─" };
+
+                        message.push_str(&format!("{}{} @{}: {}\n", indent, bullet, handle, text));
+
+                        // Show mentions if any
+                        if !mentions.is_empty() {
+                            message.push_str(&format!(
+                                "{}   [mentions: {}]\n",
+                                indent,
+                                mentions.join(", ")
+                            ));
+                        }
+
+                        // Show links if any
+                        if !links.is_empty() {
+                            message.push_str(&format!(
+                                "{}   [🔗 Links: {}]\n",
+                                indent,
+                                links.join(", ")
+                            ));
+                        }
+
+                        // Show language if not English
+                        if !langs.is_empty() && !langs.contains(&"en".to_string()) {
+                            message.push_str(&format!(
+                                "{}   [langs: {}]\n",
+                                indent,
+                                langs.join(", ")
+                            ));
+                        }
+
+                        // Show images if any
+                        if !alt_texts.is_empty() {
+                            message.push_str(&format!(
+                                "{}   [📸 {} image(s)]\n",
+                                indent,
+                                alt_texts.len()
+                            ));
+                            for alt_text in alt_texts {
+                                message
+                                    .push_str(&format!("{}    alt text: {}\n", indent, alt_text));
+                            }
+                        }
+                    }
+
+                    // Mark the main post clearly
+                    message.push_str("\n>>> MAIN POST >>>\n");
+                } else {
+                    // Fallback if we can't fetch the parent
+                    message.push_str(&format!(" to {}", reply.parent.uri));
+                }
+            } else {
+                // No BskyAgent available, just show the URI
+                message.push_str(&format!(" to {}", reply.parent.uri));
             }
         } else if item.mentions(&self.source_id) {
             message.push_str(" mentioned you");
@@ -885,7 +876,12 @@ impl DataSource for BlueskyFirehoseSource {
 
         // Show replies after main post if we're in a thread
         if let Some(_) = &item.reply {
-            if let Some(bsky_agent) = &self.bsky_agent {
+            // DISABLED: Second get_post_thread call causing stack overflow
+            if false && self.bsky_agent.is_some() {
+                let bsky_agent = self.bsky_agent.as_ref().unwrap();
+                // Add a small delay to avoid potential API rate limits or state issues
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
                 if let Ok(thread_result) = bsky_agent
                     .api
                     .app
@@ -986,7 +982,6 @@ impl DataSource for BlueskyFirehoseSource {
             }
         }
 
-        // Check for memory blocks if we have an agent handle
         if let Some(agent_handle) = &self.agent_handle {
             // Look for or create memory block for this user
             let memory_label = format!("bluesky_user_{}", item.handle);
@@ -1174,37 +1169,35 @@ impl LexiconIngestor for PostIngestor {
                     timestamp: now,
                 };
 
-                // Check if we should rate limit
+                // Apply rate limiting
                 let mut last_send = self.last_send_time.lock().await;
                 let elapsed = last_send.elapsed();
 
-                if elapsed < self.min_interval * 10 {
-                    // We're sending too fast, queue it
+                if elapsed < self.min_interval {
+                    // Need to rate limit - add to processing queue
                     if let Some(buffer) = &self.buffer {
                         let mut buffer_guard = buffer.lock();
-                        if !buffer_guard.queue_for_processing(event.clone()) {
-                            tracing::warn!(
-                                "Bluesky processing queue full, dropping post: {}",
-                                post_to_filter.uri
-                            );
+                        if buffer_guard.queue_for_processing(event.clone()) {
+                            // Successfully queued for later processing
+                            tracing::debug!("Queued post for rate-limited processing");
                         } else {
-                            tracing::debug!(
-                                "Queued post for rate-limited processing: {}",
-                                post_to_filter.uri
+                            // Queue full, drop the event
+                            tracing::warn!(
+                                "Processing queue full, dropping post from {}",
+                                post_to_filter.handle
                             );
                         }
-                        // Always add to history buffer
+                        // Also add to regular buffer for history
                         buffer_guard.push(event);
                     }
                 } else {
-                    // We can send immediately
-                    *last_send = std::time::Instant::now();
-                    drop(last_send); // Release lock before sending
-
+                    // Can send immediately
                     self.tx
                         .send(Ok(event.clone()))
                         .await
                         .inspect_err(|e| tracing::error!("{}", e))?;
+
+                    *last_send = std::time::Instant::now();
 
                     if let Some(buffer) = &self.buffer {
                         let mut buffer_guard = buffer.lock();
