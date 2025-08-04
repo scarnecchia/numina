@@ -85,12 +85,12 @@ memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true
 
-[memory.intro_blog_post]
-content_path = "blog-post.md"
-permission = "read_only"
-memory_type = "archival"
-description = "Post written by orual about their motivation for developing our constellation"
-shared = true
+# [memory.intro_blog_post]
+# content_path = "blog-post.md"
+# permission = "read_only"
+# memory_type = "archival"
+# description = "Post written by orual about their motivation for developing our constellation"
+# shared = true
 
 
 [model]
@@ -216,6 +216,8 @@ default_filters = [
         "did:plc:i7ayw57idpkvkyzktdpmtgm7",
         "did:plc:vw4e7blkwzdokanwp24k3igr",
         "did:plc:mdjhvva6vlrswsj26cftjttd",
+        "did:plc:r65qsoiv3gx7xvljzdngnyvg",
+        "did:plc:7757w723nk675bqziinitoif",
     ], keywords = [
     ], languages = [
     ] },

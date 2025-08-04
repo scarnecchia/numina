@@ -227,11 +227,25 @@ impl MessageCompressor {
     }
 
     /// Check if a message contains tool result blocks
+    #[allow(dead_code)]
     fn has_tool_result_blocks(&self, message: &Message) -> bool {
         match &message.content {
             MessageContent::Blocks(blocks) => blocks
                 .iter()
                 .any(|block| matches!(block, ContentBlock::ToolResult { .. })),
+            _ => false,
+        }
+    }
+
+    /// Check if a message contains thinking blocks
+    fn has_thinking_blocks(&self, message: &Message) -> bool {
+        match &message.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                )
+            }),
             _ => false,
         }
     }
@@ -283,7 +297,7 @@ impl MessageCompressor {
         let (archived, mut active): (Vec<_>, Vec<_>) = if messages.len() > keep_recent {
             let mut split_point = messages.len() - keep_recent;
 
-            // Adjust split point to preserve tool call/response pairs
+            // Adjust split point to preserve tool call/response pairs and thinking blocks
             while split_point > 0 && split_point < messages.len() {
                 let current = &messages[split_point];
                 let prev = if split_point > 0 {
@@ -310,6 +324,16 @@ impl MessageCompressor {
                     let next = &messages[split_point + 1];
                     if next.role == ChatRole::Tool {
                         // Move split point to before this tool call/response pair
+                        split_point -= 1;
+                        continue;
+                    }
+                }
+
+                // If current is assistant with thinking blocks, try to keep it
+                // This is especially important for the final assistant message
+                if current.role == ChatRole::Assistant && self.has_thinking_blocks(current) {
+                    // If we're near the end, try to include this message
+                    if split_point >= messages.len() - 3 {
                         split_point -= 1;
                         continue;
                     }

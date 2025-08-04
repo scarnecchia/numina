@@ -10,6 +10,7 @@ mod search;
 mod send_message;
 #[cfg(test)]
 mod test_schemas;
+mod web;
 
 use std::fmt::Debug;
 
@@ -22,9 +23,9 @@ pub use recall::{
 };
 use schemars::JsonSchema;
 pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
-
 pub use send_message::SendMessageTool;
 use serde::{Deserialize, Serialize};
+pub use web::{WebFormat, WebInput, WebOutput, WebTool};
 
 use crate::{
     context::AgentHandle,
@@ -38,6 +39,7 @@ pub struct BuiltinTools {
     context_tool: Box<dyn DynamicTool>,
     search_tool: Box<dyn DynamicTool>,
     send_message_tool: Box<dyn DynamicTool>,
+    web_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinTools {
@@ -55,10 +57,10 @@ impl BuiltinTools {
             search_tool: Box::new(DynamicToolAdapter::new(SearchTool {
                 handle: handle.clone(),
             })),
-
             send_message_tool: Box::new(DynamicToolAdapter::new(SendMessageTool {
                 handle: handle.clone(),
             })),
+            web_tool: Some(Box::new(DynamicToolAdapter::new(WebTool::new(handle)))),
         }
     }
 
@@ -68,6 +70,10 @@ impl BuiltinTools {
         registry.register_dynamic(self.context_tool.clone_box());
         registry.register_dynamic(self.search_tool.clone_box());
         registry.register_dynamic(self.send_message_tool.clone_box());
+
+        if let Some(web_tool) = &self.web_tool {
+            registry.register_dynamic(web_tool.clone_box());
+        }
 
         // Note: DataSourceTool requires external coordinator setup.
         // Use register_data_source_tool() function directly when you have a coordinator.
@@ -124,6 +130,7 @@ impl BuiltinToolsBuilder {
             context_tool: self.context_tool.unwrap_or(defaults.context_tool),
             search_tool: self.search_tool.unwrap_or(defaults.search_tool),
             send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
+            web_tool: defaults.web_tool,
         }
     }
 }

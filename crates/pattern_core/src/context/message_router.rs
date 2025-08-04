@@ -1094,7 +1094,23 @@ impl MessageEndpoint for BlueskyEndpoint {
         let reply = if is_reply {
             if let Some(meta) = &metadata {
                 if let Some(reply_to) = meta.get("reply_to").and_then(|v| v.as_str()) {
-                    Some(self.create_reply_refs(reply_to).await?)
+                    if text.trim().to_lowercase() == "like" || text.trim().is_empty() {
+                        let agent = self.agent.read().await;
+                        info!("like message received");
+                        let like = self.create_like(reply_to).await?;
+                        let result = agent.create_record(like).await.map_err(|e| {
+                            crate::CoreError::ToolExecutionFailed {
+                                tool_name: "bluesky_endpoint".to_string(),
+                                cause: format!("Failed to create like: {}", e),
+                                parameters: serde_json::json!({ "uri": reply_to }),
+                            }
+                        })?;
+
+                        info!("Liked on Bluesky: {}", result.uri);
+                        return Ok(());
+                    } else {
+                        Some(self.create_reply_refs(reply_to).await?)
+                    }
                 } else {
                     None
                 }
@@ -1105,50 +1121,43 @@ impl MessageEndpoint for BlueskyEndpoint {
             None
         };
 
+        // Create rich text with facets
+        let rich_text = bsky_sdk::rich_text::RichText::new_with_detect_facets(&text)
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to detect facets: {}", e),
+                parameters: serde_json::json!({ "text": &text }),
+            })?;
+
         // Create the post
         let agent = self.agent.read().await;
-        if text.is_empty() {
-            if let Some(meta) = &metadata {
-                if let Some(reply_to) = meta.get("reply_to").and_then(|v| v.as_str()) {
-                    let like = self.create_like(reply_to).await?;
-                    let result = agent.create_record(like).await.map_err(|e| {
-                        crate::CoreError::ToolExecutionFailed {
-                            tool_name: "bluesky_endpoint".to_string(),
-                            cause: format!("Failed to create like: {}", e),
-                            parameters: serde_json::json!({ "uri": reply_to }),
-                        }
-                    })?;
+        let text_copy = text.clone();
+        let result = agent
+            .create_record(atrium_api::app::bsky::feed::post::RecordData {
+                created_at: atrium_api::types::string::Datetime::now(),
+                text: rich_text.text,
+                reply: reply.map(|r| r.into()),
+                embed: None,
+                entities: None,
+                facets: rich_text.facets,
+                labels: None,
+                langs: None,
+                tags: None,
+            })
+            .await
+            .map_err(|e| crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!("Failed to create post: {}", e),
+                parameters: serde_json::json!({ "text": text_copy }),
+            })?;
 
-                    info!("Liked on Bluesky: {}", result.uri,);
-                }
-            }
-        } else {
-            let text_copy = text.clone();
-            let result = agent
-                .create_record(atrium_api::app::bsky::feed::post::RecordData {
-                    created_at: atrium_api::types::string::Datetime::now(),
-                    text,
-                    reply: reply.map(|r| r.into()),
-                    embed: None,
-                    entities: None,
-                    facets: None,
-                    labels: None,
-                    langs: None,
-                    tags: None,
-                })
-                .await
-                .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "bluesky_endpoint".to_string(),
-                    cause: format!("Failed to create post: {}", e),
-                    parameters: serde_json::json!({ "text": text_copy }),
-                })?;
-
-            info!(
-                "Posted to Bluesky: {} ({})",
-                result.uri,
-                if is_reply { "reply" } else { "new post" }
-            );
-        }
+        info!(
+            "Posted to Bluesky: {} ({})\n{}",
+            result.uri,
+            if is_reply { "reply" } else { "new post" },
+            text_copy
+        );
 
         Ok(())
     }

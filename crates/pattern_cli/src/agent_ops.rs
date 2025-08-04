@@ -481,6 +481,8 @@ pub async fn register_data_sources<M, E>(
                                 "did:plc:jqnuubqvyurc3n3km2puzpfx".to_string(),
                                 "did:plc:vw4e7blkwzdokanwp24k3igr".to_string(),
                                 "did:plc:i7ayw57idpkvkyzktdpmtgm7".to_string(),
+                                "did:plc:r65qsoiv3gx7xvljzdngnyvg".to_string(),
+                                "did:plc:7757w723nk675bqziinitoif".to_string(),
                             ],
                             keywords: vec![],
                             languages: vec![],
@@ -492,6 +494,11 @@ pub async fn register_data_sources<M, E>(
                         .clone(),
                     true,
                 )
+                // .with_file_source(
+                //     "/home/orual/Projects/PatternProject/pattern/bsky_agent/blog-post.md",
+                //     false,
+                //     true,
+                // )
                 .build(
                     agent.id(),
                     agent.name(),

@@ -97,7 +97,7 @@ pub enum CoreError {
         parameters: serde_json::Value,
     },
 
-    #[error("Invalid tool parameters")]
+    #[error("Invalid tool parameters for {tool_name}")]
     #[diagnostic(
         code(pattern_core::invalid_tool_params),
         help("Expected schema: {expected_schema}")

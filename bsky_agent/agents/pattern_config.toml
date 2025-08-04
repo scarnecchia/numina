@@ -68,12 +68,12 @@ memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true
 
-[memory.intro_blog_post]
-content_path = "../blog-post.md"
-permission = "read_only"
-memory_type = "archival"
-description = "Post written by orual about their motivation for developing our constellation"
-shared = true
+# [memory.intro_blog_post]
+# content_path = "../blog-post.md"
+# permission = "read_only"
+# memory_type = "archival"
+# description = "Post written by orual about their motivation for developing our constellation"
+# shared = true
 
 
 # Pattern gets default model from constellation config
@@ -111,10 +111,11 @@ default_filters = [
         "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
         "did:plc:by3jhwdqgbtrcc7q4tkkv3cf",
         "did:plc:vw4e7blkwzdokanwp24k3igr",
-
+        "did:plc:r65qsoiv3gx7xvljzdngnyvg",
         "did:plc:i7ayw57idpkvkyzktdpmtgm7",
         "did:plc:jqnuubqvyurc3n3km2puzpfx",
         "did:plc:mdjhvva6vlrswsj26cftjttd",
+        "did:plc:7757w723nk675bqziinitoif",
     ], keywords = [
     ], languages = [
     ] },

@@ -8,10 +8,8 @@ use tokio::sync::RwLock;
 use crate::context::message_router::AgentMessageRouter;
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
-use crate::id::AgentId;
 
 use super::buffer::{BufferConfig, BufferStats};
-use super::cursor_store::DataSourceCursorRecord;
 use super::traits::{DataSource, StreamEvent};
 
 use async_trait::async_trait;

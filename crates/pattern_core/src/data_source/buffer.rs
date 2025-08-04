@@ -14,6 +14,10 @@ pub struct StreamBuffer<T, C, D: Connection = surrealdb::engine::any::Any> {
     max_items: usize,
     max_age: Duration,
     db: Option<Surreal<D>>,
+    /// Optional queue for rate-limited processing
+    processing_queue: Option<VecDeque<StreamEvent<T, C>>>,
+    /// Max queue size before dropping new items
+    max_queue_size: Option<usize>,
 }
 
 impl<T, C, D> StreamBuffer<T, C, D>
@@ -28,11 +32,20 @@ where
             max_items,
             max_age,
             db: None,
+            processing_queue: None,
+            max_queue_size: None,
         }
     }
 
     pub fn with_persistence(mut self, db: Surreal<D>) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    /// Enable rate-limited processing queue
+    pub fn with_processing_queue(mut self, max_queue_size: usize) -> Self {
+        self.processing_queue = Some(VecDeque::with_capacity(max_queue_size));
+        self.max_queue_size = Some(max_queue_size);
         self
     }
 
@@ -101,12 +114,43 @@ where
             newest_item: self.items.back().map(|e| e.timestamp),
             max_items: self.max_items,
             max_age: self.max_age,
+            queue_size: self.processing_queue.as_ref().map(|q| q.len()).unwrap_or(0),
         }
     }
 
     /// Clear the buffer
     pub fn clear(&mut self) {
         self.items.clear();
+        if let Some(queue) = &mut self.processing_queue {
+            queue.clear();
+        }
+    }
+
+    /// Add an item to the processing queue
+    pub fn queue_for_processing(&mut self, event: StreamEvent<T, C>) -> bool {
+        if let Some(queue) = &mut self.processing_queue {
+            if let Some(max_size) = self.max_queue_size {
+                if queue.len() >= max_size {
+                    // Queue is full, drop the item
+                    return false;
+                }
+            }
+            queue.push_back(event);
+            true
+        } else {
+            // No processing queue configured
+            false
+        }
+    }
+
+    /// Get the next item from the processing queue
+    pub fn dequeue_for_processing(&mut self) -> Option<StreamEvent<T, C>> {
+        self.processing_queue.as_mut()?.pop_front()
+    }
+
+    /// Get the current queue size
+    pub fn queue_len(&self) -> usize {
+        self.processing_queue.as_ref().map(|q| q.len()).unwrap_or(0)
     }
 
     /// Search buffer contents if items implement Searchable
@@ -149,6 +193,7 @@ pub struct BufferStats {
     pub newest_item: Option<DateTime<Utc>>,
     pub max_items: usize,
     pub max_age: Duration,
+    pub queue_size: usize,
 }
 
 /// Configuration for stream buffering

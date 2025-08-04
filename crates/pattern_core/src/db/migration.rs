@@ -11,12 +11,18 @@ pub struct MigrationRunner;
 impl MigrationRunner {
     /// Run all migrations
     pub async fn run<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        let start = std::time::Instant::now();
+        tracing::info!("Starting database migrations...");
+
         let current_version = Self::get_schema_version(db).await?;
+        tracing::info!("Current schema version: {}", current_version);
 
         if current_version < 1 {
             tracing::info!("Running migration v1: Initial schema");
+            let migration_start = std::time::Instant::now();
             Self::migrate_v1(db).await?;
             Self::update_schema_version(db, 1).await?;
+            tracing::info!("Migration v1 completed in {:?}", migration_start.elapsed());
         }
 
         // Create entity tables using their schema definitions
@@ -28,6 +34,8 @@ impl MigrationRunner {
         use crate::users::User;
 
         // Create all entity tables
+        let entity_start = std::time::Instant::now();
+        tracing::info!("Creating entity tables...");
         for table_def in [
             User::schema(),
             AgentRecord::schema(),
@@ -37,6 +45,13 @@ impl MigrationRunner {
             Message::schema(),
             ToolCall::schema(),
         ] {
+            let table_start = std::time::Instant::now();
+            let table_name = table_def
+                .schema
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or("unknown");
+
             // Execute table schema
             db.query(&table_def.schema)
                 .await
@@ -48,9 +63,18 @@ impl MigrationRunner {
                     .await
                     .map_err(|e| DatabaseError::QueryFailed(e))?;
             }
+
+            tracing::debug!(
+                "Created table {} in {:?}",
+                table_name,
+                table_start.elapsed()
+            );
         }
+        tracing::info!("Entity tables created in {:?}", entity_start.elapsed());
 
         // Create auxiliary tables (system_metadata, etc.)
+        let aux_start = std::time::Instant::now();
+        tracing::info!("Creating auxiliary tables...");
         for table_def in Schema::tables() {
             // Execute table schema
             db.query(&table_def.schema)
@@ -64,9 +88,16 @@ impl MigrationRunner {
                     .map_err(|e| DatabaseError::QueryFailed(e))?;
             }
         }
+        tracing::info!("Auxiliary tables created in {:?}", aux_start.elapsed());
 
         // Create specialized indices (full-text search, vector indices)
+        let indices_start = std::time::Instant::now();
+        tracing::info!("Creating specialized indices...");
         Self::create_specialized_indices(db).await?;
+        tracing::info!(
+            "Specialized indices created in {:?}",
+            indices_start.elapsed()
+        );
 
         // Add more migrations here as needed
         // if current_version < 2 {
@@ -75,6 +106,7 @@ impl MigrationRunner {
         //     Self::update_schema_version(db, 2).await?;
         // }
 
+        tracing::info!("All database migrations completed in {:?}", start.elapsed());
         Ok(())
     }
 
@@ -172,14 +204,14 @@ impl MigrationRunner {
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
         let message_search_index =
-            "DEFINE FIELD OVERWRITE conversation_history
+            "DEFINE FIELD IF NOT EXISTS conversation_history
                   ON TABLE agent
                   VALUE <future> {
                       (SELECT VALUE ->agent_messages->msg.*
                        FROM ONLY $this)
                   };
-            DEFINE INDEX OVERWRITE msg_content_search ON msg FIELDS content SEARCH ANALYZER msg_content_analyzer BM25;
-            DEFINE INDEX OVERWRITE idx_agent_conversation_search
+            DEFINE INDEX IF NOT EXISTS msg_content_search ON msg FIELDS content SEARCH ANALYZER msg_content_analyzer BM25;
+            DEFINE INDEX IF NOT EXISTS idx_agent_conversation_search
               ON TABLE agent
               COLUMNS conversation_history.*.content
               SEARCH ANALYZER msg_content_analyzer
@@ -199,14 +231,14 @@ impl MigrationRunner {
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
         let memory_search_index =
-            "DEFINE FIELD OVERWRITE archival_memories
+            "DEFINE FIELD IF NOT EXISTS archival_memories
                   ON TABLE agent
                   VALUE <future> {
                       (SELECT VALUE ->agent_memories->(mem WHERE memory_type = 'archival')
                        FROM ONLY $this FETCH mem)
                   };
-            DEFINE INDEX OVERWRITE mem_value_search ON mem FIELDS value SEARCH ANALYZER mem_value_analyzer BM25;
-            DEFINE INDEX OVERWRITE idx_agent_archival_search
+            DEFINE INDEX IF NOT EXISTS mem_value_search ON mem FIELDS value SEARCH ANALYZER mem_value_analyzer BM25;
+            DEFINE INDEX IF NOT EXISTS idx_agent_archival_search
               ON TABLE agent
               FIELDS archival_memories.*.value
               SEARCH ANALYZER mem_value_analyzer

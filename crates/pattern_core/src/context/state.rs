@@ -619,7 +619,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
 
                 Ok(Some(ToolResponse {
                     call_id: call.call_id.clone(),
-                    content: format!("Error: {}", e),
+                    content: format!("Error: {:?}", e),
                 }))
             }
         };

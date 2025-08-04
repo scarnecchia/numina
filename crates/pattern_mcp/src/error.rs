@@ -79,7 +79,7 @@ pub enum McpError {
         partial_result: Option<serde_json::Value>,
     },
 
-    #[error("Invalid tool parameters")]
+    #[error("Invalid tool parameters for tool {tool_name}")]
     #[diagnostic(
         code(pattern::mcp::invalid_tool_parameters),
         help("Tool '{tool_name}' received invalid parameters")

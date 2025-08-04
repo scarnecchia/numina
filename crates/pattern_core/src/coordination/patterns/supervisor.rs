@@ -70,7 +70,7 @@ impl GroupManager for SupervisorManager {
                 .find(|awm| awm.agent.as_ref().id() == *leader_id)
             {
                 Some(l) => l,
-                None => {
+                _ => {
                     let _ = tx
                         .send(GroupResponseEvent::Error {
                             agent_id: None,

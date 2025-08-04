@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[derive(Debug, Clone)]
 pub struct PatternHttpClient {
     pub client: reqwest::Client,
 }
@@ -142,6 +143,21 @@ impl BlueskyPost {
             })
             .unwrap_or_default()
     }
+
+    /// Extract external link from embed (link cards)
+    pub fn embedded_link(&self) -> Option<String> {
+        self.embed.as_ref().and_then(|e| {
+            // Check if it's an external embed
+            if e.get("$type")?.as_str()? == "app.bsky.embed.external" {
+                e.get("external")?
+                    .get("uri")?
+                    .as_str()
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+    }
 }
 
 /// Rich text facet for mentions, links, and hashtags
@@ -215,10 +231,16 @@ pub struct BlueskyFirehoseSource {
     >,
     notifications_enabled: bool,
     agent_handle: Option<AgentHandle>,
-    bsky_agent: Option<Arc<tokio::sync::RwLock<bsky_sdk::BskyAgent>>>,
+    bsky_agent: Option<Arc<bsky_sdk::BskyAgent>>,
     // Rate limiting
     last_send_time: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
     posts_per_second: f64,
+    // Cursor persistence
+    cursor_save_interval: std::time::Duration,
+    cursor_save_threshold: u64, // Save after N events
+    events_since_save: Arc<std::sync::Mutex<u64>>,
+    cursor_file_path: Option<std::path::PathBuf>,
+    last_cursor_save: Arc<tokio::sync::Mutex<std::time::Instant>>,
 }
 
 impl std::fmt::Debug for BlueskyFirehoseSource {
@@ -234,11 +256,39 @@ impl std::fmt::Debug for BlueskyFirehoseSource {
             .field("agent_handle", &self.agent_handle.is_some())
             .field("bsky_agent", &self.bsky_agent.is_some())
             .field("posts_per_second", &self.posts_per_second)
+            .field("cursor_save_interval", &self.cursor_save_interval)
+            .field("cursor_save_threshold", &self.cursor_save_threshold)
             .finish()
     }
 }
 
 impl BlueskyFirehoseSource {
+    /// Load cursor from file
+    async fn load_cursor_from_file(&self) -> Result<Option<BlueskyFirehoseCursor>> {
+        if let Some(path) = &self.cursor_file_path {
+            if path.exists() {
+                let cursor_data = tokio::fs::read_to_string(path).await.map_err(|e| {
+                    crate::CoreError::DataSourceError {
+                        source_name: self.source_id.clone(),
+                        operation: "load_cursor".to_string(),
+                        cause: e.to_string(),
+                    }
+                })?;
+
+                let cursor = serde_json::from_str(&cursor_data).map_err(|e| {
+                    crate::CoreError::SerializationError {
+                        data_type: "cursor".to_string(),
+                        cause: e,
+                    }
+                })?;
+
+                tracing::info!("Loaded Bluesky cursor from {:?}: {:?}", path, cursor);
+                return Ok(Some(cursor));
+            }
+        }
+        Ok(None)
+    }
+
     /// Fetch user profile and format memory content
     async fn fetch_user_profile_for_memory(
         agent: &bsky_sdk::BskyAgent,
@@ -306,7 +356,12 @@ impl BlueskyFirehoseSource {
             agent_handle,
             bsky_agent: None,
             last_send_time: std::sync::Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
-            posts_per_second: 0.5, // Default to 1 posts every other second max
+            posts_per_second: 1.0, // Default to 1 posts every second max
+            cursor_save_interval: std::time::Duration::from_secs(60), // Save every minute
+            cursor_save_threshold: 100, // Save every 100 events
+            events_since_save: Arc::new(std::sync::Mutex::new(0)),
+            cursor_file_path: None,
+            last_cursor_save: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
         }
     }
 
@@ -322,6 +377,11 @@ impl BlueskyFirehoseSource {
 
     pub fn with_rate_limit(mut self, posts_per_second: f64) -> Self {
         self.posts_per_second = posts_per_second;
+        self
+    }
+
+    pub fn with_cursor_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.cursor_file_path = Some(path.into());
         self
     }
 
@@ -374,7 +434,7 @@ impl BlueskyFirehoseSource {
             }
         };
 
-        self.bsky_agent = Some(Arc::new(tokio::sync::RwLock::new(agent)));
+        self.bsky_agent = Some(Arc::new(agent));
         Ok(self)
     }
 }
@@ -416,6 +476,11 @@ impl DataSource for BlueskyFirehoseSource {
         from: Option<Self::Cursor>,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin>>
     {
+        // Try to load cursor from file if not provided
+        let effective_cursor = match from {
+            Some(cursor) => Some(cursor),
+            None => self.load_cursor_from_file().await?,
+        };
         // Apply collection filters (NSIDs map to collections)
         let collections = if !self.filter.nsids.is_empty() {
             self.filter.nsids.clone()
@@ -424,7 +489,7 @@ impl DataSource for BlueskyFirehoseSource {
         };
 
         // Build options with all settings
-        let options = if let Some(ref cursor) = from {
+        let options = if let Some(ref cursor) = effective_cursor {
             JetstreamOptions::builder()
                 .cursor(cursor.time_us.to_string())
                 .wanted_collections(collections)
@@ -444,6 +509,41 @@ impl DataSource for BlueskyFirehoseSource {
         let source_id = self.source_id.clone();
         let buffer = self.buffer.clone();
 
+        // Start queue processor if we have a buffer
+        if let Some(buffer) = &self.buffer {
+            let tx_clone = tx.clone();
+            let buffer_clone = buffer.clone();
+            let last_send_time_clone = self.last_send_time.clone();
+            let min_interval = std::time::Duration::from_secs_f64(1.0 / self.posts_per_second);
+
+            tokio::spawn(async move {
+                loop {
+                    // Wait for the rate limit interval
+                    tokio::time::sleep(min_interval).await;
+
+                    // Check if we have anything in the queue
+                    let event = {
+                        let mut buffer_guard = buffer_clone.lock();
+                        buffer_guard.dequeue_for_processing()
+                    };
+
+                    if let Some(event) = event {
+                        // Update last send time
+                        let mut last_send = last_send_time_clone.lock().await;
+                        *last_send = std::time::Instant::now();
+                        drop(last_send);
+
+                        // Send the queued event
+                        if let Err(e) = tx_clone.send(Ok(event.clone())).await {
+                            tracing::error!("Failed to send queued event: {}", e);
+                        } else {
+                            tracing::debug!("Processed queued post: {}", event.item.uri);
+                        }
+                    }
+                }
+            });
+        }
+
         // Create our ingestor that sends posts to our channel
         let post_ingestor = PostIngestor {
             tx: tx.clone(),
@@ -452,13 +552,20 @@ impl DataSource for BlueskyFirehoseSource {
             resolver: atproto_identity_resolver(),
             last_send_time: self.last_send_time.clone(),
             min_interval: std::time::Duration::from_secs_f64(1.0 / self.posts_per_second),
+            // Cursor persistence
+            cursor_file_path: self.cursor_file_path.clone(),
+            cursor_save_interval: self.cursor_save_interval,
+            cursor_save_threshold: self.cursor_save_threshold,
+            events_since_save: self.events_since_save.clone(),
+            last_cursor_save: self.last_cursor_save.clone(),
         };
 
         let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> = HashMap::new();
         ingestors.insert("app.bsky.feed.post".to_string(), Box::new(post_ingestor));
 
         // tracks the last message we've processed
-        let cursor: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(from.map(|c| c.time_us)));
+        let cursor: Arc<Mutex<Option<u64>>> =
+            Arc::new(Mutex::new(effective_cursor.map(|c| c.time_us)));
 
         let msg_rx = connection.get_msg_rx();
         let reconnect_tx = connection.get_reconnect_tx();
@@ -556,141 +663,176 @@ impl DataSource for BlueskyFirehoseSource {
         let mut message = String::new();
         let mut reply_candidates = Vec::new();
 
+        let mut mention_check_queue = Vec::new();
+
+        mention_check_queue.append(
+            &mut item
+                .mentioned_dids()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+
         // Header with author
         message.push_str(&format!("💬 @{}", item.handle));
 
         // Add context for replies/mentions
-        if let Some(reply) = &item.reply {
+        if let Some(_) = &item.reply {
             message.push_str(" replied");
 
             // If we have a BskyAgent, try to fetch thread context
             if let Some(bsky_agent) = &self.bsky_agent {
-                if let Ok(agent) = bsky_agent.try_read() {
-                    // Try to fetch the parent post for context
-                    if let Ok(thread_result) = agent
-                        .api
-                        .app
-                        .bsky
-                        .feed
-                        .get_post_thread(
-                            atrium_api::app::bsky::feed::get_post_thread::ParametersData {
-                                uri: reply.parent.uri.clone(),
-                                depth: None, // Use default depth
-                                parent_height: None,
-                            }
-                            .into(),
-                        )
-                        .await
+                // Try to fetch the parent post for context
+                if let Ok(thread_result) = bsky_agent
+                    .api
+                    .app
+                    .bsky
+                    .feed
+                    .get_post_thread(
+                        atrium_api::app::bsky::feed::get_post_thread::ParametersData {
+                            uri: item.uri.clone(),
+                            depth: None, // Use default depth
+                            parent_height: None,
+                        }
+                        .into(),
+                    )
+                    .await
+                {
+                    // Extract thread context
+                    use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
+                    if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
+                        thread_view,
+                    )) = &thread_result.thread
                     {
-                        // Extract thread context
-                        use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
-                        if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
-                            thread_view,
-                        )) = &thread_result.thread
-                        {
-                            message.push_str(" in thread:\n\n");
+                        message.push_str(" in thread:\n\n");
 
-                            // Walk up the parent chain to collect thread context
-                            let mut current_thread = thread_view;
-                            let mut thread_posts = Vec::new();
-                            let mut depth = 0;
+                        // Walk up the parent chain to collect thread context
+                        let mut current_thread = thread_view;
+                        let mut thread_posts = Vec::new();
+                        let mut depth = 0;
 
-                            // Collect the immediate parent and up to 4 posts up the chain
-                            loop {
-                                if let Some((text, langs, features, alt_texts)) =
-                                    extract_post_data(&current_thread.post)
+                        // Collect the immediate parent and up to 4 posts up the chain
+                        loop {
+                            if let Some((text, langs, features, alt_texts)) =
+                                extract_post_data(&current_thread.post)
+                            {
+                                let handle = current_thread.post.author.handle.as_str().to_string();
+                                let mentions: Vec<_> = features
+                                    .iter()
+                                    .filter_map(|f| match f {
+                                        FacetFeature::Mention { did } => Some(format!("@{}", did)),
+                                        _ => None,
+                                    })
+                                    .collect();
+
+                                let links: Vec<_> = features
+                                    .iter()
+                                    .filter_map(|f| match f {
+                                        FacetFeature::Link { uri } => Some(uri.clone()),
+                                        _ => None,
+                                    })
+                                    .collect();
+
+                                mention_check_queue.append(&mut mentions.clone());
+
+                                thread_posts.push((
+                                    handle,
+                                    text,
+                                    current_thread.post.uri.clone(),
+                                    depth,
+                                    mentions,
+                                    langs,
+                                    alt_texts,
+                                    links,
+                                ));
+
+                                // Add as reply candidate
+                                reply_candidates
+                                    .push(thread_post_to_candidate(&current_thread.post));
+                            }
+
+                            depth += 1;
+                            if depth >= 10 {
+                                break;
+                            }
+
+                            // Check if there's a parent
+                            if let Some(parent) = &current_thread.parent {
+                                use atrium_api::app::bsky::feed::defs::ThreadViewPostParentRefs;
+                                if let Union::Refs(ThreadViewPostParentRefs::ThreadViewPost(
+                                    parent_thread,
+                                )) = parent
                                 {
-                                    let handle =
-                                        current_thread.post.author.handle.as_str().to_string();
-                                    let mentions: Vec<_> = features
-                                        .iter()
-                                        .filter_map(|f| match f {
-                                            FacetFeature::Mention { did } => {
-                                                Some(format!("@{}", did))
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-
-                                    thread_posts.push((
-                                        handle,
-                                        text,
-                                        current_thread.post.uri.clone(),
-                                        depth,
-                                        mentions,
-                                        langs,
-                                        alt_texts,
-                                    ));
-
-                                    // Add as reply candidate
-                                    reply_candidates
-                                        .push(thread_post_to_candidate(&current_thread.post));
-                                }
-
-                                depth += 1;
-                                if depth >= 4 {
-                                    break;
-                                }
-
-                                // Check if there's a parent
-                                if let Some(parent) = &current_thread.parent {
-                                    use atrium_api::app::bsky::feed::defs::ThreadViewPostParentRefs;
-                                    if let Union::Refs(ThreadViewPostParentRefs::ThreadViewPost(
-                                        parent_thread,
-                                    )) = parent
-                                    {
-                                        current_thread = parent_thread;
-                                    } else {
-                                        break;
-                                    }
+                                    current_thread = parent_thread;
+                                } else if let Union::Refs(ThreadViewPostParentRefs::BlockedPost(
+                                    _,
+                                )) = parent
+                                {
+                                    // immediately eject if we hit a blocked post.
+                                    return None;
                                 } else {
                                     break;
                                 }
+                            } else {
+                                break;
                             }
-
-                            // Display thread posts in reverse order (root to leaf)
-                            for (handle, text, _uri, depth, mentions, langs, alt_texts) in
-                                thread_posts.iter().rev()
-                            {
-                                let indent = "  ".repeat(*depth);
-                                let bullet = if *depth == 0 { "•" } else { "└─" };
-
-                                message.push_str(&format!(
-                                    "{}{} @{}: {}\n",
-                                    indent, bullet, handle, text
-                                ));
-
-                                // Show mentions if any
-                                if !mentions.is_empty() {
-                                    message.push_str(&format!(
-                                        "{}   [mentions: {}]\n",
-                                        indent,
-                                        mentions.join(", ")
-                                    ));
-                                }
-
-                                // Show language if not English
-                                if !langs.is_empty() && !langs.contains(&"en".to_string()) {
-                                    message.push_str(&format!(
-                                        "{}   [langs: {}]\n",
-                                        indent,
-                                        langs.join(", ")
-                                    ));
-                                }
-
-                                // Show images if any
-                                if !alt_texts.is_empty() {
-                                    message.push_str(&format!(
-                                        "{}   [📸 {} image(s)]\n",
-                                        indent,
-                                        alt_texts.len()
-                                    ));
-                                }
-                            }
-
-                            // Mark the main post clearly
-                            message.push_str("\n>>> MAIN POST >>>\n");
                         }
+
+                        // Display thread posts in reverse order (root to leaf)
+                        for (handle, text, _uri, depth, mentions, langs, alt_texts, links) in
+                            thread_posts.iter().rev()
+                        {
+                            let indent = "  ".repeat(*depth);
+                            let bullet = if *depth == 0 { "•" } else { "└─" };
+
+                            message
+                                .push_str(&format!("{}{} @{}: {}\n", indent, bullet, handle, text));
+
+                            // Show mentions if any
+                            if !mentions.is_empty() {
+                                message.push_str(&format!(
+                                    "{}   [mentions: {}]\n",
+                                    indent,
+                                    mentions.join(", ")
+                                ));
+                            }
+
+                            // Show links if any
+                            if !links.is_empty() {
+                                message.push_str(&format!(
+                                    "{}   [🔗 Links: {}]\n",
+                                    indent,
+                                    links.join(", ")
+                                ));
+                            }
+
+                            // Show language if not English
+                            if !langs.is_empty() && !langs.contains(&"en".to_string()) {
+                                message.push_str(&format!(
+                                    "{}   [langs: {}]\n",
+                                    indent,
+                                    langs.join(", ")
+                                ));
+                            }
+
+                            // Show images if any
+                            if !alt_texts.is_empty() {
+                                message.push_str(&format!(
+                                    "{}   [📸 {} image(s)]\n",
+                                    indent,
+                                    alt_texts.len()
+                                ));
+                                for alt_text in alt_texts {
+                                    message.push_str(&format!(
+                                        "{}    alt text: {}\n",
+                                        indent, alt_text
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Mark the main post clearly
+                        message.push_str("\n>>> MAIN POST >>>\n");
                     }
                 }
             }
@@ -703,11 +845,38 @@ impl DataSource for BlueskyFirehoseSource {
         // Full post text
         message.push_str(&format!("@{}: {}", item.handle, item.text));
 
+        // Extract and display links from facets
+        let mut links: Vec<_> = item
+            .facets
+            .iter()
+            .flat_map(|facet| &facet.features)
+            .filter_map(|feature| match feature {
+                FacetFeature::Link { uri } => Some(uri.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Also check for embedded link card
+        if let Some(embed_link) = item.embedded_link() {
+            links.push(embed_link);
+        }
+
+        if !links.is_empty() {
+            message.push_str("\n[🔗 Links:");
+            for link in &links {
+                message.push_str(&format!(" {}", link));
+            }
+            message.push_str("]");
+        }
+
         // Add image indicator if present
         if item.has_images() {
             let alt_texts = item.image_alt_texts();
             if !alt_texts.is_empty() {
                 message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
+            }
+            for alt_text in alt_texts {
+                message.push_str(&format!("\n alt text: {}", alt_text));
             }
         }
 
@@ -715,52 +884,100 @@ impl DataSource for BlueskyFirehoseSource {
         message.push_str(&format!("\n🔗 {}", item.uri));
 
         // Show replies after main post if we're in a thread
-        if let Some(reply) = &item.reply {
+        if let Some(_) = &item.reply {
             if let Some(bsky_agent) = &self.bsky_agent {
-                if let Ok(agent) = bsky_agent.try_read() {
-                    if let Ok(thread_result) = agent
-                        .api
-                        .app
-                        .bsky
-                        .feed
-                        .get_post_thread(
-                            atrium_api::app::bsky::feed::get_post_thread::ParametersData {
-                                uri: reply.parent.uri.clone(),
-                                depth: None,
-                                parent_height: None,
-                            }
-                            .into(),
-                        )
-                        .await
+                if let Ok(thread_result) = bsky_agent
+                    .api
+                    .app
+                    .bsky
+                    .feed
+                    .get_post_thread(
+                        atrium_api::app::bsky::feed::get_post_thread::ParametersData {
+                            uri: item.uri.clone(),
+                            depth: None,
+                            parent_height: None,
+                        }
+                        .into(),
+                    )
+                    .await
+                {
+                    use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
+                    if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
+                        thread_view,
+                    )) = &thread_result.thread
                     {
-                        use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
-                        if let Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(
-                            thread_view,
-                        )) = &thread_result.thread
-                        {
-                            // Add some reply context
-                            if let Some(replies) = &thread_view.replies {
-                                message.push_str("\n<<< REPLIES <<<\n");
-                                use atrium_api::app::bsky::feed::defs::ThreadViewPostRepliesItem;
-                                for reply in replies.iter().take(2) {
-                                    if let Union::Refs(ThreadViewPostRepliesItem::ThreadViewPost(
-                                        reply_thread,
-                                    )) = reply
+                        // Add some reply context
+                        if let Some(replies) = &thread_view.replies {
+                            message.push_str("\n<<< REPLIES <<<\n");
+                            use atrium_api::app::bsky::feed::defs::ThreadViewPostRepliesItem;
+                            for reply in replies.iter().take(4) {
+                                if let Union::Refs(ThreadViewPostRepliesItem::ThreadViewPost(
+                                    reply_thread,
+                                )) = reply
+                                {
+                                    if let Some((reply_text, langs, features, alt_texts)) =
+                                        extract_post_data(&reply_thread.post)
                                     {
-                                        if let Some((reply_text, _langs, _features, _alt_texts)) =
-                                            extract_post_data(&reply_thread.post)
-                                        {
+                                        let mentions: Vec<_> = features
+                                            .iter()
+                                            .filter_map(|f| match f {
+                                                FacetFeature::Mention { did } => {
+                                                    Some(format!("@{}", did))
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect();
+                                        mention_check_queue.append(&mut mentions.clone());
+                                        let indent = "  ";
+                                        message.push_str(&format!(
+                                            "  └─ @{}: {}\n",
+                                            reply_thread.post.author.handle.as_str(),
+                                            reply_text
+                                        ));
+                                        // Show links if any
+                                        if !links.is_empty() {
                                             message.push_str(&format!(
-                                                "  └─ @{}: {}\n",
-                                                reply_thread.post.author.handle.as_str(),
-                                                reply_text
+                                                "{}   [🔗 Links: {}]\n",
+                                                indent,
+                                                links.join(", ")
                                             ));
-
-                                            // Add as reply candidate
-                                            reply_candidates
-                                                .push(thread_post_to_candidate(&reply_thread.post));
                                         }
+
+                                        // Show language if not English
+                                        if !langs.is_empty() && !langs.contains(&"en".to_string()) {
+                                            message.push_str(&format!(
+                                                "{}   [langs: {}]\n",
+                                                indent,
+                                                langs.join(", ")
+                                            ));
+                                        }
+
+                                        // Show images if any
+                                        if !alt_texts.is_empty() {
+                                            message.push_str(&format!(
+                                                "{}   [📸 {} image(s)]\n",
+                                                indent,
+                                                alt_texts.len()
+                                            ));
+                                            for alt_text in alt_texts {
+                                                message.push_str(&format!(
+                                                    "{}    alt text: {}\n",
+                                                    indent, alt_text
+                                                ));
+                                            }
+                                        }
+
+                                        // Add as reply candidate
+                                        reply_candidates
+                                            .push(thread_post_to_candidate(&reply_thread.post));
                                     }
+                                } else if let Union::Refs(ThreadViewPostRepliesItem::BlockedPost(
+                                    _,
+                                )) = reply
+                                {
+                                    // immediately eject if we hit a blocked post.
+                                    // being deliberately conservative for now
+                                    return None;
                                 }
                             }
                         }
@@ -777,12 +994,8 @@ impl DataSource for BlueskyFirehoseSource {
                 if memories.is_empty() {
                     // Fetch user profile if we have a BskyAgent
                     let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
-                        if let Ok(agent) = bsky_agent.try_read() {
-                            Self::fetch_user_profile_for_memory(&*agent, &item.handle, &item.did)
-                                .await
-                        } else {
-                            create_basic_memory_content(&item.handle, &item.did)
-                        }
+                        Self::fetch_user_profile_for_memory(&*bsky_agent, &item.handle, &item.did)
+                            .await
                     } else {
                         create_basic_memory_content(&item.handle, &item.did)
                     };
@@ -812,7 +1025,25 @@ impl DataSource for BlueskyFirehoseSource {
             }
         }
         message
-            .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\n Alternatively, you can 'like' the post by submitting an empty reply");
+            .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\nAlternatively, you can 'like' the post by submitting a reply with 'like' as the sole text");
+
+        // Check if any of the DIDs we're watching for were mentioned
+        if !self.filter.mentions.is_empty() {
+            let found_mention = self.filter.mentions.iter().any(|watched_did| {
+                // Check both with and without @ prefix since the queue has mixed format
+                mention_check_queue.contains(watched_did)
+                    || mention_check_queue.contains(&format!("@{}", watched_did))
+            });
+
+            if !found_mention {
+                tracing::debug!(
+                    "dropping thread because it didn't mention any watched DIDs: {:?}, message:\n{}",
+                    mention_check_queue,
+                    message
+                );
+                return None;
+            }
+        }
 
         Some(message)
     }
@@ -843,6 +1074,32 @@ impl DataSource for BlueskyFirehoseSource {
     }
 }
 
+impl PostIngestor {
+    /// Save cursor to file
+    #[allow(dead_code)]
+    async fn save_cursor(&self, cursor: &BlueskyFirehoseCursor) -> Result<()> {
+        if let Some(path) = &self.cursor_file_path {
+            let cursor_data = serde_json::to_string_pretty(cursor).map_err(|e| {
+                crate::CoreError::SerializationError {
+                    data_type: "cursor".to_string(),
+                    cause: e,
+                }
+            })?;
+
+            tokio::fs::write(path, cursor_data).await.map_err(|e| {
+                crate::CoreError::DataSourceError {
+                    source_name: "bluesky_firehose".to_string(),
+                    operation: "save_cursor".to_string(),
+                    cause: e.to_string(),
+                }
+            })?;
+
+            tracing::debug!("Saved Bluesky cursor to {:?}", path);
+        }
+        Ok(())
+    }
+}
+
 /// Ingestor that processes Bluesky posts and sends them to our channel
 struct PostIngestor {
     tx: tokio::sync::mpsc::Sender<Result<StreamEvent<BlueskyPost, BlueskyFirehoseCursor>>>,
@@ -853,6 +1110,12 @@ struct PostIngestor {
     // Rate limiting
     last_send_time: Arc<tokio::sync::Mutex<std::time::Instant>>,
     min_interval: std::time::Duration,
+    // Cursor persistence
+    cursor_file_path: Option<std::path::PathBuf>,
+    cursor_save_interval: std::time::Duration,
+    cursor_save_threshold: u64,
+    events_since_save: Arc<std::sync::Mutex<u64>>,
+    last_cursor_save: Arc<tokio::sync::Mutex<std::time::Instant>>,
 }
 
 #[async_trait]
@@ -900,31 +1163,102 @@ impl LexiconIngestor for PostIngestor {
             };
 
             if should_include_post(&mut post_to_filter, &self.filter, &self.resolver).await {
-                // Rate limiting
-                let mut last_send = self.last_send_time.lock().await;
-                let elapsed = last_send.elapsed();
-                if elapsed < self.min_interval {
-                    let sleep_duration = self.min_interval - elapsed;
-                    tokio::time::sleep(sleep_duration).await;
-                }
-                *last_send = std::time::Instant::now();
-                drop(last_send); // Release lock before sending
+                let cursor = BlueskyFirehoseCursor {
+                    seq: now.timestamp_micros() as u64,
+                    time_us: now.timestamp_micros() as u64,
+                };
 
                 let event = StreamEvent {
                     item: post_to_filter.clone(),
-                    cursor: BlueskyFirehoseCursor {
-                        seq: now.timestamp_micros() as u64,
-                        time_us: now.timestamp_micros() as u64,
-                    },
+                    cursor: cursor.clone(),
                     timestamp: now,
                 };
-                self.tx
-                    .send(Ok(event.clone()))
-                    .await
-                    .inspect_err(|e| tracing::error!("{}", e))?;
-                if let Some(buffer) = &self.buffer {
-                    let mut buffer_guard = buffer.lock();
-                    buffer_guard.push(event);
+
+                // Check if we should rate limit
+                let mut last_send = self.last_send_time.lock().await;
+                let elapsed = last_send.elapsed();
+
+                if elapsed < self.min_interval * 10 {
+                    // We're sending too fast, queue it
+                    if let Some(buffer) = &self.buffer {
+                        let mut buffer_guard = buffer.lock();
+                        if !buffer_guard.queue_for_processing(event.clone()) {
+                            tracing::warn!(
+                                "Bluesky processing queue full, dropping post: {}",
+                                post_to_filter.uri
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Queued post for rate-limited processing: {}",
+                                post_to_filter.uri
+                            );
+                        }
+                        // Always add to history buffer
+                        buffer_guard.push(event);
+                    }
+                } else {
+                    // We can send immediately
+                    *last_send = std::time::Instant::now();
+                    drop(last_send); // Release lock before sending
+
+                    self.tx
+                        .send(Ok(event.clone()))
+                        .await
+                        .inspect_err(|e| tracing::error!("{}", e))?;
+
+                    if let Some(buffer) = &self.buffer {
+                        let mut buffer_guard = buffer.lock();
+                        buffer_guard.push(event);
+                    }
+                }
+
+                // Check if we need to save cursor
+                let should_save = {
+                    let mut events_count = self.events_since_save.lock().unwrap();
+                    *events_count += 1;
+
+                    if *events_count >= self.cursor_save_threshold {
+                        *events_count = 0;
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                let time_based_save = {
+                    let last_save = self.last_cursor_save.try_lock();
+                    if let Ok(last_save) = last_save {
+                        last_save.elapsed() >= self.cursor_save_interval
+                    } else {
+                        false
+                    }
+                };
+
+                if should_save || time_based_save {
+                    // Save cursor in background
+                    let cursor_to_save = cursor.clone();
+                    let cursor_file_path = self.cursor_file_path.clone();
+                    let last_cursor_save = self.last_cursor_save.clone();
+
+                    tokio::spawn(async move {
+                        if let Some(path) = cursor_file_path {
+                            let cursor_data = match serde_json::to_string_pretty(&cursor_to_save) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    tracing::warn!("Failed to serialize cursor: {}", e);
+                                    return;
+                                }
+                            };
+
+                            if let Err(e) = tokio::fs::write(path, cursor_data).await {
+                                tracing::warn!("Failed to save cursor: {}", e);
+                            } else {
+                                // Update last save time
+                                let mut last_save = last_cursor_save.lock().await;
+                                *last_save = std::time::Instant::now();
+                            }
+                        }
+                    });
                 }
             }
         }

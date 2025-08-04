@@ -6,6 +6,12 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 **Current Status**: Core foundation complete, ready for feature development
 
+### ⚠️ Known API Issues (2025-08-03)
+1. **Anthropic Thinking Mode**: Message compression can create invalid sequences when final assistant message has tool calls
+   - See `docs/known-api-issues.md` for details and workarounds
+2. **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations
+   - Needs response structure validation
+
 ### 🚧 Current Development Priorities
 1. **Model Configuration** - ✅ COMPLETE (2025-07-24)
    - Created `pattern_core/src/model/defaults.rs` with comprehensive model registry
