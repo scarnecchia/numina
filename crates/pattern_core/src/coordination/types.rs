@@ -59,8 +59,8 @@ pub enum CoordinationPattern {
         check_interval: Duration,
         /// Conditions that trigger intervention
         triggers: Vec<SleeptimeTrigger>,
-        /// Agent to activate when triggers fire
-        intervention_agent_id: AgentId,
+        /// Agent to activate when triggers fire (optional - uses least recently active if None)
+        intervention_agent_id: Option<AgentId>,
     },
 }
 
@@ -180,6 +180,15 @@ pub enum TriggerCondition {
     PatternDetected { pattern_name: String },
     /// Trigger when a metric exceeds a threshold
     ThresholdExceeded { metric: String, threshold: f64 },
+    /// Trigger based on constellation activity
+    ConstellationActivity {
+        /// Number of messages or events since last sync
+        message_threshold: usize,
+        /// Alternative: time since last activity
+        #[serde(with = "crate::utils::serde_duration")]
+        #[schemars(with = "u64")]
+        time_threshold: Duration,
+    },
     /// Custom trigger evaluated by named evaluator
     Custom { evaluator: String },
 }

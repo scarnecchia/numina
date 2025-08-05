@@ -7,6 +7,7 @@ id = "188aa44f0c9f458e8adb4232332ce8fe"
 
 # Main coordinator agent
 [agent]
+id = "62b14f69e29e410b826c46a829dfc378"
 name = "Pattern"
 bluesky_handle = "pattern.atproto.systems"      # Update with actual handle
 system_prompt_path = "pattern-system-prompt.md"
@@ -130,6 +131,7 @@ pattern = { type = "dynamic", selector = "supervisor" }
 
 # Pattern - Main coordinator
 [[groups.members]]
+agent_id = "62b14f69e29e410b826c46a829dfc378"
 name = "Pattern"
 config_path = "agents/pattern_config.toml"
 role = "supervisor"
@@ -143,6 +145,7 @@ capabilities = [
 
 # Entropy - Complexity specialist
 [[groups.members]]
+agent_id = "82648861bae54729849f02b02369ac54"
 name = "Entropy"
 config_path = "agents/entropy.toml"
 role = "regular"
@@ -155,6 +158,7 @@ capabilities = [
 
 # Flux - Time dynamics
 [[groups.members]]
+agent_id = "3f31d92f7a6f41a7af278bd783d3dd39"
 name = "Flux"
 config_path = "agents/flux.toml"
 role = "regular"
@@ -167,6 +171,7 @@ capabilities = [
 
 # Archive - Memory keeper
 [[groups.members]]
+agent_id = "d59a95fda24247f1849d9190d0971b9b"
 name = "Archive"
 config_path = "agents/archive.toml"
 role = { specialist = { domain = "memory_management" } }
@@ -179,6 +184,7 @@ capabilities = [
 
 # Momentum - Energy tracker
 [[groups.members]]
+agent_id = "2f381ebf6fdf4548ac6ded79f18d496c"
 name = "Momentum"
 config_path = "agents/momentum.toml"
 role = "regular"
@@ -191,6 +197,7 @@ capabilities = [
 
 # Anchor - Stability monitor
 [[groups.members]]
+agent_id = "b134d9f4219642be8190a6eb93e9339e"
 name = "Anchor"
 config_path = "agents/anchor.toml"
 role = { specialist = { domain = "system_integrity" } }
@@ -204,9 +211,7 @@ capabilities = [
 # Bluesky configuration for the constellation
 [bluesky]
 default_filters = [
-    { nsids = [
-        "app.bsky.feed.post",
-    ], mentions = [
+    { nsids = ["app.bsky.feed.post"], mentions = [
         "did:plc:xivud6i24ruyki3bwjypjgy2",
         # "pattern.atproto.systems",
     ], dids = [
@@ -221,8 +226,51 @@ default_filters = [
         "did:plc:neisyrds2fyyfqod5zq56chr",
         "did:plc:3xu5titidud43sfemwro3j62",
         "did:plc:mxzuau6m53jtdsbqe6f4laov",
-    ], keywords = [
-    ], languages = [
-    ] },
+        "did:plc:uqndyrh6gh7rjai33ulnwvkn",
+        "did:plc:gfrmhdmjvxn2sjedzboeudef",
+        "did:plc:uxelaqoua6psz2for5amm6bp", # luna
+        "did:plc:k644h4rq5bjfzcetgsa6tuby",
+    ], keywords = [], languages = [] },
 ]
 auto_connect_firehose = true # Control when to connect
+
+# Context sync group - runs background synchronization
+[[groups]]
+name = "Context Sync"
+description = "Background context synchronization for constellation awareness"
+# Sleeptime pattern with constellation activity tracking
+pattern = { type = "sleeptime", check_interval = 300, triggers = [
+    { name = "activity_sync", condition = { type = "constellation_activity", message_threshold = 10, time_threshold = 600 }, priority = "medium" },
+    { name = "hourly_sync", condition = { type = "time_elapsed", duration = 3600 }, priority = "low" },
+] }
+
+# Include all the same members but without explicit roles
+[[groups.members]]
+agent_id = "62b14f69e29e410b826c46a829dfc378"
+name = "Pattern"
+config_path = "agents/pattern_config.toml"
+
+[[groups.members]]
+agent_id = "82648861bae54729849f02b02369ac54"
+name = "Entropy"
+config_path = "agents/entropy.toml"
+
+[[groups.members]]
+name = "Flux"
+agent_id = "3f31d92f7a6f41a7af278bd783d3dd39"
+config_path = "agents/flux.toml"
+
+[[groups.members]]
+agent_id = "d59a95fda24247f1849d9190d0971b9b"
+name = "Archive"
+config_path = "agents/archive.toml"
+
+[[groups.members]]
+agent_id = "2f381ebf6fdf4548ac6ded79f18d496c"
+name = "Momentum"
+config_path = "agents/momentum.toml"
+
+[[groups.members]]
+agent_id = "b134d9f4219642be8190a6eb93e9339e"
+name = "Anchor"
+config_path = "agents/anchor.toml"

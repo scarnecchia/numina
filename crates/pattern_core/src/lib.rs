@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod atproto_identity;
 pub mod config;
+pub mod constellation_memory;
 pub mod context;
 pub mod coordination;
 pub mod data_source;

@@ -161,6 +161,28 @@ where
             })
             .collect()
     }
+
+    /// Set the constellation activity tracker for shared context
+    pub fn set_constellation_tracker(
+        &self,
+        tracker: Arc<crate::constellation_memory::ConstellationActivityTracker>,
+    ) {
+        // We need to make this async to write to the context
+        let context = self.context.clone();
+        // Use a timeout to detect potential deadlocks
+        tokio::spawn(async move {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), context.write()).await {
+                Ok(mut ctx) => {
+                    ctx.set_constellation_tracker(tracker);
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "Failed to acquire context write lock for constellation tracker - potential deadlock"
+                    );
+                }
+            }
+        });
+    }
     // pub fn create(
     //     agent_id: AgentId,
     //     user_id: UserId,
@@ -1081,7 +1103,7 @@ where
                     Err(e) => {
                         // This shouldn't happen for new blocks
                         tracing::warn!(
-                            "Failed to attach new memory block {} to agent: {}",
+                            "Failed to attach new memory block {} to agent: {:?}",
                             stored.label,
                             e
                         );
@@ -1187,7 +1209,7 @@ where
                     );
                     let error_response = ToolResponse {
                         call_id: call.call_id.clone(),
-                        content: format!("Tool rule violation: {}", violation),
+                        content: format!("Tool rule violation: {:?}", violation),
                     };
                     responses.push(error_response);
                     continue;
@@ -1216,7 +1238,7 @@ where
                         tracing::debug!("✅ Heartbeat request sent");
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Failed to send heartbeat request: {}", e);
+                        tracing::warn!("⚠️ Failed to send heartbeat request: {:?}", e);
                     }
                 }
             }
@@ -1226,7 +1248,7 @@ where
             let tool_response = ctx.process_tool_call(&call).await.unwrap_or_else(|e| {
                 Some(ToolResponse {
                     call_id: call.call_id.clone(),
-                    content: format!("Error executing tool: {}", e),
+                    content: format!("Error executing tool: {:?}", e),
                 })
             });
 
@@ -1341,8 +1363,26 @@ where
                 }
             };
 
-            // Capture the incoming message ID for the completion event
+            // Capture the incoming message ID and content for the completion event
             let incoming_message_id = message.id.clone();
+            let incoming_message_role = message.role.clone();
+
+            // Extract message text for user messages only
+            let incoming_message_summary = if matches!(message.role, crate::message::ChatRole::User)
+            {
+                match &message.content {
+                    crate::message::MessageContent::Text(text) => {
+                        // For now, include full text without truncation
+                        Some(text.clone())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Accumulate agent's response text for constellation logging
+            let mut agent_response_text = String::new();
 
             // Update state and persist message
             {
@@ -1373,7 +1413,7 @@ where
                 Ok(ctx) => ctx,
                 Err(e) => {
                     send_event(ResponseEvent::Error {
-                        message: format!("Failed to build context: {}", e),
+                        message: format!("Failed to build context: {:?}", e),
                         recoverable: false,
                     })
                     .await;
@@ -1399,7 +1439,7 @@ where
                 Err(e) => {
                     tracing::error!("❌ Failed to execute start constraint tools: {}", e);
                     send_event(ResponseEvent::Error {
-                        message: format!("Start constraint tools failed: {}", e),
+                        message: format!("Start constraint tools failed: {:?}", e),
                         recoverable: false,
                     })
                     .await;
@@ -1427,7 +1467,7 @@ where
                     Ok(resp) => resp,
                     Err(e) => {
                         send_event(ResponseEvent::Error {
-                            message: format!("Model error: {}", e),
+                            message: format!("Model error: {:?}", e),
                             recoverable: false,
                         })
                         .await;
@@ -1508,6 +1548,38 @@ where
                                             .await
                                         {
                                             Ok(our_responses) => {
+                                                // Log tool executions to constellation tracker
+                                                if let Some(tracker) =
+                                                    &context.read().await.constellation_tracker
+                                                {
+                                                    for (call, response) in
+                                                        calls.iter().zip(&our_responses)
+                                                    {
+                                                        use crate::constellation_memory::{
+                                                            ConstellationEvent,
+                                                            ConstellationEventType,
+                                                        };
+
+                                                        let event = ConstellationEvent {
+                                                            timestamp: chrono::Utc::now(),
+                                                            agent_id: agent_id.clone(),
+                                                            agent_name: self_clone.name().to_string(),
+                                                            event_type: ConstellationEventType::ToolExecuted {
+                                                                tool_name: call.fn_name.clone(),
+                                                                action: if response.content.starts_with("Error:") {
+                                                                    format!("Failed: {}", response.content)
+                                                                } else {
+                                                                    format!("Success")
+                                                                },
+                                                            },
+                                                            description: format!("Executed tool: {}", call.fn_name),
+                                                            metadata: None,
+                                                        };
+
+                                                        tracker.add_event(event).await;
+                                                    }
+                                                }
+
                                                 // Send completion events for each response
                                                 for response in &our_responses {
                                                     let tool_result =
@@ -1539,7 +1611,7 @@ where
                                             }
                                             Err(e) => {
                                                 tracing::error!(
-                                                    "Failed to execute tools with rules: {}",
+                                                    "Failed to execute tools with rules: {:?}",
                                                     e
                                                 );
                                                 // Create error responses for all calls
@@ -1548,7 +1620,7 @@ where
                                                     .map(|call| ToolResponse {
                                                         call_id: call.call_id.clone(),
                                                         content: format!(
-                                                            "Tool execution failed: {}",
+                                                            "Tool execution failed: {:?}",
                                                             e
                                                         ),
                                                     })
@@ -1572,6 +1644,12 @@ where
                                 // or we literally just added them after executing the tools.
                             }
                             MessageContent::Text(text) => {
+                                // Accumulate text for constellation logging
+                                if !agent_response_text.is_empty() {
+                                    agent_response_text.push('\n');
+                                }
+                                agent_response_text.push_str(text);
+
                                 send_event(ResponseEvent::TextChunk {
                                     text: text.clone(),
                                     is_final: true,
@@ -1583,6 +1661,12 @@ where
                                 for part in parts {
                                     match part {
                                         ContentPart::Text(text) => {
+                                            // Accumulate text for constellation logging
+                                            if !agent_response_text.is_empty() {
+                                                agent_response_text.push('\n');
+                                            }
+                                            agent_response_text.push_str(text);
+
                                             send_event(ResponseEvent::TextChunk {
                                                 text: text.clone(),
                                                 is_final: false,
@@ -1621,6 +1705,12 @@ where
                                 for block in blocks {
                                     match block {
                                         ContentBlock::Text { text } => {
+                                            // Accumulate text for constellation logging
+                                            if !agent_response_text.is_empty() {
+                                                agent_response_text.push('\n');
+                                            }
+                                            agent_response_text.push_str(text);
+
                                             send_event(ResponseEvent::TextChunk {
                                                 text: text.clone(),
                                                 is_final: false,
@@ -1687,7 +1777,7 @@ where
                                             Err(e) => {
                                                 tool_responses.push(ToolResponse {
                                                     call_id: tool_call.call_id.clone(),
-                                                    content: format!("Error: {}", e),
+                                                    content: format!("Error: {:?}", e),
                                                 });
                                             }
                                         }
@@ -1720,7 +1810,7 @@ where
                     // Persist any memory changes from tool execution
                     if let Err(e) = self_clone.persist_memory_changes().await {
                         send_event(ResponseEvent::Error {
-                            message: format!("Failed to persist response: {}", e),
+                            message: format!("Failed to persist response: {:?}", e),
                             recoverable: true,
                         })
                         .await;
@@ -1732,7 +1822,7 @@ where
                         .await
                     {
                         send_event(ResponseEvent::Error {
-                            message: format!("Failed to persist response: {}", e),
+                            message: format!("Failed to persist response: {:?}", e),
                             recoverable: true,
                         })
                         .await;
@@ -1756,7 +1846,7 @@ where
                         Ok(ctx) => ctx,
                         Err(e) => {
                             send_event(ResponseEvent::Error {
-                                message: format!("Failed to rebuild context: {}", e),
+                                message: format!("Failed to rebuild context: {:?}", e),
                                 recoverable: false,
                             })
                             .await;
@@ -1777,7 +1867,7 @@ where
                             Ok(resp) => resp,
                             Err(e) => {
                                 send_event(ResponseEvent::Error {
-                                    message: format!("Model error in continuation: {}", e),
+                                    message: format!("Model error in continuation: {:?}", e),
                                     recoverable: false,
                                 })
                                 .await;
@@ -1794,7 +1884,7 @@ where
                         // Persist any memory changes from tool execution
                         if let Err(e) = self_clone.persist_memory_changes().await {
                             send_event(ResponseEvent::Error {
-                                message: format!("Failed to persist response: {}", e),
+                                message: format!("Failed to persist response: {:?}", e),
                                 recoverable: true,
                             })
                             .await;
@@ -1806,7 +1896,7 @@ where
                             .await
                         {
                             send_event(ResponseEvent::Error {
-                                message: format!("Failed to persist response: {}", e),
+                                message: format!("Failed to persist response: {:?}", e),
                                 recoverable: true,
                             })
                             .await;
@@ -1833,6 +1923,12 @@ where
                     for content in &current_response.content {
                         match content {
                             MessageContent::Text(text) => {
+                                // Accumulate text for constellation logging
+                                if !agent_response_text.is_empty() {
+                                    agent_response_text.push('\n');
+                                }
+                                agent_response_text.push_str(text);
+
                                 send_event(ResponseEvent::TextChunk {
                                     text: text.clone(),
                                     is_final: true,
@@ -1843,6 +1939,12 @@ where
                                 for part in parts {
                                     match part {
                                         ContentPart::Text(text) => {
+                                            // Accumulate text for constellation logging
+                                            if !agent_response_text.is_empty() {
+                                                agent_response_text.push('\n');
+                                            }
+                                            agent_response_text.push_str(text);
+
                                             send_event(ResponseEvent::TextChunk {
                                                 text: text.clone(),
                                                 is_final: true,
@@ -1876,6 +1978,12 @@ where
                                 for block in blocks {
                                     match block {
                                         ContentBlock::Text { text } => {
+                                            // Accumulate text for constellation logging
+                                            if !agent_response_text.is_empty() {
+                                                agent_response_text.push('\n');
+                                            }
+                                            agent_response_text.push_str(text);
+
                                             send_event(ResponseEvent::TextChunk {
                                                 text: text.clone(),
                                                 is_final: true,
@@ -1922,7 +2030,7 @@ where
                         .await;
                     if let Err(e) = persist_result {
                         send_event(ResponseEvent::Error {
-                            message: format!("Failed to persist final response: {}", e),
+                            message: format!("Failed to persist final response: {:?}", e),
                             recoverable: true,
                         })
                         .await;
@@ -1949,9 +2057,9 @@ where
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ Failed to execute required exit tools: {}", e);
+                    tracing::error!("❌ Failed to execute required exit tools: {:?}", e);
                     send_event(ResponseEvent::Error {
-                        message: format!("Required exit tools failed: {}", e),
+                        message: format!("Required exit tools failed: {:?}", e),
                         recoverable: true, // Don't fail the whole conversation
                     })
                     .await;
@@ -1962,6 +2070,46 @@ where
             {
                 let mut ctx = context.write().await;
                 ctx.handle.state = AgentState::Ready;
+            }
+
+            // Log to constellation activity tracker if present
+            if let Some(tracker) = &context.read().await.constellation_tracker {
+                use crate::constellation_memory::{ConstellationEvent, ConstellationEventType};
+
+                // Create summary combining user message and agent response
+                let summary = if let Some(user_msg) = incoming_message_summary {
+                    if !agent_response_text.is_empty() {
+                        // Truncate agent response if needed
+                        let agent_summary = if agent_response_text.len() > 100 {
+                            format!("{}...", &agent_response_text[..100])
+                        } else {
+                            agent_response_text.clone()
+                        };
+                        format!("User: {}\nAgent: {}", user_msg, agent_summary)
+                    } else {
+                        user_msg
+                    }
+                } else if !agent_response_text.is_empty() {
+                    // Just agent response
+                    if agent_response_text.len() > 200 {
+                        format!("Agent: {}...", &agent_response_text[..200])
+                    } else {
+                        format!("Agent: {}", agent_response_text)
+                    }
+                } else {
+                    format!("Processed {} message", incoming_message_role)
+                };
+
+                let event = ConstellationEvent {
+                    timestamp: chrono::Utc::now(),
+                    agent_id: agent_id.clone(),
+                    agent_name: self_clone.name().to_string(),
+                    event_type: ConstellationEventType::MessageProcessed { summary },
+                    description: format!("Completed processing {} message", incoming_message_role),
+                    metadata: None,
+                };
+
+                tracker.add_event(event).await;
             }
 
             // Send completion event with the incoming message ID
@@ -2476,6 +2624,95 @@ where
 
         // Calculate duration
         let duration_ms = start_time.elapsed().as_millis() as i64;
+
+        // Log memory operations to constellation tracker if this is a memory tool
+        if matches!(tool_name, "context" | "recall") && result.is_ok() {
+            let context = self.context.read().await;
+            if let Some(tracker) = &context.constellation_tracker {
+                use crate::constellation_memory::{
+                    ConstellationEvent, ConstellationEventType, MemoryChangeType,
+                };
+                use crate::tool::builtin::{
+                    ArchivalMemoryOperationType, ContextInput, CoreMemoryOperationType, RecallInput,
+                };
+
+                // Try to extract operation details from the result
+                if let Ok(result_value) = &result {
+                    if let Some(success) = result_value.get("success").and_then(|v| v.as_bool()) {
+                        if success {
+                            // Determine memory operation type from params
+                            let event_opt = if tool_name == "context" {
+                                // Context tool operations
+                                if let Ok(input) =
+                                    serde_json::from_value::<ContextInput>(params.clone())
+                                {
+                                    let label = input
+                                        .name
+                                        .or(input.archival_label)
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let change_type = match input.operation {
+                                        CoreMemoryOperationType::Append
+                                        | CoreMemoryOperationType::Replace => {
+                                            MemoryChangeType::Updated
+                                        }
+                                        CoreMemoryOperationType::Archive => {
+                                            MemoryChangeType::Archived
+                                        }
+                                        CoreMemoryOperationType::LoadFromArchival => {
+                                            MemoryChangeType::Created
+                                        }
+                                        CoreMemoryOperationType::Swap => MemoryChangeType::Updated,
+                                    };
+                                    Some((label, change_type))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                // Recall tool operations
+                                if let Ok(input) =
+                                    serde_json::from_value::<RecallInput>(params.clone())
+                                {
+                                    let label = input
+                                        .label
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    match input.operation {
+                                        ArchivalMemoryOperationType::Insert => {
+                                            Some((label, MemoryChangeType::Created))
+                                        }
+                                        ArchivalMemoryOperationType::Append => {
+                                            Some((label, MemoryChangeType::Updated))
+                                        }
+                                        ArchivalMemoryOperationType::Read => None, // Skip logging read operations
+                                        ArchivalMemoryOperationType::Delete => {
+                                            Some((label, MemoryChangeType::Deleted))
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let Some((memory_label, change_type)) = event_opt {
+                                let event = ConstellationEvent {
+                                    timestamp: chrono::Utc::now(),
+                                    agent_id: agent_id.clone(),
+                                    agent_name: self.name().to_string(),
+                                    event_type: ConstellationEventType::MemoryUpdated {
+                                        memory_label,
+                                        change_type,
+                                    },
+                                    description: format!("Memory operation via {} tool", tool_name),
+                                    metadata: None,
+                                };
+
+                                tracker.add_event(event).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Update tool call count in metadata
         {

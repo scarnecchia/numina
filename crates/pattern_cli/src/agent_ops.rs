@@ -451,6 +451,75 @@ pub async fn create_agent_from_record(
     Ok(agent_dyn)
 }
 
+/// Create a runtime agent from a stored AgentRecord with a shared constellation tracker
+pub async fn create_agent_from_record_with_tracker(
+    record: AgentRecord,
+    model_name: Option<String>,
+    enable_tools: bool,
+    config: &PatternConfig,
+    heartbeat_sender: heartbeat::HeartbeatSender,
+    constellation_tracker: Option<
+        Arc<pattern_core::constellation_memory::ConstellationActivityTracker>,
+    >,
+) -> Result<Arc<dyn Agent>> {
+    let (model_provider, embedding_provider, response_options) =
+        load_model_embedding_providers(model_name, config, Some(&record), enable_tools).await?;
+    // Create tool registry
+    let tools = ToolRegistry::new();
+
+    // Create agent from the record
+    let agent = DatabaseAgent::from_record(
+        record.clone(),
+        DB.clone(),
+        model_provider,
+        tools.clone(),
+        embedding_provider.clone(),
+        heartbeat_sender,
+    )
+    .await?;
+
+    // Set the chat options with our selected model
+    {
+        let mut options = agent.chat_options.write().await;
+        *options = Some(response_options);
+    }
+
+    // If we have a constellation tracker, set it up
+    if let Some(tracker) = constellation_tracker {
+        // Create or update the constellation activity memory block
+        let activity_block = tracker.to_memory_block(record.owner_id.clone()).await;
+        let label = activity_block.label.clone();
+
+        // Add the memory block to the agent's memory
+        agent.update_memory(&label, activity_block).await?;
+
+        // Set the tracker on the agent's context
+        agent.set_constellation_tracker(tracker);
+    }
+
+    // Wrap in Arc before calling monitoring methods
+    let agent = Arc::new(agent);
+    agent.clone().start_stats_sync().await?;
+    agent.clone().start_memory_sync().await?;
+    agent.clone().start_message_monitoring().await?;
+
+    // Register data sources
+    register_data_sources(agent.clone(), config, tools, embedding_provider).await;
+
+    // Convert to trait object for endpoint setup
+    let agent_dyn: Arc<dyn Agent> = agent;
+
+    // Set up Bluesky endpoint if configured
+    let output = Output::new();
+    setup_bluesky_endpoint(&agent_dyn, config, &output)
+        .await
+        .inspect_err(|e| {
+            tracing::error!("Failed to setup Bluesky endpoint: {:?}", e);
+        })?;
+
+    Ok(agent_dyn)
+}
+
 pub async fn register_data_sources<M, E>(
     agent: Arc<DatabaseAgent<surrealdb::engine::any::Any, M, E>>,
     config: &PatternConfig,
@@ -486,6 +555,10 @@ pub async fn register_data_sources<M, E>(
                                 "did:plc:neisyrds2fyyfqod5zq56chr".to_string(),
                                 "did:plc:mxzuau6m53jtdsbqe6f4laov".to_string(),
                                 "did:plc:3xu5titidud43sfemwro3j62".to_string(),
+                                "did:plc:gfrmhdmjvxn2sjedzboeudef".to_string(),
+                                "did:plc:uqndyrh6gh7rjai33ulnwvkn".to_string(),
+                                "did:plc:k644h4rq5bjfzcetgsa6tuby".to_string(),
+                                "did:plc:uxelaqoua6psz2for5amm6bp".to_string(), // luna
                             ],
                             keywords: vec![],
                             languages: vec![],

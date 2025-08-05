@@ -878,7 +878,7 @@ pub async fn create_router_with_global_db(agent_id: AgentId) -> Result<AgentMess
 /// Endpoint for sending messages to Bluesky/ATProto
 #[derive(Clone)]
 pub struct BlueskyEndpoint {
-    agent: Arc<tokio::sync::RwLock<bsky_sdk::BskyAgent>>,
+    agent: bsky_sdk::BskyAgent,
     #[allow(dead_code)]
     handle: String,
     #[allow(dead_code)]
@@ -934,8 +934,8 @@ impl BlueskyEndpoint {
         info!("Authenticated to Bluesky as {:?}", session.handle);
 
         Ok(Self {
-            agent: Arc::new(tokio::sync::RwLock::new(agent)),
-            handle: handle,
+            agent,
+            handle,
             did: session.did.to_string(),
         })
     }
@@ -945,7 +945,7 @@ impl BlueskyEndpoint {
         &self,
         reply_to_uri: &str,
     ) -> Result<atrium_api::app::bsky::feed::post::ReplyRefData> {
-        let agent = self.agent.write().await;
+        let agent = &self.agent;
 
         // Fetch the post thread to get reply information
         let post_result = agent
@@ -1009,7 +1009,7 @@ impl BlueskyEndpoint {
         &self,
         reply_to_uri: &str,
     ) -> Result<atrium_api::app::bsky::feed::like::RecordData> {
-        let agent = self.agent.write().await;
+        let agent = &self.agent;
 
         // Fetch the post thread to get reply information
         let post_result = agent
@@ -1095,7 +1095,7 @@ impl MessageEndpoint for BlueskyEndpoint {
             if let Some(meta) = &metadata {
                 if let Some(reply_to) = meta.get("reply_to").and_then(|v| v.as_str()) {
                     if text.trim().to_lowercase() == "like" || text.trim().is_empty() {
-                        let agent = self.agent.read().await;
+                        let agent = &self.agent;
                         info!("like message received");
                         let like = self.create_like(reply_to).await?;
                         let result = agent.create_record(like).await.map_err(|e| {
@@ -1131,7 +1131,7 @@ impl MessageEndpoint for BlueskyEndpoint {
             })?;
 
         // Create the post
-        let agent = self.agent.read().await;
+        let agent = &self.agent;
         let text_copy = text.clone();
         let result = agent
             .create_record(atrium_api::app::bsky::feed::post::RecordData {
@@ -1143,7 +1143,7 @@ impl MessageEndpoint for BlueskyEndpoint {
                 facets: rich_text.facets,
                 labels: None,
                 langs: None,
-                tags: None,
+                tags: Some(vec!["pattern_post".to_string(), "llm_bot".to_string()]),
             })
             .await
             .map_err(|e| crate::CoreError::ToolExecutionFailed {

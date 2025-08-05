@@ -35,7 +35,7 @@ macro_rules! log_error_chain {
             let mut current = source;
             let mut depth = 1;
             loop {
-                tracing::error!("  {}: {}", depth, current);
+                tracing::error!("  {}: {:?}", depth, current);
                 match current.source() {
                     Some(next) => {
                         current = next;
@@ -58,7 +58,7 @@ macro_rules! log_error_chain {
             let mut current = source;
             let mut depth = 1;
             loop {
-                tracing::error!("  {}: {}", depth, current);
+                tracing::error!("  {}: {:?}", depth, current);
                 match current.source() {
                     Some(next) => {
                         current = next;

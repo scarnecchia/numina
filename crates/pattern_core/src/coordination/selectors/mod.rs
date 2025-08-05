@@ -3,7 +3,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{groups::AgentWithMembership, types::SelectionContext};
-use crate::{Result, agent::Agent, message::Response};
+use crate::{
+    Result,
+    agent::{Agent, ResponseEvent},
+};
+use futures::Stream;
 
 mod capability;
 mod load_balancing;
@@ -17,12 +21,12 @@ pub use load_balancing::LoadBalancingSelector;
 pub use random::RandomSelector;
 pub use supervisor::SupervisorSelector;
 
-/// Result of agent selection, optionally including a response from the selector
+/// Result of agent selection, optionally including a response stream from the selector
 pub struct SelectionResult<'a> {
     /// The selected agents
     pub agents: Vec<&'a AgentWithMembership<Arc<dyn Agent>>>,
-    /// Optional response from the selector (e.g., when supervisor handles directly)
-    pub selector_response: Option<Response>,
+    /// Optional response stream from the selector (e.g., when supervisor handles directly)
+    pub selector_response: Option<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>>,
 }
 
 #[async_trait]

@@ -690,7 +690,7 @@ impl DataSource for BlueskyFirehoseSource {
                 let mut thread_posts = Vec::new();
                 let mut current_uri = Some(reply.parent.uri.clone());
                 let mut depth = 0;
-                const MAX_DEPTH: usize = 4;
+                const MAX_DEPTH: usize = 10;
 
                 // Fetch parent posts one by one, walking up the thread
                 while let Some(uri) = current_uri.take() {

@@ -192,11 +192,159 @@ pub struct Request {
 }
 
 impl Request {
+    /// Validate that the request has no orphaned tool calls and proper ordering
+    pub fn validate(&self) -> crate::Result<()> {
+        let mut tool_call_ids = std::collections::HashSet::new();
+        let mut tool_result_ids = std::collections::HashSet::new();
+
+        // Also check for immediate ordering (Anthropic requirement)
+        for i in 0..self.messages.len() {
+            let msg = &self.messages[i];
+
+            // Check if this message has tool calls
+            let msg_tool_calls: Vec<String> = match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    calls.iter().map(|c| c.call_id.clone()).collect()
+                }
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::ToolUse { id, .. } = b {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+
+            if !msg_tool_calls.is_empty() {
+                // Tool calls found - check if next message has the results
+                if i + 1 >= self.messages.len() {
+                    return Err(crate::CoreError::ConfigurationError {
+                        config_path: "Request.messages".to_string(),
+                        field: "tool_calls".to_string(),
+                        expected: "Tool calls must be immediately followed by tool results"
+                            .to_string(),
+                        cause: crate::error::ConfigError::InvalidValue {
+                            field: format!("messages[{}]", i),
+                            reason: format!(
+                                "tool calls {:?} at end of message list",
+                                msg_tool_calls
+                            ),
+                        },
+                    });
+                }
+
+                let next_msg = &self.messages[i + 1];
+                let next_msg_results: Vec<String> = match &next_msg.content {
+                    MessageContent::ToolResponses(responses) => {
+                        responses.iter().map(|r| r.call_id.clone()).collect()
+                    }
+                    MessageContent::Blocks(blocks) => blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                                Some(tool_use_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+
+                // Check that all tool calls have results in the next message
+                for call_id in &msg_tool_calls {
+                    if !next_msg_results.contains(call_id) {
+                        return Err(crate::CoreError::ConfigurationError {
+                            config_path: "Request.messages".to_string(),
+                            field: "tool_calls".to_string(),
+                            expected: "Tool results must immediately follow tool calls".to_string(),
+                            cause: crate::error::ConfigError::InvalidValue {
+                                field: format!("messages[{}]", i),
+                                reason: format!(
+                                    "tool call '{}' not immediately followed by its result",
+                                    call_id
+                                ),
+                            },
+                        });
+                    }
+                }
+            }
+
+            // Collect all IDs for orphan checking
+            match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        tool_call_ids.insert(call.call_id.clone());
+                    }
+                }
+                MessageContent::ToolResponses(responses) => {
+                    for response in responses {
+                        tool_result_ids.insert(response.call_id.clone());
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                tool_call_ids.insert(id.clone());
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                tool_result_ids.insert(tool_use_id.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Check for orphaned tool calls
+        let orphaned_calls: Vec<_> = tool_call_ids.difference(&tool_result_ids).collect();
+        if !orphaned_calls.is_empty() {
+            return Err(crate::CoreError::ConfigurationError {
+                config_path: "Request.messages".to_string(),
+                field: "tool_calls".to_string(),
+                expected: "All tool_use blocks must have corresponding tool_result blocks"
+                    .to_string(),
+                cause: crate::error::ConfigError::InvalidValue {
+                    field: "messages".to_string(),
+                    reason: format!("orphaned tool call IDs: {:?}", orphaned_calls),
+                },
+            });
+        }
+
+        // Also check that tool results don't reference non-existent calls
+        let orphaned_results: Vec<_> = tool_result_ids.difference(&tool_call_ids).collect();
+        if !orphaned_results.is_empty() {
+            return Err(crate::CoreError::ConfigurationError {
+                config_path: "Request.messages".to_string(),
+                field: "tool_results".to_string(),
+                expected: "Tool results must reference existing tool calls".to_string(),
+                cause: crate::error::ConfigError::InvalidValue {
+                    field: "messages".to_string(),
+                    reason: format!("orphaned tool result IDs: {:?}", orphaned_results),
+                },
+            });
+        }
+
+        Ok(())
+    }
+
     /// Convert this request to a genai ChatRequest
-    pub fn as_chat_request(&self) -> genai::chat::ChatRequest {
-        genai::chat::ChatRequest::from_system(self.system.clone().unwrap().join("\n\n"))
-            .append_messages(self.messages.iter().map(|m| m.as_chat_message()).collect())
-            .with_tools(self.tools.clone().unwrap_or_default())
+    pub fn as_chat_request(&self) -> crate::Result<genai::chat::ChatRequest> {
+        // Validate before converting
+        self.validate()?;
+
+        Ok(
+            genai::chat::ChatRequest::from_system(self.system.clone().unwrap().join("\n\n"))
+                .append_messages(self.messages.iter().map(|m| m.as_chat_message()).collect())
+                .with_tools(self.tools.clone().unwrap_or_default()),
+        )
     }
 }
 
@@ -205,14 +353,6 @@ impl Request {
 pub struct MessageOptions {
     pub cache_control: Option<CacheControl>,
 }
-
-// impl Default for MessageOptions {
-//     fn default() -> Self {
-//         Self {
-//             cache_control: Some(CacheControl::Ephemeral),
-//         }
-//     }
-// }
 
 /// Cache control options
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -704,6 +844,26 @@ impl Message {
             metadata: MessageMetadata::default(),
             options: MessageOptions::default(),
             has_tool_calls,
+            word_count,
+            created_at: Utc::now(),
+            embedding: None,
+            embedding_model: None,
+        }
+    }
+
+    /// Create a tool response message
+    pub fn tool(responses: Vec<ToolResponse>) -> Self {
+        let content = MessageContent::ToolResponses(responses);
+        let word_count = Self::estimate_word_count(&content);
+
+        Self {
+            id: MessageId::generate(),
+            role: ChatRole::Tool,
+            owner_id: None,
+            content,
+            metadata: MessageMetadata::default(),
+            options: MessageOptions::default(),
+            has_tool_calls: false,
             word_count,
             created_at: Utc::now(),
             embedding: None,
@@ -1492,5 +1652,78 @@ mod tests {
             messages_with_embeddings[0].text_content(),
             Some("Message with embedding".to_string())
         );
+    }
+
+    #[test]
+    fn test_request_validation_with_orphaned_tool_calls() {
+        // Create a request with an orphaned tool call
+        let request = Request {
+            system: Some(vec!["System prompt".to_string()]),
+            messages: vec![
+                Message::user("Hello"),
+                Message::agent(MessageContent::ToolCalls(vec![ToolCall {
+                    call_id: "test_call_1".to_string(),
+                    fn_name: "test_tool".to_string(),
+                    fn_arguments: serde_json::json!({}),
+                }])),
+                // Missing tool response for test_call_1
+                Message::user("What happened?"),
+            ],
+            tools: None,
+        };
+
+        // Should fail validation
+        let result = request.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("orphaned tool call IDs"));
+    }
+
+    #[test]
+    fn test_request_validation_with_matched_tool_calls() {
+        // Create a request with properly matched tool calls
+        let request = Request {
+            system: Some(vec!["System prompt".to_string()]),
+            messages: vec![
+                Message::user("Hello"),
+                Message::agent(MessageContent::ToolCalls(vec![ToolCall {
+                    call_id: "test_call_1".to_string(),
+                    fn_name: "test_tool".to_string(),
+                    fn_arguments: serde_json::json!({}),
+                }])),
+                Message::tool(vec![ToolResponse {
+                    call_id: "test_call_1".to_string(),
+                    content: "Tool result".to_string(),
+                }]),
+                Message::user("What happened?"),
+            ],
+            tools: None,
+        };
+
+        // Should pass validation
+        let result = request.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_request_validation_with_orphaned_tool_results() {
+        // Create a request with an orphaned tool result
+        let request = Request {
+            system: Some(vec!["System prompt".to_string()]),
+            messages: vec![
+                Message::user("Hello"),
+                Message::tool(vec![ToolResponse {
+                    call_id: "non_existent_call".to_string(),
+                    content: "Tool result".to_string(),
+                }]),
+            ],
+            tools: None,
+        };
+
+        // Should fail validation
+        let result = request.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("orphaned tool result IDs"));
     }
 }

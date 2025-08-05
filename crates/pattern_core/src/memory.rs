@@ -305,6 +305,8 @@ impl Memory {
         if let Some(existing_block) = self.blocks.get(&label) {
             // Update existing block, preserving its ID
             let existing_id = existing_block.id.clone();
+            drop(existing_block); // Drop the guard before inserting to avoid deadlock
+
             block.id = existing_id.clone(); // Preserve the existing ID
             self.blocks.insert(label, block);
 

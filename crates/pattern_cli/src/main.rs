@@ -527,6 +527,11 @@ async fn main() -> Result<()> {
 
                 // Group was already loaded with relations in get_group_by_name
 
+                // Create a shared constellation activity tracker for the group
+                let constellation_tracker = Arc::new(
+                    pattern_core::constellation_memory::ConstellationActivityTracker::new(100),
+                );
+
                 // Load all agents in the group
                 tracing::info!("Group has {} members to load", group.members.len());
                 let mut agents = Vec::new();
@@ -534,13 +539,14 @@ async fn main() -> Result<()> {
                     // Load memories and messages for the agent
                     agent_ops::load_agent_memories_and_messages(&mut agent_record).await?;
 
-                    // Create runtime agent from record
-                    let agent = agent_ops::create_agent_from_record(
+                    // Create runtime agent from record with constellation tracker
+                    let agent = agent_ops::create_agent_from_record_with_tracker(
                         agent_record,
                         model.clone(),
                         !*no_tools,
                         &config,
                         heartbeat_sender.clone(),
+                        Some(constellation_tracker.clone()),
                     )
                     .await?;
                     agents.push(agent);

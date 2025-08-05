@@ -5,11 +5,36 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     CoreError, ModelProvider, Result,
     message::{ChatRole, ContentBlock, Message, MessageContent},
 };
+
+/// Detect provider from model string
+fn detect_provider_from_model(model: &str) -> String {
+    let model_lower = model.to_lowercase();
+
+    if model_lower.contains("claude") {
+        "anthropic".to_string()
+    } else if model_lower.contains("gpt") {
+        "openai".to_string()
+    } else if model_lower.contains("gemini") {
+        "gemini".to_string()
+    } else if model_lower.contains("llama") || model_lower.contains("mixtral") {
+        "groq".to_string()
+    } else if model_lower.contains("command") {
+        "cohere".to_string()
+    } else if model_lower.contains("deepseek") {
+        "deepseek".to_string()
+    } else if model_lower.contains("o1") || model_lower.contains("o3") {
+        "openai".to_string()
+    } else {
+        // Default to openai as it's most common
+        "openai".to_string()
+    }
+}
 
 /// Strategy for compressing messages when context is full
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +203,7 @@ impl MessageCompressor {
             });
         }
 
-        let mut result = match &self.strategy {
+        let result = match &self.strategy {
             CompressionStrategy::Truncate { keep_recent } => {
                 self.truncate_messages(messages, *keep_recent)
             }
@@ -211,7 +236,7 @@ impl MessageCompressor {
         }?;
 
         // Validate and fix message sequence for Gemini compatibility
-        result.active_messages = self.ensure_valid_message_sequence(result.active_messages);
+        //result.active_messages = self.ensure_valid_message_sequence(result.active_messages);
 
         Ok(result)
     }
@@ -250,39 +275,163 @@ impl MessageCompressor {
         }
     }
 
-    /// Ensure message sequence is valid for Gemini API requirements
-    /// Gemini requires function calls to come immediately after user turns or tool responses
-    fn ensure_valid_message_sequence(&self, mut messages: Vec<Message>) -> Vec<Message> {
-        let mut i = 0;
-        while i < messages.len() {
-            let current = &messages[i];
+    /// Validate and fix tool call/response ordering to ensure Anthropic compatibility
+    /// Anthropic requires tool results to immediately follow tool uses
+    fn validate_and_reorder_tool_calls(&self, messages: Vec<Message>) -> Vec<Message> {
+        let mut fixed_messages = Vec::new();
+        let mut pending_tool_calls = HashMap::new();
+        let mut orphaned_tool_results = HashSet::new();
 
-            // Check if this is an assistant message with tool calls
-            if current.role == ChatRole::Assistant
-                && (current.tool_call_count() > 0 || self.has_tool_use_blocks(current))
-            {
-                // Check if previous message is valid for tool calls
-                if i > 0 {
-                    let prev = &messages[i - 1];
-                    let is_valid = match prev.role {
-                        ChatRole::User => true,
-                        ChatRole::Tool => true,
-                        _ => false,
-                    };
-
-                    if !is_valid {
-                        // Insert a placeholder user message to make the sequence valid
-                        let placeholder =
-                            Message::user("[Context compressed - some messages were archived]");
-                        messages.insert(i, placeholder);
-                        i += 1; // Skip the placeholder we just inserted
+        // First pass: identify all tool calls and results
+        for (i, msg) in messages.iter().enumerate() {
+            match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        pending_tool_calls.insert(call.call_id.clone(), (i, msg.clone()));
                     }
                 }
+                MessageContent::ToolResponses(responses) => {
+                    for response in responses {
+                        if !pending_tool_calls.contains_key(&response.call_id) {
+                            orphaned_tool_results.insert(response.call_id.clone());
+                        }
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                pending_tool_calls.insert(id.clone(), (i, msg.clone()));
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                if !pending_tool_calls.contains_key(tool_use_id) {
+                                    orphaned_tool_results.insert(tool_use_id.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
+        }
+
+        // Second pass: rebuild message list with proper ordering
+        let mut processed_indices = HashSet::new();
+        let mut i = 0;
+
+        while i < messages.len() {
+            if processed_indices.contains(&i) {
+                i += 1;
+                continue;
+            }
+
+            let msg = &messages[i];
+
+            // Check if this message has tool calls
+            let tool_call_ids: Vec<String> = match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    calls.iter().map(|c| c.call_id.clone()).collect()
+                }
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::ToolUse { id, .. } = b {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+
+            if !tool_call_ids.is_empty() {
+                // This message has tool calls - find corresponding results
+                let mut found_results = false;
+
+                // Look for tool results in subsequent messages
+                for j in (i + 1)..messages.len() {
+                    if processed_indices.contains(&j) {
+                        continue;
+                    }
+
+                    let result_msg = &messages[j];
+                    let result_ids: Vec<String> = match &result_msg.content {
+                        MessageContent::ToolResponses(responses) => {
+                            responses.iter().map(|r| r.call_id.clone()).collect()
+                        }
+                        MessageContent::Blocks(blocks) => blocks
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                                    Some(tool_use_id.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                        _ => vec![],
+                    };
+
+                    // Check if these results match our tool calls
+                    if result_ids.iter().all(|rid| tool_call_ids.contains(rid)) {
+                        // Found matching results - add both messages
+                        fixed_messages.push(msg.clone());
+                        fixed_messages.push(result_msg.clone());
+                        processed_indices.insert(i);
+                        processed_indices.insert(j);
+                        found_results = true;
+                        break;
+                    }
+                }
+
+                if !found_results {
+                    // No results found for these tool calls - skip this message
+                    tracing::warn!(
+                        "Removing message with orphaned tool calls: {:?}",
+                        tool_call_ids
+                    );
+                    processed_indices.insert(i);
+                }
+            } else {
+                // Check if this is an orphaned tool result
+                let result_ids: Vec<String> = match &msg.content {
+                    MessageContent::ToolResponses(responses) => {
+                        responses.iter().map(|r| r.call_id.clone()).collect()
+                    }
+                    MessageContent::Blocks(blocks) => blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                                Some(tool_use_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+
+                if !result_ids.is_empty()
+                    && result_ids
+                        .iter()
+                        .all(|rid| orphaned_tool_results.contains(rid))
+                {
+                    // Skip orphaned tool results
+                    tracing::warn!("Removing orphaned tool results: {:?}", result_ids);
+                    processed_indices.insert(i);
+                } else {
+                    // Regular message - add it
+                    fixed_messages.push(msg.clone());
+                    processed_indices.insert(i);
+                }
+            }
+
             i += 1;
         }
 
-        messages
+        fixed_messages
     }
 
     /// Simple truncation strategy
@@ -364,6 +513,10 @@ impl MessageCompressor {
             }
         }
 
+        // Validate and fix tool call/result ordering in active messages
+        // Anthropic requires tool results to immediately follow tool uses
+        active = self.validate_and_reorder_tool_calls(active);
+
         Ok(CompressionResult {
             active_messages: active,
             summary: None,
@@ -416,7 +569,7 @@ impl MessageCompressor {
             let request = crate::message::Request {
                 system: Some(vec![
                     "You are a helpful assistant that creates concise summaries of conversations. \
-                     Focus on key information, decisions made, and important context."
+                     Focus on key information, decisions made, and important context. Maintain the style of the messages as much as possible."
                         .to_string(),
                 ]),
                 messages: vec![Message::user(summary_prompt)],
@@ -424,16 +577,22 @@ impl MessageCompressor {
             };
 
             // Create options for summarization
+            // Detect provider from model string
+            let provider_name = detect_provider_from_model(summarization_model);
+
             let model_info = crate::model::ModelInfo {
                 id: summarization_model.to_string(),
                 name: summarization_model.to_string(),
-                provider: "unknown".to_string(),
+                provider: provider_name,
                 capabilities: vec![],
                 context_window: 128000, // Default to a large context
                 max_output_tokens: Some(4096),
                 cost_per_1k_prompt_tokens: None,
                 cost_per_1k_completion_tokens: None,
             };
+
+            // Enhance with proper defaults
+            let model_info = crate::model::defaults::enhance_model_info(model_info);
 
             let mut options = crate::model::ResponseOptions::new(model_info);
             options.max_tokens = Some(1000);
@@ -457,6 +616,9 @@ impl MessageCompressor {
         // Combine summary with kept messages
         let mut active_messages = vec![summary_message];
         active_messages.extend(to_keep);
+
+        // Validate and fix tool call/result ordering
+        active_messages = self.validate_and_reorder_tool_calls(active_messages);
 
         Ok(CompressionResult {
             active_messages,
@@ -541,6 +703,10 @@ impl MessageCompressor {
 
         // Add recent messages
         active_messages.extend(recent);
+
+        // Validate and fix tool call/result ordering
+        active_messages = self.validate_and_reorder_tool_calls(active_messages);
+
         let compressed_count = archived_messages.len();
         let archived_count = archived_messages.len();
         let tokens_saved = self.estimate_tokens(&archived_messages);
@@ -681,6 +847,9 @@ impl MessageCompressor {
             }
         }
 
+        // Validate and fix tool call/result ordering
+        active_messages = self.validate_and_reorder_tool_calls(active_messages);
+
         Ok(CompressionResult {
             active_messages,
             summary: None,
@@ -781,39 +950,6 @@ mod tests {
         assert_eq!(
             result.active_messages[0].text_content().unwrap(),
             "Let me check that for you"
-        );
-    }
-
-    #[test]
-    fn test_ensure_valid_message_sequence() {
-        let compressor = MessageCompressor::new(CompressionStrategy::Truncate { keep_recent: 5 });
-
-        // Create a problematic sequence: Assistant with tool call after another Assistant
-        let messages = vec![
-            Message::user("Hello"),
-            Message::agent("Let me help you"),
-            Message {
-                role: ChatRole::Assistant,
-                content: MessageContent::ToolCalls(vec![crate::message::ToolCall {
-                    call_id: "123".to_string(),
-                    fn_name: "search".to_string(),
-                    fn_arguments: serde_json::json!({"query": "test"}),
-                }]),
-                has_tool_calls: true,
-                ..Message::agent("test")
-            },
-        ];
-
-        let validated = compressor.ensure_valid_message_sequence(messages.clone());
-
-        // Should have inserted a placeholder user message
-        assert_eq!(validated.len(), 4);
-        assert_eq!(validated[2].role, ChatRole::User);
-        assert!(
-            validated[2]
-                .text_content()
-                .unwrap()
-                .contains("Context compressed")
         );
     }
 

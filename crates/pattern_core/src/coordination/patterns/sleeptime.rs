@@ -5,7 +5,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    Result,
+    AgentId, Result,
     agent::Agent,
     coordination::{
         groups::{
@@ -61,6 +61,27 @@ impl GroupManager for SleeptimeManager {
                 }
             };
 
+            // Determine which agent to use for intervention
+            let selected_agent_id = if let Some(id) = intervention_agent_id {
+                // Use the specified agent
+                id.clone()
+            } else {
+                // Find the least recently active agent in the group
+                match Self::find_least_recently_active(&agents) {
+                    Some(agent_id) => agent_id,
+                    None => {
+                        let _ = tx
+                            .send(GroupResponseEvent::Error {
+                                agent_id: None,
+                                message: "No agents available for intervention".to_string(),
+                                recoverable: false,
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            };
+
             // Get current state
             let (last_check, mut trigger_history) = match &group_state {
                 GroupState::Sleeptime {
@@ -107,7 +128,7 @@ impl GroupManager for SleeptimeManager {
                     // Find intervention agent
                     if let Some(intervention_agent) = agents
                         .iter()
-                        .find(|awm| &awm.agent.as_ref().id() == intervention_agent_id)
+                        .find(|awm| awm.agent.as_ref().id() == selected_agent_id)
                     {
                         let agent_id = intervention_agent.agent.as_ref().id();
                         let agent_name = intervention_agent.agent.name();
@@ -274,7 +295,7 @@ impl GroupManager for SleeptimeManager {
                                 agent_id: None,
                                 message: format!(
                                     "Intervention agent {} not found",
-                                    intervention_agent_id
+                                    selected_agent_id
                                 ),
                                 recoverable: false,
                             })
@@ -285,7 +306,7 @@ impl GroupManager for SleeptimeManager {
                     // No triggers fired, just emit info message
                     let _ = tx
                         .send(GroupResponseEvent::TextChunk {
-                            agent_id: intervention_agent_id.clone(),
+                            agent_id: selected_agent_id.clone(),
                             text: "[Sleeptime] Routine check complete. All systems nominal."
                                 .to_string(),
                             is_final: true,
@@ -293,7 +314,7 @@ impl GroupManager for SleeptimeManager {
                         .await;
 
                     agent_responses.push(AgentResponse {
-                        agent_id: intervention_agent_id.clone(),
+                        agent_id: selected_agent_id.clone(),
                         response: text_response(
                             "[Sleeptime] Routine check complete. All systems nominal.",
                         ),
@@ -316,14 +337,14 @@ impl GroupManager for SleeptimeManager {
 
                 let _ = tx
                     .send(GroupResponseEvent::TextChunk {
-                        agent_id: intervention_agent_id.clone(),
+                        agent_id: selected_agent_id.clone(),
                         text: next_check_msg.clone(),
                         is_final: true,
                     })
                     .await;
 
                 agent_responses.push(AgentResponse {
-                    agent_id: intervention_agent_id.clone(),
+                    agent_id: selected_agent_id.clone(),
                     response: text_response(next_check_msg),
                     responded_at: Utc::now(),
                 });
@@ -361,6 +382,24 @@ impl GroupManager for SleeptimeManager {
 }
 
 impl SleeptimeManager {
+    /// Find the agent that was least recently active
+    fn find_least_recently_active(
+        agents: &[AgentWithMembership<Arc<dyn Agent>>],
+    ) -> Option<AgentId> {
+        // Find the agent with the oldest last_active timestamp
+        // TODO: Need to query database for actual last_active timestamps
+        // TODO: Pass db connection through or expose last_active via Agent trait
+        agents
+            .iter()
+            .filter(|awm| awm.membership.is_active)
+            .min_by_key(|awm| {
+                // TODO: Use actual last_active timestamp once available
+                // For now, use joined_at as a proxy
+                awm.membership.joined_at
+            })
+            .map(|awm| awm.agent.id())
+    }
+
     async fn evaluate_trigger_static(
         trigger: &SleeptimeTrigger,
         _message: &Message,
@@ -400,6 +439,25 @@ impl SleeptimeManager {
                 // For now, simulate threshold check
                 Ok(metric.contains("sedentary") && *threshold < 60.0)
             }
+            TriggerCondition::ConstellationActivity {
+                message_threshold: _,
+                time_threshold,
+            } => {
+                // TODO: Check actual constellation activity
+                // For now, simulate based on time elapsed
+                let last_sync = history
+                    .iter()
+                    .filter(|e| e.trigger_name == trigger.name)
+                    .max_by_key(|e| e.timestamp);
+
+                if let Some(last) = last_sync {
+                    let elapsed = Utc::now() - last.timestamp;
+                    Ok(elapsed > ChronoDuration::from_std(*time_threshold).unwrap_or_default())
+                } else {
+                    // Never synced before
+                    Ok(true)
+                }
+            }
             TriggerCondition::Custom { evaluator } => {
                 // Would call custom evaluator function
                 Ok(evaluator.contains("custom") && rand::random::<f32>() > 0.8)
@@ -414,6 +472,11 @@ impl SleeptimeManager {
     fn get_intervention_message_impl(triggers: &[&SleeptimeTrigger]) -> &'static str {
         // Determine intervention based on highest priority trigger
         if let Some(trigger) = triggers.first() {
+            // Check if this is a constellation activity sync trigger
+            if trigger.name.contains("activity_sync") || trigger.name.contains("context_sync") {
+                return "You have been activated for constellation context synchronization. Review the constellation_activity memory block to understand recent events and update your state accordingly.";
+            }
+
             match trigger.priority {
                 TriggerPriority::Critical => {
                     "CRITICAL: Immediate intervention required. Please take a break NOW."
@@ -511,7 +574,7 @@ mod tests {
             coordination_pattern: CoordinationPattern::Sleeptime {
                 check_interval: Duration::from_secs(1), // 1 second for testing
                 triggers,
-                intervention_agent_id: intervention_id.clone(),
+                intervention_agent_id: Some(intervention_id.clone()),
             },
             created_at: Utc::now(),
             updated_at: Utc::now(),

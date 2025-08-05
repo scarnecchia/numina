@@ -182,8 +182,8 @@ impl GroupManager for DynamicManager {
                 })
                 .await;
 
-            // If supervisor provided a direct response, handle it
-            if let Some(supervisor_response) = selector_response {
+            // If supervisor provided a direct response stream, handle it
+            if let Some(mut supervisor_stream) = selector_response {
                 // Find which agent is the supervisor (should be the only selected agent)
                 if selected_agents.len() == 1 {
                     let supervisor_awm = selected_agents[0];
@@ -199,19 +199,76 @@ impl GroupManager for DynamicManager {
                         })
                         .await;
 
-                    // Send the response content
-                    for content in &supervisor_response.content {
-                        match content {
-                            crate::message::MessageContent::Text(text) => {
+                    // Forward the stream events
+                    use tokio_stream::StreamExt;
+                    let mut message_id = None;
+
+                    while let Some(event) = supervisor_stream.next().await {
+                        match event {
+                            crate::agent::ResponseEvent::TextChunk { text, is_final } => {
                                 let _ = tx
                                     .send(GroupResponseEvent::TextChunk {
                                         agent_id: supervisor_id.clone(),
-                                        text: text.clone(),
-                                        is_final: true,
+                                        text,
+                                        is_final,
                                     })
                                     .await;
                             }
-                            _ => {} // Handle other content types if needed
+                            crate::agent::ResponseEvent::ReasoningChunk { text, is_final } => {
+                                let _ = tx
+                                    .send(GroupResponseEvent::ReasoningChunk {
+                                        agent_id: supervisor_id.clone(),
+                                        text,
+                                        is_final,
+                                    })
+                                    .await;
+                            }
+                            crate::agent::ResponseEvent::ToolCallStarted {
+                                call_id,
+                                fn_name,
+                                args,
+                            } => {
+                                tracing::debug!(
+                                    "Dynamic: Forwarding ToolCallStarted {} from supervisor {}",
+                                    fn_name,
+                                    supervisor_name
+                                );
+                                let _ = tx
+                                    .send(GroupResponseEvent::ToolCallStarted {
+                                        agent_id: supervisor_id.clone(),
+                                        call_id,
+                                        fn_name,
+                                        args,
+                                    })
+                                    .await;
+                            }
+                            crate::agent::ResponseEvent::ToolCallCompleted { call_id, result } => {
+                                let _ = tx
+                                    .send(GroupResponseEvent::ToolCallCompleted {
+                                        agent_id: supervisor_id.clone(),
+                                        call_id,
+                                        result: result.map_err(|e| e.to_string()),
+                                    })
+                                    .await;
+                            }
+                            crate::agent::ResponseEvent::Complete {
+                                message_id: msg_id, ..
+                            } => {
+                                message_id = Some(msg_id);
+                            }
+                            crate::agent::ResponseEvent::Error {
+                                message,
+                                recoverable,
+                            } => {
+                                let _ = tx
+                                    .send(GroupResponseEvent::Error {
+                                        agent_id: Some(supervisor_id.clone()),
+                                        message,
+                                        recoverable,
+                                    })
+                                    .await;
+                            }
+                            _ => {} // Skip other events
                         }
                     }
 
@@ -220,14 +277,18 @@ impl GroupManager for DynamicManager {
                         .send(GroupResponseEvent::AgentCompleted {
                             agent_id: supervisor_id.clone(),
                             agent_name: supervisor_name.clone(),
-                            message_id: None, // We don't have a message ID from the direct response
+                            message_id,
                         })
                         .await;
 
                     // Track the response
                     let agent_responses = vec![AgentResponse {
                         agent_id: supervisor_id.clone(),
-                        response: supervisor_response,
+                        response: crate::message::Response {
+                            content: vec![], // TODO: We'd need to collect content from the stream
+                            reasoning: None,
+                            metadata: crate::message::ResponseMetadata::default(),
+                        },
                         responded_at: Utc::now(),
                     }];
 
@@ -266,162 +327,195 @@ impl GroupManager for DynamicManager {
                 }
             }
 
-            // Process each selected agent
-            let mut agent_responses = Vec::new();
-            let mut new_recent_selections = recent_selections.clone();
+            // Process each selected agent in parallel
+            let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(selected_agents.len());
+            let agent_count = selected_agents.len();
 
             for awm in selected_agents {
                 let agent_id = awm.agent.as_ref().id();
                 let agent_name = awm.agent.name();
+                let tx = tx.clone();
+                let message = message.clone();
+                let agent = awm.agent.clone();
+                let role = awm.membership.role.clone();
+                let response_tx = response_tx.clone();
 
-                // Send agent started event
-                let _ = tx
-                    .send(GroupResponseEvent::AgentStarted {
-                        agent_id: agent_id.clone(),
-                        agent_name: agent_name.clone(),
-                        role: awm.membership.role.clone(),
-                    })
-                    .await;
-
-                // Process message with streaming
-                match awm
-                    .agent
-                    .clone()
-                    .process_message_stream(message.clone())
-                    .await
-                {
-                    Ok(mut stream) => {
-                        use tokio_stream::StreamExt;
-
-                        while let Some(event) = stream.next().await {
-                            // Convert ResponseEvent to GroupResponseEvent
-                            match event {
-                                crate::agent::ResponseEvent::TextChunk { text, is_final } => {
-                                    let _ = tx
-                                        .send(GroupResponseEvent::TextChunk {
-                                            agent_id: agent_id.clone(),
-                                            text,
-                                            is_final,
-                                        })
-                                        .await;
-                                }
-                                crate::agent::ResponseEvent::ReasoningChunk { text, is_final } => {
-                                    let _ = tx
-                                        .send(GroupResponseEvent::ReasoningChunk {
-                                            agent_id: agent_id.clone(),
-                                            text,
-                                            is_final,
-                                        })
-                                        .await;
-                                }
-                                crate::agent::ResponseEvent::ToolCallStarted {
-                                    call_id,
-                                    fn_name,
-                                    args,
-                                } => {
-                                    tracing::debug!(
-                                        "Dynamic: Forwarding ToolCallStarted {} from agent {}",
-                                        fn_name,
-                                        agent_name
-                                    );
-                                    let _ = tx
-                                        .send(GroupResponseEvent::ToolCallStarted {
-                                            agent_id: agent_id.clone(),
-                                            call_id,
-                                            fn_name,
-                                            args,
-                                        })
-                                        .await;
-                                }
-                                crate::agent::ResponseEvent::ToolCallCompleted {
-                                    call_id,
-                                    result,
-                                } => {
-                                    let _ = tx
-                                        .send(GroupResponseEvent::ToolCallCompleted {
-                                            agent_id: agent_id.clone(),
-                                            call_id,
-                                            result: result.map_err(|e| e.to_string()),
-                                        })
-                                        .await;
-                                }
-                                crate::agent::ResponseEvent::Complete { message_id, .. } => {
-                                    let _ = tx
-                                        .send(GroupResponseEvent::AgentCompleted {
-                                            agent_id: agent_id.clone(),
-                                            agent_name: agent_name.clone(),
-                                            message_id: Some(message_id),
-                                        })
-                                        .await;
-                                }
-                                crate::agent::ResponseEvent::Error {
-                                    message,
-                                    recoverable,
-                                } => {
-                                    let _ = tx
-                                        .send(GroupResponseEvent::Error {
-                                            agent_id: Some(agent_id.clone()),
-                                            message,
-                                            recoverable,
-                                        })
-                                        .await;
-                                }
-                                _ => {} // Skip other events
-                            }
-                        }
-
-                        // Track response for final summary
-                        agent_responses.push(AgentResponse {
+                // Spawn a task for each agent to process in parallel
+                tokio::spawn(async move {
+                    // Send agent started event
+                    let _ = tx
+                        .send(GroupResponseEvent::AgentStarted {
                             agent_id: agent_id.clone(),
-                            response: crate::message::Response {
-                                content: vec![], // TODO: Collect actual response content
-                                reasoning: None,
-                                metadata: crate::message::ResponseMetadata::default(),
-                            },
-                            responded_at: Utc::now(),
-                        });
+                            agent_name: agent_name.clone(),
+                            role,
+                        })
+                        .await;
+
+                    // Process message with streaming
+                    match agent.process_message_stream(message).await {
+                        Ok(mut stream) => {
+                            use tokio_stream::StreamExt;
+
+                            while let Some(event) = stream.next().await {
+                                // Convert ResponseEvent to GroupResponseEvent
+                                match event {
+                                    crate::agent::ResponseEvent::TextChunk { text, is_final } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::TextChunk {
+                                                agent_id: agent_id.clone(),
+                                                text,
+                                                is_final,
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::ReasoningChunk {
+                                        text,
+                                        is_final,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::ReasoningChunk {
+                                                agent_id: agent_id.clone(),
+                                                text,
+                                                is_final,
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::ToolCallStarted {
+                                        call_id,
+                                        fn_name,
+                                        args,
+                                    } => {
+                                        tracing::debug!(
+                                            "Dynamic: Forwarding ToolCallStarted {} from agent {}",
+                                            fn_name,
+                                            agent_name
+                                        );
+                                        let _ = tx
+                                            .send(GroupResponseEvent::ToolCallStarted {
+                                                agent_id: agent_id.clone(),
+                                                call_id,
+                                                fn_name,
+                                                args,
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::ToolCallCompleted {
+                                        call_id,
+                                        result,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::ToolCallCompleted {
+                                                agent_id: agent_id.clone(),
+                                                call_id,
+                                                result: result.map_err(|e| e.to_string()),
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::Complete {
+                                        message_id, ..
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::AgentCompleted {
+                                                agent_id: agent_id.clone(),
+                                                agent_name: agent_name.clone(),
+                                                message_id: Some(message_id),
+                                            })
+                                            .await;
+                                    }
+                                    crate::agent::ResponseEvent::Error {
+                                        message,
+                                        recoverable,
+                                    } => {
+                                        let _ = tx
+                                            .send(GroupResponseEvent::Error {
+                                                agent_id: Some(agent_id.clone()),
+                                                message,
+                                                recoverable,
+                                            })
+                                            .await;
+                                    }
+                                    _ => {} // Skip other events
+                                }
+                            }
+
+                            // Send response for final summary
+                            let _ = response_tx
+                                .send(AgentResponse {
+                                    agent_id: agent_id.clone(),
+                                    response: crate::message::Response {
+                                        content: vec![], // TODO: Collect actual response content
+                                        reasoning: None,
+                                        metadata: crate::message::ResponseMetadata::default(),
+                                    },
+                                    responded_at: Utc::now(),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(GroupResponseEvent::Error {
+                                    agent_id: Some(agent_id.clone()),
+                                    message: e.to_string(),
+                                    recoverable: false,
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx
-                            .send(GroupResponseEvent::Error {
-                                agent_id: Some(agent_id.clone()),
-                                message: e.to_string(),
-                                recoverable: false,
-                            })
-                            .await;
+                });
+            }
+
+            // Drop the original sender so only agent tasks hold references
+            drop(response_tx);
+
+            // Spawn a monitor task to handle completion
+            tokio::spawn(async move {
+                // Collect all responses from the channel
+                let mut agent_responses = Vec::new();
+                let mut completed_count = 0;
+
+                while let Some(response) = response_rx.recv().await {
+                    agent_responses.push(response.clone());
+                    completed_count += 1;
+
+                    // If all agents have completed, we can finish
+                    if completed_count >= agent_count {
+                        break;
                     }
                 }
 
-                // Update recent selections
-                new_recent_selections.push((Utc::now(), agent_id));
-            }
+                // Update recent selections based on responses
+                let mut new_recent_selections = recent_selections.clone();
+                for response in &agent_responses {
+                    new_recent_selections.push((Utc::now(), response.agent_id.clone()));
+                }
 
-            // Keep only recent selections (last 100 or from last hour)
-            let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
-            new_recent_selections.retain(|(timestamp, _)| *timestamp > one_hour_ago);
-            if new_recent_selections.len() > 100 {
-                new_recent_selections = new_recent_selections
-                    .into_iter()
-                    .rev()
-                    .take(100)
-                    .rev()
-                    .collect();
-            }
+                // Keep only recent selections (last 100 or from last hour)
+                let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+                new_recent_selections.retain(|(timestamp, _)| *timestamp > one_hour_ago);
+                if new_recent_selections.len() > 100 {
+                    new_recent_selections = new_recent_selections
+                        .into_iter()
+                        .rev()
+                        .take(100)
+                        .rev()
+                        .collect();
+                }
 
-            let new_state = GroupState::Dynamic {
-                recent_selections: new_recent_selections,
-            };
+                let new_state = GroupState::Dynamic {
+                    recent_selections: new_recent_selections,
+                };
 
-            // Send completion event
-            let _ = tx
-                .send(GroupResponseEvent::Complete {
-                    group_id,
-                    pattern: format!("dynamic:{}", selector_name),
-                    execution_time: start_time.elapsed(),
-                    agent_responses,
-                    state_changes: Some(new_state),
-                })
-                .await;
+                // Send completion event
+                let _ = tx
+                    .send(GroupResponseEvent::Complete {
+                        group_id,
+                        pattern: format!("dynamic:{}", selector_name),
+                        execution_time: start_time.elapsed(),
+                        agent_responses,
+                        state_changes: Some(new_state),
+                    })
+                    .await;
+            });
         });
 
         Ok(Box::new(ReceiverStream::new(rx)))

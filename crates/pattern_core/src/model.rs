@@ -282,7 +282,7 @@ impl ModelProvider for GenAiClient {
         let (model_info, chat_options) = options.to_chat_options_tuple();
 
         // Log the full request
-        let chat_request = request.as_chat_request();
+        let chat_request = request.as_chat_request()?;
         tracing::debug!("Chat Request:\n{:#?}", chat_request);
 
         let response = match self

@@ -82,37 +82,40 @@ impl AgentSelector for SupervisorSelector {
             embedding_model: None,
         };
 
-        // Ask supervisor to decide
-        let response = supervisor
+        // Ask supervisor to decide using streaming
+        let mut response_stream = supervisor
             .agent
             .clone()
-            .process_message(supervisor_message)
+            .process_message_stream(supervisor_message)
             .await?;
 
-        // Extract text content from response
-        let response_text = response
-            .content
-            .iter()
-            .filter_map(|mc| match mc {
-                MessageContent::Text(text) => Some(text.clone()),
-                MessageContent::Parts(parts) => {
-                    let text_parts: Vec<String> = parts
-                        .iter()
-                        .filter_map(|p| match p {
-                            crate::message::ContentPart::Text(text) => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    if text_parts.is_empty() {
-                        None
-                    } else {
-                        Some(text_parts.join("\n"))
+        // Buffer initial events to determine if this is agent selection or direct response
+        use tokio_stream::StreamExt;
+        let mut buffered_events = Vec::new();
+        let mut response_text = String::new();
+        let mut _has_tool_calls = false;
+        let mut is_complete = false;
+
+        // Collect up to 10 events or until we see a Complete event
+        while buffered_events.len() < 10 && !is_complete {
+            if let Some(event) = response_stream.next().await {
+                match &event {
+                    crate::agent::ResponseEvent::TextChunk { text, .. } => {
+                        response_text.push_str(text);
                     }
+                    crate::agent::ResponseEvent::ToolCallStarted { .. } => {
+                        _has_tool_calls = true;
+                    }
+                    crate::agent::ResponseEvent::Complete { .. } => {
+                        is_complete = true;
+                    }
+                    _ => {}
                 }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+                buffered_events.push(event);
+            } else {
+                break;
+            }
+        }
 
         // Parse supervisor's response to get selected agent names
         let selected_names = parse_supervisor_response(&response_text);
@@ -138,10 +141,27 @@ impl AgentSelector for SupervisorSelector {
 
         // If supervisor provided a direct response and can select self, return self
         if is_direct_response && can_select_self {
-            // Return supervisor as selected with their response
+            // Create a stream that includes the buffered events plus the rest
+            use tokio_stream::wrappers::ReceiverStream;
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+            // Spawn task to forward buffered events and remaining stream
+            tokio::spawn(async move {
+                // Send buffered events first
+                for event in buffered_events {
+                    let _ = tx.send(event).await;
+                }
+
+                // Forward remaining events
+                while let Some(event) = response_stream.next().await {
+                    let _ = tx.send(event).await;
+                }
+            });
+
+            // Return supervisor as selected with their response stream
             return Ok(super::SelectionResult {
                 agents: vec![supervisor],
-                selector_response: Some(response),
+                selector_response: Some(Box::new(ReceiverStream::new(rx))),
             });
         }
 

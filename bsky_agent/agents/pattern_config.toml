@@ -117,9 +117,12 @@ default_filters = [
         "did:plc:mdjhvva6vlrswsj26cftjttd",
         "did:plc:7757w723nk675bqziinitoif",
         "did:plc:neisyrds2fyyfqod5zq56chr",
-
+        "did:plc:uqndyrh6gh7rjai33ulnwvkn",
         "did:plc:3xu5titidud43sfemwro3j62",
+        "did:plc:gfrmhdmjvxn2sjedzboeudef",
         "did:plc:mxzuau6m53jtdsbqe6f4laov",
+        "did:plc:uxelaqoua6psz2for5amm6bp", # luna
+        "did:plc:k644h4rq5bjfzcetgsa6tuby",
     ], keywords = [
     ], languages = [
     ] },

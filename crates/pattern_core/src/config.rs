@@ -430,6 +430,57 @@ pub enum GroupMemberRoleConfig {
     },
 }
 
+/// Configuration for a sleeptime trigger
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SleeptimeTriggerConfig {
+    /// Name of the trigger
+    pub name: String,
+    /// Condition that activates this trigger
+    pub condition: TriggerConditionConfig,
+    /// Priority of this trigger
+    pub priority: TriggerPriorityConfig,
+}
+
+/// Configuration for trigger conditions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerConditionConfig {
+    /// Time-based trigger
+    TimeElapsed {
+        /// Duration in seconds
+        duration: u64,
+    },
+    /// Metric-based trigger
+    MetricThreshold {
+        /// Metric name
+        metric: String,
+        /// Threshold value
+        threshold: f64,
+    },
+    /// Constellation activity trigger
+    ConstellationActivity {
+        /// Number of messages to trigger
+        message_threshold: u32,
+        /// Time window in seconds
+        time_threshold: u64,
+    },
+    /// Custom evaluator
+    Custom {
+        /// Custom evaluator name
+        evaluator: String,
+    },
+}
+
+/// Configuration for trigger priority
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerPriorityConfig {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
 /// Configuration for coordination patterns
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -461,9 +512,12 @@ pub enum GroupPatternConfig {
     /// Background monitoring
     Sleeptime {
         /// Check interval in seconds
-        interval_seconds: u64,
-        /// Member name to activate on triggers
-        intervention_agent: String,
+        check_interval: u64,
+        /// Triggers that can activate intervention
+        triggers: Vec<SleeptimeTriggerConfig>,
+        /// Optional member name to activate on triggers (uses least recently active if not specified)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        intervention_agent: Option<String>,
     },
 }
 

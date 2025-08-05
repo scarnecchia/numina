@@ -317,6 +317,224 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
 
         Ok(messages)
     }
+
+    /// Search messages from all agents in the same constellation
+    pub async fn search_constellation_messages(
+        &self,
+        query: Option<&str>,
+        role_filter: Option<crate::message::ChatRole>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<(String, crate::message::Message)>> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for constellation message search".into(),
+                ),
+            ))
+        })?;
+
+        // First, find the constellation this agent belongs to
+        let constellation_query = format!(
+            "SELECT VALUE <-constellation_agents<-constellation FROM agent:⟨{}⟩ LIMIT 1",
+            self.agent_id.to_key()
+        );
+
+        let mut result = db
+            .query(&constellation_query)
+            .await
+            .map_err(DatabaseError::from)?;
+        let constellation_ids: Vec<surrealdb::RecordId> =
+            result.take(0).map_err(DatabaseError::from)?;
+
+        if constellation_ids.is_empty() {
+            // Agent not in a constellation, return empty
+            return Ok(Vec::new());
+        }
+
+        let constellation_id = &constellation_ids[0];
+
+        // First, get all agents in the constellation with their names
+        let agents_query = format!(
+            r#"SELECT id, name FROM agent WHERE id IN (
+                -- Direct agents in the constellation
+                SELECT VALUE out FROM constellation_agents 
+                WHERE in = {}
+                -- UNION with agents from groups in the constellation
+                UNION
+                SELECT VALUE in FROM group_members
+                WHERE out IN (
+                    SELECT VALUE out FROM composed_of
+                    WHERE in = {}
+                )
+            )"#,
+            constellation_id, constellation_id
+        );
+
+        let mut agents_result = db.query(&agents_query).await.map_err(DatabaseError::from)?;
+        let agents_data: Vec<serde_json::Value> =
+            agents_result.take(0).map_err(DatabaseError::from)?;
+
+        // Build a map of agent ID to name
+        let mut agent_names = std::collections::HashMap::new();
+        for agent in agents_data {
+            if let (Some(id), Some(name)) = (
+                agent.get("id").and_then(|v| v.as_str()),
+                agent.get("name").and_then(|v| v.as_str()),
+            ) {
+                agent_names.insert(id.to_string(), name.to_string());
+            }
+        }
+
+        // Now build query to get messages from all these agents
+        // We'll get agent_messages relations and then fetch the messages
+        let mut sql = format!(
+            r#"SELECT in AS agent_id, out AS message FROM agent_messages
+            WHERE in IN (
+                -- Direct agents in the constellation
+                SELECT VALUE out FROM constellation_agents 
+                WHERE in = {}
+                -- UNION with agents from groups in the constellation
+                UNION
+                SELECT VALUE in FROM group_members
+                WHERE out IN (
+                    SELECT VALUE out FROM composed_of
+                    WHERE in = {}
+                )
+            )"#,
+            constellation_id, constellation_id
+        );
+
+        // TODO: Optimize by applying filters in the query instead of in code
+        // This would require a more complex query that joins through the relations
+        // For now, we fetch all relations and filter in code
+
+        sql.push_str(" ORDER BY msg.created_at DESC LIMIT $limit");
+
+        // Build query and bind all parameters
+        let mut query_builder = db.query(&sql).bind(("limit", limit));
+
+        if let Some(search_query) = query {
+            query_builder = query_builder.bind(("search_query", search_query.to_string()));
+        }
+
+        if let Some(role) = &role_filter {
+            query_builder = query_builder.bind(("role", role.to_string()));
+        }
+
+        if let Some(start) = start_time {
+            query_builder =
+                query_builder.bind(("start_time", surrealdb::sql::Datetime::from(start)));
+        }
+
+        if let Some(end) = end_time {
+            query_builder = query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
+        }
+
+        // Execute query and get results with agent names
+        let results: Vec<serde_json::Value> = query_builder
+            .await
+            .map_err(DatabaseError::from)?
+            .take(0)
+            .map_err(DatabaseError::from)?;
+
+        // Parse results to extract agent ID and message ID, then fetch messages
+        let mut messages_with_agents = Vec::new();
+        for result in results {
+            if let (Some(agent_id_val), Some(message_id_val)) =
+                (result.get("agent_id"), result.get("message"))
+            {
+                // Extract the agent ID string
+                let agent_id = if let Some(obj) = agent_id_val.as_object() {
+                    if let Some(id_str) = obj.get("id").and_then(|v| v.as_str()) {
+                        id_str
+                    } else {
+                        continue;
+                    }
+                } else if let Some(id_str) = agent_id_val.as_str() {
+                    id_str
+                } else {
+                    continue;
+                };
+
+                // Look up agent name from our map
+                let agent_name = agent_names
+                    .get(agent_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Unknown ({})", agent_id));
+
+                // Extract message ID and fetch the message
+                let message_id = if let Some(obj) = message_id_val.as_object() {
+                    if let (Some(tb), Some(id)) = (
+                        obj.get("tb").and_then(|v| v.as_str()),
+                        obj.get("id").and_then(|v| v.as_str()),
+                    ) {
+                        format!("{}:{}", tb, id)
+                    } else {
+                        continue;
+                    }
+                } else if let Some(id_str) = message_id_val.as_str() {
+                    id_str.to_string()
+                } else {
+                    continue;
+                };
+
+                // Fetch the actual message
+                let msg_query = format!("SELECT * FROM {}", message_id);
+                if let Ok(mut msg_result) = db.query(&msg_query).await {
+                    if let Ok(msg_data) = msg_result.take::<Vec<serde_json::Value>>(0) {
+                        if let Some(msg_val) = msg_data.into_iter().next() {
+                            // Convert to Message
+                            if let Ok(db_model) =
+                                serde_json::from_value::<<Message as DbEntity>::DbModel>(msg_val)
+                            {
+                                if let Ok(message) = Message::from_db_model(db_model) {
+                                    // Apply filters
+                                    if let Some(q) = query {
+                                        if let Some(text) = message.text_content() {
+                                            if !text.to_lowercase().contains(&q.to_lowercase()) {
+                                                continue;
+                                            }
+                                        } else {
+                                            continue;
+                                        }
+                                    }
+
+                                    if let Some(role) = &role_filter {
+                                        if message.role != *role {
+                                            continue;
+                                        }
+                                    }
+
+                                    if let Some(start) = start_time {
+                                        if message.created_at < start {
+                                            continue;
+                                        }
+                                    }
+
+                                    if let Some(end) = end_time {
+                                        if message.created_at > end {
+                                            continue;
+                                        }
+                                    }
+
+                                    messages_with_agents.push((agent_name, message));
+
+                                    // Check if we've reached the limit
+                                    if messages_with_agents.len() >= limit {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(messages_with_agents)
+    }
 }
 
 impl Default for AgentHandle {
@@ -395,6 +613,10 @@ pub struct AgentContext<C: surrealdb::Connection + Clone = surrealdb::engine::an
 
     /// The big stuff in its own lock
     pub history: Arc<RwLock<MessageHistory>>,
+
+    /// Optional constellation activity tracker for shared context
+    pub constellation_tracker:
+        Option<Arc<crate::constellation_memory::ConstellationActivityTracker>>,
 }
 
 /// Metadata about the agent state
@@ -456,12 +678,21 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
             history: Arc::new(RwLock::new(MessageHistory::new(
                 CompressionStrategy::default(),
             ))),
+            constellation_tracker: None,
         }
     }
 
     /// Get a cheap handle to agent internals
     pub fn handle(&self) -> AgentHandle<C> {
         self.handle.clone()
+    }
+
+    /// Set the constellation activity tracker
+    pub fn set_constellation_tracker(
+        &mut self,
+        tracker: Arc<crate::constellation_memory::ConstellationActivityTracker>,
+    ) {
+        self.constellation_tracker = Some(tracker);
     }
 
     /// Add tool workflow rules to the context configuration (merges with existing rules)
@@ -513,6 +744,9 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
             context.messages.len(),
             context.system_prompt.len()
         );
+        for msg in &context.messages {
+            tracing::debug!("{:?}", msg);
+        }
 
         Ok(context)
     }

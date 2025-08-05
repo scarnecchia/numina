@@ -477,13 +477,62 @@ fn convert_pattern_config(pattern: &GroupPatternConfig) -> Result<CoordinationPa
             selector_config: selector_config.clone(),
         },
         GroupPatternConfig::Sleeptime {
-            interval_seconds,
-            intervention_agent: _,
+            check_interval,
+            triggers,
+            intervention_agent,
         } => {
+            // Convert config triggers to coordination triggers
+            let coord_triggers = triggers
+                .iter()
+                .map(|t| {
+                    use pattern_core::config::{TriggerConditionConfig, TriggerPriorityConfig};
+                    use pattern_core::coordination::types::{
+                        SleeptimeTrigger, TriggerCondition, TriggerPriority,
+                    };
+
+                    let condition = match &t.condition {
+                        TriggerConditionConfig::TimeElapsed { duration } => {
+                            TriggerCondition::TimeElapsed {
+                                duration: std::time::Duration::from_secs(*duration),
+                            }
+                        }
+                        TriggerConditionConfig::MetricThreshold { metric, threshold } => {
+                            TriggerCondition::ThresholdExceeded {
+                                metric: metric.clone(),
+                                threshold: *threshold,
+                            }
+                        }
+                        TriggerConditionConfig::ConstellationActivity {
+                            message_threshold,
+                            time_threshold,
+                        } => TriggerCondition::ConstellationActivity {
+                            message_threshold: *message_threshold as usize,
+                            time_threshold: std::time::Duration::from_secs(*time_threshold),
+                        },
+                        TriggerConditionConfig::Custom { evaluator } => TriggerCondition::Custom {
+                            evaluator: evaluator.clone(),
+                        },
+                    };
+
+                    let priority = match &t.priority {
+                        TriggerPriorityConfig::Critical => TriggerPriority::Critical,
+                        TriggerPriorityConfig::High => TriggerPriority::High,
+                        TriggerPriorityConfig::Medium => TriggerPriority::Medium,
+                        TriggerPriorityConfig::Low => TriggerPriority::Low,
+                    };
+
+                    SleeptimeTrigger {
+                        name: t.name.clone(),
+                        condition,
+                        priority,
+                    }
+                })
+                .collect();
+
             CoordinationPattern::Sleeptime {
-                check_interval: std::time::Duration::from_secs(*interval_seconds),
-                triggers: vec![],                           // Empty triggers for now
-                intervention_agent_id: AgentId::generate(), // TODO: Look up actual ID
+                check_interval: std::time::Duration::from_secs(*check_interval),
+                triggers: coord_triggers,
+                intervention_agent_id: intervention_agent.as_ref().map(|_| AgentId::generate()), // TODO: Look up actual ID
             }
         }
     })
@@ -691,9 +740,14 @@ fn convert_pattern_to_config(pattern: &CoordinationPattern) -> GroupPatternConfi
                 selector_config: Default::default(),
             }
         }
-        CoordinationPattern::Sleeptime { check_interval, .. } => GroupPatternConfig::Sleeptime {
-            interval_seconds: check_interval.as_secs(),
-            intervention_agent: String::new(), // Can't resolve agent name from ID without lookup
+        CoordinationPattern::Sleeptime {
+            check_interval,
+            triggers: _,
+            intervention_agent_id: _,
+        } => GroupPatternConfig::Sleeptime {
+            check_interval: check_interval.as_secs(),
+            triggers: vec![], // TODO: Convert coordination triggers back to config triggers
+            intervention_agent: None, // Can't resolve agent name from ID without lookup
         },
     }
 }

@@ -15,6 +15,7 @@ use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
 pub enum SearchDomain {
     ArchivalMemory,
     Conversations,
+    ConstellationMessages,
     All,
 }
 
@@ -83,7 +84,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C
     }
 
     fn description(&self) -> &str {
-        "Unified search across different domains (archival_memory, conversations, all). Returns relevant results based on query and filters."
+        "Unified search across different domains (archival_memory, conversations, constellation_messages, all). Returns relevant results based on query and filters. Use constellation_messages to search messages from all agents in your constellation."
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
@@ -118,6 +119,32 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C
                     .map(|dt| dt.with_timezone(&Utc));
 
                 self.search_conversations(&params.query, role, start_time, end_time, limit)
+                    .await
+            }
+            SearchDomain::ConstellationMessages => {
+                let role = params
+                    .role
+                    .as_ref()
+                    .and_then(|r| match r.to_lowercase().as_str() {
+                        "user" => Some(ChatRole::User),
+                        "assistant" => Some(ChatRole::Assistant),
+                        "tool" => Some(ChatRole::Tool),
+                        _ => None,
+                    });
+
+                let start_time = params
+                    .start_time
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                let end_time = params
+                    .end_time
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                self.search_constellation_messages(&params.query, role, start_time, end_time, limit)
                     .await
             }
             SearchDomain::All => self.search_all(&params.query, limit).await,
@@ -305,6 +332,62 @@ impl<C: surrealdb::Connection + Clone> SearchTool<C> {
             Ok(SearchOutput {
                 success: false,
                 message: Some("Conversation search requires database connection".to_string()),
+                results: json!([]),
+            })
+        }
+    }
+
+    async fn search_constellation_messages(
+        &self,
+        query: &str,
+        role: Option<ChatRole>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<SearchOutput> {
+        // Use database search if available
+        if self.handle.has_db_connection() {
+            match self
+                .handle
+                .search_constellation_messages(Some(query), role, start_time, end_time, limit)
+                .await
+            {
+                Ok(messages) => {
+                    let results: Vec<_> = messages
+                        .into_iter()
+                        .map(|(agent_name, msg)| {
+                            json!({
+                                "agent": agent_name,
+                                "id": msg.id,
+                                "role": msg.role.to_string(),
+                                "content": msg.text_content().unwrap_or_default(),
+                                "created_at": msg.created_at
+                            })
+                        })
+                        .collect();
+
+                    Ok(SearchOutput {
+                        success: true,
+                        message: Some(format!(
+                            "Found {} constellation messages matching '{}'",
+                            results.len(),
+                            query
+                        )),
+                        results: json!(results),
+                    })
+                }
+                Err(e) => Ok(SearchOutput {
+                    success: false,
+                    message: Some(format!("Constellation message search failed: {}", e)),
+                    results: json!([]),
+                }),
+            }
+        } else {
+            Ok(SearchOutput {
+                success: false,
+                message: Some(
+                    "Constellation message search requires database connection".to_string(),
+                ),
                 results: json!([]),
             })
         }
