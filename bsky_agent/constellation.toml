@@ -210,28 +210,44 @@ capabilities = [
 
 # Bluesky configuration for the constellation
 [bluesky]
-default_filters = [
-    { nsids = ["app.bsky.feed.post"], mentions = [
-        "did:plc:xivud6i24ruyki3bwjypjgy2",
-        # "pattern.atproto.systems",
-    ], dids = [
-        "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
-        "did:plc:by3jhwdqgbtrcc7q4tkkv3cf",
-        "did:plc:jqnuubqvyurc3n3km2puzpfx",
-        "did:plc:i7ayw57idpkvkyzktdpmtgm7",
-        "did:plc:vw4e7blkwzdokanwp24k3igr",
-        "did:plc:mdjhvva6vlrswsj26cftjttd",
-        "did:plc:r65qsoiv3gx7xvljzdngnyvg",
-        "did:plc:7757w723nk675bqziinitoif",
-        "did:plc:neisyrds2fyyfqod5zq56chr",
-        "did:plc:3xu5titidud43sfemwro3j62",
-        "did:plc:mxzuau6m53jtdsbqe6f4laov",
-        "did:plc:uqndyrh6gh7rjai33ulnwvkn",
-        "did:plc:gfrmhdmjvxn2sjedzboeudef",
-        "did:plc:uxelaqoua6psz2for5amm6bp", # luna
-        "did:plc:k644h4rq5bjfzcetgsa6tuby",
-    ], keywords = [], languages = [] },
-]
+default_filter = { nsids = [
+    "app.bsky.feed.post",
+], mentions = [
+    # Pattern's DID - required mention target
+    "did:plc:xivud6i24ruyki3bwjypjgy2",
+], dids = [
+    # DIDs allowlist - only see posts from these accounts
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
+    "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # alice (__justplaying)
+    "did:plc:jqnuubqvyurc3n3km2puzpfx", # laurens's alt
+    "did:plc:i7ayw57idpkvkyzktdpmtgm7", # catherine
+    "did:plc:vw4e7blkwzdokanwp24k3igr", # hoopy
+    "did:plc:mdjhvva6vlrswsj26cftjttd", # laurens's main
+    "did:plc:r65qsoiv3gx7xvljzdngnyvg", # deltave
+    "did:plc:7757w723nk675bqziinitoif", # alice (avengingfemme)
+    "did:plc:neisyrds2fyyfqod5zq56chr", # ed miles (anesthesiologist)
+    "did:plc:3xu5titidud43sfemwro3j62", # paul mcghee (carpet repair guy)
+    "did:plc:mxzuau6m53jtdsbqe6f4laov", # void
+    "did:plc:uqndyrh6gh7rjai33ulnwvkn", # susank
+    "did:plc:gfrmhdmjvxn2sjedzboeudef", # Cameron (void's admin)
+    "did:plc:k644h4rq5bjfzcetgsa6tuby", # natalie.sh
+    "did:plc:uxelaqoua6psz2for5amm6bp", # luna
+    "did:plc:yokspuz7ha7rf5mrqmhgdtxw", # penelope
+], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
+    "did:plc:7757w723nk675bqziinitoif", # alice (avengingfemme)
+], allow_any_mentions = true, keywords = [ # Keywords to include
+], languages = [ # Languages to include
+], exclude_keywords = [
+    # Keywords to exclude (takes precedence)
+    # Example: "crypto", "nft", "airdrop"
+    "patternstop",
+    "p*ttern",
+], exclude_dids = [
+    # DIDs to exclude (takes precedence over all inclusion filters)
+    # Example spam accounts would go here
+    "did:plc:7iozku5btifey2a2x6lojvyk", # jerkface
+] }
 auto_connect_firehose = true # Control when to connect
 
 # Context sync group - runs background synchronization

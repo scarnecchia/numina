@@ -20,7 +20,7 @@ pub trait ModelProvider: Send + Sync + Debug {
     async fn list_models(&self) -> Result<Vec<ModelInfo>>;
 
     /// Generate a completion
-    async fn complete(&self, options: &ResponseOptions, request: Request) -> Result<Response>;
+    async fn complete(&self, options: &ResponseOptions, mut request: Request) -> Result<Response>;
 
     /// Check if a model supports a specific capability
     async fn supports_capability(&self, model: &str, capability: ModelCapability) -> bool;
@@ -278,7 +278,7 @@ impl ModelProvider for GenAiClient {
     }
 
     /// Generate a completion
-    async fn complete(&self, options: &ResponseOptions, request: Request) -> Result<Response> {
+    async fn complete(&self, options: &ResponseOptions, mut request: Request) -> Result<Response> {
         let (model_info, chat_options) = options.to_chat_options_tuple();
 
         // Log the full request

@@ -192,6 +192,27 @@ pub struct Request {
 }
 
 impl Request {
+    /// Remove any trailing unpaired tool calls from messages
+    pub fn clean_unpaired_tool_calls(&mut self) {
+        // Check if the last message contains unpaired tool calls
+        if let Some(last_msg) = self.messages.last() {
+            if matches!(&last_msg.content, MessageContent::ToolCalls(_)) {
+                tracing::warn!("Removing trailing unpaired tool calls from request");
+                self.messages.pop();
+            } else if let MessageContent::Blocks(blocks) = &last_msg.content {
+                // Check if blocks end with tool calls without responses
+                let has_trailing_tool_calls = blocks
+                    .iter()
+                    .rev()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+                if has_trailing_tool_calls {
+                    tracing::warn!("Found trailing tool calls in blocks, removing last message");
+                    self.messages.pop();
+                }
+            }
+        }
+    }
+
     /// Validate that the request has no orphaned tool calls and proper ordering
     pub fn validate(&self) -> crate::Result<()> {
         let mut tool_call_ids = std::collections::HashSet::new();
@@ -336,7 +357,10 @@ impl Request {
     }
 
     /// Convert this request to a genai ChatRequest
-    pub fn as_chat_request(&self) -> crate::Result<genai::chat::ChatRequest> {
+    pub fn as_chat_request(&mut self) -> crate::Result<genai::chat::ChatRequest> {
+        // Clean up any trailing unpaired tool calls
+        self.clean_unpaired_tool_calls();
+
         // Validate before converting
         self.validate()?;
 

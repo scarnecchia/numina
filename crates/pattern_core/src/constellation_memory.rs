@@ -98,13 +98,23 @@ impl ConstellationActivityTracker {
 
     /// Add a new event to the activity log
     pub async fn add_event(&self, event: ConstellationEvent) {
+        tracing::debug!(
+            "ConstellationActivityTracker::add_event called for agent: {}",
+            event.agent_name
+        );
         let mut events = self.events.write().await;
         events.push(event);
+        tracing::debug!("Event added, total events now: {}", events.len());
 
         // Trim to max size, keeping most recent
         if events.len() > self.max_events {
             let trim_count = events.len() - self.max_events;
             events.drain(0..trim_count);
+            tracing::info!(
+                "Trimmed {} old events, keeping {}",
+                trim_count,
+                self.max_events
+            );
         }
     }
 

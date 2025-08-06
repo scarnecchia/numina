@@ -141,15 +141,13 @@ pattern = { type = "pipeline", stages = [
 
 # Optional: Bluesky configuration
 [bluesky]
-# Default filters for the firehose
-default_filters = [
-    { nsids = [
-        "app.bsky.feed.post",
-    ], mentions = [
-    ], dids = [
-    ], keywords = [
-    ], languages = [
-    ] },
-]
+# Default filter for the firehose
+default_filter = { nsids = [
+    "app.bsky.feed.post",
+], mentions = [
+], dids = [
+], keywords = [
+], languages = [
+] }
 auto_connect_firehose = false
 # jetstream_endpoint = "wss://jetstream2.us-east.bsky.network/subscribe"

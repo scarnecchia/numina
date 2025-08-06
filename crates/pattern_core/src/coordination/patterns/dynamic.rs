@@ -108,7 +108,8 @@ impl GroupManager for DynamicManager {
                     let agent_name = awm.agent.name().to_lowercase();
                     // Check various addressing patterns
                     lower_text.starts_with(&format!("{},", agent_name))
-                        || lower_text.contains(&format!("@{}", agent_name))
+                        || lower_text.contains(&format!("@{} ", agent_name))
+                        || lower_text.contains(&format!("@{},", agent_name))
                         || lower_text.starts_with(&format!("{}:", agent_name))
                         || lower_text.starts_with(&format!("{} -", agent_name))
                         || lower_text.starts_with(&format!("hey {}", agent_name))

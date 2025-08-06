@@ -16,7 +16,10 @@ use pattern_core::{
     memory::{Memory, MemoryBlock},
     message::{Message, MessageContent},
     model::{GenAiClient, ResponseOptions},
-    tool::{ToolRegistry, builtin::DataSourceTool},
+    tool::{
+        ToolRegistry,
+        builtin::{DataSourceTool, MessageTarget},
+    },
 };
 use std::sync::Arc;
 use surrealdb::RecordId;
@@ -486,12 +489,71 @@ pub async fn create_agent_from_record_with_tracker(
 
     // If we have a constellation tracker, set it up
     if let Some(tracker) = constellation_tracker {
-        // Create or update the constellation activity memory block
-        let activity_block = tracker.to_memory_block(record.owner_id.clone()).await;
-        let label = activity_block.label.clone();
+        // Check if agent already has a constellation_activity block
+        let existing_block = agent.get_memory("constellation_activity").await?;
 
-        // Add the memory block to the agent's memory
-        agent.update_memory(&label, activity_block).await?;
+        if let Some(existing) = existing_block {
+            // Reuse the existing block's ID to avoid duplicates
+            tracing::info!(
+                "Found existing constellation_activity block with id: {}",
+                existing.id
+            );
+            let updated_block =
+                pattern_core::constellation_memory::create_constellation_activity_block(
+                    existing.id.clone(),
+                    record.owner_id.clone(),
+                    tracker.format_as_memory_content().await,
+                );
+            agent
+                .update_memory("constellation_activity", updated_block)
+                .await?;
+        } else {
+            // Check database for any existing constellation_activity blocks for this agent
+            tracing::info!("No constellation_activity block in memory, checking database");
+            let existing_memories =
+                ops::get_agent_memories(&DB, &record.id)
+                    .await
+                    .map_err(|e| {
+                        miette::miette!("Failed to check for existing memory blocks: {}", e)
+                    })?;
+
+            let existing_constellation_block = existing_memories
+                .iter()
+                .find(|(mem, _)| mem.label == "constellation_activity")
+                .map(|(mem, _)| mem.clone());
+
+            if let Some(existing) = existing_constellation_block {
+                // Found one in database, reuse its ID
+                tracing::info!(
+                    "Found existing constellation_activity block in database with id: {}",
+                    existing.id
+                );
+                let updated_block =
+                    pattern_core::constellation_memory::create_constellation_activity_block(
+                        existing.id.clone(),
+                        record.owner_id.clone(),
+                        tracker.format_as_memory_content().await,
+                    );
+                agent
+                    .update_memory("constellation_activity", updated_block)
+                    .await?;
+            } else {
+                // Really first time - create new block with the tracker's memory ID
+                tracing::info!(
+                    "Creating new constellation_activity block with tracker id: {}",
+                    tracker.memory_id()
+                );
+                let activity_block =
+                    pattern_core::constellation_memory::create_constellation_activity_block(
+                        tracker.memory_id().clone(),
+                        record.owner_id.clone(),
+                        tracker.format_as_memory_content().await,
+                    );
+                agent
+                    .update_memory("constellation_activity", activity_block)
+                    .await?;
+            }
+        }
 
         // Set the tracker on the agent's context
         agent.set_constellation_tracker(tracker);
@@ -529,59 +591,62 @@ pub async fn register_data_sources<M, E>(
     E: EmbeddingProvider + Clone + 'static,
     M: ModelProvider + 'static,
 {
+    register_data_sources_with_target(agent, config, tools, embedding_provider, None).await
+}
+
+pub async fn register_data_sources_with_target<M, E>(
+    agent: Arc<DatabaseAgent<surrealdb::engine::any::Any, M, E>>,
+    config: &PatternConfig,
+    tools: ToolRegistry,
+    embedding_provider: Option<Arc<E>>,
+    target: Option<MessageTarget>,
+) where
+    E: EmbeddingProvider + Clone + 'static,
+    M: ModelProvider + 'static,
+{
     let config = config.clone();
 
     // hardcoding so that only pattern gets messages initially
     if agent.name() == "Pattern" {
         tokio::spawn(async move {
-            let mut data_sources = DataSourceBuilder::new()
-                .with_bluesky_source(
-                    "bluesky_jetstream".to_string(),
-                    config
-                        .bluesky
-                        .as_ref()
-                        .map(|b| b.default_filters.first().unwrap())
-                        .unwrap_or(&BlueskyFilter {
-                            nsids: vec!["app.bsky.feed.post".to_string()],
-                            dids: vec![
-                                "did:plc:yfvwmnlztr4dwkb7hwz55r2g".to_string(),
-                                "did:plc:mdjhvva6vlrswsj26cftjttd".to_string(),
-                                "did:plc:mdjhvva6vlrswsj26cftjttd".to_string(),
-                                "did:plc:jqnuubqvyurc3n3km2puzpfx".to_string(),
-                                "did:plc:vw4e7blkwzdokanwp24k3igr".to_string(),
-                                "did:plc:i7ayw57idpkvkyzktdpmtgm7".to_string(),
-                                "did:plc:r65qsoiv3gx7xvljzdngnyvg".to_string(),
-                                "did:plc:7757w723nk675bqziinitoif".to_string(),
-                                "did:plc:neisyrds2fyyfqod5zq56chr".to_string(),
-                                "did:plc:mxzuau6m53jtdsbqe6f4laov".to_string(),
-                                "did:plc:3xu5titidud43sfemwro3j62".to_string(),
-                                "did:plc:gfrmhdmjvxn2sjedzboeudef".to_string(),
-                                "did:plc:uqndyrh6gh7rjai33ulnwvkn".to_string(),
-                                "did:plc:k644h4rq5bjfzcetgsa6tuby".to_string(),
-                                "did:plc:uxelaqoua6psz2for5amm6bp".to_string(), // luna
-                            ],
-                            keywords: vec![],
-                            languages: vec![],
-                            mentions: vec!["did:plc:xivud6i24ruyki3bwjypjgy2".to_string()],
-                        })
-                        .clone(),
-                    true,
-                )
-                // .with_file_source(
-                //     "/home/orual/Projects/PatternProject/pattern/bsky_agent/blog-post.md",
-                //     false,
-                //     true,
-                // )
-                .build(
-                    agent.id(),
-                    agent.name(),
-                    DB.clone(),
-                    embedding_provider,
-                    Some(agent.handle().await),
-                    get_bluesky_credentials(&config).await,
-                )
-                .await
-                .unwrap();
+            let filter = config
+                .bluesky
+                .as_ref()
+                .and_then(|b| b.default_filter.as_ref())
+                .unwrap_or(&BlueskyFilter {
+                    exclude_keywords: vec!["patternstop".to_string()],
+                    ..Default::default()
+                })
+                .clone();
+            tracing::info!("filter: {:?}", filter);
+            let mut data_sources = if let Some(target) = target {
+                DataSourceBuilder::new()
+                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .build_with_target(
+                        agent.id(),
+                        agent.name(),
+                        DB.clone(),
+                        embedding_provider,
+                        Some(agent.handle().await),
+                        get_bluesky_credentials(&config).await,
+                        target,
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                DataSourceBuilder::new()
+                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .build(
+                        agent.id(),
+                        agent.name(),
+                        DB.clone(),
+                        embedding_provider,
+                        Some(agent.handle().await),
+                        get_bluesky_credentials(&config).await,
+                    )
+                    .await
+                    .unwrap()
+            };
 
             data_sources
                 .start_monitoring("bluesky_jetstream")
@@ -1538,6 +1603,21 @@ pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
         })
         .collect();
 
+    // Register GroupCliEndpoint for routing group messages
+    let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
+        group: group.clone(),
+        agents: agents_with_membership.clone(),
+        manager: Arc::new(pattern_manager.clone()),
+        output: output.clone(),
+    });
+
+    // Register the endpoint with each agent's message router
+    for awm in &agents_with_membership {
+        awm.agent
+            .register_endpoint("group".to_string(), group_endpoint.clone())
+            .await?;
+    }
+
     // Clone agents for heartbeat handler
     let agents_for_heartbeat: Vec<Arc<dyn Agent>> = agents_with_membership
         .iter()
@@ -1796,4 +1876,92 @@ pub async fn print_group_response_event(
             }
         }
     }
+}
+
+/// Set up a group chat with Jetstream data routing to the group
+/// This creates agents for the group, registers data sources to route to the group,
+/// and starts the chat interface
+pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
+    group_name: &str,
+    pattern_manager: M,
+    model: Option<String>,
+    no_tools: bool,
+    config: &PatternConfig,
+) -> Result<()> {
+    use pattern_core::tool::builtin::{MessageTarget, TargetType};
+
+    let output = Output::new();
+
+    // Load the group from database
+    let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
+    let group = match group {
+        Some(g) => g,
+        None => {
+            output.error(&format!("Group '{}' not found", group_name));
+            return Ok(());
+        }
+    };
+
+    // Create heartbeat channel for agents
+    let (heartbeat_sender, heartbeat_receiver) = heartbeat::heartbeat_channel();
+
+    // Create a shared constellation activity tracker for the group
+    let group_id_str = group.id.to_string();
+    let tracker_memory_id = pattern_core::MemoryId(group_id_str);
+    let constellation_tracker = Arc::new(
+        pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
+            tracker_memory_id,
+            100,
+        ),
+    );
+
+    // Load all agents in the group
+    tracing::info!("Group has {} members to load", group.members.len());
+    let mut agents = Vec::new();
+
+    for (mut agent_record, _membership) in group.members.clone() {
+        // Load memories and messages for the agent
+        load_agent_memories_and_messages(&mut agent_record).await?;
+
+        // Create runtime agent from record with constellation tracker
+        let agent = create_agent_from_record_with_tracker(
+            agent_record.clone(),
+            model.clone(),
+            !no_tools,
+            config,
+            heartbeat_sender.clone(),
+            Some(constellation_tracker.clone()),
+        )
+        .await?;
+
+        // Keep track of Pattern agent if it's in the group
+        if agent.name() == "Pattern" {
+            // We need the DatabaseAgent, not the dyn Agent
+            // This function needs to keep track of the concrete type
+            // For now, we'll modify this later to properly support data sources
+            output.warning(
+                "Data source routing to groups requires Pattern agent setup modifications",
+            );
+        }
+
+        agents.push(agent);
+    }
+
+    if agents.is_empty() {
+        output.error("No agents in group");
+        output.info(
+            "Hint:",
+            "Add agents with: pattern-cli group add-member <group> <agent>",
+        );
+        return Ok(());
+    }
+
+    // Start the group chat
+    output.success("Starting group chat...");
+    output.info("Group:", &group.name.bright_cyan().to_string());
+    output.info("Pattern:", &format!("{:?}", group.coordination_pattern));
+    output.info("Members:", &format!("{} agents", agents.len()));
+    output.warning("Note: Jetstream routing to groups requires additional setup");
+
+    chat_with_group(group, agents, pattern_manager, heartbeat_receiver).await
 }

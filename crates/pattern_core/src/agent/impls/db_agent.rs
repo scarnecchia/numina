@@ -10,7 +10,10 @@ use tokio::sync::RwLock;
 use crate::context::AgentHandle;
 use crate::db::DbEntity;
 use crate::id::RelationId;
-use crate::message::{ContentBlock, ContentPart, ImageSource, ToolCall, ToolResponse};
+use crate::message::{
+    ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
+};
+use crate::model::ResponseOptions;
 use crate::tool::builtin::BuiltinTools;
 
 use crate::QueuedMessage;
@@ -28,8 +31,7 @@ use crate::{
     embeddings::EmbeddingProvider,
     id::AgentId,
     memory::Memory,
-    message::{Message, MessageContent, Request, Response},
-    model::ResponseOptions,
+    message::{Message, MessageContent},
     tool::{DynamicTool, ToolRegistry},
 };
 use chrono::Utc;
@@ -76,6 +78,55 @@ where
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
+    /// Retry model completion with exponential backoff for rate limit errors
+    async fn complete_with_retry(
+        model: &M,
+        options: &ResponseOptions,
+        request: Request,
+        max_retries: u32,
+    ) -> Result<Response> {
+        let mut retries = 0;
+        let mut backoff_ms = 10000; // Start with 10 seconds
+
+        loop {
+            match model.complete(options, request.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    // Check if this is a rate limit error (529)
+                    let is_rate_limit = match &e {
+                        CoreError::ModelProviderError { cause, .. } => {
+                            let error_str = format!("{:?}", cause);
+                            error_str.contains("529")
+                                || error_str.contains("rate limit")
+                                || error_str.contains("ResponseFailedStatus { status: 529")
+                        }
+                        _ => false,
+                    };
+
+                    if is_rate_limit && retries < max_retries {
+                        retries += 1;
+                        tracing::warn!(
+                            "Rate limit error (attempt {}/{}), waiting {}ms before retry",
+                            retries,
+                            max_retries,
+                            backoff_ms
+                        );
+
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+
+                        // Exponential backoff with jitter
+                        backoff_ms = (backoff_ms * 2).min(60000); // Cap at 30 seconds
+                        backoff_ms += rand::random::<u64>() % 1000; // Add 0-1s jitter
+
+                        continue;
+                    }
+
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     /// Create a new database-backed agent
     /// Create a new database agent
     ///
@@ -664,9 +715,18 @@ where
                             for mut queued_msg in messages {
                                 queued_msg.add_to_call_chain(agent_id.clone());
 
-                                let mut message = if let Some(_from_agent) = &queued_msg.from_agent
-                                {
-                                    Message::agent(queued_msg.content.clone())
+                                let mut message = if let Some(from_agent) = &queued_msg.from_agent {
+                                    // Message from another agent - use User role but track origin
+                                    let content = if let Some(origin) = &queued_msg.origin {
+                                        origin.wrap_content(queued_msg.content.clone())
+                                    } else {
+                                        // Create a generic origin wrapper if none provided
+                                        format!(
+                                            "Message from agent {}:\n{}",
+                                            from_agent, queued_msg.content
+                                        )
+                                    };
+                                    Message::user(content)
                                 } else if let Some(from_user) = &queued_msg.from_user {
                                     let mut msg = Message::user(queued_msg.content.clone());
                                     msg.owner_id = Some(from_user.clone());
@@ -798,9 +858,11 @@ where
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!(
-                                        "❌ Agent {} failed to process incoming message: {}",
-                                        agent_id,
+                                    crate::log_error_chain!(
+                                        format!(
+                                            "❌ Agent {} failed to process incoming message:",
+                                            agent_id
+                                        ),
                                         e
                                     );
                                     break;
@@ -1065,6 +1127,25 @@ where
     async fn persist_memory_changes(&self) -> Result<()> {
         let context = self.context.read().await;
         let memory = &context.handle.memory;
+
+        // Update constellation activity memory block if we have a tracker
+        if let Some(tracker) = &context.constellation_tracker {
+            let updated_content = tracker.format_as_memory_content().await;
+            let owner_id = memory.owner_id.clone();
+            let updated_block = crate::constellation_memory::create_constellation_activity_block(
+                tracker.memory_id().clone(),
+                owner_id,
+                updated_content,
+            );
+
+            // Update the memory block in the agent's memory
+            if let Err(e) = memory.update_block_value("constellation_activity", updated_block.value)
+            {
+                tracing::warn!("Failed to update constellation activity memory: {:?}", e);
+            } else {
+                tracing::trace!("Successfully updated constellation activity memory block");
+            }
+        }
 
         // Get the lists of blocks that need persistence
         let new_blocks = memory.get_new_blocks();
@@ -1437,7 +1518,7 @@ where
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ Failed to execute start constraint tools: {}", e);
+                    crate::log_error_chain!("❌ Failed to execute start constraint tools:", e);
                     send_event(ResponseEvent::Error {
                         message: format!("Start constraint tools failed: {:?}", e),
                         recoverable: false,
@@ -1460,10 +1541,10 @@ where
                 .clone()
                 .expect("should have options or default");
 
-            // Get response from model
+            // Get response from model with retry logic
             let response = {
                 let model = model.read().await;
-                match model.complete(&options, request).await {
+                match Self::complete_with_retry(&*model, &options, request, 3).await {
                     Ok(resp) => resp,
                     Err(e) => {
                         send_event(ResponseEvent::Error {
@@ -1576,6 +1657,9 @@ where
                                                             metadata: None,
                                                         };
 
+                                                        tracing::info!(
+                                                            "Adding tool execution event to constellation tracker"
+                                                        );
                                                         tracker.add_event(event).await;
                                                     }
                                                 }
@@ -1610,8 +1694,8 @@ where
                                                 }
                                             }
                                             Err(e) => {
-                                                tracing::error!(
-                                                    "Failed to execute tools with rules: {:?}",
+                                                crate::log_error_chain!(
+                                                    "Failed to execute tools with rules: ",
                                                     e
                                                 );
                                                 // Create error responses for all calls
@@ -1863,7 +1947,9 @@ where
 
                     current_response = {
                         let model = model.read().await;
-                        match model.complete(&options, request_with_tools).await {
+                        match Self::complete_with_retry(&*model, &options, request_with_tools, 3)
+                            .await
+                        {
                             Ok(resp) => resp,
                             Err(e) => {
                                 send_event(ResponseEvent::Error {
@@ -1871,10 +1957,23 @@ where
                                     recoverable: false,
                                 })
                                 .await;
-                                tracing::error!(
-                                    "offending request:\n{:?}",
-                                    memory_context.messages
-                                );
+                                crate::log_error!("offending request:\n", memory_context.messages);
+
+                                // Clean up any unpaired tool calls from the context before breaking
+                                {
+                                    let ctx = context.write().await;
+                                    let mut history = ctx.history.write().await;
+                                    if let Some(last_msg) = history.messages.last() {
+                                        if matches!(&last_msg.content, MessageContent::ToolCalls(_))
+                                        {
+                                            tracing::warn!(
+                                                "Removing unpaired tool calls from context after model error"
+                                            );
+                                            history.messages.pop();
+                                        }
+                                    }
+                                }
+
                                 break;
                             }
                         }
@@ -2057,7 +2156,7 @@ where
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ Failed to execute required exit tools: {:?}", e);
+                    crate::log_error!("❌ Failed to execute required exit tools: ", e);
                     send_event(ResponseEvent::Error {
                         message: format!("Required exit tools failed: {:?}", e),
                         recoverable: true, // Don't fail the whole conversation
@@ -2074,6 +2173,7 @@ where
 
             // Log to constellation activity tracker if present
             if let Some(tracker) = &context.read().await.constellation_tracker {
+                tracing::debug!("Constellation tracker present, logging activity");
                 use crate::constellation_memory::{ConstellationEvent, ConstellationEventType};
 
                 // Create summary combining user message and agent response
@@ -2109,6 +2209,7 @@ where
                     metadata: None,
                 };
 
+                tracing::debug!("Adding message processed event to constellation tracker");
                 tracker.add_event(event).await;
             }
 
@@ -2706,6 +2807,9 @@ where
                                     metadata: None,
                                 };
 
+                                tracing::info!(
+                                    "Adding memory update event to constellation tracker"
+                                );
                                 tracker.add_event(event).await;
                             }
                         }

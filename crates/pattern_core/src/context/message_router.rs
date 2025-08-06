@@ -559,6 +559,26 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
             self.agent_id, group_id
         );
 
+        // Check if we have a registered group endpoint
+        let endpoints = self.endpoints.read().await;
+        if let Some(endpoint) = endpoints.get("group") {
+            // Use the registered group endpoint
+            let message = match &origin {
+                Some(MessageOrigin::Agent { .. }) => Message::agent(content),
+                _ => Message::user(content), // External origins use User role
+            };
+
+            endpoint.send(message, metadata, origin.as_ref()).await?;
+            return Ok(());
+        }
+
+        // Otherwise log a warning and fall back to basic routing
+        warn!(
+            "No group endpoint registered. Falling back to basic routing for group {}. \
+            To use proper group coordination patterns, register a GroupEndpoint.",
+            group_id
+        );
+
         // Get the group with its coordination pattern
         let group =
             crate::coordination::groups::AgentGroup::load_with_relations(&self.db, &group_id)
@@ -576,161 +596,41 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
         }
 
         info!(
-            "Sending message to group {} with {} members using {:?} pattern",
+            "Basic routing to group {} with {} members (no coordination pattern support)",
             group_id,
-            members.len(),
-            group.coordination_pattern
+            members.len()
         );
 
-        // Route based on coordination pattern
-        use crate::coordination::types::CoordinationPattern;
-        match &group.coordination_pattern {
-            CoordinationPattern::Supervisor { leader_id, .. } => {
-                if let Some(MessageOrigin::Agent { agent_id, .. }) = &origin {
-                    if agent_id == leader_id {
-                        // Leader can broadcast to all group members
-                        let mut sent_count = 0;
-                        for (agent_record, membership) in members {
-                            if !membership.is_active {
-                                debug!("Skipping inactive member {}", agent_record.id);
-                                continue;
-                            }
-
-                            if &agent_record.id == leader_id {
-                                debug!("Leader doesn't message itself {}", agent_record.id);
-                                continue;
-                            }
-
-                            let queued = QueuedMessage::agent_to_agent(
-                                self.agent_id.clone(),
-                                agent_record.id.clone(),
-                                content.clone(),
-                                metadata.clone(),
-                                origin.clone(),
-                            );
-
-                            if let Err(e) = self.store_queued_message(queued).await {
-                                warn!(
-                                    "Failed to queue message for group member {}: {:?}",
-                                    agent_record.id, e
-                                );
-                            } else {
-                                sent_count += 1;
-                            }
-                        }
-                        info!(
-                            "Broadcast message to {} non-supervisor members of group {}",
-                            sent_count, group_id
-                        );
-                    } else {
-                        // Send only to the leader
-                        let queued = QueuedMessage::agent_to_agent(
-                            self.agent_id.clone(),
-                            leader_id.clone(),
-                            content,
-                            metadata,
-                            origin.clone(),
-                        );
-                        self.store_queued_message(queued).await?;
-                        info!("Sent message to group supervisor {}", leader_id);
-                    }
-                } else {
-                    // Send only to the leader
-                    let queued = QueuedMessage::agent_to_agent(
-                        self.agent_id.clone(),
-                        leader_id.clone(),
-                        content,
-                        metadata,
-                        origin,
-                    );
-                    self.store_queued_message(queued).await?;
-                    info!("Sent message to group supervisor {}", leader_id);
-                }
+        // Basic fallback: just queue for all active members
+        let mut sent_count = 0;
+        for (agent_record, membership) in members {
+            if !membership.is_active {
+                debug!("Skipping inactive member {}", agent_record.id);
+                continue;
             }
 
-            CoordinationPattern::RoundRobin {
-                current_index,
-                skip_unavailable,
-            } => {
-                // Send to the agent whose turn it is
-                let active_members: Vec<_> = members
-                    .iter()
-                    .filter(|(_, m)| !skip_unavailable || m.is_active)
-                    .collect();
+            let queued = QueuedMessage::agent_to_agent(
+                self.agent_id.clone(),
+                agent_record.id.clone(),
+                content.clone(),
+                metadata.clone(),
+                origin.clone(),
+            );
 
-                if !active_members.is_empty() {
-                    let target_idx = current_index % active_members.len();
-                    let (agent_record, _) = &active_members[target_idx];
-
-                    let queued = QueuedMessage::agent_to_agent(
-                        self.agent_id.clone(),
-                        agent_record.id.clone(),
-                        content,
-                        metadata,
-                        origin,
-                    );
-                    self.store_queued_message(queued).await?;
-                    info!(
-                        "Sent message to round-robin member {} at index {}",
-                        agent_record.id, target_idx
-                    );
-
-                    // TODO: Update group state to increment current_index
-                }
-            }
-
-            CoordinationPattern::Pipeline { stages, .. } => {
-                // Send to the first stage's first agent
-                // TODO: see about better routing here.
-                if let Some(first_stage) = stages.first() {
-                    if let Some(first_agent) = first_stage.agent_ids.first() {
-                        let queued = QueuedMessage::agent_to_agent(
-                            self.agent_id.clone(),
-                            first_agent.clone(),
-                            content,
-                            metadata,
-                            origin,
-                        );
-                        self.store_queued_message(queued).await?;
-                        info!("Sent message to pipeline first stage agent {}", first_agent);
-                    }
-                }
-            }
-
-            _ => {
-                // Default behavior: broadcast to all active members
-                let mut sent_count = 0;
-                for (agent_record, membership) in members {
-                    if !membership.is_active {
-                        debug!("Skipping inactive member {}", agent_record.id);
-                        continue;
-                    }
-
-                    let queued = QueuedMessage::agent_to_agent(
-                        self.agent_id.clone(),
-                        agent_record.id.clone(),
-                        content.clone(),
-                        metadata.clone(),
-                        origin.clone(),
-                    );
-
-                    if let Err(e) = self.store_queued_message(queued).await {
-                        warn!(
-                            "Failed to queue message for group member {}: {:?}",
-                            agent_record.id, e
-                        );
-                    } else {
-                        sent_count += 1;
-                    }
-                }
-                info!(
-                    "Broadcast message to {} active members of group {}",
-                    sent_count, group_id
+            if let Err(e) = self.store_queued_message(queued).await {
+                warn!(
+                    "Failed to queue message for group member {}: {:?}",
+                    agent_record.id, e
                 );
+            } else {
+                sent_count += 1;
             }
         }
 
-        info!("Completed group message routing for group {}", group_id);
+        info!(
+            "Basic broadcast message to {} active members of group {}",
+            sent_count, group_id
+        );
 
         Ok(())
     }

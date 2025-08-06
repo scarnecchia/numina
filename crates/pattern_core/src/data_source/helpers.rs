@@ -32,6 +32,24 @@ where
     DataIngestionCoordinator::new(router, embedding_provider)
 }
 
+/// Create a DataIngestionCoordinator that routes to a specific target
+pub async fn create_coordinator_with_target<C, E>(
+    agent_id: crate::id::AgentId,
+    agent_name: String,
+    db: Surreal<C>,
+    embedding_provider: Option<Arc<E>>,
+    target: crate::tool::builtin::MessageTarget,
+) -> DataIngestionCoordinator<C, E>
+where
+    C: surrealdb::Connection + Clone + 'static,
+    E: EmbeddingProvider + Clone + 'static,
+{
+    let router = AgentMessageRouter::new(agent_id, agent_name, db);
+    let coordinator = DataIngestionCoordinator::new(router, embedding_provider);
+    coordinator.set_default_target(target).await;
+    coordinator
+}
+
 /// Add a file data source to an agent's coordinator
 pub async fn add_file_source<P: AsRef<Path>, C, E>(
     coordinator: &mut DataIngestionCoordinator<C, E>,
@@ -219,6 +237,58 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> DataSourceB
     {
         let mut coordinator =
             create_coordinator_with_agent_info(agent_id, agent_name, db, embedding_provider);
+
+        // Add file sources
+        for config in self.file_sources {
+            add_file_source(
+                &mut coordinator,
+                config.path,
+                config.watch,
+                config.indexed,
+                config.template_path,
+            )
+            .await?;
+        }
+
+        // Add Bluesky sources
+        for config in self.bluesky_sources {
+            let handle = if config.use_agent_handle {
+                agent_handle.clone()
+            } else {
+                None
+            };
+
+            add_bluesky_source(
+                &mut coordinator,
+                config.source_id,
+                config.endpoint,
+                config.filter,
+                handle,
+                bsky_agent.clone(),
+            )
+            .await?;
+        }
+
+        Ok(coordinator)
+    }
+
+    /// Build and attach all configured sources with a custom target
+    pub async fn build_with_target(
+        self,
+        agent_id: crate::id::AgentId,
+        agent_name: String,
+        db: Surreal<C>,
+        embedding_provider: Option<Arc<E>>,
+        agent_handle: Option<AgentHandle>,
+        bsky_agent: Option<(crate::atproto_identity::AtprotoAuthCredentials, String)>,
+        target: crate::tool::builtin::MessageTarget,
+    ) -> Result<DataIngestionCoordinator<C, E>>
+    where
+        E: EmbeddingProvider + Clone + 'static,
+    {
+        let mut coordinator =
+            create_coordinator_with_target(agent_id, agent_name, db, embedding_provider, target)
+                .await;
 
         // Add file sources
         for config in self.file_sources {

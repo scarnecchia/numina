@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub mod compression;
+pub mod endpoints;
 pub mod heartbeat;
 pub mod message_router;
 pub mod state;

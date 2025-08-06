@@ -74,7 +74,8 @@ pub struct BlueskyPost {
     pub uri: String,
     pub did: String, // Author DID
     pub cid: Cid,
-    pub handle: String, // Author handle
+    pub handle: String,               // Author handle
+    pub display_name: Option<String>, // Author display name (fetched later)
     pub text: String,
     pub created_at: DateTime<Utc>,
     pub reply: Option<ReplyRef>, // Full reply reference with root and parent
@@ -208,6 +209,20 @@ pub struct BlueskyFilter {
     pub languages: Vec<String>,
     /// Only include posts that mention these DIDs/handles
     pub mentions: Vec<String>,
+
+    // New fields for enhanced filtering
+    /// Friends list - always see posts from these DIDs (bypasses mention requirement)
+    #[serde(default)]
+    pub friends: Vec<String>,
+    /// Allow mentions from anyone, not just allowlisted DIDs
+    #[serde(default)]
+    pub allow_any_mentions: bool,
+    /// Keywords to exclude - filter out posts containing these (takes precedence)
+    #[serde(default)]
+    pub exclude_keywords: Vec<String>,
+    /// DIDs to exclude - never show posts from these (takes precedence over all inclusion filters)
+    #[serde(default)]
+    pub exclude_dids: Vec<String>,
 }
 
 /// Source statistics
@@ -660,6 +675,9 @@ impl DataSource for BlueskyFirehoseSource {
     }
 
     async fn format_notification(&self, item: &Self::Item) -> Option<String> {
+        // Clone the item so we can mutate it
+        let mut item = item.clone();
+
         // Format based on post type
         let mut message = String::new();
         let mut reply_candidates = Vec::new();
@@ -674,8 +692,38 @@ impl DataSource for BlueskyFirehoseSource {
                 .collect(),
         );
 
+        // Try to fetch the author's display name if we have a BskyAgent
+        if item.display_name.is_none() {
+            if let Some(bsky_agent) = &self.bsky_agent {
+                if let Ok(profile_result) = bsky_agent
+                    .api
+                    .app
+                    .bsky
+                    .actor
+                    .get_profile(
+                        atrium_api::app::bsky::actor::get_profile::ParametersData {
+                            actor: atrium_api::types::string::AtIdentifier::Did(
+                                Did::from_str(&item.did).unwrap_or_else(|_| {
+                                    Did::new("did:plc:unknown".to_string()).unwrap()
+                                }),
+                            ),
+                        }
+                        .into(),
+                    )
+                    .await
+                {
+                    item.display_name = profile_result.display_name.clone();
+                }
+            }
+        }
+
         // Header with author
-        message.push_str(&format!("💬 @{}", item.handle));
+        let author_str = if let Some(display_name) = &item.display_name {
+            format!("{} (@{})", display_name, item.handle)
+        } else {
+            format!("@{}", item.handle)
+        };
+        message.push_str(&format!("💬 {}", author_str));
 
         // Add context for replies/mentions
         if let Some(reply) = &item.reply {
@@ -709,6 +757,7 @@ impl DataSource for BlueskyFirehoseSource {
                                 extract_post_data(post_view)
                             {
                                 let handle = post_view.author.handle.as_str().to_string();
+                                let display_name = post_view.author.display_name.clone();
                                 let mentions: Vec<_> = features
                                     .iter()
                                     .filter_map(|f| match f {
@@ -729,6 +778,7 @@ impl DataSource for BlueskyFirehoseSource {
 
                                 thread_posts.push((
                                     handle,
+                                    display_name,
                                     text,
                                     post_view.uri.clone(),
                                     depth,
@@ -768,13 +818,28 @@ impl DataSource for BlueskyFirehoseSource {
                     message.push_str(" in thread:\n\n");
 
                     // Display thread posts in reverse order (root to leaf)
-                    for (handle, text, _uri, depth, mentions, langs, alt_texts, links) in
-                        thread_posts.iter().rev()
+                    for (
+                        handle,
+                        display_name,
+                        text,
+                        _uri,
+                        depth,
+                        mentions,
+                        langs,
+                        alt_texts,
+                        links,
+                    ) in thread_posts.iter().rev()
                     {
                         let indent = "  ".repeat(*depth);
                         let bullet = if *depth == 0 { "•" } else { "└─" };
 
-                        message.push_str(&format!("{}{} @{}: {}\n", indent, bullet, handle, text));
+                        let author_str = if let Some(name) = display_name {
+                            format!("{} (@{})", name, handle)
+                        } else {
+                            format!("@{}", handle)
+                        };
+                        message
+                            .push_str(&format!("{}{} {}: {}\n", indent, bullet, author_str, text));
 
                         // Show mentions if any
                         if !mentions.is_empty() {
@@ -925,10 +990,20 @@ impl DataSource for BlueskyFirehoseSource {
                                             .collect();
                                         mention_check_queue.append(&mut mentions.clone());
                                         let indent = "  ";
+                                        let reply_author_str = if let Some(name) =
+                                            &reply_thread.post.author.display_name
+                                        {
+                                            format!(
+                                                "{} (@{})",
+                                                name,
+                                                reply_thread.post.author.handle.as_str()
+                                            )
+                                        } else {
+                                            format!("@{}", reply_thread.post.author.handle.as_str())
+                                        };
                                         message.push_str(&format!(
-                                            "  └─ @{}: {}\n",
-                                            reply_thread.post.author.handle.as_str(),
-                                            reply_text
+                                            "  └─ {}: {}\n",
+                                            reply_author_str, reply_text
                                         ));
                                         // Show links if any
                                         if !links.is_empty() {
@@ -985,8 +1060,12 @@ impl DataSource for BlueskyFirehoseSource {
         if let Some(agent_handle) = &self.agent_handle {
             // Look for or create memory block for this user
             let memory_label = format!("bluesky_user_{}", item.handle);
-            if let Ok(memories) = agent_handle.search_archival_memories(&item.handle, 1).await {
-                if memories.is_empty() {
+            // Use the new get method to check for exact label match
+            if let Ok(existing_memory) = agent_handle
+                .get_archival_memory_by_label(&memory_label)
+                .await
+            {
+                if existing_memory.is_none() {
                     // Fetch user profile if we have a BskyAgent
                     let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
                         Self::fetch_user_profile_for_memory(&*bsky_agent, &item.handle, &item.did)
@@ -1022,8 +1101,30 @@ impl DataSource for BlueskyFirehoseSource {
         message
             .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\nAlternatively, you can 'like' the post by submitting a reply with 'like' as the sole text");
 
-        // Check if any of the DIDs we're watching for were mentioned
-        if !self.filter.mentions.is_empty() {
+        // First check exclusion keywords - these take highest priority
+        // Check the entire formatted message for excluded keywords
+        if !self.filter.exclude_keywords.is_empty() {
+            let message_lower = message.to_lowercase();
+            for keyword in &self.filter.exclude_keywords {
+                if message_lower.contains(&keyword.to_lowercase()) {
+                    tracing::debug!(
+                        "dropping thread because it contains excluded keyword '{}' in formatted message",
+                        keyword
+                    );
+                    return None;
+                }
+            }
+        }
+
+        // Check if post should be included based on friends list or mentions
+        // Friends bypass all mention requirements
+        let is_from_friend = self.filter.friends.contains(&item.did);
+
+        // Check if Pattern (or any watched DID) authored this post or any parent post
+        let is_from_watched_author = self.filter.mentions.contains(&item.did);
+
+        if !is_from_friend && !is_from_watched_author && !self.filter.mentions.is_empty() {
+            // Not from a friend or watched author, so check if any of the DIDs we're watching for were mentioned
             let found_mention = self.filter.mentions.iter().any(|watched_did| {
                 // Check both with and without @ prefix since the queue has mixed format
                 mention_check_queue.contains(watched_did)
@@ -1141,6 +1242,8 @@ impl LexiconIngestor for PostIngestor {
 
             let mut post_to_filter = BlueskyPost {
                 uri,
+
+                display_name: None,
                 did: event.did.to_string(),
                 cid: rcid,
                 handle: event.did.to_string(), // temporary, need to do handle resolution
@@ -1404,23 +1507,108 @@ async fn should_include_post(
     resolver: &atrium_identity::did::CommonDidResolver<PatternHttpClient>,
 ) -> bool {
     use atrium_common::resolver::Resolver;
+
+    // 1. EXCLUSIONS FIRST (highest priority)
+
+    // Exclude DIDs - never show posts from these
+    if filter.exclude_dids.contains(&post.did) {
+        return false;
+    }
+
+    // Exclude keywords - filter out posts containing these
+    if !filter.exclude_keywords.is_empty() {
+        let text_lower = post.text.to_lowercase();
+        if filter
+            .exclude_keywords
+            .iter()
+            .any(|kw| text_lower.contains(&kw.to_lowercase()))
+        {
+            return false;
+        }
+    }
+
+    // 2. FRIENDS LIST - bypass all other checks
+    if filter.friends.contains(&post.did) {
+        // Friends always pass through
+        // Still need to resolve handle though
+        post.handle = resolver
+            .resolve(&Did::from_str(&post.did).expect("valid did"))
+            .await
+            .ok()
+            .map(|doc| {
+                let handle = doc
+                    .also_known_as
+                    .expect("proper did doc should have an alias in it")
+                    .first()
+                    .expect("proper did doc should have an alias in it")
+                    .clone();
+
+                handle.strip_prefix("at://").unwrap_or(&handle).to_string()
+            })
+            .unwrap_or(post.did.clone());
+
+        return true;
+    }
+
+    // 3. CHECK MENTIONS
+    if !filter.mentions.is_empty() {
+        let mentioned = post.mentioned_dids();
+        let has_required_mention = filter
+            .mentions
+            .iter()
+            .any(|allowed_did| mentioned.contains(&allowed_did.as_str()));
+
+        if has_required_mention {
+            // Has required mention - check if author is allowed
+            if filter.allow_any_mentions {
+                // Accept mentions from anyone
+                post.handle = resolver
+                    .resolve(&Did::from_str(&post.did).expect("valid did"))
+                    .await
+                    .ok()
+                    .map(|doc| {
+                        let handle = doc
+                            .also_known_as
+                            .expect("proper did doc should have an alias in it")
+                            .first()
+                            .expect("proper did doc should have an alias in it")
+                            .clone();
+
+                        handle.strip_prefix("at://").unwrap_or(&handle).to_string()
+                    })
+                    .unwrap_or(post.did.clone());
+
+                return true;
+            } else if filter.dids.is_empty() || filter.dids.contains(&post.did) {
+                // Only accept mentions from allowlisted DIDs (or if no allowlist)
+                post.handle = resolver
+                    .resolve(&Did::from_str(&post.did).expect("valid did"))
+                    .await
+                    .ok()
+                    .map(|doc| {
+                        let handle = doc
+                            .also_known_as
+                            .expect("proper did doc should have an alias in it")
+                            .first()
+                            .expect("proper did doc should have an alias in it")
+                            .clone();
+
+                        handle.strip_prefix("at://").unwrap_or(&handle).to_string()
+                    })
+                    .unwrap_or(post.did.clone());
+
+                return true;
+            }
+        }
+    }
+
+    // 4. CHECK REGULAR ALLOWLIST
     // DID filter - only from specific authors
     if !filter.dids.is_empty() && !filter.dids.contains(&post.did) {
         return false;
     }
 
-    // Mention filter - if set, only include posts that mention whitelisted DIDs/handles
-    if !filter.mentions.is_empty() {
-        let mentioned = post.mentioned_dids();
-        if !filter
-            .mentions
-            .iter()
-            .any(|allowed_did| mentioned.contains(&allowed_did.as_str()))
-            && !filter.dids.contains(&post.did)
-        {
-            return false;
-        }
-    }
+    // 5. APPLY REMAINING FILTERS (keywords, languages)
 
     // Keyword filter
     if !filter.keywords.is_empty() {
@@ -1545,6 +1733,7 @@ mod tests {
     #[tokio::test]
     async fn test_filter_post() {
         let mut post = BlueskyPost {
+            display_name: None,
             uri: "at://did:plc:example/app.bsky.feed.post/123".to_string(),
             cid: Cid::from_str("bafyreieqropzcxn6nztojzr5z42u4furcrgfqppyt5e4p43vuzmbi7xdfu")
                 .unwrap(),
@@ -1585,6 +1774,7 @@ mod tests {
     #[tokio::test]
     async fn test_mention_filter() {
         let mut post = BlueskyPost {
+            display_name: None,
             uri: "at://did:plc:author/app.bsky.feed.post/456".to_string(),
             did: "did:plc:author".to_string(),
             cid: Cid::from_str("bafyreieqropzcxn6nztojzr5z42u4furcrgfqppyt5e4p43vuzmbi7xdfu")

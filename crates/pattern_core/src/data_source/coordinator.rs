@@ -32,6 +32,8 @@ pub struct DataIngestionCoordinator<C: surrealdb::Connection + Clone, E: Embeddi
     sources: Arc<RwLock<HashMap<String, SourceHandle>>>,
     agent_router: AgentMessageRouter<C>,
     embedding_provider: Option<Arc<E>>,
+    /// Default target for data source notifications
+    default_target: Arc<RwLock<crate::tool::builtin::MessageTarget>>,
 }
 
 /// Type-erased wrapper for concrete data sources
@@ -207,6 +209,8 @@ where
 struct SourceHandle {
     source: Box<dyn DataSource<Item = Value, Filter = Value, Cursor = Value>>,
     monitoring_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Optional custom target for this specific source
+    custom_target: Option<crate::tool::builtin::MessageTarget>,
 }
 
 impl std::fmt::Debug for SourceHandle {
@@ -236,10 +240,17 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
     DataIngestionCoordinator<C, E>
 {
     pub fn new(agent_router: AgentMessageRouter<C>, embedding_provider: Option<Arc<E>>) -> Self {
+        // Default to sending to the agent that owns this coordinator
+        let default_target = crate::tool::builtin::MessageTarget {
+            target_type: crate::tool::builtin::TargetType::Agent,
+            target_id: Some(agent_router.agent_id().to_string()),
+        };
+
         Self {
             sources: Arc::new(RwLock::new(HashMap::new())),
             agent_router,
             embedding_provider,
+            default_target: Arc::new(RwLock::new(default_target)),
         }
     }
 
@@ -248,8 +259,29 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
         self.embedding_provider.clone()
     }
 
+    /// Set the default target for data source notifications
+    pub async fn set_default_target(&self, target: crate::tool::builtin::MessageTarget) {
+        let mut default_target = self.default_target.write().await;
+        *default_target = target;
+    }
+
     /// Register a source and start monitoring
     pub async fn add_source<S>(&mut self, source: S) -> Result<()>
+    where
+        S: DataSource + 'static,
+        S::Item: Serialize + for<'de> Deserialize<'de> + Send,
+        S::Filter: Serialize + for<'de> Deserialize<'de> + Send,
+        S::Cursor: Serialize + for<'de> Deserialize<'de> + Send,
+    {
+        self.add_source_with_target(source, None).await
+    }
+
+    /// Register a source with a custom target and start monitoring
+    pub async fn add_source_with_target<S>(
+        &mut self,
+        source: S,
+        target: Option<crate::tool::builtin::MessageTarget>,
+    ) -> Result<()>
     where
         S: DataSource + 'static,
         S::Item: Serialize + for<'de> Deserialize<'de> + Send,
@@ -278,6 +310,7 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
         let handle = SourceHandle {
             source: erased_source,
             monitoring_handle,
+            custom_target: target,
         };
 
         let mut sources = self.sources.write().await;
@@ -304,10 +337,11 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
                             if let Some(message) =
                                 handle.source.format_notification(&event.item).await
                             {
-                                // Send notification to agent
-                                let target = crate::tool::builtin::MessageTarget {
-                                    target_type: crate::tool::builtin::TargetType::Agent,
-                                    target_id: Some(self.agent_router.agent_id().to_string()),
+                                // Use custom target if available, otherwise use default
+                                let target = if let Some(custom_target) = &handle.custom_target {
+                                    custom_target.clone()
+                                } else {
+                                    self.default_target.read().await.clone()
                                 };
 
                                 // Create origin for this data source

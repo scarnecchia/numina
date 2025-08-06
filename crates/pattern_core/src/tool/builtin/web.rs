@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::{
     CoreError, Result, context::AgentHandle, data_source::bluesky::PatternHttpClient, tool::AiTool,
@@ -107,21 +108,35 @@ impl<C: surrealdb::Connection + Clone> WebTool<C> {
 
     /// Fetch content from a URL
     async fn fetch_url(&self, url: String, format: WebFormat) -> Result<WebOutput> {
-        let response = self.client.client.get(&url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-                .header("Accept-Language", "en-US,en;q=0.5")
-                .header("Accept-Encoding", "gzip, deflate")
-                .header("Connection", "keep-alive")
-                .header("Upgrade-Insecure-Requests", "1")
-                .send()
-                .await.map_err(|e| {
-            CoreError::ToolExecutionFailed {
+        let parsed_domain = Url::parse(&url)
+            .ok()
+            .and_then(|url| url.host_str().map(|s| s.to_string()))
+            .unwrap_or("".to_string());
+        let response = self
+            .client
+            .client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0",
+            )
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            )
+            .header("Alt-Used", parsed_domain)
+            .header("Accept-Language", "en-GB,en;q=0.5")
+            .header("Accept-Encoding", "gzip, deflate, zstd")
+            .header("Connection", "keep-alive")
+            .header("Sec-GPC", "1")
+            .header("Upgrade-Insecure-Requests", "1")
+            .send()
+            .await
+            .map_err(|e| CoreError::ToolExecutionFailed {
                 tool_name: "web".to_string(),
                 cause: format!("Failed to fetch URL: {}", e),
                 parameters: serde_json::json!({ "url": url }),
-            }
-        })?;
+            })?;
 
         let final_url = response.url().to_string();
         let content_type = response

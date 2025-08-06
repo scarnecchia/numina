@@ -528,9 +528,9 @@ fn default_skip_unavailable() -> bool {
 /// Bluesky/ATProto configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskyConfig {
-    /// Default filters for the firehose
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub default_filters: Vec<BlueskyFilter>,
+    /// Default filter for the firehose
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_filter: Option<BlueskyFilter>,
 
     /// Whether to automatically connect to firehose on startup
     #[serde(default)]

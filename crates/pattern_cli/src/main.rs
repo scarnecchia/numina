@@ -528,8 +528,15 @@ async fn main() -> Result<()> {
                 // Group was already loaded with relations in get_group_by_name
 
                 // Create a shared constellation activity tracker for the group
+                // Use the group ID directly as the memory ID - they're in different namespaces
+                // GroupId is GroupId(String), so extract the inner UUID string
+                let group_id_str = group.id.to_string();
+                let tracker_memory_id = pattern_core::MemoryId(group_id_str);
                 let constellation_tracker = Arc::new(
-                    pattern_core::constellation_memory::ConstellationActivityTracker::new(100),
+                    pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
+                        tracker_memory_id,
+                        100,
+                    ),
                 );
 
                 // Load all agents in the group

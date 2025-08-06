@@ -40,6 +40,7 @@ pub async fn listen(
         mentions,
         keywords,
         languages,
+        ..Default::default()
     };
 
     // Use endpoint from args or config
