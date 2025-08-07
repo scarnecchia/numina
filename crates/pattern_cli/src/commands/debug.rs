@@ -3,6 +3,7 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     agent::{AgentRecord, AgentState},
+    config::PatternConfig,
     context::AgentHandle,
     db::{DbEntity, client::DB, ops},
     memory::{Memory, MemoryBlock},
@@ -172,7 +173,153 @@ pub async fn search_conversations(
                             println!("      {}", line.dimmed());
                         }
                     } else {
-                        output.status("Content: [Non-text content]");
+                        // Show more details about non-text content
+                        use pattern_core::message::{ContentBlock, MessageContent};
+                        match &msg.content {
+                            MessageContent::Parts(parts) => {
+                                output.status(&format!(
+                                    "Content: [Multi-part: {} parts]",
+                                    parts.len()
+                                ));
+                                for (j, part) in parts.iter().enumerate().take(3) {
+                                    match part {
+                                        pattern_core::message::ContentPart::Text(t) => {
+                                            let preview = if t.len() > 100 {
+                                                format!("{}...", &t[..100])
+                                            } else {
+                                                t.to_string()
+                                            };
+                                            println!(
+                                                "      Part {}: Text - {}",
+                                                j + 1,
+                                                preview.dimmed()
+                                            );
+                                        }
+                                        pattern_core::message::ContentPart::Image {
+                                            content_type,
+                                            ..
+                                        } => {
+                                            println!(
+                                                "      Part {}: [Image: {}]",
+                                                j + 1,
+                                                content_type
+                                            );
+                                        }
+                                    }
+                                }
+                                if parts.len() > 3 {
+                                    println!("      ... and {} more parts", parts.len() - 3);
+                                }
+                            }
+                            MessageContent::ToolCalls(calls) => {
+                                output.status(&format!(
+                                    "Content: [Tool calls: {} calls]",
+                                    calls.len()
+                                ));
+                                for (j, call) in calls.iter().enumerate().take(3) {
+                                    println!(
+                                        "      Call {}: {} (id: {})",
+                                        j + 1,
+                                        call.fn_name,
+                                        call.call_id
+                                    );
+                                }
+                                if calls.len() > 3 {
+                                    println!("      ... and {} more calls", calls.len() - 3);
+                                }
+                            }
+                            MessageContent::ToolResponses(responses) => {
+                                output.status(&format!(
+                                    "Content: [Tool responses: {} responses]",
+                                    responses.len()
+                                ));
+                                for (j, resp) in responses.iter().enumerate().take(3) {
+                                    let content_preview = if resp.content.len() > 100 {
+                                        format!("{}...", &resp.content[..100])
+                                    } else {
+                                        resp.content.clone()
+                                    };
+                                    println!(
+                                        "      Response {} (call_id: {}): {}",
+                                        j + 1,
+                                        resp.call_id,
+                                        content_preview.dimmed()
+                                    );
+                                }
+                                if responses.len() > 3 {
+                                    println!(
+                                        "      ... and {} more responses",
+                                        responses.len() - 3
+                                    );
+                                }
+                            }
+                            MessageContent::Blocks(blocks) => {
+                                output
+                                    .status(&format!("Content: [Blocks: {} blocks]", blocks.len()));
+                                for (j, block) in blocks.iter().enumerate().take(3) {
+                                    match block {
+                                        ContentBlock::Text { text } => {
+                                            let preview = if text.len() > 100 {
+                                                format!("{}...", &text[..100])
+                                            } else {
+                                                text.clone()
+                                            };
+                                            println!(
+                                                "      Block {}: Text - {}",
+                                                j + 1,
+                                                preview.dimmed()
+                                            );
+                                        }
+                                        ContentBlock::Thinking { text, .. } => {
+                                            let preview = if text.len() > 100 {
+                                                format!("{}...", &text[..100])
+                                            } else {
+                                                text.clone()
+                                            };
+                                            println!(
+                                                "      Block {}: Thinking - {}",
+                                                j + 1,
+                                                preview.dimmed()
+                                            );
+                                        }
+                                        ContentBlock::RedactedThinking { .. } => {
+                                            println!("      Block {}: [Redacted Thinking]", j + 1);
+                                        }
+                                        ContentBlock::ToolUse { name, id, .. } => {
+                                            println!(
+                                                "      Block {}: Tool Use - {} (id: {})",
+                                                j + 1,
+                                                name,
+                                                id
+                                            );
+                                        }
+                                        ContentBlock::ToolResult {
+                                            tool_use_id,
+                                            content,
+                                            ..
+                                        } => {
+                                            let preview = if content.len() > 100 {
+                                                format!("{}...", &content[..100])
+                                            } else {
+                                                content.clone()
+                                            };
+                                            println!(
+                                                "      Block {}: Tool Result (tool_use_id: {}) - {}",
+                                                j + 1,
+                                                tool_use_id,
+                                                preview.dimmed()
+                                            );
+                                        }
+                                    }
+                                }
+                                if blocks.len() > 3 {
+                                    println!("      ... and {} more blocks", blocks.len() - 3);
+                                }
+                            }
+                            _ => {
+                                output.status("Content: [Non-text content]");
+                            }
+                        }
                     }
 
                     println!();
@@ -694,7 +841,7 @@ pub async fn list_all_memory(agent_name: &str) -> Result<()> {
 }
 
 /// Show the current context that would be passed to the LLM
-pub async fn show_context(agent_name: &str) -> Result<()> {
+pub async fn show_context(agent_name: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
     output.section("Agent Context Inspection");
@@ -726,8 +873,6 @@ pub async fn show_context(agent_name: &str) -> Result<()> {
         output.info("State:", &format!("{:?}", agent_record.state));
         println!();
 
-        // Load the agent using the standard function
-        let config = crate::config::PatternConfig::default();
         let (heartbeat_sender, _) = pattern_core::context::heartbeat::heartbeat_channel();
 
         match crate::agent_ops::load_or_create_agent(
@@ -782,6 +927,153 @@ pub async fn show_context(agent_name: &str) -> Result<()> {
         if !agent_names.is_empty() {
             output.info("Available agents:", &agent_names.join(", "));
         }
+    }
+
+    Ok(())
+}
+
+/// Edit a memory block by exporting to file and reimporting after edits
+pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>) -> Result<()> {
+    let output = Output::new();
+
+    output.section(&format!(
+        "Editing memory block '{}' for agent '{}'",
+        label, agent_name
+    ));
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        // Query for the specific memory block
+        let query_sql = r#"
+            SELECT * FROM mem
+            WHERE label = $label
+            LIMIT 1
+        "#;
+
+        let mut response = DB
+            .query(query_sql)
+            .bind(("label", label.to_string()))
+            .await
+            .into_diagnostic()?;
+
+        let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
+            response.take(0).into_diagnostic()?;
+        let memories: Vec<MemoryBlock> = memory_models
+            .into_iter()
+            .filter_map(|m| MemoryBlock::from_db_model(m).ok())
+            .collect();
+
+        if let Some(memory) = memories.first() {
+            // Extract the memory content
+            let content = memory.value.clone();
+            let memory_type = format!("{:?}", memory.memory_type);
+            let memory_id = memory.id.clone();
+
+            // Determine file path
+            let file_path_string = format!("memory_{}.txt", label);
+            let file_path = file_path.unwrap_or(&file_path_string);
+
+            // Write to file
+            std::fs::write(&file_path, &content).into_diagnostic()?;
+
+            output.info("Memory content written to:", file_path);
+            output.info("Memory type:", &memory_type);
+            output.info("Current length:", &format!("{} chars", content.len()));
+            println!();
+
+            // Get user confirmation to proceed with edit
+            output.warning(
+                "Edit the file and save it, then press Enter to update the memory block...",
+            );
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).into_diagnostic()?;
+
+            // Read the edited content
+            let new_content = std::fs::read_to_string(&file_path).into_diagnostic()?;
+
+            // Update the memory block
+            let update_sql = r#"
+                UPDATE mem SET value = $value WHERE id = $id
+            "#;
+
+            let mut response = DB
+                .query(update_sql)
+                .bind(("value", new_content.clone()))
+                .bind(("id", RecordId::from(&memory_id)))
+                .await
+                .into_diagnostic()?;
+
+            let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
+                response.take(0).into_diagnostic()?;
+            let _memories: Vec<MemoryBlock> = memory_models
+                .into_iter()
+                .filter_map(|m| MemoryBlock::from_db_model(m).ok())
+                .collect();
+
+            output.success(&format!(
+                "Memory block '{}' updated successfully!",
+                label.bright_cyan()
+            ));
+            output.info("New length:", &format!("{} chars", new_content.len()));
+
+            // Optionally delete the temp file
+            output.info("Temporary file kept at:", file_path);
+        } else {
+            output.error(&format!(
+                "Memory block '{}' not found for agent '{}'",
+                label, agent_name
+            ));
+
+            // List available memory blocks
+            println!(
+                "
+Available memory blocks:"
+            );
+            let query_sql = r#"
+                SELECT * FROM mem
+                WHERE id IN (
+                    SELECT out FROM agent_memories
+                    WHERE in = $agent_id
+                )
+                ORDER BY label
+            "#;
+
+            let mut response = DB
+                .query(query_sql)
+                .bind(("agent_id", RecordId::from(&agent_record.id)))
+                .await
+                .into_diagnostic()?;
+
+            let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
+                response.take(0).into_diagnostic()?;
+            let memories: Vec<MemoryBlock> = memory_models
+                .into_iter()
+                .filter_map(|m| MemoryBlock::from_db_model(m).ok())
+                .collect();
+
+            for memory in memories {
+                println!(
+                    "  - {} ({:?})",
+                    memory.label.bright_cyan(),
+                    memory.memory_type
+                );
+            }
+        }
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
     }
 
     Ok(())

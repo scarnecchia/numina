@@ -92,15 +92,15 @@ pub enum WebOutput {
 
 /// Web interaction tool
 #[derive(Debug, Clone)]
-pub struct WebTool<C: surrealdb::Connection + Clone> {
+pub struct WebTool {
     #[allow(dead_code)]
-    pub(crate) handle: AgentHandle<C>,
+    pub(crate) handle: AgentHandle,
     client: PatternHttpClient,
 }
 
-impl<C: surrealdb::Connection + Clone> WebTool<C> {
+impl WebTool {
     /// Create a new web tool
-    pub fn new(handle: AgentHandle<C>) -> Self {
+    pub fn new(handle: AgentHandle) -> Self {
         let client = PatternHttpClient::default();
 
         Self { handle, client }
@@ -251,7 +251,7 @@ impl<C: surrealdb::Connection + Clone> WebTool<C> {
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for WebTool<C> {
+impl AiTool for WebTool {
     type Input = WebInput;
     type Output = WebOutput;
 

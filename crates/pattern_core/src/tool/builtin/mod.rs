@@ -44,9 +44,7 @@ pub struct BuiltinTools {
 
 impl BuiltinTools {
     /// Create default built-in tools for an agent
-    pub fn default_for_agent<C: surrealdb::Connection + Debug + Clone>(
-        handle: AgentHandle<C>,
-    ) -> Self {
+    pub fn default_for_agent(handle: AgentHandle) -> Self {
         Self {
             recall_tool: Box::new(DynamicToolAdapter::new(RecallTool {
                 handle: handle.clone(),
@@ -120,10 +118,7 @@ impl BuiltinToolsBuilder {
     }
 
     /// Build the tools for a specific agent
-    pub fn build_for_agent<C: surrealdb::Connection + Debug + Clone>(
-        self,
-        handle: AgentHandle<C>,
-    ) -> BuiltinTools {
+    pub fn build_for_agent(self, handle: AgentHandle) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(handle);
         BuiltinTools {
             recall_tool: self.recall_tool.unwrap_or(defaults.recall_tool),

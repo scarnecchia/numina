@@ -84,6 +84,9 @@ pub trait Agent: Send + Sync + Debug {
     /// Get the agent's type
     fn agent_type(&self) -> AgentType;
 
+    /// Get the agent's handle for controlled access to internals
+    async fn handle(&self) -> crate::context::state::AgentHandle;
+
     /// Process an incoming message and generate a response
     async fn process_message(self: Arc<Self>, message: Message) -> Result<Response>;
 

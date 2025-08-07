@@ -76,12 +76,12 @@ pub struct ArchivalSearchResult {
 
 /// Unified tool for managing recall storage
 #[derive(Debug, Clone)]
-pub struct RecallTool<C: surrealdb::Connection + Clone> {
-    pub(crate) handle: AgentHandle<C>,
+pub struct RecallTool {
+    pub(crate) handle: AgentHandle,
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + Clone + Debug> AiTool for RecallTool<C> {
+impl AiTool for RecallTool {
     type Input = RecallInput;
     type Output = RecallOutput;
 
@@ -90,7 +90,11 @@ impl<C: surrealdb::Connection + Clone + Debug> AiTool for RecallTool<C> {
     }
 
     fn description(&self) -> &str {
-        "Manage long-term recall storage. Recall memories are not always visible in context. Operations: insert, append, read (by label), delete."
+        "Manage long-term recall storage. Recall memories are not always visible in context. Operations: insert, append, read (by label), delete.
+ - 'insert' creates a new recall memory with the provided content
+ - 'append' appends the provided content to the recall memory with the specified label
+ - 'read' reads out the contents of the recall block with the specified label
+ - 'delete' removes the recall memory with the specified label"
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
@@ -181,7 +185,7 @@ impl<C: surrealdb::Connection + Clone + Debug> AiTool for RecallTool<C> {
     }
 }
 
-impl<C: surrealdb::Connection + Clone> RecallTool<C> {
+impl RecallTool {
     async fn execute_insert(&self, content: String, label: Option<String>) -> Result<RecallOutput> {
         // Generate label if not provided
         let label = label.unwrap_or_else(|| format!("archival_{}", chrono::Utc::now().timestamp()));

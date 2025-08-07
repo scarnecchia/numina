@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use compact_str::CompactString;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
+use std::time::Duration;
+
 use surrealdb::{RecordId, Surreal};
 use tokio::sync::RwLock;
 
@@ -40,14 +42,11 @@ use crate::agent::ResponseEvent;
 
 /// A concrete agent implementation backed by the database
 #[derive(Clone)]
-pub struct DatabaseAgent<C, M, E>
-where
-    C: surrealdb::Connection + Clone,
-{
+pub struct DatabaseAgent<M, E> {
     /// The user who owns this agent
     pub user_id: UserId,
     /// The agent's context (includes all state)
-    context: Arc<RwLock<AgentContext<C>>>,
+    context: Arc<RwLock<AgentContext>>,
 
     /// model provider
     model: Arc<RwLock<M>>,
@@ -55,7 +54,7 @@ where
     /// model configuration
     pub chat_options: Arc<RwLock<Option<ResponseOptions>>>,
     /// Database connection
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
 
     /// Embedding provider for semantic search
     embeddings: Option<Arc<E>>,
@@ -72,9 +71,8 @@ where
     cached_agent_type: AgentType,
 }
 
-impl<C, M, E> DatabaseAgent<C, M, E>
+impl<M, E> DatabaseAgent<M, E>
 where
-    C: surrealdb::Connection + Clone + std::fmt::Debug,
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
@@ -139,7 +137,7 @@ where
         name: String,
         system_prompt: String,
         memory: Memory,
-        db: Surreal<C>,
+        db: Surreal<surrealdb::engine::any::Any>,
         model: Arc<RwLock<M>>,
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
@@ -249,7 +247,7 @@ where
     // ) -> Arc<Self> {
     // }
     //
-    pub async fn handle(&self) -> AgentHandle<C> {
+    pub async fn handle(&self) -> AgentHandle {
         self.context.read().await.handle.clone()
     }
 
@@ -269,7 +267,7 @@ where
     /// The model provider, tools, and embeddings are injected at runtime.
     pub async fn from_record(
         record: crate::agent::AgentRecord,
-        db: Surreal<C>,
+        db: Surreal<surrealdb::engine::any::Any>,
         model: Arc<RwLock<M>>,
         tools: ToolRegistry,
         embeddings: Option<Arc<E>>,
@@ -817,6 +815,57 @@ where
                                     custom: queued_msg.metadata.clone(),
                                     ..Default::default()
                                 };
+                            }
+
+                            // Extract and attach memory blocks from metadata
+                            if let Some(blocks_value) = queued_msg.metadata.get("memory_blocks") {
+                                if let Ok(memory_blocks) = serde_json::from_value::<
+                                    Vec<(compact_str::CompactString, crate::memory::MemoryBlock)>,
+                                >(
+                                    blocks_value.clone()
+                                ) {
+                                    tracing::info!(
+                                        "📝 Attaching {} memory blocks from data source to agent {}",
+                                        memory_blocks.len(),
+                                        agent_id
+                                    );
+
+                                    // For each memory block, attach it to this agent
+                                    for (label, block) in memory_blocks {
+                                        // First store the memory block if it doesn't exist
+                                        let block_id = block.id.clone();
+                                        if let Err(e) = block.store_with_relations(&db).await {
+                                            tracing::warn!(
+                                                "Failed to store memory block {}: {}",
+                                                label,
+                                                e
+                                            );
+                                            continue;
+                                        }
+
+                                        // Use the proper ops function to attach memory
+                                        if let Err(e) = crate::db::ops::attach_memory_to_agent(
+                                            &db,
+                                            &agent_id,
+                                            &block_id,
+                                            block.permission,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                "Failed to attach memory block {} to agent: {}",
+                                                label,
+                                                e
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                "✅ Attached memory block {} to agent {}",
+                                                label,
+                                                agent_id
+                                            );
+                                        }
+                                    }
+                                }
                             }
 
                             // Mark message as read immediately to prevent reprocessing
@@ -1436,6 +1485,14 @@ where
 
         // Spawn the processing task
         tokio::spawn(async move {
+            // wait here until the agent is ready, avoids unexpected parallel operations.
+            loop {
+                if self_clone.handle().await.state == AgentState::Ready {
+                    break;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(20)).await
+                }
+            }
             // Helper to send events
             let send_event = |event: ResponseEvent| {
                 let tx = tx.clone();
@@ -2307,17 +2364,14 @@ mod tool_rules_integration_tests {
 }
 
 /// Builder for creating DatabaseAgent instances with fluent configuration
-pub struct DatabaseAgentBuilder<C, M, E>
-where
-    C: surrealdb::Connection + Clone,
-{
+pub struct DatabaseAgentBuilder<M, E> {
     agent_id: Option<AgentId>,
     user_id: Option<UserId>,
     agent_type: Option<AgentType>,
     name: Option<String>,
     system_prompt: Option<String>,
     memory: Option<Memory>,
-    db: Option<Surreal<C>>,
+    db: Option<Surreal<surrealdb::engine::any::Any>>,
     model: Option<Arc<RwLock<M>>>,
     tools: Option<ToolRegistry>,
     embeddings: Option<Arc<E>>,
@@ -2325,9 +2379,8 @@ where
     tool_rules: Vec<ToolRule>,
 }
 
-impl<C, M, E> DatabaseAgentBuilder<C, M, E>
+impl<M, E> DatabaseAgentBuilder<M, E>
 where
-    C: surrealdb::Connection + Clone + std::fmt::Debug,
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
@@ -2386,7 +2439,7 @@ where
     }
 
     /// Set the database connection
-    pub fn with_db(mut self, db: Surreal<C>) -> Self {
+    pub fn with_db(mut self, db: Surreal<surrealdb::engine::any::Any>) -> Self {
         self.db = Some(db);
         self
     }
@@ -2482,7 +2535,7 @@ where
     }
 
     /// Build the DatabaseAgent
-    pub fn build(self) -> Result<DatabaseAgent<C, M, E>> {
+    pub fn build(self) -> Result<DatabaseAgent<M, E>> {
         let agent_id = self.agent_id.unwrap_or_else(AgentId::generate);
         let user_id = self
             .user_id
@@ -2529,21 +2582,19 @@ where
     }
 }
 
-impl<C, M, E> DatabaseAgent<C, M, E>
+impl<M, E> DatabaseAgent<M, E>
 where
-    C: surrealdb::Connection + Clone + std::fmt::Debug,
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
     /// Create a new builder for this agent type
-    pub fn builder() -> DatabaseAgentBuilder<C, M, E> {
+    pub fn builder() -> DatabaseAgentBuilder<M, E> {
         DatabaseAgentBuilder::new()
     }
 }
 
-impl<C, M, E> std::fmt::Debug for DatabaseAgent<C, M, E>
+impl<M, E> std::fmt::Debug for DatabaseAgent<M, E>
 where
-    C: surrealdb::Connection + Clone,
     M: ModelProvider,
     E: EmbeddingProvider,
 {
@@ -2570,9 +2621,8 @@ where
 }
 
 #[async_trait]
-impl<C, M, E> Agent for DatabaseAgent<C, M, E>
+impl<M, E> Agent for DatabaseAgent<M, E>
 where
-    C: surrealdb::Connection + std::fmt::Debug + 'static + Clone,
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
@@ -2586,6 +2636,10 @@ where
 
     fn agent_type(&self) -> AgentType {
         self.cached_agent_type.clone()
+    }
+
+    async fn handle(&self) -> crate::context::state::AgentHandle {
+        self.handle().await
     }
 
     async fn process_message(self: Arc<Self>, message: Message) -> Result<Response> {
@@ -2683,13 +2737,48 @@ where
         // Persist memory block synchronously during initial setup
         // TODO: Consider spawning background task for updates after agent is initialized
 
-        crate::db::ops::persist_agent_memory(
-            &self.db,
-            agent_id,
-            &memory,
-            crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
-        )
-        .await?;
+        //tracing::debug!("persisting memory key {}", key);
+        // Retry logic for concurrent upserts of constellation_activity block
+        // let mut attempts = 0;
+        // const MAX_RETRIES: u32 = 3;
+
+        // loop {
+        //     match crate::db::ops::persist_agent_memory(
+        //         &self.db,
+        //         agent_id.clone(),
+        //         &memory,
+        //         crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
+        //     )
+        //     .await
+        //     {
+        //         Ok(_) => break,
+        //         Err(e) => {
+        //             // Check if it's a duplicate key error in the full-text search index
+        //             if let crate::db::DatabaseError::QueryFailed(ref surreal_err) = e {
+        //                 let error_str = surreal_err.to_string();
+        //                 if error_str.contains("Duplicate insert key")
+        //                     && error_str.contains("mem_value_search")
+        //                 {
+        //                     attempts += 1;
+        //                     if attempts < MAX_RETRIES {
+        //                         tracing::warn!(
+        //                             "Duplicate key error updating memory '{}' (attempt {}/{}), retrying...",
+        //                             key,
+        //                             attempts,
+        //                             MAX_RETRIES
+        //                         );
+        //                         // Small delay with jitter to reduce contention
+        //                         let delay_ms = 50u64 + (attempts as u64 * 100);
+        //                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+        //                             .await;
+        //                         continue;
+        //                     }
+        //                 }
+        //             }
+        //             return Err(e.into());
+        //         }
+        //     }
+        // }
 
         Ok(())
     }

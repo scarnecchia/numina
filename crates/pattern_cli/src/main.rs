@@ -381,6 +381,16 @@ enum DebugCommands {
         /// Agent name
         agent: String,
     },
+    /// Edit a memory block by exporting to file
+    EditMemory {
+        /// Agent name
+        agent: String,
+        /// Memory block label/name
+        label: String,
+        /// Optional file path (defaults to memory_<label>.txt)
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Search conversation history
     SearchConversations {
         /// Agent name to search conversations for
@@ -535,7 +545,7 @@ async fn main() -> Result<()> {
                 let constellation_tracker = Arc::new(
                     pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
                         tracker_memory_id,
-                        100,
+                        50,
                     ),
                 );
 
@@ -544,7 +554,7 @@ async fn main() -> Result<()> {
                 let mut agents = Vec::new();
                 for (mut agent_record, _membership) in group.members.clone() {
                     // Load memories and messages for the agent
-                    agent_ops::load_agent_memories_and_messages(&mut agent_record).await?;
+                    agent_ops::load_agent_memories_and_messages(&mut agent_record, &output).await?;
 
                     // Create runtime agent from record with constellation tracker
                     let agent = agent_ops::create_agent_from_record_with_tracker(
@@ -554,6 +564,7 @@ async fn main() -> Result<()> {
                         &config,
                         heartbeat_sender.clone(),
                         Some(constellation_tracker.clone()),
+                        &output,
                     )
                     .await?;
                     agents.push(agent);
@@ -575,36 +586,109 @@ async fn main() -> Result<()> {
                     SupervisorManager, VotingManager,
                 };
 
+                // Check if we have a Bluesky configuration block
+                let has_bluesky_config = config.bluesky.is_some();
+
+                if has_bluesky_config {
+                    output.info("Bluesky:", "Jetstream routing enabled");
+                }
+
                 match &group.coordination_pattern {
                     CoordinationPattern::RoundRobin { .. } => {
                         let manager = RoundRobinManager;
-                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                        if has_bluesky_config {
+                            agent_ops::chat_with_group_and_jetstream(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
                             .await?;
+                        } else {
+                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                                .await?;
+                        }
                     }
                     CoordinationPattern::Dynamic { .. } => {
                         let manager = DynamicManager::new(Arc::new(DefaultSelectorRegistry::new()));
-                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                        if has_bluesky_config {
+                            agent_ops::chat_with_group_and_jetstream(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
                             .await?;
+                        } else {
+                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                                .await?;
+                        }
                     }
                     CoordinationPattern::Pipeline { .. } => {
                         let manager = PipelineManager;
-                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                        if has_bluesky_config {
+                            agent_ops::chat_with_group_and_jetstream(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
                             .await?;
+                        } else {
+                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                                .await?;
+                        }
                     }
                     CoordinationPattern::Supervisor { .. } => {
                         let manager = SupervisorManager;
-                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                        if has_bluesky_config {
+                            agent_ops::chat_with_group_and_jetstream(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
                             .await?;
+                        } else {
+                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                                .await?;
+                        }
                     }
                     CoordinationPattern::Voting { .. } => {
                         let manager = VotingManager;
-                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                        if has_bluesky_config {
+                            agent_ops::chat_with_group_and_jetstream(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
                             .await?;
+                        } else {
+                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                                .await?;
+                        }
                     }
                     CoordinationPattern::Sleeptime { .. } => {
                         let manager = SleeptimeManager;
-                        agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                        if has_bluesky_config {
+                            agent_ops::chat_with_group_and_jetstream(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
                             .await?;
+                        } else {
+                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                                .await?;
+                        }
                     }
                 }
             } else {
@@ -689,6 +773,9 @@ async fn main() -> Result<()> {
             DebugCommands::ListAllMemory { agent } => {
                 commands::debug::list_all_memory(&agent).await?;
             }
+            DebugCommands::EditMemory { agent, label, file } => {
+                commands::debug::edit_memory(&agent, &label, file.as_deref()).await?;
+            }
             DebugCommands::SearchConversations {
                 agent,
                 query,
@@ -708,7 +795,7 @@ async fn main() -> Result<()> {
                 .await?;
             }
             DebugCommands::ShowContext { agent } => {
-                commands::debug::show_context(&agent).await?;
+                commands::debug::show_context(&agent, &config).await?;
             }
         },
         Commands::Config { cmd } => match cmd {
@@ -807,6 +894,9 @@ async fn main() -> Result<()> {
                 .await?
         }
     }
+
+    // Flush any remaining logs before exit
+    drop(tracing_writer);
 
     Ok(())
 }

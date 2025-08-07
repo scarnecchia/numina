@@ -12,7 +12,7 @@ model = "gemini-2.5-pro"
 temperature = 0.3
 
 [context]
-max_messages = 200
+max_messages = 500
 
 [context.compression_strategy]
 type = "recursive_summarization"
@@ -40,6 +40,7 @@ content_path = "../pattern-observations-block.md"
 permission = "read_write"
 memory_type = "core"
 description = "Collective pattern gathering"
+
 shared = true
 
 [memory.resonances]
@@ -51,7 +52,7 @@ shared = true
 
 [memory.constellation_context]
 content_path = "../constellation-context.md"
-permission = "read_only"
+permission = "read_write"
 memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true

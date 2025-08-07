@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
@@ -8,6 +9,7 @@ use tokio::sync::RwLock;
 use crate::context::message_router::AgentMessageRouter;
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
+use crate::memory::MemoryBlock;
 
 use super::buffer::{BufferConfig, BufferStats};
 use super::traits::{DataSource, StreamEvent};
@@ -27,10 +29,9 @@ pub struct DataIngestionEvent {
 
 /// Manages multiple data sources and routes their output to agents
 #[derive(Clone)]
-pub struct DataIngestionCoordinator<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone>
-{
+pub struct DataIngestionCoordinator<E: EmbeddingProvider + Clone> {
     sources: Arc<RwLock<HashMap<String, SourceHandle>>>,
-    agent_router: AgentMessageRouter<C>,
+    agent_router: AgentMessageRouter,
     embedding_provider: Option<Arc<E>>,
     /// Default target for data source notifications
     default_target: Arc<RwLock<crate::tool::builtin::MessageTarget>>,
@@ -170,7 +171,10 @@ where
         self.inner.buffer_config()
     }
 
-    async fn format_notification(&self, item: &Self::Item) -> Option<String> {
+    async fn format_notification(
+        &self,
+        item: &Self::Item,
+    ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
         // Deserialize Value back to concrete type and delegate
         if let Ok(typed_item) = serde_json::from_value::<S::Item>(item.clone()) {
             self.inner.format_notification(&typed_item).await
@@ -222,9 +226,7 @@ impl std::fmt::Debug for SourceHandle {
     }
 }
 
-impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> std::fmt::Debug
-    for DataIngestionCoordinator<C, E>
-{
+impl<E: EmbeddingProvider + Clone> std::fmt::Debug for DataIngestionCoordinator<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataIngestionCoordinator")
             .field(
@@ -236,10 +238,8 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> std::fmt::D
     }
 }
 
-impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
-    DataIngestionCoordinator<C, E>
-{
-    pub fn new(agent_router: AgentMessageRouter<C>, embedding_provider: Option<Arc<E>>) -> Self {
+impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
+    pub fn new(agent_router: AgentMessageRouter, embedding_provider: Option<Arc<E>>) -> Self {
         // Default to sending to the agent that owns this coordinator
         let default_target = crate::tool::builtin::MessageTarget {
             target_type: crate::tool::builtin::TargetType::Agent,
@@ -252,6 +252,11 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
             embedding_provider,
             default_target: Arc::new(RwLock::new(default_target)),
         }
+    }
+
+    /// Get a reference to the agent router
+    pub fn router(&self) -> &AgentMessageRouter {
+        &self.agent_router
     }
 
     /// Get the embedding provider if available
@@ -334,7 +339,7 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
                     if let Some(handle) = self.sources.read().await.get(&source_id) {
                         // Check if notifications are enabled before formatting
                         if handle.source.notifications_enabled() {
-                            if let Some(message) =
+                            if let Some((message, memory_blocks)) =
                                 handle.source.format_notification(&event.item).await
                             {
                                 // Use custom target if available, otherwise use default
@@ -353,19 +358,24 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone + 'static>
                                         cursor: Some(event.cursor.clone()),
                                     };
 
+                                // Include memory blocks in metadata for now
+                                let mut metadata = serde_json::json!({
+                                    "source": "data_ingestion",
+                                    "source_id": source_id,
+                                    "item": event.item,
+                                    "cursor": event.cursor,
+                                });
+
+                                // Add memory blocks if any
+                                if !memory_blocks.is_empty() {
+                                    metadata["memory_blocks"] =
+                                        serde_json::to_value(&memory_blocks)
+                                            .unwrap_or(serde_json::Value::Null);
+                                }
+
                                 if let Err(e) = self
                                     .agent_router
-                                    .send_message(
-                                        target,
-                                        message,
-                                        Some(serde_json::json!({
-                                            "source": "data_ingestion",
-                                            "source_id": source_id,
-                                            "item": event.item,
-                                            "cursor": event.cursor,
-                                        })),
-                                        Some(origin),
-                                    )
+                                    .send_message(target, message, Some(metadata), Some(origin))
                                     .await
                                 {
                                     tracing::warn!("Failed to send notification: {}", e);

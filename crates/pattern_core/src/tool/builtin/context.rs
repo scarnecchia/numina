@@ -83,12 +83,12 @@ pub struct ContextOutput {
 
 /// Unified tool for managing context
 #[derive(Debug, Clone)]
-pub struct ContextTool<C: surrealdb::Connection + Clone> {
-    pub(crate) handle: AgentHandle<C>,
+pub struct ContextTool {
+    pub(crate) handle: AgentHandle,
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for ContextTool<C> {
+impl AiTool for ContextTool {
     type Input = ContextInput;
     type Output = ContextOutput;
 
@@ -97,7 +97,12 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for ContextTool<
     }
 
     fn description(&self) -> &str {
-        "Manage context sections (persona, human, etc). Context is always visible and shapes agent behavior. No need to read - it's already in your messages. Operations: append, replace, archive, load_from_archival, swap."
+        "Manage context sections (persona, human, etc). Context is always visible and shapes agent behavior. No need to read - it's already in your messages. Operations: append, replace, archive, load_from_archival, swap.
+ - 'append' adds a new chunk of text to the block. avoid duplicate append operations.
+ - 'replace' replaces a section of text (old_content is matched and replaced with new content) within a block. this can be used to delete sections.
+ - 'archive' swaps an entire block to recall memory (only works on 'working' memory, not 'core', requires permissions)
+ - 'load_from_archival' is the reverse, pulling a block from recall memory into working memory for editing/reading
+ - 'swap' replaces a working memory with the requested recall memory, by label"
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
@@ -226,7 +231,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for ContextTool<
     }
 }
 
-impl<C: surrealdb::Connection + Clone> ContextTool<C> {
+impl ContextTool {
     async fn execute_append(&self, name: String, content: String) -> Result<ContextOutput> {
         // Check if the block exists first
         if !self.handle.memory.contains_block(&name) {

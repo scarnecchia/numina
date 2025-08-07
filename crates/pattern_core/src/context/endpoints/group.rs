@@ -23,10 +23,24 @@ pub struct GroupEndpoint {
 impl MessageEndpoint for GroupEndpoint {
     async fn send(
         &self,
-        message: Message,
-        _metadata: Option<Value>,
+        mut message: Message,
+        metadata: Option<Value>,
         _origin: Option<&MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
+        // Merge any provided metadata into the message
+        if let Some(meta) = metadata {
+            if let Some(obj) = meta.as_object() {
+                // Merge with existing custom metadata
+                if let Some(existing_obj) = message.metadata.custom.as_object_mut() {
+                    for (key, value) in obj {
+                        existing_obj.insert(key.clone(), value.clone());
+                    }
+                } else {
+                    message.metadata.custom = meta;
+                }
+            }
+        }
+
         let mut stream = self
             .manager
             .route_message(&self.group, &self.agents, message)
@@ -58,7 +72,7 @@ impl MessageEndpoint for GroupEndpoint {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn endpoint_type(&self) -> &'static str {

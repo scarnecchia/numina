@@ -21,7 +21,7 @@ use pattern_core::{
         builtin::{DataSourceTool, MessageTarget},
     },
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use surrealdb::RecordId;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
@@ -166,7 +166,7 @@ pub async fn load_or_create_agent(
         };
 
         // Load memories and messages
-        load_agent_memories_and_messages(&mut existing_agent).await?;
+        load_agent_memories_and_messages(&mut existing_agent, &output).await?;
 
         output.kv("ID", &existing_agent.id.to_string().dimmed().to_string());
         output.kv(
@@ -210,9 +210,10 @@ pub async fn load_or_create_agent(
 }
 
 /// Load memory blocks and messages for an AgentRecord
-pub async fn load_agent_memories_and_messages(agent_record: &mut AgentRecord) -> Result<()> {
-    let output = Output::new();
-
+pub async fn load_agent_memories_and_messages(
+    agent_record: &mut AgentRecord,
+    output: &Output,
+) -> Result<()> {
     // Manually load message history since the macro doesn't handle edge entities properly yet
     agent_record.messages = agent_record
         .load_message_history(&DB, false)
@@ -464,6 +465,7 @@ pub async fn create_agent_from_record_with_tracker(
     constellation_tracker: Option<
         Arc<pattern_core::constellation_memory::ConstellationActivityTracker>,
     >,
+    output: &Output,
 ) -> Result<Arc<dyn Agent>> {
     let (model_provider, embedding_provider, response_options) =
         load_model_embedding_providers(model_name, config, Some(&record), enable_tools).await?;
@@ -492,7 +494,7 @@ pub async fn create_agent_from_record_with_tracker(
         // Check if agent already has a constellation_activity block
         let existing_block = agent.get_memory("constellation_activity").await?;
 
-        if let Some(existing) = existing_block {
+        let _block = if let Some(existing) = existing_block {
             // Reuse the existing block's ID to avoid duplicates
             tracing::info!(
                 "Found existing constellation_activity block with id: {}",
@@ -505,8 +507,10 @@ pub async fn create_agent_from_record_with_tracker(
                     tracker.format_as_memory_content().await,
                 );
             agent
-                .update_memory("constellation_activity", updated_block)
+                .update_memory("constellation_activity", updated_block.clone())
                 .await?;
+
+            updated_block
         } else {
             // Check database for any existing constellation_activity blocks for this agent
             tracing::info!("No constellation_activity block in memory, checking database");
@@ -535,8 +539,10 @@ pub async fn create_agent_from_record_with_tracker(
                         tracker.format_as_memory_content().await,
                     );
                 agent
-                    .update_memory("constellation_activity", updated_block)
+                    .update_memory("constellation_activity", updated_block.clone())
                     .await?;
+
+                updated_block
             } else {
                 // Really first time - create new block with the tracker's memory ID
                 tracing::info!(
@@ -550,30 +556,43 @@ pub async fn create_agent_from_record_with_tracker(
                         tracker.format_as_memory_content().await,
                     );
                 agent
-                    .update_memory("constellation_activity", activity_block)
+                    .update_memory("constellation_activity", activity_block.clone())
                     .await?;
+
+                activity_block
             }
-        }
+        };
 
         // Set the tracker on the agent's context
         agent.set_constellation_tracker(tracker);
+
+        tracing::debug!("persisting constellation tracker memory");
+        // ops::persist_agent_memory(
+        //     &DB,
+        //     agent.id(),
+        //     &block,
+        //     pattern_core::memory::MemoryPermission::ReadWrite,
+        // )
+        // .await?;
     }
 
     // Wrap in Arc before calling monitoring methods
     let agent = Arc::new(agent);
+
+    tokio::time::sleep(Duration::from_millis(112)).await;
     agent.clone().start_stats_sync().await?;
     agent.clone().start_memory_sync().await?;
     agent.clone().start_message_monitoring().await?;
 
-    // Register data sources
-    register_data_sources(agent.clone(), config, tools, embedding_provider).await;
+    // NOTE: We do NOT register data sources here - that's handled by the caller
+    // This function should only create the agent without side effects
+    //
 
     // Convert to trait object for endpoint setup
     let agent_dyn: Arc<dyn Agent> = agent;
 
     // Set up Bluesky endpoint if configured
-    let output = Output::new();
-    setup_bluesky_endpoint(&agent_dyn, config, &output)
+    setup_bluesky_endpoint(&agent_dyn, config, output)
         .await
         .inspect_err(|e| {
             tracing::error!("Failed to setup Bluesky endpoint: {:?}", e);
@@ -583,7 +602,7 @@ pub async fn create_agent_from_record_with_tracker(
 }
 
 pub async fn register_data_sources<M, E>(
-    agent: Arc<DatabaseAgent<surrealdb::engine::any::Any, M, E>>,
+    agent: Arc<DatabaseAgent<M, E>>,
     config: &PatternConfig,
     tools: ToolRegistry,
     embedding_provider: Option<Arc<E>>,
@@ -594,8 +613,163 @@ pub async fn register_data_sources<M, E>(
     register_data_sources_with_target(agent, config, tools, embedding_provider, None).await
 }
 
+/// Create an agent from a record with data sources configured for a group
+#[allow(dead_code)]
+pub async fn create_agent_from_record_with_data_sources(
+    record: AgentRecord,
+    model_name: Option<String>,
+    enable_tools: bool,
+    config: &PatternConfig,
+    heartbeat_sender: pattern_core::context::heartbeat::HeartbeatSender,
+    constellation_tracker: Option<
+        Arc<pattern_core::constellation_memory::ConstellationActivityTracker>,
+    >,
+    group_id: Option<pattern_core::id::GroupId>,
+    _group_name: Option<String>,
+) -> Result<Arc<dyn Agent>> {
+    // Use the existing function to create model and embedding providers
+    let (model_provider, embedding_provider, response_options) =
+        load_model_embedding_providers(model_name, config, Some(&record), enable_tools).await?;
+
+    // Create tool registry
+    let tools = ToolRegistry::new();
+
+    // Create agent from the record
+    let agent = DatabaseAgent::from_record(
+        record,
+        DB.clone(),
+        model_provider,
+        tools.clone(),
+        embedding_provider.clone(),
+        heartbeat_sender,
+    )
+    .await?;
+
+    // Set the chat options with our selected model
+    {
+        let mut options = agent.chat_options.write().await;
+        *options = Some(response_options);
+    }
+
+    // Wrap in Arc before calling monitoring methods
+    let agent = Arc::new(agent);
+    agent.clone().start_stats_sync().await?;
+    agent.clone().start_memory_sync().await?;
+    agent.clone().start_message_monitoring().await?;
+
+    // Set constellation tracker if provided
+    if let Some(tracker) = constellation_tracker.clone() {
+        agent.set_constellation_tracker(tracker);
+    }
+
+    // If group_id is provided, DON'T set up data sources yet
+    // They will be started after the group endpoint is registered
+    let has_group = group_id.is_some();
+    if !has_group {
+        // No group - use regular data sources
+        register_data_sources(agent.clone(), config, tools, embedding_provider).await;
+    }
+
+    // Convert to trait object
+    let agent_dyn: Arc<dyn Agent> = agent;
+
+    // Set up endpoints - skip Bluesky endpoint since we're routing to group
+
+    let output = Output::new();
+    setup_bluesky_endpoint(&agent_dyn, config, &output).await?;
+
+    // Only register CLI endpoint if NOT part of a group
+    // When part of a group, chat_with_group will register both CLI and Group endpoints
+    if !has_group {
+        // Register CLI endpoint
+        agent_dyn
+            .set_default_user_endpoint(Arc::new(CliEndpoint::new(output)))
+            .await?;
+    }
+
+    Ok(agent_dyn)
+}
+
+/// Register data sources for a trait object agent
+#[allow(dead_code)]
+async fn register_data_sources_for_agent_dyn<E>(
+    agent: Arc<dyn Agent>,
+    config: &PatternConfig,
+    tools: ToolRegistry,
+    embedding_provider: Arc<E>,
+    target: Option<MessageTarget>,
+) where
+    E: EmbeddingProvider + Clone + 'static,
+{
+    let config = config.clone();
+    let agent_name = agent.name();
+
+    tracing::info!(
+        "register_data_sources_for_agent_dyn called for agent: {}",
+        agent_name
+    );
+
+    // hardcoding so that only pattern gets messages initially
+    if agent_name == "Pattern" {
+        tracing::info!("Starting data source setup for Pattern agent");
+        tokio::spawn(async move {
+            let filter = config
+                .bluesky
+                .as_ref()
+                .and_then(|b| b.default_filter.as_ref())
+                .unwrap_or(&BlueskyFilter {
+                    exclude_keywords: vec!["patternstop".to_string()],
+                    ..Default::default()
+                })
+                .clone();
+            tracing::info!("filter: {:?}", filter);
+            let mut data_sources = if let Some(target) = target {
+                DataSourceBuilder::new()
+                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .build_with_target(
+                        agent.id(),
+                        agent.name(),
+                        DB.clone(),
+                        Some(embedding_provider),
+                        Some(agent.handle().await),
+                        get_bluesky_credentials(&config).await,
+                        target,
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                DataSourceBuilder::new()
+                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .build(
+                        agent.id(),
+                        agent.name(),
+                        DB.clone(),
+                        Some(embedding_provider),
+                        Some(agent.handle().await),
+                        get_bluesky_credentials(&config).await,
+                    )
+                    .await
+                    .unwrap()
+            };
+
+            tracing::info!("Starting Jetstream monitoring...");
+            data_sources
+                .start_monitoring("bluesky_jetstream")
+                .await
+                .unwrap();
+            tracing::info!("✓ Jetstream monitoring started successfully");
+            tools.register(DataSourceTool::new(Arc::new(RwLock::new(data_sources))));
+        });
+    } else {
+        tracing::info!(
+            "Skipping data source setup for agent: {} (not Pattern)",
+            agent_name
+        );
+    }
+}
+
 pub async fn register_data_sources_with_target<M, E>(
-    agent: Arc<DatabaseAgent<surrealdb::engine::any::Any, M, E>>,
+    agent: Arc<DatabaseAgent<M, E>>,
     config: &PatternConfig,
     tools: ToolRegistry,
     embedding_provider: Option<Arc<E>>,
@@ -1134,7 +1308,7 @@ pub async fn chat_with_agent(
     crate::tracing_writer::set_shared_writer(writer.clone());
 
     // Create output with SharedWriter for proper concurrent output
-    let output = Output::new().with_writer(writer.clone());
+    let output = output.with_writer(writer.clone());
 
     // Register CLI endpoint on all agents in the group
     let cli_endpoint = Arc::new(CliEndpoint::new(output.clone()));
@@ -1351,7 +1525,7 @@ pub async fn load_or_create_agent_from_member(
         };
 
         // Load memories and messages
-        load_agent_memories_and_messages(&mut agent_record).await?;
+        load_agent_memories_and_messages(&mut agent_record, &output).await?;
 
         // Create runtime agent from record (reusing existing function)
         // Build a config that preserves the bluesky_handle from main_config if available
@@ -1563,18 +1737,41 @@ pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
     group: AgentGroup,
     agents: Vec<Arc<dyn Agent>>,
     pattern_manager: M,
-    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    heartbeat_receiver: heartbeat::HeartbeatReceiver,
 ) -> Result<()> {
-    use pattern_core::coordination::groups::AgentWithMembership;
-    use rustyline_async::{Readline, ReadlineEvent};
+    use rustyline_async::Readline;
 
-    let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
+    let (rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
 
     // Update the global tracing writer to use the SharedWriter
     crate::tracing_writer::set_shared_writer(writer.clone());
 
     // Create output with SharedWriter for proper concurrent output
     let output = Output::new().with_writer(writer.clone());
+
+    // Initialize group chat
+    let agents_with_membership = init_group_chat(&group, agents, &pattern_manager, &output).await?;
+
+    // Run the chat loop
+    run_group_chat_loop(
+        group,
+        agents_with_membership,
+        pattern_manager,
+        heartbeat_receiver,
+        output,
+        rl,
+    )
+    .await
+}
+
+/// Initialize group chat and return the agents with membership data
+async fn init_group_chat<M: GroupManager + Clone + 'static>(
+    group: &AgentGroup,
+    agents: Vec<Arc<dyn Agent>>,
+    pattern_manager: &M,
+    output: &Output,
+) -> Result<Vec<AgentWithMembership<Arc<dyn Agent>>>> {
+    use pattern_core::coordination::groups::AgentWithMembership;
 
     // Register CLI endpoint now that we have the output with SharedWriter
     let cli_endpoint = Arc::new(CliEndpoint::new(output.clone()));
@@ -1612,11 +1809,31 @@ pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
     });
 
     // Register the endpoint with each agent's message router
+    tracing::info!(
+        "Registering group endpoint for {} agents",
+        agents_with_membership.len()
+    );
     for awm in &agents_with_membership {
+        tracing::debug!("Registering group endpoint for agent: {}", awm.agent.name());
         awm.agent
             .register_endpoint("group".to_string(), group_endpoint.clone())
             .await?;
     }
+    tracing::info!("✓ Group endpoint registered for all agents");
+
+    Ok(agents_with_membership)
+}
+
+/// Run the group chat loop with initialized agents
+async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
+    group: AgentGroup,
+    agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
+    pattern_manager: M,
+    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    output: Output,
+    mut rl: rustyline_async::Readline,
+) -> Result<()> {
+    use rustyline_async::ReadlineEvent;
 
     // Clone agents for heartbeat handler
     let agents_for_heartbeat: Vec<Arc<dyn Agent>> = agents_with_membership
@@ -1888,9 +2105,16 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
     no_tools: bool,
     config: &PatternConfig,
 ) -> Result<()> {
-    use pattern_core::tool::builtin::{MessageTarget, TargetType};
+    use rustyline_async::Readline;
 
-    let output = Output::new();
+    // Create readline and output ONCE here
+    let (rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;
+
+    // Update the global tracing writer to use the SharedWriter
+    crate::tracing_writer::set_shared_writer(writer.clone());
+
+    // Create output with SharedWriter for proper concurrent output
+    let output = Output::new().with_writer(writer.clone());
 
     // Load the group from database
     let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
@@ -1918,12 +2142,19 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
     // Load all agents in the group
     tracing::info!("Group has {} members to load", group.members.len());
     let mut agents = Vec::new();
+    let mut pattern_agent_index = None;
 
-    for (mut agent_record, _membership) in group.members.clone() {
+    // First pass: create all agents WITHOUT data sources
+    for (i, (mut agent_record, _membership)) in group.members.clone().into_iter().enumerate() {
         // Load memories and messages for the agent
-        load_agent_memories_and_messages(&mut agent_record).await?;
+        load_agent_memories_and_messages(&mut agent_record, &output).await?;
 
-        // Create runtime agent from record with constellation tracker
+        // Check if this is the Pattern agent
+        if agent_record.name == "Pattern" {
+            pattern_agent_index = Some(i);
+        }
+
+        // Create agent using regular method (no data sources yet)
         let agent = create_agent_from_record_with_tracker(
             agent_record.clone(),
             model.clone(),
@@ -1931,19 +2162,9 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
             config,
             heartbeat_sender.clone(),
             Some(constellation_tracker.clone()),
+            &output,
         )
         .await?;
-
-        // Keep track of Pattern agent if it's in the group
-        if agent.name() == "Pattern" {
-            // We need the DatabaseAgent, not the dyn Agent
-            // This function needs to keep track of the concrete type
-            // For now, we'll modify this later to properly support data sources
-            output.warning(
-                "Data source routing to groups requires Pattern agent setup modifications",
-            );
-        }
-
         agents.push(agent);
     }
 
@@ -1956,12 +2177,148 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
         return Ok(());
     }
 
-    // Start the group chat
-    output.success("Starting group chat...");
-    output.info("Group:", &group.name.bright_cyan().to_string());
-    output.info("Pattern:", &format!("{:?}", group.coordination_pattern));
-    output.info("Members:", &format!("{} agents", agents.len()));
-    output.warning("Note: Jetstream routing to groups requires additional setup");
+    if pattern_agent_index.is_none() {
+        output.warning("Pattern agent not found in group - Jetstream routing unavailable");
+        output.info(
+            "Hint:",
+            "Add Pattern agent with: pattern-cli group add-member <group> Pattern",
+        );
+    }
 
-    chat_with_group(group, agents, pattern_manager, heartbeat_receiver).await
+    // Save pattern agent reference before moving agents vec
+    let pattern_agent_ref = pattern_agent_index.map(|idx| agents[idx].clone());
+
+    // Initialize group chat (registers CLI and Group endpoints)
+    let agents_with_membership = init_group_chat(&group, agents, &pattern_manager, &output).await?;
+
+    // Now that group endpoint is registered, set up data sources if we have Pattern agent
+    if let Some(pattern_agent) = pattern_agent_ref {
+        if config.bluesky.is_some() {
+            output.info("Jetstream:", "Setting up data source routing to group...");
+
+            // Set up data sources with group as target
+            let group_target = pattern_core::tool::builtin::MessageTarget {
+                target_type: pattern_core::tool::builtin::TargetType::Group,
+                target_id: Some(group.id.to_string()),
+            };
+
+            // We need to get the tools and embedding provider from somewhere...
+            // For now, let's create them fresh (not ideal but works)
+            let tools = pattern_core::tool::ToolRegistry::new();
+            let embedding_provider = if let Ok((_, embedding_provider, _)) =
+                load_model_embedding_providers(None, config, None, true).await
+            {
+                embedding_provider
+            } else {
+                None
+            };
+
+            // Register data sources NOW (not in a spawn) since group endpoint is ready
+            if let Some(embedding_provider) = embedding_provider {
+                tracing::info!(
+                    "Registering data sources with group target: {:?}",
+                    group_target
+                );
+
+                // Set up data sources synchronously (not in a spawn)
+                let filter = config
+                    .bluesky
+                    .as_ref()
+                    .and_then(|b| b.default_filter.as_ref())
+                    .unwrap_or(&BlueskyFilter {
+                        exclude_keywords: vec!["patternstop".to_string()],
+                        ..Default::default()
+                    })
+                    .clone();
+
+                tracing::info!("filter: {:?}", filter);
+
+                let mut data_sources = DataSourceBuilder::new()
+                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .build_with_target(
+                        pattern_agent.id(),
+                        pattern_agent.name(),
+                        DB.clone(),
+                        Some(embedding_provider),
+                        Some(pattern_agent.handle().await),
+                        get_bluesky_credentials(&config).await,
+                        group_target,
+                    )
+                    .await
+                    .map_err(|e| miette::miette!("Failed to build data sources: {}", e))?;
+
+                // Note: We'll register endpoints on the data source's router after creating it
+
+                tracing::info!("Starting Jetstream monitoring...");
+                data_sources
+                    .start_monitoring("bluesky_jetstream")
+                    .await
+                    .map_err(|e| miette::miette!("Failed to start monitoring: {}", e))?;
+
+                tracing::info!("✓ Jetstream monitoring started successfully");
+
+                // Register endpoints on the data source's router
+                let data_sources_router = data_sources.router();
+
+                // Register the CLI endpoint as default user endpoint
+                data_sources_router
+                    .register_endpoint(
+                        "user".to_string(),
+                        Arc::new(CliEndpoint::new(output.clone())),
+                    )
+                    .await;
+
+                // Register the group endpoint so it can route to the group
+                let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
+                    group: group.clone(),
+                    agents: agents_with_membership.clone(),
+                    manager: Arc::new(pattern_manager.clone()),
+                    output: output.clone(),
+                });
+                data_sources_router
+                    .register_endpoint("group".to_string(), group_endpoint)
+                    .await;
+
+                tools.register(DataSourceTool::new(Arc::new(RwLock::new(data_sources))));
+
+                output.success("✓ Jetstream routing configured for group");
+            }
+        }
+    }
+
+    // Now run the chat loop
+    run_group_chat_loop(
+        group.clone(),
+        agents_with_membership,
+        pattern_manager.clone(),
+        heartbeat_receiver,
+        output.clone(),
+        rl,
+    )
+    .await
+}
+
+/// Internal helper that sets up group chat without starting data sources
+#[allow(dead_code)]
+async fn chat_with_group_internal<M: GroupManager + Clone + 'static>(
+    group: AgentGroup,
+    agents: Vec<Arc<dyn Agent>>,
+    pattern_manager: M,
+    heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    output: Output,
+    rl: rustyline_async::Readline,
+) -> Result<()> {
+    // Initialize group chat
+    let agents_with_membership = init_group_chat(&group, agents, &pattern_manager, &output).await?;
+
+    // Run the chat loop
+    run_group_chat_loop(
+        group,
+        agents_with_membership,
+        pattern_manager,
+        heartbeat_receiver,
+        output,
+        rl,
+    )
+    .await
 }

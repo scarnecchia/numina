@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use surrealdb::Connection;
 
 use crate::data_source::DataIngestionCoordinator;
 use crate::embeddings::EmbeddingProvider;
@@ -18,12 +17,12 @@ fn default_limit() -> i64 {
 
 /// Tool for managing data sources that feed into agents
 #[derive(Debug, Clone)]
-pub struct DataSourceTool<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> {
-    coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<C, E>>>,
+pub struct DataSourceTool<E: EmbeddingProvider + Clone> {
+    coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<E>>>,
 }
 
-impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> DataSourceTool<C, E> {
-    pub fn new(coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<C, E>>>) -> Self {
+impl<E: EmbeddingProvider + Clone> DataSourceTool<E> {
+    pub fn new(coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<E>>>) -> Self {
         Self { coordinator }
     }
 }
@@ -92,9 +91,7 @@ pub struct DataSourceOutput {
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + Clone + Debug, E: EmbeddingProvider + Clone + 'static> AiTool
-    for DataSourceTool<C, E>
-{
+impl<E: EmbeddingProvider + Clone + 'static> AiTool for DataSourceTool<E> {
     type Input = DataSourceInput;
     type Output = DataSourceOutput;
 
@@ -310,12 +307,9 @@ Sources must be configured separately before they can be used."#,
 }
 
 /// Register the data source tool with the registry
-pub fn register_data_source_tool<
-    C: Connection + Clone + Debug,
-    E: EmbeddingProvider + Clone + 'static,
->(
+pub fn register_data_source_tool<E: EmbeddingProvider + Clone + 'static>(
     registry: &mut ToolRegistry,
-    coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<C, E>>>,
+    coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<E>>>,
 ) -> Result<()> {
     registry.register(DataSourceTool::new(coordinator));
     Ok(())

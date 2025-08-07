@@ -31,7 +31,7 @@ impl MessageEndpoint for CliEndpoint {
         message: Message,
         _metadata: Option<Value>,
         origin: Option<&MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         // Extract text content from the message
         let text = match &message.content {
             MessageContent::Text(text) => text.as_str(),
@@ -68,7 +68,7 @@ impl MessageEndpoint for CliEndpoint {
         }
         self.output.agent_message("Pattern", text);
 
-        Ok(())
+        Ok(None)
     }
 
     fn endpoint_type(&self) -> &'static str {
@@ -88,19 +88,34 @@ pub struct GroupCliEndpoint {
 impl MessageEndpoint for GroupCliEndpoint {
     async fn send(
         &self,
-        message: Message,
-        _metadata: Option<Value>,
+        mut message: Message,
+        metadata: Option<Value>,
         origin: Option<&MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
+        // Show origin info if provided
+        if let Some(origin) = origin {
+            self.output.info("Message from:", &origin.description());
+            self.output.list_item(message.content.text().unwrap_or("")); // temporarily to see formatting
+        }
+
+        // Merge any provided metadata into the message
+        if let Some(meta) = metadata {
+            if let Some(obj) = meta.as_object() {
+                // Merge with existing custom metadata
+                if let Some(existing_obj) = message.metadata.custom.as_object_mut() {
+                    for (key, value) in obj {
+                        existing_obj.insert(key.clone(), value.clone());
+                    }
+                } else {
+                    message.metadata.custom = meta;
+                }
+            }
+        }
+
         let mut stream = self
             .manager
             .route_message(&self.group, &self.agents, message)
             .await?;
-
-        // Show origin info if provided
-        if let Some(origin) = origin {
-            self.output.info("Message from:", &origin.description());
-        }
 
         while let Some(event) = stream.next().await {
             match event {
@@ -121,24 +136,19 @@ impl MessageEndpoint for GroupCliEndpoint {
                         .info(&format!("{} ({:?})", agent_name, role), "starting response");
                 }
                 GroupResponseEvent::TextChunk {
-                    agent_id: _,
+                    agent_id,
                     text,
                     is_final: _,
                 } => {
-                    // Stream the text directly (output handles formatting)
-                    print!("{}", text);
-                    use std::io::{self, Write};
-                    let _ = io::stdout().flush();
+                    self.output.agent_message(&agent_id.to_string(), &text);
                 }
                 GroupResponseEvent::ReasoningChunk {
-                    agent_id: _,
+                    agent_id,
                     text,
                     is_final: _,
                 } => {
-                    // Show thinking in dimmed style
-                    print!("{}", text.dimmed());
-                    use std::io::{self, Write};
-                    let _ = io::stdout().flush();
+                    let string = format!("{} reasoning\n{}", agent_id, text.dimmed());
+                    self.output.working(&string);
                 }
                 GroupResponseEvent::ToolCallStarted {
                     agent_id: _,
@@ -192,14 +202,13 @@ impl MessageEndpoint for GroupCliEndpoint {
                         ),
                     );
                 }
-                _ => {} // Other events we don't need to display
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn endpoint_type(&self) -> &'static str {
-        "group_cli"
+        "group"
     }
 }

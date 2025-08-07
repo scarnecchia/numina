@@ -799,6 +799,23 @@ pub async fn persist_agent_message<C: Connection>(
     use rand::Rng;
     use tokio::time::{Duration, sleep};
 
+    // Check if this is a coordination message that should not be persisted
+    if let Some(is_coordination) = message
+        .metadata
+        .custom
+        .get("coordination_message")
+        .and_then(|v| v.as_bool())
+    {
+        if is_coordination {
+            tracing::debug!(
+                "Skipping persistence of coordination message for agent {}: message_id={:?}",
+                agent_id,
+                message.id
+            );
+            return Ok(());
+        }
+    }
+
     tracing::debug!(
         "Persisting message for agent {}: message_id={:?}, type={:?}",
         agent_id,

@@ -24,7 +24,7 @@ use super::{
 
 /// Cheap handle to agent internals that built-in tools can hold
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentHandle<C: surrealdb::Connection + Clone = surrealdb::engine::any::Any> {
+pub struct AgentHandle {
     /// The agent's display name
     pub name: String,
     /// Unique identifier for this agent
@@ -39,16 +39,16 @@ pub struct AgentHandle<C: surrealdb::Connection + Clone = surrealdb::engine::any
 
     /// Private database connection for controlled access
     #[serde(skip)]
-    db: Option<surrealdb::Surreal<C>>,
+    db: Option<surrealdb::Surreal<surrealdb::engine::any::Any>>,
 
     /// Message router for sending messages to various targets
     #[serde(skip)]
-    pub(crate) message_router: Option<super::message_router::AgentMessageRouter<C>>,
+    pub(crate) message_router: Option<super::message_router::AgentMessageRouter>,
 }
 
-impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
+impl AgentHandle {
     /// Create a new handle with a database connection
-    pub fn with_db(mut self, db: surrealdb::Surreal<C>) -> Self {
+    pub fn with_db(mut self, db: surrealdb::Surreal<surrealdb::engine::any::Any>) -> Self {
         self.db = Some(db);
         self
     }
@@ -61,14 +61,14 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
     /// Set the message router for this handle
     pub fn with_message_router(
         mut self,
-        router: super::message_router::AgentMessageRouter<C>,
+        router: super::message_router::AgentMessageRouter,
     ) -> Self {
         self.message_router = Some(router);
         self
     }
 
     /// Get the message router for this handle
-    pub fn message_router(&self) -> Option<&super::message_router::AgentMessageRouter<C>> {
+    pub fn message_router(&self) -> Option<&super::message_router::AgentMessageRouter> {
         self.message_router.as_ref()
     }
 
@@ -374,7 +374,7 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
         let agents_query = format!(
             r#"SELECT id, name FROM agent WHERE id IN (
                 -- Direct agents in the constellation
-                SELECT VALUE out FROM constellation_agents 
+                SELECT VALUE out FROM constellation_agents
                 WHERE in = {}
                 -- UNION with agents from groups in the constellation
                 UNION
@@ -408,7 +408,7 @@ impl<C: surrealdb::Connection + Clone> AgentHandle<C> {
             r#"SELECT in AS agent_id, out AS message FROM agent_messages
             WHERE in IN (
                 -- Direct agents in the constellation
-                SELECT VALUE out FROM constellation_agents 
+                SELECT VALUE out FROM constellation_agents
                 WHERE in = {}
                 -- UNION with agents from groups in the constellation
                 UNION
@@ -613,9 +613,9 @@ impl MessageHistory {
 
 /// Represents the complete state of an agent
 #[derive(Clone)]
-pub struct AgentContext<C: surrealdb::Connection + Clone = surrealdb::engine::any::Any> {
+pub struct AgentContext {
     /// Cheap, frequently accessed stuff
-    pub handle: AgentHandle<C>,
+    pub handle: AgentHandle,
 
     /// Tools available to this agent
     pub tools: ToolRegistry,
@@ -665,7 +665,7 @@ impl Default for AgentContextMetadata {
     }
 }
 
-impl<C: surrealdb::Connection + Clone> AgentContext<C> {
+impl AgentContext {
     /// Create a new agent state
     pub fn new(
         agent_id: AgentId,
@@ -698,7 +698,7 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
     }
 
     /// Get a cheap handle to agent internals
-    pub fn handle(&self) -> AgentHandle<C> {
+    pub fn handle(&self) -> AgentHandle {
         self.handle.clone()
     }
 
@@ -810,15 +810,88 @@ impl<C: surrealdb::Connection + Clone> AgentContext<C> {
                         call.call_id
                     );
                     false
-                } else {
+                } else if metadata.tool_call_ids.contains(&call.call_id) {
                     metadata.tool_response_ids.insert(call.call_id.clone());
                     true
+                } else {
+                    tracing::debug!(
+                        "Filtering out unpaired tool response with ID: {}",
+                        call.call_id
+                    );
+                    false
                 }
             });
 
             // If all tool calls were duplicates, skip the message entirely
             if calls.is_empty() && original_count > 0 {
                 tracing::debug!("All tool responses were duplicates, skipping message");
+                return;
+            }
+
+            {
+                let mut history = self.history.write().await;
+                if let Some(last) = history.messages.last().clone() {
+                    if !matches!(
+                        last.content,
+                        MessageContent::ToolCalls(_) | MessageContent::Blocks(_),
+                    ) {
+                        history.messages.pop();
+                        return;
+                    }
+                }
+            }
+        }
+
+        if let MessageContent::Blocks(blocks) = &mut message.content {
+            let mut metadata = self.metadata.write().await;
+            let mut should_keep = false;
+            for block in blocks {
+                match block {
+                    crate::message::ContentBlock::ToolUse { id, .. } => {
+                        if metadata.tool_response_ids.contains(id) {
+                            tracing::debug!("Filtering out duplicate tool call with ID: {}", id);
+                            should_keep = false;
+                        } else {
+                            metadata.tool_response_ids.insert(id.clone());
+                            should_keep = true;
+                            metadata.total_tool_calls += 1;
+                        }
+                    }
+                    crate::message::ContentBlock::ToolResult { tool_use_id, .. } => {
+                        if metadata.tool_response_ids.contains(tool_use_id) {
+                            tracing::debug!(
+                                "Filtering out duplicate tool response with ID: {}",
+                                tool_use_id
+                            );
+                            should_keep = false;
+                        } else if metadata.tool_call_ids.contains(tool_use_id) {
+                            metadata.tool_response_ids.insert(tool_use_id.clone());
+                            should_keep = true;
+                        } else {
+                            tracing::debug!(
+                                "Filtering out unpaired tool response with ID: {}",
+                                tool_use_id
+                            );
+                            should_keep = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            {
+                let mut history = self.history.write().await;
+                if let Some(last) = history.messages.last().clone() {
+                    if !matches!(
+                        last.content,
+                        MessageContent::ToolCalls(_) | MessageContent::Blocks(_),
+                    ) {
+                        history.messages.pop();
+                        return;
+                    }
+                }
+            }
+            if !should_keep {
+                tracing::debug!("duplicate or unpaired tool responses, skipping message");
                 return;
             }
         }

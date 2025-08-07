@@ -70,12 +70,12 @@ pub struct SearchOutput {
 
 /// Unified search tool
 #[derive(Debug, Clone)]
-pub struct SearchTool<C: surrealdb::Connection + Clone> {
-    pub(crate) handle: AgentHandle<C>,
+pub struct SearchTool {
+    pub(crate) handle: AgentHandle,
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C> {
+impl AiTool for SearchTool {
     type Input = SearchInput;
     type Output = SearchOutput;
 
@@ -84,7 +84,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C
     }
 
     fn description(&self) -> &str {
-        "Unified search across different domains (archival_memory, conversations, constellation_messages, all). Returns relevant results based on query and filters. Use constellation_messages to search messages from all agents in your constellation."
+        "Unified search across different domains (archival_memory, conversations, constellation_messages, all). Returns relevant results based on query and filters. Use constellation_messages to search messages from all agents in your constellation. archival_memory domain searches your recall memory."
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
@@ -205,7 +205,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SearchTool<C
     }
 }
 
-impl<C: surrealdb::Connection + Clone> SearchTool<C> {
+impl SearchTool {
     async fn search_archival(&self, query: &str, limit: usize) -> Result<SearchOutput> {
         // Try to use database if available
         if self.handle.has_db_connection() {

@@ -16,7 +16,7 @@ chunk_size = 20
 summarization_model = "claude-3-5-haiku-20241022"
 
 [context]
-max_messages = 100
+max_messages = 500
 
 # Shared memory blocks
 [memory.current_human]

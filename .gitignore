@@ -13,3 +13,5 @@ CLAUDE.md.local
 mcp-wrapper.sh
 /logs
 **/**.db
+**.txt
+**.car

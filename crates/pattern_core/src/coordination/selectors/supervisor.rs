@@ -67,13 +67,18 @@ impl AgentSelector for SupervisorSelector {
         // Build prompt for supervisor
         let prompt = build_selection_prompt(&context.message, agents, config);
 
-        // Create a message for the supervisor
+        // Create a message for the supervisor with coordination metadata
+        let mut metadata = crate::message::MessageMetadata::default();
+        metadata.custom = serde_json::json!({
+            "coordination_message": true
+        });
+
         let supervisor_message = Message {
             id: crate::MessageId::generate(),
             role: ChatRole::User,
             owner_id: None,
             content: MessageContent::from_text(prompt),
-            metadata: Default::default(),
+            metadata,
             options: Default::default(),
             has_tool_calls: false,
             word_count: 0,
@@ -120,16 +125,39 @@ impl AgentSelector for SupervisorSelector {
         // Parse supervisor's response to get selected agent names
         let selected_names = parse_supervisor_response(&response_text);
 
+        tracing::info!(
+            "Supervisor {} response: text='{}', parsed_names={:?}",
+            supervisor.agent.name(),
+            response_text.trim(),
+            selected_names
+        );
+
         // Check if the response looks like agent names or a direct response
         let is_direct_response = if selected_names.is_empty() {
             // No valid agent names found, check if it's a substantive response
-            response_text.len() > 50 || response_text.contains('.') || response_text.contains('?')
+            let is_substantive = response_text.len() > 50
+                || response_text.contains('.')
+                || response_text.contains('?');
+            tracing::info!(
+                "No agent names found. Response length={}, substantive={}",
+                response_text.len(),
+                is_substantive
+            );
+            is_substantive
         } else {
             // Check if all "names" are actually just single words (likely agent names)
             let all_single_words = selected_names.iter().all(|name| !name.contains(' '));
             let all_match_agents = selected_names
                 .iter()
                 .all(|name| agents.iter().any(|a| a.agent.name() == name.as_str()));
+
+            tracing::info!(
+                "Found {} names. all_single_words={}, all_match_agents={}",
+                selected_names.len(),
+                all_single_words,
+                all_match_agents
+            );
+
             !all_single_words || !all_match_agents
         };
 
@@ -139,8 +167,19 @@ impl AgentSelector for SupervisorSelector {
             _ => true,
         };
 
+        tracing::info!(
+            "Supervisor decision: is_direct_response={}, can_select_self={}, role={:?}",
+            is_direct_response,
+            can_select_self,
+            supervisor.membership.role
+        );
+
         // If supervisor provided a direct response and can select self, return self
         if is_direct_response && can_select_self {
+            tracing::info!(
+                "Supervisor {} selecting self with direct response stream",
+                supervisor.agent.name()
+            );
             // Create a stream that includes the buffered events plus the rest
             use tokio_stream::wrappers::ReceiverStream;
             let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -171,14 +210,22 @@ impl AgentSelector for SupervisorSelector {
             if let Some(awm) = agents.iter().find(|a| a.agent.name() == name) {
                 // Skip self-selection for routing specialists
                 if !can_select_self && awm.agent.id() == supervisor.agent.id() {
+                    tracing::info!(
+                        "Skipping self-selection for routing specialist {}",
+                        supervisor.agent.name()
+                    );
                     continue;
                 }
                 selected.push(awm);
+                tracing::info!("Selected agent: {}", awm.agent.name());
+            } else {
+                tracing::warn!("Agent name '{}' not found in group", name);
             }
         }
 
         // If supervisor didn't select anyone valid, handle fallback
         if selected.is_empty() {
+            tracing::info!("No valid agents selected, applying fallback logic");
             if can_select_self {
                 // Supervisors and non-routing specialists can fall back to themselves
                 selected.push(supervisor);
@@ -191,6 +238,12 @@ impl AgentSelector for SupervisorSelector {
                 }
             }
         }
+
+        tracing::info!(
+            "Supervisor selection complete: {} agents selected: {:?}",
+            selected.len(),
+            selected.iter().map(|a| a.agent.name()).collect::<Vec<_>>()
+        );
 
         Ok(super::SelectionResult {
             agents: selected,

@@ -192,175 +192,198 @@ pub struct Request {
 }
 
 impl Request {
-    /// Remove any trailing unpaired tool calls from messages
-    pub fn clean_unpaired_tool_calls(&mut self) {
-        // Check if the last message contains unpaired tool calls
-        if let Some(last_msg) = self.messages.last() {
-            if matches!(&last_msg.content, MessageContent::ToolCalls(_)) {
-                tracing::warn!("Removing trailing unpaired tool calls from request");
-                self.messages.pop();
-            } else if let MessageContent::Blocks(blocks) = &last_msg.content {
-                // Check if blocks end with tool calls without responses
-                let has_trailing_tool_calls = blocks
-                    .iter()
-                    .rev()
-                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
-                if has_trailing_tool_calls {
-                    tracing::warn!("Found trailing tool calls in blocks, removing last message");
-                    self.messages.pop();
-                }
-            }
-        }
-    }
-
     /// Validate that the request has no orphaned tool calls and proper ordering
-    pub fn validate(&self) -> crate::Result<()> {
-        let mut tool_call_ids = std::collections::HashSet::new();
-        let mut tool_result_ids = std::collections::HashSet::new();
+    pub fn validate(&mut self) -> crate::Result<()> {
+        // let mut tool_call_ids = std::collections::HashSet::new();
+        // let mut tool_result_ids = std::collections::HashSet::new();
 
-        // Also check for immediate ordering (Anthropic requirement)
-        for i in 0..self.messages.len() {
-            let msg = &self.messages[i];
+        // //let mut removal_queue = vec![];
 
-            // Check if this message has tool calls
-            let msg_tool_calls: Vec<String> = match &msg.content {
-                MessageContent::ToolCalls(calls) => {
-                    calls.iter().map(|c| c.call_id.clone()).collect()
-                }
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::ToolUse { id, .. } = b {
-                            Some(id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => vec![],
-            };
+        // // Also check for immediate ordering (Anthropic requirement)
+        // //
+        // tracing::info!("constructing first pass of corrected sequence");
+        // let mut messages = Vec::with_capacity(self.messages.capacity());
 
-            if !msg_tool_calls.is_empty() {
-                // Tool calls found - check if next message has the results
-                if i + 1 >= self.messages.len() {
-                    return Err(crate::CoreError::ConfigurationError {
-                        config_path: "Request.messages".to_string(),
-                        field: "tool_calls".to_string(),
-                        expected: "Tool calls must be immediately followed by tool results"
-                            .to_string(),
-                        cause: crate::error::ConfigError::InvalidValue {
-                            field: format!("messages[{}]", i),
-                            reason: format!(
-                                "tool calls {:?} at end of message list",
-                                msg_tool_calls
-                            ),
-                        },
-                    });
-                }
+        // let mut iter = self.messages.iter().peekable();
+        // while let Some(msg) = iter.next() {
+        //     // Check if this message has tool calls
+        //     let msg_tool_calls: Vec<String> = match &msg.content {
+        //         MessageContent::ToolCalls(calls) => {
+        //             calls.iter().map(|c| c.call_id.clone()).collect()
+        //         }
+        //         MessageContent::Blocks(blocks) => blocks
+        //             .iter()
+        //             .filter_map(|b| {
+        //                 if let ContentBlock::ToolUse { id, .. } = b {
+        //                     Some(id.clone())
+        //                 } else {
+        //                     None
+        //                 }
+        //             })
+        //             .collect(),
+        //         _ => vec![],
+        //     };
+        //     if !msg_tool_calls.is_empty() {
+        //         if let Some(next_msg) = iter.peek() {
+        //             let next_msg_results: Vec<String> = match &next_msg.content {
+        //                 MessageContent::ToolResponses(responses) => {
+        //                     responses.iter().map(|r| r.call_id.clone()).collect()
+        //                 }
+        //                 MessageContent::Blocks(blocks) => blocks
+        //                     .iter()
+        //                     .filter_map(|b| {
+        //                         if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+        //                             Some(tool_use_id.clone())
+        //                         } else {
+        //                             None
+        //                         }
+        //                     })
+        //                     .collect(),
+        //                 _ => vec![],
+        //             };
 
-                let next_msg = &self.messages[i + 1];
-                let next_msg_results: Vec<String> = match &next_msg.content {
-                    MessageContent::ToolResponses(responses) => {
-                        responses.iter().map(|r| r.call_id.clone()).collect()
-                    }
-                    MessageContent::Blocks(blocks) => blocks
-                        .iter()
-                        .filter_map(|b| {
-                            if let ContentBlock::ToolResult { tool_use_id, .. } = b {
-                                Some(tool_use_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
-                    _ => vec![],
-                };
+        //             // Collect all IDs for orphan checking
+        //             match &msg.content {
+        //                 MessageContent::ToolCalls(calls) => {
+        //                     for call in calls {
+        //                         tool_call_ids.insert(call.call_id.clone());
+        //                     }
+        //                     if next_msg_results.iter().all(|t| msg_tool_calls.contains(t)) {
+        //                         tracing::info!("{:?}\n", msg);
+        //                         messages.push(msg.clone());
+        //                     } else {
+        //                         tracing::warn!("skipping {:?}\n", msg);
+        //                     }
+        //                 }
+        //                 MessageContent::ToolResponses(responses) => {
+        //                     tracing::info!("{:?}\n", msg);
+        //                     messages.push(msg.clone());
+        //                     for response in responses {
+        //                         tool_result_ids.insert(response.call_id.clone());
+        //                     }
+        //                 }
+        //                 MessageContent::Blocks(blocks) => {
+        //                     if next_msg_results.iter().all(|t| msg_tool_calls.contains(t)) {
+        //                         tracing::info!("{:?}\n", msg);
+        //                         messages.push(msg.clone());
+        //                     } else {
+        //                         tracing::warn!("skipping {:?}\n", msg);
+        //                     }
+        //                     for block in blocks {
+        //                         match block {
+        //                             ContentBlock::ToolUse { id, .. } => {
+        //                                 tool_call_ids.insert(id.clone());
+        //                             }
+        //                             ContentBlock::ToolResult { tool_use_id, .. } => {
+        //                                 tool_result_ids.insert(tool_use_id.clone());
+        //                             }
+        //                             _ => {}
+        //                         }
+        //                     }
+        //                 }
+        //                 _ => {
+        //                     tracing::info!("{:?}\n", msg);
+        //                     messages.push(msg.clone());
+        //                 }
+        //             }
+        //         } else {
+        //             tracing::warn!("skipping {:?}\n", msg);
+        //         }
+        //     } else {
+        //         tracing::info!("{:?}\n", msg);
+        //         messages.push(msg.clone());
+        //     }
+        // }
 
-                // Check that all tool calls have results in the next message
-                for call_id in &msg_tool_calls {
-                    if !next_msg_results.contains(call_id) {
-                        return Err(crate::CoreError::ConfigurationError {
-                            config_path: "Request.messages".to_string(),
-                            field: "tool_calls".to_string(),
-                            expected: "Tool results must immediately follow tool calls".to_string(),
-                            cause: crate::error::ConfigError::InvalidValue {
-                                field: format!("messages[{}]", i),
-                                reason: format!(
-                                    "tool call '{}' not immediately followed by its result",
-                                    call_id
-                                ),
-                            },
-                        });
-                    }
-                }
-            }
+        // // Check for orphaned tool calls
+        // let orphaned_calls: Vec<_> = tool_call_ids.difference(&tool_result_ids).collect();
 
-            // Collect all IDs for orphan checking
-            match &msg.content {
-                MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        tool_call_ids.insert(call.call_id.clone());
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        tool_result_ids.insert(response.call_id.clone());
-                    }
-                }
-                MessageContent::Blocks(blocks) => {
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                tool_call_ids.insert(id.clone());
-                            }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                tool_result_ids.insert(tool_use_id.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        // // Also check that tool results don't reference non-existent calls
+        // let orphaned_results: Vec<_> = tool_result_ids.difference(&tool_call_ids).collect();
 
-        // Check for orphaned tool calls
-        let orphaned_calls: Vec<_> = tool_call_ids.difference(&tool_result_ids).collect();
-        if !orphaned_calls.is_empty() {
-            return Err(crate::CoreError::ConfigurationError {
-                config_path: "Request.messages".to_string(),
-                field: "tool_calls".to_string(),
-                expected: "All tool_use blocks must have corresponding tool_result blocks"
-                    .to_string(),
-                cause: crate::error::ConfigError::InvalidValue {
-                    field: "messages".to_string(),
-                    reason: format!("orphaned tool call IDs: {:?}", orphaned_calls),
-                },
-            });
-        }
+        // // clear messages and we'll insert the known good ones back in.
+        // self.messages.clear();
 
-        // Also check that tool results don't reference non-existent calls
-        let orphaned_results: Vec<_> = tool_result_ids.difference(&tool_call_ids).collect();
-        if !orphaned_results.is_empty() {
-            return Err(crate::CoreError::ConfigurationError {
-                config_path: "Request.messages".to_string(),
-                field: "tool_results".to_string(),
-                expected: "Tool results must reference existing tool calls".to_string(),
-                cause: crate::error::ConfigError::InvalidValue {
-                    field: "messages".to_string(),
-                    reason: format!("orphaned tool result IDs: {:?}", orphaned_results),
-                },
-            });
-        }
+        // tracing::info!("constructing final message sequence");
 
+        // let mut iter = messages.iter().peekable();
+        // while let Some(msg) = iter.next() {
+        //     // Collect all IDs for orphan checking
+        //     let msg_tool_calls: Vec<String> = match &msg.content {
+        //         MessageContent::ToolCalls(calls) => {
+        //             calls.iter().map(|c| c.call_id.clone()).collect()
+        //         }
+        //         MessageContent::Blocks(blocks) => blocks
+        //             .iter()
+        //             .filter_map(|b| {
+        //                 if let ContentBlock::ToolUse { id, .. } = b {
+        //                     Some(id.clone())
+        //                 } else {
+        //                     None
+        //                 }
+        //             })
+        //             .collect(),
+        //         _ => vec![],
+        //     };
+        //     let has_orphan = match &msg.content {
+        //         MessageContent::ToolCalls(calls) => {
+        //             calls.iter().any(|t| orphaned_calls.contains(&&t.call_id))
+        //         }
+        //         MessageContent::ToolResponses(responses) => responses
+        //             .iter()
+        //             .any(|t| orphaned_results.contains(&&t.call_id)),
+        //         MessageContent::Blocks(blocks) => {
+        //             let mut has_orphan = false;
+        //             for block in blocks {
+        //                 match block {
+        //                     ContentBlock::ToolUse { id, .. } => {
+        //                         has_orphan = orphaned_calls.contains(&&id);
+        //                     }
+        //                     ContentBlock::ToolResult { tool_use_id, .. } => {
+        //                         has_orphan = orphaned_results.contains(&&tool_use_id);
+        //                     }
+        //                     _ => {}
+        //                 }
+        //             }
+        //             has_orphan
+        //         }
+        //         _ => false,
+        //     };
+        //     if !has_orphan {
+        //         if let Some(next_msg) = iter.peek() {
+        //             let next_msg_results: Vec<String> = match &next_msg.content {
+        //                 MessageContent::ToolResponses(responses) => {
+        //                     responses.iter().map(|r| r.call_id.clone()).collect()
+        //                 }
+        //                 MessageContent::Blocks(blocks) => blocks
+        //                     .iter()
+        //                     .filter_map(|b| {
+        //                         if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+        //                             Some(tool_use_id.clone())
+        //                         } else {
+        //                             None
+        //                         }
+        //                     })
+        //                     .collect(),
+        //                 _ => vec![],
+        //             };
+        //             if next_msg_results.iter().all(|t| msg_tool_calls.contains(t)) {
+        //                 tracing::info!("{:?}\n", msg);
+        //                 self.messages.push(msg.clone());
+        //             } else {
+        //                 tracing::warn!("skipping {:?}\n", msg);
+        //             }
+        //         } else {
+        //             tracing::info!("{:?}\n", msg);
+        //             self.messages.push(msg.clone());
+        //         }
+        //     }
+        // }
         Ok(())
     }
 
     /// Convert this request to a genai ChatRequest
     pub fn as_chat_request(&mut self) -> crate::Result<genai::chat::ChatRequest> {
-        // Clean up any trailing unpaired tool calls
-        self.clean_unpaired_tool_calls();
-
         // Validate before converting
         self.validate()?;
 
@@ -1681,7 +1704,7 @@ mod tests {
     #[test]
     fn test_request_validation_with_orphaned_tool_calls() {
         // Create a request with an orphaned tool call
-        let request = Request {
+        let mut request = Request {
             system: Some(vec!["System prompt".to_string()]),
             messages: vec![
                 Message::user("Hello"),
@@ -1706,7 +1729,7 @@ mod tests {
     #[test]
     fn test_request_validation_with_matched_tool_calls() {
         // Create a request with properly matched tool calls
-        let request = Request {
+        let mut request = Request {
             system: Some(vec!["System prompt".to_string()]),
             messages: vec![
                 Message::user("Hello"),
@@ -1732,7 +1755,7 @@ mod tests {
     #[test]
     fn test_request_validation_with_orphaned_tool_results() {
         // Create a request with an orphaned tool result
-        let request = Request {
+        let mut request = Request {
             system: Some(vec!["System prompt".to_string()]),
             messages: vec![
                 Message::user("Hello"),

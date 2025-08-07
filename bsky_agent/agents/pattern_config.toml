@@ -63,7 +63,7 @@ description = "How facets work together"
 
 [memory.constellation_context]
 content_path = "../constellation-context.md"
-permission = "read_only"
+permission = "read_write"
 memory_type = "core"
 description = "Shared understanding of constellation purpose and members"
 shared = true

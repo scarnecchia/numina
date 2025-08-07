@@ -17,14 +17,13 @@ use crate::{
 use surrealdb::Surreal;
 
 /// Create a DataIngestionCoordinator with an agent's ID and name
-pub fn create_coordinator_with_agent_info<C, E>(
+pub fn create_coordinator_with_agent_info<E>(
     agent_id: crate::id::AgentId,
     agent_name: String,
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
     embedding_provider: Option<Arc<E>>,
-) -> DataIngestionCoordinator<C, E>
+) -> DataIngestionCoordinator<E>
 where
-    C: surrealdb::Connection + Clone + 'static,
     E: EmbeddingProvider + Clone + 'static,
 {
     let router = AgentMessageRouter::new(agent_id, agent_name, db);
@@ -33,15 +32,14 @@ where
 }
 
 /// Create a DataIngestionCoordinator that routes to a specific target
-pub async fn create_coordinator_with_target<C, E>(
+pub async fn create_coordinator_with_target<E>(
     agent_id: crate::id::AgentId,
     agent_name: String,
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
     embedding_provider: Option<Arc<E>>,
     target: crate::tool::builtin::MessageTarget,
-) -> DataIngestionCoordinator<C, E>
+) -> DataIngestionCoordinator<E>
 where
-    C: surrealdb::Connection + Clone + 'static,
     E: EmbeddingProvider + Clone + 'static,
 {
     let router = AgentMessageRouter::new(agent_id, agent_name, db);
@@ -51,15 +49,14 @@ where
 }
 
 /// Add a file data source to an agent's coordinator
-pub async fn add_file_source<P: AsRef<Path>, C, E>(
-    coordinator: &mut DataIngestionCoordinator<C, E>,
+pub async fn add_file_source<P: AsRef<Path>, E>(
+    coordinator: &mut DataIngestionCoordinator<E>,
     path: P,
     watch: bool,
     indexed: bool,
     template_path: Option<PathBuf>,
 ) -> Result<()>
 where
-    C: surrealdb::Connection + Clone + 'static,
     E: EmbeddingProvider + Clone + 'static,
 {
     let storage_mode = if indexed {
@@ -96,8 +93,8 @@ where
 }
 
 /// Add a Bluesky firehose source to an agent's coordinator
-pub async fn add_bluesky_source<C, E>(
-    coordinator: &mut DataIngestionCoordinator<C, E>,
+pub async fn add_bluesky_source<E>(
+    coordinator: &mut DataIngestionCoordinator<E>,
     source_id: String,
     endpoint: Option<String>,
     filter: BlueskyFilter,
@@ -105,7 +102,6 @@ pub async fn add_bluesky_source<C, E>(
     bsky_agent: Option<(crate::atproto_identity::AtprotoAuthCredentials, String)>,
 ) -> Result<()>
 where
-    C: surrealdb::Connection + Clone + 'static,
     E: EmbeddingProvider + Clone + 'static,
 {
     let endpoint =
@@ -131,9 +127,9 @@ where
 }
 
 /// Builder for setting up data sources on an agent
-pub struct DataSourceBuilder<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> {
+pub struct DataSourceBuilder<E: EmbeddingProvider + Clone> {
     #[allow(dead_code)]
-    coordinator: Option<DataIngestionCoordinator<C, E>>,
+    coordinator: Option<DataIngestionCoordinator<E>>,
     file_sources: Vec<FileSourceConfig>,
     bluesky_sources: Vec<BlueskySourceConfig>,
 }
@@ -152,7 +148,7 @@ struct BlueskySourceConfig {
     use_agent_handle: bool,
 }
 
-impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> DataSourceBuilder<C, E> {
+impl<E: EmbeddingProvider + Clone> DataSourceBuilder<E> {
     pub fn new() -> Self {
         Self {
             coordinator: None,
@@ -227,11 +223,11 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> DataSourceB
         self,
         agent_id: crate::id::AgentId,
         agent_name: String,
-        db: Surreal<C>,
+        db: Surreal<surrealdb::engine::any::Any>,
         embedding_provider: Option<Arc<E>>,
         agent_handle: Option<AgentHandle>,
         bsky_agent: Option<(crate::atproto_identity::AtprotoAuthCredentials, String)>,
-    ) -> Result<DataIngestionCoordinator<C, E>>
+    ) -> Result<DataIngestionCoordinator<E>>
     where
         E: EmbeddingProvider + Clone + 'static,
     {
@@ -277,12 +273,12 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> DataSourceB
         self,
         agent_id: crate::id::AgentId,
         agent_name: String,
-        db: Surreal<C>,
+        db: Surreal<surrealdb::engine::any::Any>,
         embedding_provider: Option<Arc<E>>,
         agent_handle: Option<AgentHandle>,
         bsky_agent: Option<(crate::atproto_identity::AtprotoAuthCredentials, String)>,
         target: crate::tool::builtin::MessageTarget,
-    ) -> Result<DataIngestionCoordinator<C, E>>
+    ) -> Result<DataIngestionCoordinator<E>>
     where
         E: EmbeddingProvider + Clone + 'static,
     {
@@ -328,15 +324,14 @@ impl<C: surrealdb::Connection + Clone, E: EmbeddingProvider + Clone> DataSourceB
 /// Quick setup functions for common scenarios
 
 /// Monitor a directory for changes and notify the agent
-pub async fn monitor_directory<P, C, E>(
+pub async fn monitor_directory<P, E>(
     agent_id: crate::id::AgentId,
     agent_name: String,
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
     path: P,
-) -> Result<DataIngestionCoordinator<C, E>>
+) -> Result<DataIngestionCoordinator<E>>
 where
     P: AsRef<Path>,
-    C: surrealdb::Connection + Clone + 'static,
     E: EmbeddingProvider + Clone + 'static,
 {
     DataSourceBuilder::new()
@@ -346,17 +341,16 @@ where
 }
 
 /// Create an indexed knowledge base from a directory
-pub async fn create_knowledge_base<P, C, E>(
+pub async fn create_knowledge_base<P, E>(
     agent_id: crate::id::AgentId,
     agent_name: String,
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
     path: P,
     embedding_provider: Arc<E>,
-) -> Result<DataIngestionCoordinator<C, E>>
+) -> Result<DataIngestionCoordinator<E>>
 where
     P: AsRef<Path>,
     E: EmbeddingProvider + Clone + 'static,
-    C: surrealdb::Connection + Clone + 'static,
 {
     DataSourceBuilder::new()
         .with_file_source(path, false, true)
@@ -372,16 +366,15 @@ where
 }
 
 /// Monitor Bluesky for mentions
-pub async fn monitor_bluesky_mentions<C, E>(
+pub async fn monitor_bluesky_mentions<E>(
     agent_id: crate::id::AgentId,
     agent_name: String,
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
     handle: &str,
     agent_handle: Option<AgentHandle>,
-) -> Result<DataIngestionCoordinator<C, E>>
+) -> Result<DataIngestionCoordinator<E>>
 where
     E: EmbeddingProvider + Clone + 'static,
-    C: surrealdb::Connection + Clone + 'static,
 {
     let filter = BlueskyFilter {
         mentions: vec![handle.to_string()],
@@ -399,19 +392,18 @@ where
 }
 
 /// Create a multi-source setup for a fully-featured agent
-pub async fn create_full_data_pipeline<C, E>(
+pub async fn create_full_data_pipeline<E>(
     agent_id: crate::id::AgentId,
     agent_name: String,
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
     knowledge_dir: PathBuf,
     watch_dir: PathBuf,
     bluesky_filter: BlueskyFilter,
     embedding_provider: Arc<E>,
     agent_handle: Option<AgentHandle>,
-) -> Result<DataIngestionCoordinator<C, E>>
+) -> Result<DataIngestionCoordinator<E>>
 where
     E: EmbeddingProvider + Clone + 'static,
-    C: surrealdb::Connection + Clone + 'static,
 {
     DataSourceBuilder::new()
         // Indexed knowledge base

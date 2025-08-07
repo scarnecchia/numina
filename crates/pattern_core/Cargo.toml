@@ -58,6 +58,7 @@ rand = "0.9.2"
 base64 = "0.22"
 sha2 = "0.10"
 url = "2.5"
+urlencoding = "2.1"
 serde_urlencoded = "0.7"
 
 # DAG-CBOR and CAR archive support

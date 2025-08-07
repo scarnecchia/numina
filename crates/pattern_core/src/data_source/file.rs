@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use compact_str::CompactString;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -10,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
+use crate::memory::MemoryBlock;
 
 use super::traits::{DataSource, DataSourceMetadata, DataSourceStatus, Searchable, StreamEvent};
 
@@ -348,7 +350,10 @@ impl DataSource for FileDataSource {
         }
     }
 
-    async fn format_notification(&self, item: &Self::Item) -> Option<String> {
+    async fn format_notification(
+        &self,
+        item: &Self::Item,
+    ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
         let path_str = item.path.display();
         let size_str = if item.metadata.size_bytes > 1024 * 1024 {
             format!(
@@ -361,7 +366,7 @@ impl DataSource for FileDataSource {
             format!("{} bytes", item.metadata.size_bytes)
         };
 
-        match &item.content {
+        let message = match &item.content {
             FileContent::Text(text) => {
                 let preview = if text.lines().count() > 5 {
                     let lines: Vec<&str> = text.lines().take(5).collect();
@@ -373,7 +378,7 @@ impl DataSource for FileDataSource {
                 } else {
                     format!("\n\nContent:\n{}", text)
                 };
-                Some(format!("📄 File: {} ({}){}", path_str, size_str, preview))
+                format!("📄 File: {} ({}){}", path_str, size_str, preview)
             }
             FileContent::Lines(lines) => {
                 let preview = if lines.len() > 5 {
@@ -385,17 +390,20 @@ impl DataSource for FileDataSource {
                 } else {
                     format!("\n\nLines:\n{}", lines.join("\n"))
                 };
-                Some(format!("📋 File: {} ({}){}", path_str, size_str, preview))
+                format!("📋 File: {} ({}){}", path_str, size_str, preview)
             }
             FileContent::Chunk {
                 text,
                 start_line,
                 end_line,
-            } => Some(format!(
+            } => format!(
                 "📄 File: {} (lines {}-{})\n\n{}",
                 path_str, start_line, end_line, text
-            )),
-        }
+            ),
+        };
+
+        // No memory blocks from file source
+        Some((message, vec![]))
     }
 
     fn set_notifications_enabled(&mut self, enabled: bool) {

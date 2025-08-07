@@ -200,10 +200,14 @@ impl MessageOrigin {
                 reason,
             } => {
                 format!(
-                    "Message from agent: {}, reason: {}, content:\n\n{}",
+                    "Message from agent: {}, reason: {}, content:\n\n{}
+You may opt to reply, if you haven't already replied to them recently.
+Only reply if you have something new to add.
+If the conversation has reached a conclusion, internally reflect rather than responding.",
                     name, reason, content
                 )
             }
+
             MessageOrigin::Other {
                 origin_type,
                 source_id,
@@ -228,7 +232,7 @@ pub trait MessageEndpoint: Send + Sync {
         message: Message,
         metadata: Option<Value>,
         origin: Option<&MessageOrigin>,
-    ) -> Result<()>;
+    ) -> Result<Option<String>>;
 
     /// Get the endpoint type name
     fn endpoint_type(&self) -> &'static str;
@@ -236,7 +240,7 @@ pub trait MessageEndpoint: Send + Sync {
 
 /// Routes messages from agents to their destinations
 #[derive(Clone)]
-pub struct AgentMessageRouter<C: surrealdb::Connection = surrealdb::engine::any::Any> {
+pub struct AgentMessageRouter {
     /// The agent this router belongs to
     agent_id: AgentId,
 
@@ -244,24 +248,28 @@ pub struct AgentMessageRouter<C: surrealdb::Connection = surrealdb::engine::any:
     name: String,
 
     /// Database connection for queuing messages
-    db: Surreal<C>,
+    db: Surreal<surrealdb::engine::any::Any>,
 
     /// Map of endpoint types to their implementations
     endpoints: Arc<RwLock<HashMap<String, Arc<dyn MessageEndpoint>>>>,
 
     /// Default endpoint for user messages
     default_user_endpoint: Arc<RwLock<Option<Arc<dyn MessageEndpoint>>>>,
+
+    /// Recent message pairs to prevent rapid loops (key: sorted agent pair, value: last message time)
+    recent_messages: Arc<RwLock<HashMap<String, std::time::Instant>>>,
 }
 
-impl<C: surrealdb::Connection> AgentMessageRouter<C> {
+impl AgentMessageRouter {
     /// Create a new message router for an agent
-    pub fn new(agent_id: AgentId, name: String, db: Surreal<C>) -> Self {
+    pub fn new(agent_id: AgentId, name: String, db: Surreal<surrealdb::engine::any::Any>) -> Self {
         Self {
             agent_id,
             name,
             db,
             endpoints: Arc::new(RwLock::new(HashMap::new())),
             default_user_endpoint: Arc::new(RwLock::new(None)),
+            recent_messages: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -520,6 +528,39 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
             self.agent_id, target_agent_id
         );
 
+        // Check recent message cache to prevent rapid loops
+        {
+            let mut recent = self.recent_messages.write().await;
+
+            // Create a consistent key for the agent pair (sorted to ensure consistency)
+            let mut agents = vec![self.agent_id.to_string(), target_agent_id.to_string()];
+            agents.sort();
+            let pair_key = agents.join(":");
+
+            // Check if we've sent a message to this pair recently
+            if let Some(last_time) = recent.get(&pair_key) {
+                if last_time.elapsed() < std::time::Duration::from_secs(30) {
+                    return Err(crate::CoreError::ToolExecutionFailed {
+                        tool_name: "send_message".to_string(),
+                        cause: format!(
+                            "Message loop detected: rapid messages between agents within 30 seconds. Please wait before sending another message."
+                        ),
+                        parameters: serde_json::json!({
+                            "from": self.agent_id.to_string(),
+                            "to": target_agent_id.to_string(),
+                            "elapsed_seconds": last_time.elapsed().as_secs()
+                        }),
+                    });
+                }
+            }
+
+            // Update the cache
+            recent.insert(pair_key, std::time::Instant::now());
+
+            // Clean up old entries (older than 5 minutes)
+            recent.retain(|_, time| time.elapsed() < std::time::Duration::from_secs(300));
+        }
+
         // Create the queued message
         let queued = QueuedMessage::agent_to_agent(
             self.agent_id.clone(),
@@ -530,14 +571,18 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
         );
 
         // Check for loops - allow up to one self-response (max 2 occurrences in chain)
-        if queued.count_in_call_chain(&target_agent_id) >= 2 {
-            warn!(
-                "Preventing message loop: agent {} already appears {} times in call chain {:?}",
-                target_agent_id,
-                queued.count_in_call_chain(&target_agent_id),
-                queued.call_chain
-            );
-            return Ok(());
+        if queued.count_in_call_chain(&target_agent_id) >= 1 {
+            return Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "send_message".to_string(),
+                cause: format!(
+                    "Message loop detected: agent {} already appears in call chain. Conversation should end here.",
+                    target_agent_id
+                ),
+                parameters: serde_json::json!({
+                    "call_chain": queued.call_chain,
+                    "target": target_agent_id.to_string()
+                }),
+            });
         }
 
         // Store the message in the database
@@ -564,7 +609,7 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
         if let Some(endpoint) = endpoints.get("group") {
             // Use the registered group endpoint
             let message = match &origin {
-                Some(MessageOrigin::Agent { .. }) => Message::agent(content),
+                Some(MessageOrigin::Agent { .. }) => Message::user(content),
                 _ => Message::user(content), // External origins use User role
             };
 
@@ -715,7 +760,7 @@ impl<C: surrealdb::Connection> AgentMessageRouter<C> {
     }
 }
 
-impl<C: surrealdb::Connection> std::fmt::Debug for AgentMessageRouter<C> {
+impl std::fmt::Debug for AgentMessageRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentMessageRouter")
             .field("agent_id", &self.agent_id)
@@ -748,11 +793,11 @@ impl MessageEndpoint for QueueEndpoint {
         _message: Message,
         _metadata: Option<Value>,
         _origin: Option<&MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         // For now, we'll need to extract the target from metadata
         // This is a fallback endpoint
         warn!("QueueEndpoint used - this should be replaced with proper routing");
-        Ok(())
+        Ok(None)
     }
 
     fn endpoint_type(&self) -> &'static str {
@@ -959,7 +1004,7 @@ impl MessageEndpoint for BlueskyEndpoint {
         message: Message,
         metadata: Option<Value>,
         _origin: Option<&MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let text = match &message.content {
             MessageContent::Text(t) => t.clone(),
             MessageContent::Parts(parts) => {
@@ -1007,7 +1052,7 @@ impl MessageEndpoint for BlueskyEndpoint {
                         })?;
 
                         info!("Liked on Bluesky: {}", result.uri);
-                        return Ok(());
+                        return Ok(None);
                     } else {
                         Some(self.create_reply_refs(reply_to).await?)
                     }
@@ -1059,7 +1104,7 @@ impl MessageEndpoint for BlueskyEndpoint {
             text_copy
         );
 
-        Ok(())
+        Ok(Some(result.uri.clone()))
     }
 
     fn endpoint_type(&self) -> &'static str {

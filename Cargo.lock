@@ -2825,7 +2825,6 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.4.0-alpha.8-WIP"
-source = "git+https://github.com/orual/rust-genai#e0e16dbb02f410405f2c0e8f8dbc76018ed0f4c4"
 dependencies = [
  "bytes",
  "derive_more 2.0.1",
@@ -5127,6 +5126,7 @@ dependencies = [
  "trybuild",
  "ureq 3.0.12",
  "url",
+ "urlencoding",
  "uuid",
  "zstd",
 ]

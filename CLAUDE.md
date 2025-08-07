@@ -198,6 +198,72 @@ pub struct User {
     - Discord bot integration
   - Architecture plan below
 
+### 🔧 Memory Block Pass-through (2025-08-06) - IN PROGRESS
+
+**Goal**: Pass memory blocks from data sources to receiving agents
+
+**What's Done**:
+1. ✅ Updated `DataSource` trait - `format_notification` returns `Option<(String, Vec<(CompactString, MemoryBlock)>)>`
+2. ✅ Updated all implementations (FileDataSource, BlueskyFirehoseSource, TypeErasedSource)
+3. ✅ Coordinator includes memory blocks in metadata when sending messages
+4. ✅ Bluesky creates/retrieves memory blocks for thread participants:
+   - Post author, parent post authors, siblings, replies
+   - Uses existing `fetch_user_profile_for_memory` helper
+   - Inserts new blocks then retrieves to avoid duplicates
+   - Only creates blocks AFTER filtering to avoid waste
+
+**What's Needed**:
+1. Update `AgentMessageRouter` to extract memory blocks from metadata
+2. Create RELATE edges to attach blocks to target agent
+3. Test with live Bluesky data
+
+**Router Implementation Plan**:
+```rust
+// In AgentMessageRouter::send_message() or delivery method:
+if let Some(metadata) = metadata {
+    if let Some(blocks_value) = metadata.get("memory_blocks") {
+        if let Ok(blocks) = serde_json::from_value::<Vec<(CompactString, MemoryBlock)>>(blocks_value) {
+            // For each block, create RELATE edge to target agent
+            // INSERT RELATE agent:123->owns_memory->memory:456
+        }
+    }
+}
+```
+
+### 🔧 Recent Fixes (2025-08-06 session)
+
+**Anti-looping Protection** ✅:
+- Modified `AgentMessageRouter` to return `ToolExecutionFailed` errors instead of silently dropping messages
+- Added recent message cache with 30-second cooldown between rapid agent-to-agent messages
+- Helps agents break out of acknowledgment loops
+
+**Jetstream Group Routing** ✅:
+- Fixed "No group endpoint registered" warnings by registering endpoints on data source's router
+- Issue: Data source created its own router instance instead of using Pattern agent's router
+- Solution: Register both CLI and group endpoints on the data source's router after creation
+
+**Constellation Thread Siblings** ✅:
+- Added types: `ConstellationLinksResponse`, `ConstellationRecord`, `ThreadContext` with engagement metrics
+- Implemented `PatternHttpClient::fetch_thread_siblings()` to query constellation.microcosm.blue
+- Implemented `PatternHttpClient::build_thread_context()` for comprehensive thread fetching
+- Enhanced ThreadContext with `PostEngagement` (likes, replies, reposts) and `AgentInteraction` tracking
+- Smart filtering based on agent DID, friends list, excluded DIDs, and allowlists
+- Integrated into `format_notification` with rich display:
+  - Shows thread context walking UP (reduced to 4 levels)
+  - Shows sibling posts with engagement metrics and AT URIs
+  - [YOU] markers for agent's own posts throughout
+  - Replies to siblings (up to 2 per sibling)
+  - Replaced broken `get_post_thread` call with constellation-based reply fetching
+- Constellation API format: `https://constellation.microcosm.blue/links?target=<urlencoded-at-uri>&collection=app.bsky.feed.post&path=.reply.parent.uri`
+
+**Other Fixes**:
+- Fixed tracing-subscriber errors on exit by dropping writer before exit
+- Fixed multiple Output instance creation causing terminal display issues
+- Fixed duplicate Jetstream notifications by removing data source registration from agent creation
+
+**Known Issues**:
+- Tool call validation error after compression - Flux agent hitting message validation when compression leaves unpaired tool calls
+
 ### Medium Priority
 - [X] Make agent groups usable via CLI and config system - COMPLETE
 - [ ] Complete pattern-specific agent groups implementation (main, crisis, planning, memory)

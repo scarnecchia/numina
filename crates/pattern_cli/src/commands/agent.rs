@@ -201,7 +201,7 @@ pub async fn status(name: &str) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     for agent in agents.iter_mut() {
-        load_agent_memories_and_messages(agent).await?;
+        load_agent_memories_and_messages(agent, &output).await?;
     }
 
     if let Some(agent) = agents.first() {

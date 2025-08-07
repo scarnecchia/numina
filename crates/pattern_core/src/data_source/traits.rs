@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use compact_str::CompactString;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{BufferConfig, BufferStats};
-use crate::error::Result;
+use crate::{error::Result, memory::MemoryBlock};
 
 /// Core trait for data sources that agents can consume from
 #[async_trait]
@@ -41,7 +42,11 @@ pub trait DataSource: Send + Sync {
     fn buffer_config(&self) -> BufferConfig;
 
     /// Format an item for notification to agents (returns None if item shouldn't notify)
-    async fn format_notification(&self, item: &Self::Item) -> Option<String>;
+    /// Also returns any memory blocks that should be attached to the receiving agent
+    async fn format_notification(
+        &self,
+        item: &Self::Item,
+    ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)>;
 
     /// Get buffer statistics if source maintains a buffer
     fn get_buffer_stats(&self) -> Option<BufferStats> {

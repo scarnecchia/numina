@@ -139,12 +139,22 @@ impl GroupManager for DynamicManager {
                 agent_capabilities,
             };
 
+            // Log direct addressing check
+            if let Some(addressed) = directly_addressed_agent {
+                tracing::info!(
+                    "Direct addressing detected for agent: {}",
+                    addressed.agent.name()
+                );
+            }
+
             // Use the actual selector to select agents, unless directly addressed
             let (selected_agents, selector_response) =
                 if let Some(addressed_agent) = directly_addressed_agent {
                     // Bypass selector for directly addressed agents
+                    tracing::info!("Bypassing selector due to direct addressing");
                     (vec![addressed_agent], None)
                 } else {
+                    tracing::info!("Using {} selector for agent selection", selector_name);
                     match selector
                         .select_agents(&agents, &context, &selector_config)
                         .await

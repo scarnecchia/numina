@@ -46,12 +46,12 @@ pub struct SendMessageOutput {
 
 /// Tool for sending messages to various targets
 #[derive(Debug, Clone)]
-pub struct SendMessageTool<C: surrealdb::Connection + Clone> {
-    pub handle: AgentHandle<C>,
+pub struct SendMessageTool {
+    pub handle: AgentHandle,
 }
 
 #[async_trait]
-impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageTool<C> {
+impl AiTool for SendMessageTool {
     type Input = SendMessageInput;
     type Output = SendMessageOutput;
 
@@ -60,7 +60,7 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
     }
 
     fn description(&self) -> &str {
-        "Send a message to the user, another agent, a group, or a specific channel. This is the primary way to communicate."
+        "Send a message to the user, another agent, a group, or a specific channel, or as a post on bluesky. This is the primary way to communicate."
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
@@ -77,21 +77,28 @@ impl<C: surrealdb::Connection + Clone + std::fmt::Debug> AiTool for SendMessageT
         // Handle agent name resolution if target is agent type
         let target = params.target.clone();
 
+        let (reason, content) = if matches!(params.target.target_type, TargetType::Agent) {
+            let split: Vec<_> = params.content.splitn(2, &['\n', '|', '-']).collect();
+
+            let reason = if split.len() == 1 {
+                split.first().unwrap_or(&"")
+            } else {
+                "send_message_invocation"
+            };
+            (reason, split.last().unwrap_or(&"").to_string())
+        } else {
+            ("send_message_invocation", params.content)
+        };
         // When agent uses send_message tool, origin is the agent itself
         let origin = crate::context::message_router::MessageOrigin::Agent {
             agent_id: router.agent_id().clone(),
             name: router.agent_name().clone(),
-            reason: "send_message tool invocation".to_string(),
+            reason: reason.to_string(),
         };
 
         // Send the message through the router
         match router
-            .send_message(
-                target,
-                params.content.clone(),
-                params.metadata.clone(),
-                Some(origin),
-            )
+            .send_message(target, content, params.metadata.clone(), Some(origin))
             .await
         {
             Ok(()) => {

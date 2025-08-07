@@ -437,13 +437,12 @@ impl AgentRecord {
     /// Some fields like relations, creation time, and detailed config are not
     /// accessible through the public API and would need to be loaded separately.
 
-    pub async fn from_database_agent<C, M, E>(
-        agent: &crate::agent::DatabaseAgent<C, M, E>,
+    pub async fn from_database_agent<M, E>(
+        agent: &crate::agent::DatabaseAgent<M, E>,
         owner_id: UserId,
         base_instructions: String,
     ) -> Self
     where
-        C: surrealdb::Connection + Clone + std::fmt::Debug + 'static,
         M: crate::ModelProvider + 'static,
         E: crate::embeddings::EmbeddingProvider + 'static,
     {
