@@ -301,8 +301,8 @@ fn build_selection_prompt(
     prompt.push_str(
         "if you select, respond with only constellation member names, one per line. \
                      if more than one should see it, list all of them. \
-                     if you are able to select yourself (see the preceding list), you can also respond directly \
-                     and it will be treated as a normal response from you, or take other actions, like using tools.\
+                     if you are able to select yourself (see the preceding list), you should respond directly \
+                     if you think you are the most appropriate, or take other response actions, like using tools. If you think no response is needed, you can say nothing.\
                      if you respond directly using send_message, consider the correct target (e.g. user, discord/channel, bluesky).",
     );
 

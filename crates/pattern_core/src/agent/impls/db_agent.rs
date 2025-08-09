@@ -1354,12 +1354,33 @@ where
 
             // Check if tool requires heartbeat (optimization)
             let needs_heartbeat = rule_engine.requires_heartbeat(&call.fn_name);
+            let has_heartbeat_param = check_heartbeat_request(&call.fn_arguments);
 
-            if needs_heartbeat && check_heartbeat_request(&call.fn_arguments) {
-                tracing::debug!(
-                    "💓 Heartbeat requested by tool {} (call_id: {})",
+            // Check if tool has ContinueLoop rule (which means it should continue but doesn't need heartbeat param)
+            let has_continue_rule = !needs_heartbeat; // If doesn't need heartbeat, it has ContinueLoop
+
+            tracing::info!(
+                "🔍 Tool {} heartbeat check: needs_heartbeat={}, has_param={}, has_continue_rule={}, args={:?}",
+                call.fn_name,
+                needs_heartbeat,
+                has_heartbeat_param,
+                has_continue_rule,
+                call.fn_arguments
+            );
+
+            // Send heartbeat if either:
+            // 1. Tool requires heartbeat AND has the parameter
+            // 2. Tool has ContinueLoop rule (we'll use heartbeat mechanism for continuation)
+            if (needs_heartbeat && has_heartbeat_param) || has_continue_rule {
+                tracing::info!(
+                    "💓 Continuation requested by tool {} (call_id: {}) - reason: {}",
                     call.fn_name,
-                    call.call_id
+                    call.call_id,
+                    if has_continue_rule {
+                        "ContinueLoop rule"
+                    } else {
+                        "heartbeat parameter"
+                    }
                 );
 
                 let heartbeat_req = HeartbeatRequest {
@@ -1371,12 +1392,20 @@ where
                 // Try to send, but don't block if the channel is full
                 match self.heartbeat_sender.try_send(heartbeat_req) {
                     Ok(()) => {
-                        tracing::debug!("✅ Heartbeat request sent");
+                        tracing::info!("✅ Continuation request sent successfully");
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️ Failed to send heartbeat request: {:?}", e);
+                        tracing::warn!("⚠️ Failed to send continuation request: {:?}", e);
                     }
                 }
+            } else {
+                tracing::debug!(
+                    "❌ No continuation for tool {}: needs_heartbeat={}, has_param={}, has_continue_rule={}",
+                    call.fn_name,
+                    needs_heartbeat,
+                    has_heartbeat_param,
+                    has_continue_rule
+                );
             }
 
             // Execute tool using the context method
@@ -1683,6 +1712,11 @@ where
 
                                         // Send individual tool call started events
                                         for call in calls {
+                                            tracing::info!(
+                                                "🔧 Sending ToolCallStarted event for tool: {} (call_id: {})",
+                                                call.fn_name,
+                                                call.call_id
+                                            );
                                             send_event(ResponseEvent::ToolCallStarted {
                                                 call_id: call.call_id.clone(),
                                                 fn_name: call.fn_name.clone(),
@@ -1909,31 +1943,38 @@ where
                                     })
                                     .await;
 
-                                    // Execute the tools
-                                    let mut tool_responses = Vec::new();
-                                    for tool_call in block_tool_calls {
-                                        // Execute tool
-                                        match self_clone
-                                            .execute_tool(
-                                                &tool_call.fn_name,
-                                                tool_call.fn_arguments.clone(),
-                                            )
-                                            .await
-                                        {
-                                            Ok(result) => {
-                                                tool_responses.push(ToolResponse {
-                                                    call_id: tool_call.call_id.clone(),
-                                                    content: result.to_string(),
-                                                });
-                                            }
-                                            Err(e) => {
-                                                tool_responses.push(ToolResponse {
-                                                    call_id: tool_call.call_id.clone(),
-                                                    content: format!("Error: {:?}", e),
-                                                });
-                                            }
-                                        }
+                                    // Send individual tool call started events
+                                    for call in &block_tool_calls {
+                                        tracing::info!(
+                                            "🔧 Sending ToolCallStarted event for block tool: {} (call_id: {})",
+                                            call.fn_name,
+                                            call.call_id
+                                        );
+                                        send_event(ResponseEvent::ToolCallStarted {
+                                            call_id: call.call_id.clone(),
+                                            fn_name: call.fn_name.clone(),
+                                            args: call.fn_arguments.clone(),
+                                        })
+                                        .await;
                                     }
+
+                                    // Execute the tools with rule validation and heartbeat support
+                                    let tool_responses = match self_clone
+                                        .execute_tools_with_rules(&block_tool_calls, &agent_id)
+                                        .await
+                                    {
+                                        Ok(responses) => responses,
+                                        Err(e) => {
+                                            // If execution fails, create error responses for all tools
+                                            block_tool_calls
+                                                .iter()
+                                                .map(|call| ToolResponse {
+                                                    call_id: call.call_id.clone(),
+                                                    content: format!("Error: {:?}", e),
+                                                })
+                                                .collect()
+                                        }
+                                    };
                                     // Add the non-tool blocks to processed response
                                     if !other_blocks.is_empty() {
                                         processed_response
@@ -1947,6 +1988,20 @@ where
                                             responses: tool_responses.clone(),
                                         })
                                         .await;
+
+                                        // Send individual tool call completed events
+                                        for response in &tool_responses {
+                                            tracing::info!(
+                                                "🔧 Sending ToolCallCompleted event for call_id: {}",
+                                                response.call_id
+                                            );
+                                            send_event(ResponseEvent::ToolCallCompleted {
+                                                call_id: response.call_id.clone(),
+                                                result: Ok(response.content.clone()),
+                                            })
+                                            .await;
+                                        }
+
                                         processed_response
                                             .content
                                             .push(MessageContent::ToolResponses(tool_responses));

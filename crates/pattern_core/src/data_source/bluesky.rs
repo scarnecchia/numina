@@ -1260,6 +1260,8 @@ impl DataSource for BlueskyFirehoseSource {
                                 let author_did = post_view.author.did.as_str().to_string();
                                 thread_users.push((handle.clone(), author_did));
 
+                                let embed_info = extract_embed_info(post_view);
+
                                 thread_posts.push((
                                     handle,
                                     display_name,
@@ -1272,6 +1274,7 @@ impl DataSource for BlueskyFirehoseSource {
                                     links,
                                     relative_time,
                                     is_agent_post,
+                                    embed_info,
                                 ));
 
                                 // Add as reply candidate
@@ -1309,10 +1312,11 @@ impl DataSource for BlueskyFirehoseSource {
                         depth,
                         mentions,
                         langs,
-                        alt_texts,
+                        _alt_texts,
                         links,
                         relative_time,
                         is_agent_post,
+                        embed_info,
                     ) in thread_posts.iter().rev()
                     {
                         let indent = "  ".repeat(*depth);
@@ -1360,17 +1364,9 @@ impl DataSource for BlueskyFirehoseSource {
                             ));
                         }
 
-                        // Show images if any
-                        if !alt_texts.is_empty() {
-                            message.push_str(&format!(
-                                "{}   [📸 {} image(s)]\n",
-                                indent,
-                                alt_texts.len()
-                            ));
-                            for alt_text in alt_texts {
-                                message
-                                    .push_str(&format!("{}    alt text: {}\n", indent, alt_text));
-                            }
+                        // Show embeds if any
+                        if let Some(embed) = embed_info {
+                            message.push_str(&embed.format_display(&indent));
                         }
                     }
 
@@ -1383,6 +1379,7 @@ impl DataSource for BlueskyFirehoseSource {
                             if let Some((text, _langs, features, _alt_texts)) =
                                 extract_post_data(sibling)
                             {
+                                let embed_info = extract_embed_info(sibling);
                                 let author_str = if let Some(name) = &sibling.author.display_name {
                                     format!("{} (@{})", name, sibling.author.handle.as_str())
                                 } else {
@@ -1417,6 +1414,17 @@ impl DataSource for BlueskyFirehoseSource {
                                 ));
                                 message.push_str(&format!("│  🔗 {}\n", sibling.uri));
 
+                                // Show embeds if any
+                                if let Some(embed) = embed_info {
+                                    let embed_display = embed.format_display("  ");
+                                    // Add vertical bar prefix to each line
+                                    for line in embed_display.lines() {
+                                        if !line.is_empty() {
+                                            message.push_str(&format!("│{}\n", line));
+                                        }
+                                    }
+                                }
+
                                 // Extract mentions from features for checking
                                 let mentions: Vec<_> = features
                                     .iter()
@@ -1437,6 +1445,7 @@ impl DataSource for BlueskyFirehoseSource {
                                         if let Some((reply_text, _, _, _)) =
                                             extract_post_data(reply)
                                         {
+                                            let reply_embed_info = extract_embed_info(reply);
                                             let reply_author =
                                                 if let Some(name) = &reply.author.display_name {
                                                     format!(
@@ -1465,6 +1474,17 @@ impl DataSource for BlueskyFirehoseSource {
                                                 reply_text,
                                                 relative_time
                                             ));
+
+                                            // Show embeds if any
+                                            if let Some(embed) = reply_embed_info {
+                                                let embed_display = embed.format_display("    ");
+                                                // Add vertical bar and indentation prefix to each line
+                                                for line in embed_display.lines() {
+                                                    if !line.is_empty() {
+                                                        message.push_str(&format!("│  {}\n", line));
+                                                    }
+                                                }
+                                            }
 
                                             // Add as reply candidate
                                             reply_candidates.push(thread_post_to_candidate(reply));
@@ -1726,8 +1746,23 @@ impl DataSource for BlueskyFirehoseSource {
         // Check if Pattern (or any watched DID) authored this post or any parent post
         let is_from_watched_author = self.filter.mentions.contains(&item.did);
 
-        if !is_from_friend && !is_from_watched_author && !self.filter.mentions.is_empty() {
-            // Not from a friend or watched author, so check if any of the DIDs we're watching for were mentioned
+        // Check if this is a reply to the agent's own post
+        let is_reply_to_self = if let Some(reply) = &item.reply {
+            self.filter
+                .mentions
+                .first()
+                .map(|agent_did| reply.parent.uri.contains(agent_did))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if !is_from_friend
+            && !is_from_watched_author
+            && !is_reply_to_self
+            && !self.filter.mentions.is_empty()
+        {
+            // Not from a friend, watched author, or reply to self, so check if any of the DIDs we're watching for were mentioned
             let found_mention = self.filter.mentions.iter().any(|watched_did| {
                 // Check both with and without @ prefix since the queue has mixed format
                 mention_check_queue.contains(watched_did)
@@ -2098,6 +2133,226 @@ fn extract_post_data(
     }
 }
 
+/// Extract full embed info from a PostView
+fn extract_embed_info(
+    post_view: &atrium_api::app::bsky::feed::defs::PostView,
+) -> Option<EmbedInfo> {
+    use atrium_api::app::bsky::feed::defs::PostViewEmbedRefs;
+
+    if let Some(embed) = &post_view.embed {
+        match embed {
+            Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => {
+                Some(EmbedInfo::Images {
+                    count: images_view.images.len(),
+                    alt_texts: images_view
+                        .images
+                        .iter()
+                        .map(|img| img.alt.clone())
+                        .collect(),
+                })
+            }
+            Union::Refs(PostViewEmbedRefs::AppBskyEmbedExternalView(external_view)) => {
+                Some(EmbedInfo::External {
+                    uri: external_view.external.uri.clone(),
+                    title: external_view.external.title.clone(),
+                    description: external_view.external.description.clone(),
+                })
+            }
+            Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordView(record_view)) => {
+                match &record_view.record {
+                    Union::Refs(
+                        atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
+                            view_record,
+                        ),
+                    ) => {
+                        if let Ok(quoted_record) =
+                            atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
+                                view_record.value.clone(),
+                            )
+                        {
+                            let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
+                            Some(EmbedInfo::Quote {
+                                uri: view_record.uri.clone(),
+                                cid: view_record.cid.as_ref().to_string(),
+                                author_handle: view_record.author.handle.as_str().to_string(),
+                                author_display_name: view_record.author.display_name.clone(),
+                                text: quoted_text,
+                                created_at: Some(
+                                    chrono::DateTime::parse_from_rfc3339(
+                                        view_record.indexed_at.as_str(),
+                                    )
+                                    .ok()
+                                    .map(|dt| dt.to_utc())
+                                    .unwrap_or_else(Utc::now),
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(record_with_media)) => {
+                // Extract quote part
+                let quote_info = match &record_with_media.record.record {
+                    Union::Refs(
+                        atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
+                            view_record,
+                        ),
+                    ) => {
+                        if let Ok(quoted_record) =
+                            atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
+                                view_record.value.clone(),
+                            )
+                        {
+                            let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
+                            Some(EmbedInfo::Quote {
+                                uri: view_record.uri.clone(),
+                                cid: view_record.cid.as_ref().to_string(),
+                                author_handle: view_record.author.handle.as_str().to_string(),
+                                author_display_name: view_record.author.display_name.clone(),
+                                text: quoted_text,
+                                created_at: Some(
+                                    chrono::DateTime::parse_from_rfc3339(
+                                        view_record.indexed_at.as_str(),
+                                    )
+                                    .ok()
+                                    .map(|dt| dt.to_utc())
+                                    .unwrap_or_else(Utc::now),
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                // Extract media part
+                let media_info = match &record_with_media.media {
+                    Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedImagesView(images)) => {
+                        Some(EmbedInfo::Images {
+                            count: images.images.len(),
+                            alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
+                        })
+                    }
+                    Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedExternalView(external)) => {
+                        Some(EmbedInfo::External {
+                            uri: external.external.uri.clone(),
+                            title: external.external.title.clone(),
+                            description: external.external.description.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+
+                // Combine both
+                match (quote_info, media_info) {
+                    (Some(quote), Some(media)) => Some(EmbedInfo::QuoteWithMedia {
+                        quote: Box::new(quote),
+                        media: Box::new(media),
+                    }),
+                    (Some(quote), None) => Some(quote),
+                    (None, Some(media)) => Some(media),
+                    (None, None) => None,
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Info about post embeds
+#[derive(Debug, Clone)]
+enum EmbedInfo {
+    Images {
+        count: usize,
+        alt_texts: Vec<String>,
+    },
+    External {
+        uri: String,
+        title: String,
+        description: String,
+    },
+    Quote {
+        uri: String,
+        cid: String,
+        author_handle: String,
+        author_display_name: Option<String>,
+        text: String,
+        created_at: Option<DateTime<Utc>>,
+    },
+    QuoteWithMedia {
+        quote: Box<EmbedInfo>,
+        media: Box<EmbedInfo>,
+    },
+}
+
+impl EmbedInfo {
+    /// Format embed info for display with given indentation
+    fn format_display(&self, indent: &str) -> String {
+        let mut output = String::new();
+
+        match self {
+            EmbedInfo::Images { count, alt_texts } => {
+                output.push_str(&format!("{}   [📸 {} image(s)]\n", indent, count));
+                for alt_text in alt_texts {
+                    if !alt_text.is_empty() {
+                        output.push_str(&format!("{}    alt: {}\n", indent, alt_text));
+                    }
+                }
+            }
+            EmbedInfo::External {
+                uri,
+                title,
+                description,
+            } => {
+                output.push_str(&format!("{}   [🔗 Link Card]\n", indent));
+                if !title.is_empty() {
+                    output.push_str(&format!("{}    {}\n", indent, title));
+                }
+                if !description.is_empty() {
+                    output.push_str(&format!("{}    {}\n", indent, description));
+                }
+                output.push_str(&format!("{}    {}\n", indent, uri));
+            }
+            EmbedInfo::Quote {
+                uri,
+                author_handle,
+                author_display_name,
+                text,
+                created_at,
+                ..
+            } => {
+                output.push_str(&format!("{}   ┌─ Quote ─────\n", indent));
+                let author = if let Some(name) = author_display_name {
+                    format!("{} (@{})", name, author_handle)
+                } else {
+                    format!("@{}", author_handle)
+                };
+                output.push_str(&format!("{}   │ {}: {}\n", indent, author, text));
+                if let Some(time) = created_at {
+                    let interval = Utc::now() - *time;
+                    let relative =
+                        format_duration(interval.to_std().unwrap_or(Duration::from_secs(0)));
+                    output.push_str(&format!("{}   │ {} ago\n", indent, relative));
+                }
+                output.push_str(&format!("{}   │ 🔗 {}\n", indent, uri));
+                output.push_str(&format!("{}   └──────────\n", indent));
+            }
+            EmbedInfo::QuoteWithMedia { quote, media } => {
+                output.push_str(&quote.format_display(indent));
+                output.push_str(&media.format_display(indent));
+            }
+        }
+
+        output
+    }
+}
+
 /// Extract alt texts from post embed
 fn extract_image_alt_texts(
     embed: &Option<Union<atrium_api::app::bsky::feed::defs::PostViewEmbedRefs>>,
@@ -2205,7 +2460,35 @@ async fn should_include_post(
         }
     }
 
-    // 2. FRIENDS LIST - bypass all other checks
+    // 2. REPLIES TO SELF - always see replies to our own posts
+    if let Some(reply) = &post.reply {
+        // Extract agent's DID from mentions field (should be the only entry)
+        if let Some(agent_did) = filter.mentions.first() {
+            // Check if this is a reply to the agent's own post
+            if reply.parent.uri.contains(agent_did) {
+                // This is a reply to the agent - always include it
+                post.handle = resolver
+                    .resolve(&Did::from_str(&post.did).expect("valid did"))
+                    .await
+                    .ok()
+                    .map(|doc| {
+                        let handle = doc
+                            .also_known_as
+                            .expect("proper did doc should have an alias in it")
+                            .first()
+                            .expect("proper did doc should have an alias in it")
+                            .clone();
+
+                        handle.strip_prefix("at://").unwrap_or(&handle).to_string()
+                    })
+                    .unwrap_or(post.did.clone());
+
+                return true;
+            }
+        }
+    }
+
+    // 3. FRIENDS LIST - bypass all other checks
     if filter.friends.contains(&post.did) {
         // Friends always pass through
         // Still need to resolve handle though
@@ -2228,7 +2511,7 @@ async fn should_include_post(
         return true;
     }
 
-    // 3. CHECK MENTIONS
+    // 4. CHECK MENTIONS
     if !filter.mentions.is_empty() {
         let mentioned = post.mentioned_dids();
         let has_required_mention = filter
@@ -2280,13 +2563,13 @@ async fn should_include_post(
         }
     }
 
-    // 4. CHECK REGULAR ALLOWLIST
+    // 5. CHECK REGULAR ALLOWLIST
     // DID filter - only from specific authors
     if !filter.dids.is_empty() && !filter.dids.contains(&post.did) {
         return false;
     }
 
-    // 5. APPLY REMAINING FILTERS (keywords, languages)
+    // 6. APPLY REMAINING FILTERS (keywords, languages)
 
     // Keyword filter
     if !filter.keywords.is_empty() {

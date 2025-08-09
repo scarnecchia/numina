@@ -13,6 +13,7 @@ temperature = 0.3
 
 [context]
 max_messages = 500
+enable_thinking = true
 
 [context.compression_strategy]
 type = "recursive_summarization"

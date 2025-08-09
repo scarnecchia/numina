@@ -7,7 +7,7 @@ persona_path = "../entropy-persona-block.md"
 
 # Test per-agent context config
 [context]
-max_messages = 75        # Keep more messages for complex analysis
+max_messages = 150       # Keep more messages for complex analysis
 memory_char_limit = 7500 # More space for working memory
 enable_thinking = true
 

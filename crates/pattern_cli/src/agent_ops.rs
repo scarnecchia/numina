@@ -2022,8 +2022,20 @@ async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
     // Spawn heartbeat monitor task
     let output_clone = output.clone();
     tokio::spawn(async move {
+        tracing::info!(
+            "💓 Heartbeat monitor task started with {} agents",
+            agents_for_heartbeat.len()
+        );
+        for agent in &agents_for_heartbeat {
+            tracing::info!(
+                "  - Agent available for heartbeat: {} ({})",
+                agent.name(),
+                agent.id()
+            );
+        }
+
         while let Some(heartbeat) = heartbeat_receiver.recv().await {
-            tracing::debug!(
+            tracing::info!(
                 "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
                 heartbeat.agent_id,
                 heartbeat.tool_name,
@@ -2035,6 +2047,7 @@ async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
                 .iter()
                 .find(|a| a.id() == heartbeat.agent_id)
             {
+                tracing::info!("✅ Found agent {} for heartbeat", agent.name());
                 let agent = agent.clone();
                 let output = output_clone.clone();
 
@@ -2043,8 +2056,8 @@ async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
                     tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
 
                     // Create a system message to trigger another turn
-                    let heartbeat_message = Message::system(format!(
-                        "[Heartbeat continuation from tool: {}]",
+                    let heartbeat_message = Message::user(format!(
+                        "[System message: Heartbeat continuation from tool: {}]",
                         heartbeat.tool_name
                     ));
 
