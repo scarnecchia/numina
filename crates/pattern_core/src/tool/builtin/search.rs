@@ -11,7 +11,6 @@ use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
 /// Search domains available
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(inline)]
 pub enum SearchDomain {
     ArchivalMemory,
     Conversations,

@@ -266,6 +266,17 @@ impl ToolRegistry {
         self.tools.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Create a deep clone of the registry with all tools copied to a new registry
+    pub fn deep_clone(&self) -> Self {
+        let new_registry = Self::new();
+        for entry in self.tools.iter() {
+            new_registry
+                .tools
+                .insert(entry.key().clone(), entry.value().clone_box());
+        }
+        new_registry
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, tool_name: &str, params: Value) -> Result<Value> {
         let tool = self.get(tool_name).ok_or_else(|| {

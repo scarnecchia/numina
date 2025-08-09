@@ -302,7 +302,8 @@ fn build_selection_prompt(
         "if you select, respond with only constellation member names, one per line. \
                      if more than one should see it, list all of them. \
                      if you are able to select yourself (see the preceding list), you can also respond directly \
-                     and it will be treated as a normal response from you, or take other actions, like using tools.",
+                     and it will be treated as a normal response from you, or take other actions, like using tools.\
+                     if you respond directly using send_message, consider the correct target (e.g. user, discord/channel, bluesky).",
     );
 
     prompt

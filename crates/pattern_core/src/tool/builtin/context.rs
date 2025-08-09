@@ -15,7 +15,6 @@ use crate::{
 /// Operation types for context management
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(inline)]
 pub enum CoreMemoryOperationType {
     Append,
     Replace,

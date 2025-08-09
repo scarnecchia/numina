@@ -30,19 +30,12 @@ impl<E: EmbeddingProvider + Clone> DataSourceTool<E> {
 /// Operation types for data source management
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(inline)]
 pub enum DataSourceOperation {
-    /// Read recent items from a configured source
     Read,
-    /// Search within a source (if supported)
     Search,
-    /// Start monitoring a source with notifications
     Monitor,
-    /// Pause notifications from a source
     Pause,
-    /// Resume notifications from a source
     Resume,
-    /// List all configured sources
     List,
 }
 

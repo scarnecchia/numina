@@ -133,7 +133,7 @@ async fn setup_discord_endpoint(agent: &Arc<dyn Agent>, output: &Output) -> Resu
         .register_endpoint("discord".to_string(), Arc::new(discord_endpoint))
         .await?;
 
-    output.success("✓ Discord endpoint configured");
+    output.success("Discord endpoint configured");
 
     Ok(())
 }
@@ -183,7 +183,7 @@ async fn setup_bluesky_endpoint(
                         .register_endpoint("bluesky".to_string(), Arc::new(endpoint))
                         .await?;
                     output.success(&format!(
-                        "✓ Bluesky endpoint configured for {}",
+                        "Bluesky endpoint configured for {}",
                         identity.handle.bright_green()
                     ));
                 }
@@ -1799,7 +1799,6 @@ pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
 /// Shared setup for group agents including loading, memory setup, and tool registration
 pub struct GroupSetup {
     pub group: AgentGroup,
-    pub agents: Vec<Arc<dyn Agent>>,
     pub agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
     pub pattern_agent: Option<Arc<dyn Agent>>,
     pub shared_tools: ToolRegistry,
@@ -1861,18 +1860,50 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
             pattern_agent_index = Some(i);
         }
 
-        // Create agent using regular method (no data sources yet) with shared tools
-        let agent = create_agent_from_record_with_tracker(
-            agent_record.clone(),
-            model.clone(),
-            !no_tools,
-            config,
-            heartbeat_sender.clone(),
-            Some(constellation_tracker.clone()),
-            output,
-            Some(shared_tools.clone()),
-        )
-        .await?;
+        // Create agent - Anchor gets its own tool registry with SystemIntegrityTool
+        let agent = if agent_record.name == "Anchor" && !no_tools {
+            // Deep clone shared tools for Anchor to have its own registry
+            let anchor_tools = shared_tools.deep_clone();
+
+            // Create Anchor agent with its own tools
+            let agent = create_agent_from_record_with_tracker(
+                agent_record.clone(),
+                model.clone(),
+                !no_tools,
+                config,
+                heartbeat_sender.clone(),
+                Some(constellation_tracker.clone()),
+                output,
+                Some(anchor_tools.clone()),
+            )
+            .await?;
+
+            // Add SystemIntegrityTool only to Anchor's registry
+            use pattern_core::tool::builtin::SystemIntegrityTool;
+            let handle = agent.handle().await;
+            let integrity_tool = SystemIntegrityTool::new(handle);
+            anchor_tools.register(integrity_tool);
+            output.success(&format!(
+                "Emergency halt tool registered for {} agent",
+                "Anchor".bright_red()
+            ));
+
+            agent
+        } else {
+            // All other agents use the shared tools
+            create_agent_from_record_with_tracker(
+                agent_record.clone(),
+                model.clone(),
+                !no_tools,
+                config,
+                heartbeat_sender.clone(),
+                Some(constellation_tracker.clone()),
+                output,
+                Some(shared_tools.clone()),
+            )
+            .await?
+        };
+
         agents.push(agent);
     }
 
@@ -1902,7 +1933,6 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
 
     Ok(GroupSetup {
         group,
-        agents,
         agents_with_membership,
         pattern_agent,
         shared_tools,
@@ -2293,7 +2323,6 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
 
     let GroupSetup {
         group,
-        agents: _,
         agents_with_membership,
         pattern_agent,
         shared_tools,
@@ -2390,7 +2419,7 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
 
                 shared_tools.register(DataSourceTool::new(Arc::new(RwLock::new(data_sources))));
 
-                output.success("✓ Jetstream routing configured for group with data source tool");
+                output.success("Jetstream routing configured for group with data source tool");
             }
         }
     }
@@ -2484,7 +2513,6 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
 
     let GroupSetup {
         group,
-        agents,
         agents_with_membership,
         pattern_agent,
         shared_tools,
@@ -2549,7 +2577,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                     .await
                     .map_err(|e| miette::miette!("Failed to start monitoring: {}", e))?;
 
-                output.success("✓ Data sources configured for group");
+                output.success("Data sources configured for group");
 
                 // Register endpoints on the data source's router
                 let data_sources_router = data_sources.router();

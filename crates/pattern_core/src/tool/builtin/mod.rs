@@ -8,6 +8,7 @@ pub mod data_source;
 mod recall;
 mod search;
 mod send_message;
+mod system_integrity;
 #[cfg(test)]
 mod test_schemas;
 mod web;
@@ -25,6 +26,7 @@ use schemars::JsonSchema;
 pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
 pub use send_message::SendMessageTool;
 use serde::{Deserialize, Serialize};
+pub use system_integrity::{SystemIntegrityInput, SystemIntegrityOutput, SystemIntegrityTool};
 pub use web::{WebFormat, WebInput, WebOutput, WebTool};
 
 use crate::{
@@ -160,7 +162,6 @@ pub struct MessageTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(inline)]
 pub enum TargetType {
     User,
     Agent,

@@ -16,7 +16,6 @@ use crate::{
 /// Operation types for web interactions
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(inline)]
 pub enum WebOperation {
     Fetch,
     Search,
@@ -25,11 +24,8 @@ pub enum WebOperation {
 /// Format for web content rendering
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
-#[schemars(inline)]
 pub enum WebFormat {
-    /// Raw HTML
     Html,
-    /// Convert to Markdown
     #[default]
     Markdown,
 }
@@ -443,6 +439,7 @@ mod tests {
             query: "https://example.com".to_string(),
             format: Some(WebFormat::Markdown),
             limit: None,
+            continue_from: None,
         };
         let json = serde_json::to_string(&fetch).unwrap();
         assert!(json.contains("\"operation\":\"fetch\""));
@@ -453,6 +450,7 @@ mod tests {
             query: "rust programming".to_string(),
             format: None,
             limit: Some(5),
+            continue_from: None,
         };
         let json = serde_json::to_string(&search).unwrap();
         assert!(json.contains("\"operation\":\"search\""));

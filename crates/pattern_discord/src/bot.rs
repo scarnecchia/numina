@@ -12,14 +12,11 @@ use serenity::{
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use chrono::Utc;
 use futures::StreamExt;
-use pattern_core::coordination::types::GroupMemberRole;
-use pattern_core::id::{AgentId, GroupId, RelationId};
 use pattern_core::message::Message as PatternMessage;
 use pattern_core::{
     Agent, AgentGroup, UserId,
-    coordination::groups::{AgentWithMembership, GroupManager, GroupMembership},
+    coordination::groups::{AgentWithMembership, GroupManager},
 };
 
 /// The main Discord bot that handles all Discord interactions
@@ -33,12 +30,16 @@ pub struct DiscordBot {
     /// Group manager for CLI mode
     group_manager: Option<Arc<dyn GroupManager>>,
     /// Hardcoded user ID for CLI mode
+    #[allow(dead_code)]
     cli_user_id: UserId,
     /// Default channel for responses (when DISCORD_CHANNEL_ID is set)
     default_channel: Option<ChannelId>,
     /// Application ID
+    #[allow(dead_code)]
     app_id: Option<String>,
+
     /// Public key for interactions
+    #[allow(dead_code)]
     public_key: Option<String>,
 }
 
