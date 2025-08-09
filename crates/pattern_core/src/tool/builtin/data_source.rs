@@ -30,6 +30,7 @@ impl<E: EmbeddingProvider + Clone> DataSourceTool<E> {
 /// Operation types for data source management
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(inline)]
 pub enum DataSourceOperation {
     /// Read recent items from a configured source
     Read,
@@ -64,8 +65,9 @@ pub struct DataSourceInput {
     pub query: Option<String>,
 
     /// Maximum number of results (for read/search operations)
-    #[schemars(default = "default_limit", with = "i64")]
-    pub limit: i64,
+    #[schemars(default, with = "i64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 
     /// Request another turn after this tool executes
     #[serde(default)]
@@ -132,7 +134,7 @@ Sources must be configured separately before they can be used."#,
                         })?;
 
                 // Parse query for read modifiers
-                let mut limit = input.limit as usize;
+                let mut limit = input.limit.unwrap_or(default_limit()) as usize;
                 let mut offset = 0;
                 let mut cursor = None;
 
@@ -202,7 +204,11 @@ Sources must be configured separately before they can be used."#,
                 // Search in source
                 let coordinator = self.coordinator.read().await;
                 let results = coordinator
-                    .search_source(&source_id, &query, input.limit as usize)
+                    .search_source(
+                        &source_id,
+                        &query,
+                        input.limit.unwrap_or(default_limit()) as usize,
+                    )
                     .await?;
 
                 Ok(DataSourceOutput {

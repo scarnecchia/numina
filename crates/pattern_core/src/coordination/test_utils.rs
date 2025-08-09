@@ -80,6 +80,10 @@ pub(crate) mod test {
             unimplemented!("Test agent")
         }
 
+        async fn handle(&self) -> crate::context::state::AgentHandle {
+            unimplemented!("Test agent")
+        }
+
         async fn get_shared_memories(
             &self,
         ) -> Result<Vec<(AgentId, compact_str::CompactString, MemoryBlock)>> {

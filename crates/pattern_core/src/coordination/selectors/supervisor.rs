@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::Stream;
 
 use super::SelectionContext;
 use crate::coordination::AgentSelector;
@@ -64,6 +65,8 @@ impl AgentSelector for SupervisorSelector {
         // Pick first available supervisor (could be enhanced with load balancing)
         let supervisor = supervisors[0];
 
+        let supervisor_name = supervisor.agent.name();
+
         // Build prompt for supervisor
         let prompt = build_selection_prompt(&context.message, agents, config);
 
@@ -87,39 +90,30 @@ impl AgentSelector for SupervisorSelector {
             embedding_model: None,
         };
 
-        // Ask supervisor to decide using streaming
-        let mut response_stream = supervisor
+        // Ask supervisor to decide
+        let mut stream = supervisor
             .agent
             .clone()
             .process_message_stream(supervisor_message)
             .await?;
 
-        // Buffer initial events to determine if this is agent selection or direct response
+        // Collect response from stream
         use tokio_stream::StreamExt;
-        let mut buffered_events = Vec::new();
         let mut response_text = String::new();
         let mut _has_tool_calls = false;
-        let mut is_complete = false;
+        let mut buffered_events = Vec::new();
 
-        // Collect up to 10 events or until we see a Complete event
-        while buffered_events.len() < 10 && !is_complete {
-            if let Some(event) = response_stream.next().await {
-                match &event {
-                    crate::agent::ResponseEvent::TextChunk { text, .. } => {
-                        response_text.push_str(text);
-                    }
-                    crate::agent::ResponseEvent::ToolCallStarted { .. } => {
-                        _has_tool_calls = true;
-                    }
-                    crate::agent::ResponseEvent::Complete { .. } => {
-                        is_complete = true;
-                    }
-                    _ => {}
+        while let Some(event) = stream.next().await {
+            match &event {
+                crate::agent::ResponseEvent::TextChunk { text, .. } => {
+                    response_text.push_str(text);
                 }
-                buffered_events.push(event);
-            } else {
-                break;
+                crate::agent::ResponseEvent::ToolCalls { .. } => {
+                    _has_tool_calls = true;
+                }
+                _ => {}
             }
+            buffered_events.push(event);
         }
 
         // Parse supervisor's response to get selected agent names
@@ -133,17 +127,22 @@ impl AgentSelector for SupervisorSelector {
         );
 
         // Check if the response looks like agent names or a direct response
-        let is_direct_response = if selected_names.is_empty() {
+        let is_direct_response = if response_text.len() == 0 {
+            true
+        } else if selected_names.is_empty() {
             // No valid agent names found, check if it's a substantive response
             let is_substantive = response_text.len() > 50
                 || response_text.contains('.')
                 || response_text.contains('?');
+
             tracing::info!(
                 "No agent names found. Response length={}, substantive={}",
                 response_text.len(),
                 is_substantive
             );
             is_substantive
+        } else if selected_names.len() == 1 && selected_names[0] == supervisor_name {
+            true
         } else {
             // Check if all "names" are actually just single words (likely agent names)
             let all_single_words = selected_names.iter().all(|name| !name.contains(' '));
@@ -177,30 +176,22 @@ impl AgentSelector for SupervisorSelector {
         // If supervisor provided a direct response and can select self, return self
         if is_direct_response && can_select_self {
             tracing::info!(
-                "Supervisor {} selecting self with direct response stream",
+                "Supervisor {} selecting self to handle the message directly",
                 supervisor.agent.name()
             );
-            // Create a stream that includes the buffered events plus the rest
-            use tokio_stream::wrappers::ReceiverStream;
-            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            // Convert buffered events into a stream
+            let (tx, rx) = tokio::sync::mpsc::channel(buffered_events.len());
+            for event in buffered_events {
+                let _ = tx.send(event).await;
+            }
+            drop(tx);
 
-            // Spawn task to forward buffered events and remaining stream
-            tokio::spawn(async move {
-                // Send buffered events first
-                for event in buffered_events {
-                    let _ = tx.send(event).await;
-                }
+            let response_stream = Box::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+                as Box<dyn Stream<Item = crate::agent::ResponseEvent> + Send + Unpin>;
 
-                // Forward remaining events
-                while let Some(event) = response_stream.next().await {
-                    let _ = tx.send(event).await;
-                }
-            });
-
-            // Return supervisor as selected with their response stream
             return Ok(super::SelectionResult {
                 agents: vec![supervisor],
-                selector_response: Some(Box::new(ReceiverStream::new(rx))),
+                selector_response: Some(response_stream),
             });
         }
 
@@ -280,9 +271,9 @@ fn build_selection_prompt(
     };
 
     let mut prompt = format!(
-        "You are coordinating agent selection. A message needs to be handled:\n\n\
-        Message: {}\n\n\
-        Available agents:\n",
+        "you're coordinating routing of messages within your constellation. a new message has come in:\n\n\
+        message: {}\n\n\
+        constellation members:\n",
         message_text
     );
 
@@ -297,20 +288,21 @@ fn build_selection_prompt(
     }
 
     prompt.push_str(
-        "\nBased on the message content and agent capabilities, \
-                     which agent(s) should handle this message?\n\n",
+        "\nbased on the message content and the capabilities of your constellation members, who should handle it?\n\n",
     );
 
     // Note: The supervisor/specialist's own name may be included in the available agents list.
     // The dynamic manager will handle self-selection appropriately.
 
     if let Some(max_agents) = config.get("max_agents") {
-        prompt.push_str(&format!("Select up to {} agents.\n", max_agents));
+        prompt.push_str(&format!("select up to {} members.\n", max_agents));
     }
 
     prompt.push_str(
-        "Respond with ONLY the agent names, one per line. \
-                     If multiple agents should collaborate, list all of them.",
+        "if you select, respond with only constellation member names, one per line. \
+                     if more than one should see it, list all of them. \
+                     if you are able to select yourself (see the preceding list), you can also respond directly \
+                     and it will be treated as a normal response from you, or take other actions, like using tools.",
     );
 
     prompt

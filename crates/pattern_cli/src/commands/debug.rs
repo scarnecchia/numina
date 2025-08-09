@@ -5,8 +5,8 @@ use pattern_core::{
     agent::{AgentRecord, AgentState},
     config::PatternConfig,
     context::AgentHandle,
-    db::{DbEntity, client::DB, ops},
-    memory::{Memory, MemoryBlock},
+    db::{DatabaseError, DbEntity, client::DB, ops},
+    memory::{Memory, MemoryBlock, MemoryType},
     message::ChatRole,
 };
 use surrealdb::RecordId;
@@ -621,13 +621,7 @@ pub async fn list_core_memory(agent_name: &str) -> Result<()> {
         // Query for all core memory blocks this agent has access to
         // Core memories are memory_type = 'core' or NULL (default)
         let mem_query = r#"
-            SELECT * FROM mem
-            WHERE id IN (
-                SELECT out FROM agent_memories
-                WHERE in = $agent_id
-            )
-            AND (memory_type = 'core' OR memory_type = NULL)
-            ORDER BY created_at DESC
+            SELECT *, ->agent_memories->mem AS memories FROM $agent_id FETCH memories
         "#;
 
         let mut mem_response = DB
@@ -636,7 +630,15 @@ pub async fn list_core_memory(agent_name: &str) -> Result<()> {
             .await
             .into_diagnostic()?;
 
-        let memories: Vec<MemoryBlock> = mem_response.take(0).into_diagnostic()?;
+        let memories: Vec<Vec<<MemoryBlock as DbEntity>::DbModel>> =
+            mem_response.take("memories").into_diagnostic()?;
+
+        let memories: Vec<_> = memories
+            .concat()
+            .into_iter()
+            .map(|m| MemoryBlock::from_db_model(m).expect("db model"))
+            .filter(|m| m.memory_type == MemoryType::Core || m.memory_type == MemoryType::Working)
+            .collect();
 
         output.success(&format!("Found {} core memory blocks", memories.len()));
         println!();
@@ -1076,5 +1078,69 @@ Available memory blocks:"
         output.error(&format!("Agent '{}' not found", agent_name));
     }
 
+    Ok(())
+}
+
+pub async fn modify_memory(
+    agent: &String,
+    label: &String,
+    new_label: &Option<String>,
+    permission: &Option<String>,
+    memory_type: &Option<String>,
+) -> miette::Result<()> {
+    let output = Output::new();
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(_agent_record) = agents.first() {
+        // Query for the specific memory block
+        let query_sql = r#"
+            SELECT id FROM mem
+            WHERE label = $label
+            LIMIT 1
+        "#;
+
+        let mut response = DB
+            .query(query_sql)
+            .bind(("label", label.to_string()))
+            .await
+            .into_diagnostic()?;
+
+        let id: Vec<RecordId> = response.take("id").map_err(DatabaseError::from)?;
+
+        let mut modify_query = r#"
+            UPDATE $memory SET"#
+            .to_string();
+        if let Some(new_label) = new_label {
+            modify_query.push_str(&format!("\n label = '{}'", new_label));
+        }
+        if let Some(permission) = permission {
+            modify_query.push_str(&format!("\n permission = '{}',", permission));
+        }
+
+        if let Some(memory_type) = memory_type {
+            modify_query.push_str(&format!("\n memory_type = '{}'", memory_type));
+        }
+        modify_query.push_str(";");
+
+        let _response = DB
+            .query(modify_query)
+            .bind(("memory", id))
+            .await
+            .into_diagnostic()?;
+    } else {
+        output.error(&format!("Agent '{}' not found", agent));
+    }
     Ok(())
 }

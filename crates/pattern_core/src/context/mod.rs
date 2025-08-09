@@ -24,7 +24,7 @@ pub use compression::{CompressionResult, CompressionStrategy, MessageCompressor}
 pub use state::{AgentContext, AgentContextBuilder, AgentHandle, AgentStats, StateCheckpoint};
 
 /// Maximum characters for core memory blocks by default
-const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 5000;
+const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 10000;
 
 /// Maximum messages to keep in immediate context before compression
 const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 50;
@@ -331,7 +331,7 @@ impl ContextBuilder {
         let (core_blocks, archival_blocks): (Vec<_>, Vec<_>) = self
             .memory_blocks
             .iter()
-            .partition(|b| b.memory_type == crate::memory::MemoryType::Core);
+            .partition(|b| b.memory_type != crate::memory::MemoryType::Archival);
 
         // Add core memory blocks
         for block in &core_blocks {
@@ -345,6 +345,8 @@ impl ContextBuilder {
 {}
 </description>
 <metadata>
+- permissions={}
+- type={}
 - chars_current={}
 - chars_limit={}
 </metadata>
@@ -357,6 +359,8 @@ impl ContextBuilder {
                         .description
                         .as_deref()
                         .unwrap_or("No description provided"),
+                    block.permission,
+                    block.memory_type,
                     char_count,
                     char_limit,
                     block.value,
@@ -368,6 +372,7 @@ impl ContextBuilder {
 Description: {}
 Characters: {}/{}
 Permissions: {}
+Type: {}
 Content:
 {}",
                     block.label,
@@ -375,6 +380,7 @@ Content:
                     char_count,
                     char_limit,
                     block.permission.to_string(),
+                    block.memory_type,
                     block.value
                 ));
             }
@@ -409,7 +415,7 @@ Content:
         if self.config.model_adjustments.use_xml_tags {
             format!(
                 "<memory_blocks>
-The following memory blocks are currently engaged in your core memory unit:
+The following memory blocks are currently engaged in your main memory unit:
 
 {}
 </memory_blocks>{}",
@@ -418,7 +424,7 @@ The following memory blocks are currently engaged in your core memory unit:
             )
         } else {
             format!(
-                "Core Memory Blocks:
+                "Core and Working Memory Blocks:
 {}{}",
                 blocks_text.join("\n\n"),
                 archival_section
@@ -576,6 +582,18 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
                         // If only empty blocks remain, convert to empty text message
                         if blocks.is_empty() {
                             msg.content = MessageContent::Text(String::new());
+                        } else if let Some(last) = blocks.last() {
+                            if matches!(
+                                last,
+                                ContentBlock::Thinking { .. }
+                                    | ContentBlock::RedactedThinking { .. }
+                            ) {
+                                // trailing thinking blocks are a problem.
+                                blocks.push(ContentBlock::Text {
+                                    text: "removed erroneous tool use or result, continue"
+                                        .to_string(),
+                                })
+                            }
                         }
                     }
                     _ => {}

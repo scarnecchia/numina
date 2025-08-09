@@ -844,16 +844,15 @@ impl AgentContext {
 
         if let MessageContent::Blocks(blocks) = &mut message.content {
             let mut metadata = self.metadata.write().await;
-            let mut should_keep = false;
+            let mut should_keep = true;
             for block in blocks {
                 match block {
                     crate::message::ContentBlock::ToolUse { id, .. } => {
-                        if metadata.tool_response_ids.contains(id) {
+                        if metadata.tool_call_ids.contains(id) {
                             tracing::debug!("Filtering out duplicate tool call with ID: {}", id);
                             should_keep = false;
                         } else {
-                            metadata.tool_response_ids.insert(id.clone());
-                            should_keep = true;
+                            metadata.tool_call_ids.insert(id.clone());
                             metadata.total_tool_calls += 1;
                         }
                     }
@@ -866,7 +865,6 @@ impl AgentContext {
                             should_keep = false;
                         } else if metadata.tool_call_ids.contains(tool_use_id) {
                             metadata.tool_response_ids.insert(tool_use_id.clone());
-                            should_keep = true;
                         } else {
                             tracing::debug!(
                                 "Filtering out unpaired tool response with ID: {}",
@@ -878,18 +876,18 @@ impl AgentContext {
                     _ => {}
                 }
             }
-            {
-                let mut history = self.history.write().await;
-                if let Some(last) = history.messages.last().clone() {
-                    if !matches!(
-                        last.content,
-                        MessageContent::ToolCalls(_) | MessageContent::Blocks(_),
-                    ) {
-                        history.messages.pop();
-                        return;
-                    }
-                }
-            }
+            // {
+            //     let mut history = self.history.write().await;
+            //     if let Some(last) = history.messages.last().clone() {
+            //         if !matches!(
+            //             last.content,
+            //             MessageContent::ToolCalls(_) | MessageContent::Blocks(_),
+            //         ) {
+            //             history.messages.pop();
+            //             return;
+            //         }
+            //     }
+            // }
             if !should_keep {
                 tracing::debug!("duplicate or unpaired tool responses, skipping message");
                 return;

@@ -53,6 +53,8 @@ while true; do
     fi
 
     # Be nice to the API
+
+
     sleep 0.5
 done
 

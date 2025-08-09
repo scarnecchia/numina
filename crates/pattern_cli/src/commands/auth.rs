@@ -67,6 +67,21 @@ pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
 
         output.success("Authentication successful!");
 
+        // Log token details for debugging
+        tracing::info!(
+            "Received OAuth token response - has refresh_token: {}, expires_in: {} seconds",
+            token_response.refresh_token.is_some(),
+            token_response.expires_in
+        );
+
+        if token_response.refresh_token.is_none() {
+            tracing::warn!(
+                "Anthropic OAuth response did not include a refresh token! Token will expire in {} seconds.",
+                token_response.expires_in
+            );
+            output.warning("Note: No refresh token received. You'll need to re-authenticate when the token expires.");
+        }
+
         // Store token in database
         tracing::info!("Storing OAuth token for user: {}", config.user.id);
         let expires_at =

@@ -52,6 +52,41 @@ fn parameters_schema(&self) -> Value {
 }
 ```
 
+#### Gemini Compatibility Notes
+
+Google's Gemini models have limited JSON Schema support compared to other providers like Anthropic. When creating tools that need to work with Gemini:
+
+1. **Avoid `const` in schemas**: Gemini doesn't support the `const` keyword. Use simple `enum` arrays instead:
+   ```rust
+   // ❌ BAD - Creates oneOf with const (Gemini incompatible)
+   #[derive(JsonSchema)]
+   pub enum Operation {
+       Read,
+       Write,
+   }
+   
+   // ✅ GOOD - Creates simple enum array
+   #[derive(JsonSchema)]
+   #[schemars(inline)]  // Add this!
+   pub enum Operation {
+       Read,
+       Write,
+   }
+   ```
+
+2. **Handle optional fields carefully**: Avoid schemas that create nullable enums
+   ```rust
+   // ❌ BAD - Creates enum with null variant
+   #[schemars(with = "Option<i64>")]
+   pub limit: Option<i64>,
+   
+   // ✅ GOOD - Shows as optional integer
+   #[schemars(default, with = "i64")]
+   pub limit: Option<i64>,
+   ```
+
+3. **Keep schemas simple**: Gemini works best with basic JSON Schema features (type, enum, properties, required)
+
 ### 3. Dynamic Tool Support
 
 For cases where dynamic dispatch is needed (e.g., storing tools in a registry), we provide a `DynamicTool` trait and `DynamicToolAdapter`:

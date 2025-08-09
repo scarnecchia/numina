@@ -57,6 +57,16 @@ pub enum MemoryType {
     Archival,
 }
 
+impl std::fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryType::Core => write!(f, "core"),
+            MemoryType::Working => write!(f, "working"),
+            MemoryType::Archival => write!(f, "recall"),
+        }
+    }
+}
+
 /// A memory block following the MemGPT pattern
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
 #[entity(entity_type = "mem")]

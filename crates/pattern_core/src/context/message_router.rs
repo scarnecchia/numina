@@ -694,7 +694,7 @@ impl AgentMessageRouter {
         let channel_type = channel_info
             .get("type")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+            .unwrap_or("discord");
 
         // Look for appropriate endpoint
         let endpoints = self.endpoints.read().await;

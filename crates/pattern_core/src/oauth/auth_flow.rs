@@ -134,6 +134,12 @@ impl DeviceAuthFlow {
 
     /// Refresh an access token
     pub async fn refresh_token(&self, refresh_token: String) -> Result<TokenResponse, CoreError> {
+        tracing::debug!(
+            "Refreshing OAuth token with client_id: {} at endpoint: {}",
+            self.config.client_id,
+            self.config.token_endpoint
+        );
+
         let token_request = TokenRequest::RefreshToken {
             client_id: self.config.client_id.clone(),
             refresh_token,
@@ -175,6 +181,15 @@ impl DeviceAuthFlow {
             ],
         };
 
+        tracing::debug!(
+            "Sending token exchange request to: {} with grant_type: {}",
+            self.config.token_endpoint,
+            match &request {
+                TokenRequest::AuthorizationCode { .. } => "authorization_code",
+                TokenRequest::RefreshToken { .. } => "refresh_token",
+            }
+        );
+
         let response = self
             .http_client
             .post(&self.config.token_endpoint)
@@ -189,8 +204,15 @@ impl DeviceAuthFlow {
             })?;
 
         let status = response.status();
+        tracing::debug!("Token exchange response status: {}", status);
+
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
+            tracing::error!(
+                "Token exchange failed with status {}: {}",
+                status,
+                error_text
+            );
             return Err(CoreError::OAuthError {
                 provider: "anthropic".to_string(),
                 operation: "token_exchange".to_string(),

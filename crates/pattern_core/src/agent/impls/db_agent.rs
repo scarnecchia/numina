@@ -290,8 +290,10 @@ where
         // Load memory blocks from the record's relations
         for (memory_block, _relation) in &record.memories {
             tracing::debug!(
-                "Loading memory block: label={}, size={} chars",
+                "Loading memory block: label={}, type={:?}, permission={:?}, size={} chars",
                 memory_block.label,
+                memory_block.memory_type,
+                memory_block.permission,
                 memory_block.value.len()
             );
             memory.create_block(memory_block.label.clone(), memory_block.value.clone())?;
@@ -303,6 +305,10 @@ where
                 block.created_at = memory_block.created_at;
                 block.updated_at = memory_block.updated_at;
                 block.is_active = memory_block.is_active;
+                // CRITICAL: Copy memory type and permission from database
+                block.memory_type = memory_block.memory_type.clone();
+                block.permission = memory_block.permission.clone();
+                block.owner_id = memory_block.owner_id.clone();
             }
         }
 
@@ -1486,13 +1492,18 @@ where
         // Spawn the processing task
         tokio::spawn(async move {
             // wait here until the agent is ready, avoids unexpected parallel operations.
+            let start = tokio::time::Instant::now();
             loop {
                 if self_clone.handle().await.state == AgentState::Ready {
+                    break;
+                } else if tokio::time::Instant::now() - start >= Duration::from_secs(100) {
                     break;
                 } else {
                     tokio::time::sleep(Duration::from_millis(20)).await
                 }
             }
+            self_clone.set_state(AgentState::Processing).await.ok();
+
             // Helper to send events
             let send_event = |event: ResponseEvent| {
                 let tx = tx.clone();
@@ -1981,7 +1992,8 @@ where
                         ctx.add_tool_rules(tool_rules);
                     }
 
-                    // Get next response
+                    // IMPORTANT: Rebuild context to get fresh memory state after tool execution
+                    // This ensures agents see updated memory blocks immediately
                     let context_lock = context.read().await;
                     let memory_context = match context_lock.build_context().await {
                         Ok(ctx) => ctx,

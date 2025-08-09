@@ -108,6 +108,7 @@ impl EventHandler for PatternDiscordBot {
                         "Specific agent to talk to (optional)",
                     )
                     .required(false),
+                    run_discord_bot_with_group,
                 )
                 .add_option(
                     serenity::all::CreateCommandOption::new(
@@ -429,7 +430,10 @@ impl PatternDiscordBot {
 
                 // Provide detailed error in debug mode
                 #[cfg(debug_assertions)]
-                let error_msg = format!("Error details:\n```\n{:?}\n```\nThis usually means the agent is still initializing or Letta is slow to respond. Try again in a few seconds.", e);
+                let error_msg = format!(
+                    "Error details:\n```\n{:?}\n```\nThis usually means the agent is still initializing or Letta is slow to respond. Try again in a few seconds.",
+                    e
+                );
 
                 #[cfg(not(debug_assertions))]
                 let error_msg = format!("Sorry, I encountered an error: {}", e);

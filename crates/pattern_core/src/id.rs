@@ -317,6 +317,7 @@ define_id_type!(GroupId, "group");
 define_id_type!(ConstellationId, "constellation");
 define_id_type!(OAuthTokenId, "oauth");
 define_id_type!(AtprotoIdentityId, "atproto_identity");
+define_id_type!(DiscordIdentityId, "discord_identity");
 
 #[cfg(test)]
 mod tests {

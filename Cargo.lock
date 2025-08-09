@@ -5314,6 +5314,7 @@ dependencies = [
  "miette 7.6.0",
  "owo-colors",
  "pattern-core",
+ "pattern-discord",
  "pretty_assertions",
  "ratatui",
  "reqwest 0.12.22",
@@ -5327,6 +5328,7 @@ dependencies = [
  "tokio-stream",
  "toml 0.8.23",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
  "uuid",
 ]

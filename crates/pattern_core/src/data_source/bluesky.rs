@@ -409,6 +409,18 @@ pub type ReplyRef = ReplyRefData;
 /// Post reference - alias for atrium type
 pub type PostRef = MainData;
 
+/// Quoted post data extracted from embeds
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotedPost {
+    pub uri: String,
+    pub cid: String,
+    pub did: String,
+    pub handle: String,
+    pub display_name: Option<String>,
+    pub text: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
 impl BlueskyPost {
     /// Check if this post mentions a specific handle or DID
     pub fn mentions(&self, handle_or_did: &str) -> bool {
@@ -475,6 +487,67 @@ impl BlueskyPost {
             } else {
                 None
             }
+        })
+    }
+
+    /// Extract quoted post data if this is a quote post
+    pub fn quoted_post(&self) -> Option<QuotedPost> {
+        self.embed.as_ref().and_then(|e| {
+            let type_field = e.get("$type")?.as_str()?;
+
+            // Check for direct record embed
+            let record_obj = if type_field == "app.bsky.embed.record" {
+                e.get("record")?
+            }
+            // Check for record with media (quote post with images)
+            else if type_field == "app.bsky.embed.recordWithMedia" {
+                e.get("record")?.get("record")?
+            } else {
+                return None;
+            };
+
+            // Extract the quoted post data
+            let uri = record_obj.get("uri")?.as_str()?.to_string();
+            let cid = record_obj.get("cid")?.as_str()?.to_string();
+
+            // Author info
+            let author = record_obj.get("author")?;
+            let did = author.get("did")?.as_str()?.to_string();
+            let handle = author.get("handle")?.as_str()?.to_string();
+            let display_name = author
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            // Post content - try to get from value field which contains the actual record
+            let mut text = String::new();
+            let mut created_at = None;
+
+            if let Some(value_obj) = record_obj.get("value") {
+                text = value_obj.get("text")?.as_str()?.to_string();
+                if let Some(created_at_str) = value_obj.get("createdAt").and_then(|v| v.as_str()) {
+                    created_at = chrono::DateTime::parse_from_rfc3339(created_at_str)
+                        .ok()
+                        .map(|dt| dt.to_utc());
+                }
+            }
+
+            // Indexed time as fallback for created_at
+            let indexed_at = record_obj
+                .get("indexedAt")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.to_utc());
+
+            Some(QuotedPost {
+                uri,
+                cid,
+                did,
+                handle,
+                display_name,
+                text,
+                created_at: created_at.or(indexed_at),
+            })
         })
     }
 }
@@ -1017,6 +1090,21 @@ impl DataSource for BlueskyFirehoseSource {
                 .collect(),
         );
 
+        // Also check mentions in quoted posts
+        if let Some(quoted) = item.quoted_post() {
+            // Add the quoted post author's DID to check
+            mention_check_queue.push(quoted.did.clone());
+
+            // TODO: Parse facets from quoted post text to extract mentions
+            // For now, do a simple @handle search in the text
+            let words: Vec<&str> = quoted.text.split_whitespace().collect();
+            for word in words {
+                if word.starts_with('@') {
+                    mention_check_queue.push(word.to_string());
+                }
+            }
+        }
+
         // Get agent's DID from the mentions filter (it's monitoring for mentions of itself)
         let agent_did = self.filter.mentions.first().cloned();
 
@@ -1419,6 +1507,27 @@ impl DataSource for BlueskyFirehoseSource {
             format_duration(interval.to_std().unwrap_or(Duration::from_secs(0)))
         );
         message.push_str(&relative_time);
+
+        // Display quoted post if present
+        if let Some(quoted) = item.quoted_post() {
+            message.push_str("\n┌─ Quote Post ─────────────────\n");
+            let quoted_author = if let Some(display_name) = &quoted.display_name {
+                format!("{} (@{})", display_name, quoted.handle)
+            } else {
+                format!("@{}", quoted.handle)
+            };
+            message.push_str(&format!("│ {}: {}\n", quoted_author, quoted.text));
+
+            if let Some(created_at) = quoted.created_at {
+                let quoted_interval = Utc::now() - created_at;
+                let quoted_relative_time =
+                    format_duration(quoted_interval.to_std().unwrap_or(Duration::from_secs(0)));
+                message.push_str(&format!("│ {} ago\n", quoted_relative_time));
+            }
+
+            message.push_str(&format!("│ 🔗 {}\n", quoted.uri));
+            message.push_str("└────────────────────────────\n");
+        }
 
         // Extract and display links from facets
         let mut links: Vec<_> = item
@@ -2252,6 +2361,21 @@ impl Searchable for BlueskyPost {
             }
         }
 
+        // Search in quoted post
+        if let Some(quoted) = self.quoted_post() {
+            if quoted.text.to_lowercase().contains(&query_lower) {
+                return true;
+            }
+            if quoted.handle.to_lowercase().contains(&query_lower) {
+                return true;
+            }
+            if let Some(display_name) = &quoted.display_name {
+                if display_name.to_lowercase().contains(&query_lower) {
+                    return true;
+                }
+            }
+        }
+
         false
     }
 
@@ -2287,6 +2411,16 @@ impl Searchable for BlueskyPost {
                         score += 1.5;
                     }
                 }
+            }
+        }
+
+        // Quoted post match
+        if let Some(quoted) = self.quoted_post() {
+            if quoted.text.to_lowercase().contains(&query_lower) {
+                score += 1.0; // Match in quoted text is somewhat relevant
+            }
+            if quoted.handle.to_lowercase().contains(&query_lower) {
+                score += 1.5; // Handle match in quote is more relevant
             }
         }
 

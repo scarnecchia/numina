@@ -12,6 +12,7 @@ pub mod context;
 pub mod coordination;
 pub mod data_source;
 pub mod db;
+pub mod discord_identity;
 pub mod embeddings;
 pub mod error;
 pub mod export;

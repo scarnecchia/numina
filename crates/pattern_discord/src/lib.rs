@@ -6,14 +6,18 @@
 pub mod bot;
 pub mod commands;
 pub mod context;
+pub mod endpoints;
 pub mod error;
 pub mod routing;
 
-pub use bot::{DiscordBot, DiscordBotBuilder};
+pub use bot::{DiscordBot, DiscordBotConfig};
 pub use commands::{Command, CommandHandler, SlashCommand};
 pub use context::{DiscordContext, MessageContext, UserContext};
 pub use error::{DiscordError, Result};
 pub use routing::{MessageRouter, RoutingStrategy};
+
+// Re-export serenity for convenience
+pub use serenity;
 
 /// Discord-specific configuration
 pub mod config {
@@ -42,7 +46,7 @@ pub mod config {
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        Command, CommandHandler, DiscordBot, DiscordBotBuilder, DiscordContext, DiscordError,
+        Command, CommandHandler, DiscordBot, DiscordBotConfig, DiscordContext, DiscordError,
         MessageContext, MessageRouter, Result, RoutingStrategy, SlashCommand, UserContext,
         config::DiscordConfig,
     };

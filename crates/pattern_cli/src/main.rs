@@ -59,6 +59,10 @@ enum Commands {
         /// Disable tool usage
         #[arg(long)]
         no_tools: bool,
+
+        /// Run as Discord bot instead of CLI chat
+        #[arg(long)]
+        discord: bool,
     },
     /// Agent management
     Agent {
@@ -415,6 +419,22 @@ enum DebugCommands {
         /// Agent name
         agent: String,
     },
+    /// Modify memory block properties
+    ModifyMemory {
+        /// Agent name
+        agent: String,
+        /// Memory block label to modify
+        label: String,
+        /// New label (optional)
+        #[arg(long)]
+        new_label: Option<String>,
+        /// New permission (core_read_write, archival_read_write, recall_read_write)
+        #[arg(long)]
+        permission: Option<String>,
+        /// New memory type (core, archival)
+        #[arg(long)]
+        memory_type: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -441,36 +461,82 @@ async fn main() -> Result<()> {
     // Initialize our custom tracing writer
     let tracing_writer = tracing_writer::init_tracing_writer();
 
-    // Initialize tracing
-    use tracing_subscriber::{EnvFilter, fmt};
+    // Initialize tracing with file logging
+    use tracing_appender::rolling;
+    use tracing_subscriber::{
+        EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt,
+    };
 
-    if cli.debug {
-        // Only show debug output from pattern crates
-        fmt()
-            .with_env_filter(EnvFilter::new(
-                "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug",
-            ))
+    // Create log directory in user's data directory
+    let log_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pattern")
+        .join("logs");
+
+    // Ensure log directory exists
+    std::fs::create_dir_all(&log_dir).ok();
+
+    // Create a rolling file appender that rotates daily
+    let file_appender = rolling::daily(&log_dir, "pattern-cli.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Create the base subscriber with environment filter
+    let env_filter = if cli.debug {
+        EnvFilter::new(
+            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug",
+        )
+    } else {
+        EnvFilter::new(
+            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,warn",
+        )
+    };
+
+    // Create terminal layer
+    let terminal_layer = if cli.debug {
+        fmt::layer()
             .with_file(true)
-            .with_line_number(true) // Show target module
+            .with_line_number(true)
             .with_thread_ids(false)
             .with_thread_names(false)
-            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()) // Local time in RFC 3339 format
+            .with_timer(fmt::time::LocalTime::rfc_3339())
             .with_writer(tracing_writer.clone())
             .pretty()
-            .init();
+            .boxed()
     } else {
-        // Show info level for pattern crates, warn for everything else
-        fmt()
-            .with_env_filter( EnvFilter::new(
-                "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,warn",
-            ))
+        fmt::layer()
             .with_target(false)
             .with_thread_ids(false)
             .with_thread_names(false)
             .with_writer(tracing_writer.clone())
             .compact()
-            .init();
+            .boxed()
     };
+
+    // Create file layer with debug logging
+    let file_env_filter = EnvFilter::new(
+        "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,info",
+    );
+
+    let file_layer = fmt::layer()
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_timer(fmt::time::LocalTime::rfc_3339())
+        .with_ansi(false) // Disable ANSI colors in file output
+        .with_writer(non_blocking)
+        .pretty();
+
+    // Initialize the subscriber with both layers, each with their own filter
+    tracing_subscriber::registry()
+        .with(terminal_layer.with_filter(env_filter))
+        .with(file_layer.with_filter(file_env_filter))
+        .init();
+
+    info!(
+        "Logging initialized. Logs are being written to: {:?}",
+        log_dir.join("pattern-cli.log")
+    );
 
     // Load configuration
     let mut config = if let Some(config_path) = &cli.config {
@@ -513,6 +579,7 @@ async fn main() -> Result<()> {
             group,
             model,
             no_tools,
+            discord,
         } => {
             let output = crate::output::Output::new();
 
@@ -565,6 +632,7 @@ async fn main() -> Result<()> {
                         heartbeat_sender.clone(),
                         Some(constellation_tracker.clone()),
                         &output,
+                        None, // No shared tools for single agent chat
                     )
                     .await?;
                     agents.push(agent);
@@ -596,7 +664,26 @@ async fn main() -> Result<()> {
                 match &group.coordination_pattern {
                     CoordinationPattern::RoundRobin { .. } => {
                         let manager = RoundRobinManager;
-                        if has_bluesky_config {
+                        if *discord {
+                            #[cfg(feature = "discord")]
+                            {
+                                agent_ops::run_discord_bot_with_group(
+                                    group_name,
+                                    manager,
+                                    model.clone(),
+                                    *no_tools,
+                                    &config,
+                                    true, // enable_cli
+                                )
+                                .await?;
+                            }
+                            #[cfg(not(feature = "discord"))]
+                            {
+                                output
+                                    .error("Discord support not compiled. Add --features discord");
+                                return Ok(());
+                            }
+                        } else if has_bluesky_config {
                             agent_ops::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
@@ -612,7 +699,26 @@ async fn main() -> Result<()> {
                     }
                     CoordinationPattern::Dynamic { .. } => {
                         let manager = DynamicManager::new(Arc::new(DefaultSelectorRegistry::new()));
-                        if has_bluesky_config {
+                        if *discord {
+                            #[cfg(feature = "discord")]
+                            {
+                                agent_ops::run_discord_bot_with_group(
+                                    group_name,
+                                    manager,
+                                    model.clone(),
+                                    *no_tools,
+                                    &config,
+                                    true, // enable_cli
+                                )
+                                .await?;
+                            }
+                            #[cfg(not(feature = "discord"))]
+                            {
+                                output
+                                    .error("Discord support not compiled. Add --features discord");
+                                return Ok(());
+                            }
+                        } else if has_bluesky_config {
                             agent_ops::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
@@ -628,7 +734,26 @@ async fn main() -> Result<()> {
                     }
                     CoordinationPattern::Pipeline { .. } => {
                         let manager = PipelineManager;
-                        if has_bluesky_config {
+                        if *discord {
+                            #[cfg(feature = "discord")]
+                            {
+                                agent_ops::run_discord_bot_with_group(
+                                    group_name,
+                                    manager,
+                                    model.clone(),
+                                    *no_tools,
+                                    &config,
+                                    true, // enable_cli
+                                )
+                                .await?;
+                            }
+                            #[cfg(not(feature = "discord"))]
+                            {
+                                output
+                                    .error("Discord support not compiled. Add --features discord");
+                                return Ok(());
+                            }
+                        } else if has_bluesky_config {
                             agent_ops::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
@@ -644,7 +769,26 @@ async fn main() -> Result<()> {
                     }
                     CoordinationPattern::Supervisor { .. } => {
                         let manager = SupervisorManager;
-                        if has_bluesky_config {
+                        if *discord {
+                            #[cfg(feature = "discord")]
+                            {
+                                agent_ops::run_discord_bot_with_group(
+                                    group_name,
+                                    manager,
+                                    model.clone(),
+                                    *no_tools,
+                                    &config,
+                                    true, // enable_cli
+                                )
+                                .await?;
+                            }
+                            #[cfg(not(feature = "discord"))]
+                            {
+                                output
+                                    .error("Discord support not compiled. Add --features discord");
+                                return Ok(());
+                            }
+                        } else if has_bluesky_config {
                             agent_ops::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
@@ -660,7 +804,26 @@ async fn main() -> Result<()> {
                     }
                     CoordinationPattern::Voting { .. } => {
                         let manager = VotingManager;
-                        if has_bluesky_config {
+                        if *discord {
+                            #[cfg(feature = "discord")]
+                            {
+                                agent_ops::run_discord_bot_with_group(
+                                    group_name,
+                                    manager,
+                                    model.clone(),
+                                    *no_tools,
+                                    &config,
+                                    true, // enable_cli
+                                )
+                                .await?;
+                            }
+                            #[cfg(not(feature = "discord"))]
+                            {
+                                output
+                                    .error("Discord support not compiled. Add --features discord");
+                                return Ok(());
+                            }
+                        } else if has_bluesky_config {
                             agent_ops::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
@@ -676,7 +839,26 @@ async fn main() -> Result<()> {
                     }
                     CoordinationPattern::Sleeptime { .. } => {
                         let manager = SleeptimeManager;
-                        if has_bluesky_config {
+                        if *discord {
+                            #[cfg(feature = "discord")]
+                            {
+                                agent_ops::run_discord_bot_with_group(
+                                    group_name,
+                                    manager,
+                                    model.clone(),
+                                    *no_tools,
+                                    &config,
+                                    true, // enable_cli
+                                )
+                                .await?;
+                            }
+                            #[cfg(not(feature = "discord"))]
+                            {
+                                output
+                                    .error("Discord support not compiled. Add --features discord");
+                                return Ok(());
+                            }
+                        } else if has_bluesky_config {
                             agent_ops::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
@@ -693,6 +875,11 @@ async fn main() -> Result<()> {
                 }
             } else {
                 // Chat with a single agent
+                if *discord {
+                    output.error("Discord mode requires a group. Use --group <name> --discord");
+                    return Ok(());
+                }
+
                 output.success("Starting chat mode...");
                 output.info("Agent:", &agent.bright_cyan().to_string());
                 if let Some(model_name) = &model {
@@ -796,6 +983,16 @@ async fn main() -> Result<()> {
             }
             DebugCommands::ShowContext { agent } => {
                 commands::debug::show_context(&agent, &config).await?;
+            }
+            DebugCommands::ModifyMemory {
+                agent,
+                label,
+                new_label,
+                permission,
+                memory_type,
+            } => {
+                commands::debug::modify_memory(agent, label, new_label, permission, memory_type)
+                    .await?;
             }
         },
         Commands::Config { cmd } => match cmd {

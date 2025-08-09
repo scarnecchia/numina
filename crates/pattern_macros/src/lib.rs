@@ -1206,7 +1206,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         // Generate schema helper function
         fn #helper_fn() -> #crate_path::db::schema::TableDefinition {
             let mut schema = format!(
-                "DEFINE TABLE OVERWRITE {} SCHEMALESS;\n",
+                "DEFINE TABLE IF NOT EXISTS {} SCHEMALESS;\n",
                 #table_name
             );
 

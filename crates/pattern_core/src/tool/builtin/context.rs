@@ -284,14 +284,44 @@ impl ContextTool {
             return Ok(error_result);
         }
 
+        // Get the updated block to show the new state
+        let updated_block = self
+            .handle
+            .memory
+            .get_block(&name)
+            .map(|block| {
+                let char_count = block.value.chars().count();
+
+                // Show the last part of the content (where the append happened)
+                let preview_chars = 200; // Show last 200 chars
+                let content_preview = if block.value.len() > preview_chars {
+                    format!(
+                        "...{}",
+                        &block.value[block.value.len().saturating_sub(preview_chars)..]
+                    )
+                } else {
+                    block.value.clone()
+                };
+
+                json!({
+                    "content_preview": content_preview,
+                    "total_chars": char_count,
+                })
+            })
+            .unwrap_or_else(|| json!({}));
+
         Ok(ContextOutput {
             success: true,
             message: Some(format!(
-                "Appended {} characters to context section '{}'",
+                "Successfully appended {} characters to context section '{}'. The section now contains {} total characters.",
                 content.len(),
-                name
+                name,
+                updated_block
+                    .get("total_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
             )),
-            content: json!({}),
+            content: updated_block,
         })
     }
 
@@ -368,10 +398,54 @@ impl ContextTool {
             return Ok(error_result);
         }
 
+        // Get the updated block to show the new state
+        let updated_block = self
+            .handle
+            .memory
+            .get_block(&name)
+            .map(|block| {
+                let char_count = block.value.chars().count();
+
+                // Find where the replacement happened and show context around it
+                let preview_chars = 100; // Show 100 chars before and after
+                let content_preview = if let Some(pos) = block.value.find(&new_content) {
+                    let start = pos.saturating_sub(preview_chars);
+                    let end = (pos + new_content.len() + preview_chars).min(block.value.len());
+
+                    let prefix = if start > 0 { "..." } else { "" };
+                    let suffix = if end < block.value.len() { "..." } else { "" };
+
+                    format!("{}{}{}", prefix, &block.value[start..end], suffix)
+                } else {
+                    // Fallback to showing the end if we can't find the replacement
+                    if block.value.len() > preview_chars * 2 {
+                        format!(
+                            "...{}",
+                            &block.value[block.value.len().saturating_sub(preview_chars * 2)..]
+                        )
+                    } else {
+                        block.value.clone()
+                    }
+                };
+
+                json!({
+                    "content_preview": content_preview,
+                    "total_chars": char_count,
+                })
+            })
+            .unwrap_or_else(|| json!({}));
+
         Ok(ContextOutput {
             success: true,
-            message: Some(format!("Replaced content in context section '{}'", name)),
-            content: json!({}),
+            message: Some(format!(
+                "Successfully replaced content in context section '{}'. The section now contains {} total characters.",
+                name,
+                updated_block
+                    .get("total_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            )),
+            content: updated_block,
         })
     }
 
@@ -384,7 +458,10 @@ impl ContextTool {
         let block = match self.handle.memory.get_block(&name) {
             Some(block) => {
                 // can't archive blocks you don't have admin access for
-                if block.memory_type != MemoryType::Core {
+                if block.memory_type != MemoryType::Working
+                    && block.memory_type != MemoryType::Core
+                    && !block.pinned
+                {
                     return Ok(ContextOutput {
                         success: false,
                         message: Some(format!(
@@ -393,11 +470,11 @@ impl ContextTool {
                         )),
                         content: json!({}),
                     });
-                } else if block.permission < MemoryPermission::Admin {
+                } else if block.permission < MemoryPermission::Append {
                     return Ok(ContextOutput {
                         success: false,
                         message: Some(format!(
-                            "Not enough permissions to swap out block '{}', requires Admin",
+                            "Not enough permissions to swap out block '{}', requires read_write",
                             name
                         )),
                         content: json!({}),
@@ -427,7 +504,7 @@ impl ContextTool {
         // Update it to be archival type
         if let Some(mut archival_block) = self.handle.memory.get_block_mut(&archival_label) {
             archival_block.memory_type = MemoryType::Archival;
-            archival_block.permission = MemoryPermission::Admin;
+            archival_block.permission = MemoryPermission::ReadWrite;
             archival_block.description = Some(format!("Archived from context '{}'", name));
         }
 
@@ -497,7 +574,7 @@ impl ContextTool {
 
         // Update it to be core type
         if let Some(mut core_block) = self.handle.memory.get_block_mut(&name) {
-            core_block.memory_type = MemoryType::Core;
+            core_block.memory_type = MemoryType::Working;
             core_block.permission = MemoryPermission::ReadWrite;
             core_block.description =
                 Some(format!("Loaded from recall memory '{}'", archival_label));
@@ -524,7 +601,7 @@ impl ContextTool {
         // First check both blocks exist and have correct types
         let core_block = match self.handle.memory.get_block(&archive_name) {
             Some(block) => {
-                if block.memory_type != MemoryType::Core {
+                if block.memory_type != MemoryType::Working || block.pinned {
                     return Ok(ContextOutput {
                         success: false,
                         message: Some(format!(
@@ -533,7 +610,7 @@ impl ContextTool {
                         )),
                         content: json!({}),
                     });
-                } else if block.permission <= MemoryPermission::ReadWrite {
+                } else if block.permission < MemoryPermission::ReadWrite {
                     return Ok(ContextOutput {
                         success: false,
                         message: Some(format!(

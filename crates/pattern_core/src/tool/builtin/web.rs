@@ -1,6 +1,10 @@
 //! Web tool for fetching and searching web content
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use async_trait::async_trait;
+use dashmap::DashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -46,13 +50,20 @@ pub struct WebInput {
     pub format: Option<WebFormat>,
 
     /// For search: maximum results (1-20, default: 10)
+    /// For fetch: max characters per page (default: 10000)
     #[schemars(default, with = "i64")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+
+    /// For fetch: continue reading from this character offset
+    #[schemars(default, with = "i64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<usize>,
 }
 
 /// Result from a web search
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(inline)]
 pub struct SearchResult {
     /// Result title
     pub title: String,
@@ -62,32 +73,52 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
+/// Metadata about fetched content
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FetchMetadata {
+    /// Final URL after redirects
+    pub url: String,
+    /// Content type from server
+    pub content_type: String,
+    /// Format used for conversion
+    pub format: WebFormat,
+    /// Total content length in characters
+    pub total_length: usize,
+    /// Current offset in content
+    pub offset: usize,
+    /// Whether more content is available
+    pub has_more: bool,
+}
+
 /// Output from web operations
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum WebOutput {
-    /// Fetched content
-    Content {
-        /// The fetched content
-        content: String,
-        /// Final URL after redirects
-        url: String,
-        /// Content type from server
-        content_type: String,
-        /// Format used
-        format: WebFormat,
-        /// Content length in characters
-        content_length: usize,
-    },
-    /// Search results
-    Results {
-        /// Search results
-        results: Vec<SearchResult>,
-        /// Original query
-        query: String,
-        /// Number of results
-        count: usize,
-    },
+pub struct WebOutput {
+    /// The main content or results
+    #[schemars(default, with = "String")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+
+    /// Search results (when operation is search)
+    #[schemars(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<SearchResult>>,
+
+    /// Metadata about the operation
+    #[schemars(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<FetchMetadata>,
+
+    /// For pagination: offset to continue from
+    #[schemars(default, with = "i64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+}
+
+/// Cached fetch content
+#[derive(Debug, Clone)]
+struct CachedContent {
+    content: String,
+    timestamp: Instant,
 }
 
 /// Web interaction tool
@@ -96,6 +127,10 @@ pub struct WebTool {
     #[allow(dead_code)]
     pub(crate) handle: AgentHandle,
     client: PatternHttpClient,
+    /// Cache URL -> (content, timestamp)
+    fetch_cache: Arc<DashMap<String, CachedContent>>,
+    /// Most recently fetched URL for continuation
+    last_fetch_url: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl WebTool {
@@ -103,19 +138,115 @@ impl WebTool {
     pub fn new(handle: AgentHandle) -> Self {
         let client = PatternHttpClient::default();
 
-        Self { handle, client }
+        Self {
+            handle,
+            client,
+            fetch_cache: Arc::new(DashMap::new()),
+            last_fetch_url: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
-    /// Fetch content from a URL
-    async fn fetch_url(&self, url: String, format: WebFormat) -> Result<WebOutput> {
-        let parsed_domain = Url::parse(&url)
+    /// Fetch content from a URL with pagination support
+    async fn fetch_url(
+        &self,
+        url: String,
+        format: WebFormat,
+        continue_from: Option<usize>,
+    ) -> Result<WebOutput> {
+        const CACHE_DURATION_SECS: u64 = 300; // 5 minutes
+        const DEFAULT_PAGE_SIZE: usize = 10000; // 10k chars per page
+
+        // Handle blank query with continue_from
+        let url = if url.is_empty() && continue_from.is_some() {
+            // Get the last fetched URL
+            let last_url = self.last_fetch_url.lock().unwrap();
+            match &*last_url {
+                Some(url) => url.clone(),
+                None => {
+                    return Err(CoreError::ToolExecutionFailed {
+                        tool_name: "web".to_string(),
+                        cause: "No previous fetch to continue from".to_string(),
+                        parameters: serde_json::json!({ "continue_from": continue_from }),
+                    });
+                }
+            }
+        } else {
+            // Store this URL as the most recent
+            if !url.is_empty() {
+                *self.last_fetch_url.lock().unwrap() = Some(url.clone());
+            }
+            url
+        };
+
+        // Check cache first
+        let full_content = if let Some(cached) = self.fetch_cache.get(&url) {
+            if cached.timestamp.elapsed().as_secs() < CACHE_DURATION_SECS {
+                cached.content.clone()
+            } else {
+                // Cache expired, remove and re-fetch
+                drop(cached); // Release read lock before removing
+                self.fetch_cache.remove(&url);
+                self.fetch_and_cache(&url, format).await?
+            }
+        } else {
+            self.fetch_and_cache(&url, format).await?
+        };
+
+        // Handle pagination
+        let start = continue_from.unwrap_or(0);
+        let page_size = DEFAULT_PAGE_SIZE;
+        let total_length = full_content.chars().count();
+
+        // Ensure start is within bounds
+        if start >= total_length {
+            return Ok(WebOutput {
+                content: Some(String::new()),
+                results: None,
+                metadata: Some(FetchMetadata {
+                    url: url.clone(),
+                    content_type: "text/html".to_string(),
+                    format,
+                    total_length,
+                    offset: start,
+                    has_more: false,
+                }),
+                next_offset: None,
+            });
+        }
+
+        // Calculate end position
+        let end = (start + page_size).min(total_length);
+        let has_more = end < total_length;
+
+        // Extract the page content (handle char boundaries properly)
+        let page_content: String = full_content.chars().skip(start).take(end - start).collect();
+
+        Ok(WebOutput {
+            content: Some(page_content),
+            results: None,
+            metadata: Some(FetchMetadata {
+                url: url.clone(),
+                content_type: "text/html".to_string(),
+                format,
+                total_length,
+                offset: start,
+                has_more,
+            }),
+            next_offset: if has_more { Some(end) } else { None },
+        })
+    }
+
+    /// Fetch content and store in cache
+    async fn fetch_and_cache(&self, url: &str, format: WebFormat) -> Result<String> {
+        let parsed_domain = Url::parse(url)
             .ok()
             .and_then(|url| url.host_str().map(|s| s.to_string()))
             .unwrap_or("".to_string());
+
         let response = self
             .client
             .client
-            .get(&url)
+            .get(url)
             .header(
                 "User-Agent",
                 "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0",
@@ -138,14 +269,6 @@ impl WebTool {
                 parameters: serde_json::json!({ "url": url }),
             })?;
 
-        let final_url = response.url().to_string();
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("text/html")
-            .to_string();
-
         let text = response
             .text()
             .await
@@ -156,20 +279,20 @@ impl WebTool {
             })?;
 
         let content = match format {
-            WebFormat::Html => text.clone(),
-            WebFormat::Markdown => {
-                // Convert HTML to Markdown
-                html2md::parse_html(&text)
-            }
+            WebFormat::Html => text,
+            WebFormat::Markdown => html2md::parse_html(&text),
         };
 
-        Ok(WebOutput::Content {
-            content_length: content.chars().count(),
-            content,
-            url: final_url,
-            content_type,
-            format,
-        })
+        // Store in cache
+        self.fetch_cache.insert(
+            url.to_string(),
+            CachedContent {
+                content: content.clone(),
+                timestamp: Instant::now(),
+            },
+        );
+
+        Ok(content)
     }
 
     /// Search the web using DuckDuckGo
@@ -242,10 +365,11 @@ impl WebTool {
             });
         }
 
-        Ok(WebOutput::Results {
-            count: results.len(),
-            results,
-            query,
+        Ok(WebOutput {
+            content: None,
+            results: Some(results),
+            metadata: None,
+            next_offset: None,
         })
     }
 }
@@ -263,6 +387,9 @@ impl AiTool for WebTool {
         r#"Interact with the web. Operations: 'fetch' to get content from a URL, 'search' to search the web using DuckDuckGo.
 
 When using 'fetch' you can select format "html" or "md" (default: "md")
+- Returns 10k characters at a time to avoid overwhelming context
+- Check metadata.has_more and use continue_from with next_offset to read more
+- Shortcut: Leave query blank with continue_from to continue previous URL
 
 The "md" format converts HTML to readable markdown, which is usually better for understanding content.
 The "html" format returns raw HTML, useful when you need to see exact formatting or extract specific elements
@@ -286,7 +413,8 @@ Use this whenever you need current information, facts, news, or anything beyond 
         match params.operation {
             WebOperation::Fetch => {
                 let format = params.format.unwrap_or_default();
-                self.fetch_url(params.query, format).await
+                self.fetch_url(params.query, format, params.continue_from)
+                    .await
             }
             WebOperation::Search => {
                 let limit = params.limit.unwrap_or(10).max(1).min(20);

@@ -244,9 +244,18 @@ impl RecallTool {
             // Verify it's archival memory
             if block.memory_type == MemoryType::Archival {
                 // Clone what we need and drop the ref immediately
+                let content = block.value.clone();
+                let _char_count = content.chars().count();
+                let preview_chars = 500; // Show more chars for direct read
+                let _content_preview = if content.len() > preview_chars {
+                    format!("{}...", &content[..preview_chars])
+                } else {
+                    content.clone()
+                };
+
                 let result = ArchivalSearchResult {
                     label: block.label.to_string(),
-                    content: block.value.clone(),
+                    content: content,
                     created_at: block.created_at,
                     updated_at: block.updated_at,
                 };
@@ -416,9 +425,38 @@ impl RecallTool {
             return Ok(error_result);
         }
 
+        // Get the updated block to show a preview
+        let preview_info = self
+            .handle
+            .memory
+            .get_block(&label)
+            .map(|block| {
+                let char_count = block.value.chars().count();
+
+                // Show the last part of the content (where the append happened)
+                let preview_chars = 200; // Show last 200 chars
+                let content_preview = if block.value.len() > preview_chars {
+                    format!(
+                        "...{}",
+                        &block.value[block.value.len().saturating_sub(preview_chars)..]
+                    )
+                } else {
+                    block.value.clone()
+                };
+
+                (char_count, content_preview)
+            })
+            .unwrap_or((0, String::new()));
+
         Ok(RecallOutput {
             success: true,
-            message: Some(format!("Appended to recall memory '{}'", label)),
+            message: Some(format!(
+                "Successfully appended {} characters to recall memory '{}'. The memory now contains {} total characters. Preview: {}",
+                content.len(),
+                label,
+                preview_info.0,
+                preview_info.1
+            )),
             results: vec![],
         })
     }

@@ -75,10 +75,10 @@ impl Message {
                 .iter()
                 .map(|part| match part {
                     ContentPart::Text(text) => text.split_whitespace().count() as u32,
-                    _ => 0,
+                    _ => 100,
                 })
                 .sum(),
-            MessageContent::ToolCalls(calls) => calls.len() as u32 * 10, // Estimate
+            MessageContent::ToolCalls(calls) => calls.len() as u32 * 200, // Estimate
             MessageContent::ToolResponses(responses) => responses
                 .iter()
                 .map(|r| r.content.split_whitespace().count() as u32)
@@ -88,8 +88,8 @@ impl Message {
                 .map(|block| match block {
                     ContentBlock::Text { text } => text.split_whitespace().count() as u32,
                     ContentBlock::Thinking { text, .. } => text.split_whitespace().count() as u32,
-                    ContentBlock::RedactedThinking { .. } => 10, // Estimate
-                    ContentBlock::ToolUse { .. } => 10,          // Estimate
+                    ContentBlock::RedactedThinking { .. } => 1000, // Estimate
+                    ContentBlock::ToolUse { .. } => 200,           // Estimate
                     ContentBlock::ToolResult { content, .. } => {
                         content.split_whitespace().count() as u32
                     }
@@ -387,9 +387,41 @@ impl Request {
         // Validate before converting
         self.validate()?;
 
+        // Fix assistant messages that end with thinking blocks
+        for msg in &mut self.messages {
+            if msg.role == ChatRole::Assistant {
+                if let MessageContent::Blocks(blocks) = &mut msg.content {
+                    if let Some(last_block) = blocks.last() {
+                        // Check if the last block is a thinking block
+                        let ends_with_thinking = matches!(
+                            last_block,
+                            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                        );
+
+                        if ends_with_thinking {
+                            // Append a minimal text block to fix the issue
+                            tracing::debug!(
+                                "Appending text block after thinking block in assistant message"
+                            );
+                            blocks.push(ContentBlock::Text {
+                                text: ".".to_string(), // Single period to satisfy non-empty requirement
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let messages: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| Message::estimate_word_count(&m.content) > 0)
+            .map(|m| m.as_chat_message())
+            .collect();
+
         Ok(
             genai::chat::ChatRequest::from_system(self.system.clone().unwrap().join("\n\n"))
-                .append_messages(self.messages.iter().map(|m| m.as_chat_message()).collect())
+                .append_messages(messages)
                 .with_tools(self.tools.clone().unwrap_or_default()),
         )
     }
@@ -995,7 +1027,10 @@ impl Message {
                 current_assistant_content[0].clone()
             };
 
-            let has_tool_calls = matches!(&combined_content, MessageContent::ToolCalls(_));
+            let has_tool_calls = matches!(
+                &combined_content,
+                MessageContent::ToolCalls(_) | MessageContent::Blocks(_)
+            );
             let word_count = Self::estimate_word_count(&combined_content);
 
             messages.push(Self {
@@ -1016,29 +1051,29 @@ impl Message {
             });
         }
 
-        // If response was empty but had reasoning, create a text message
-        if messages.is_empty() && response.reasoning.is_some() {
-            messages.push(Self {
-                id: MessageId::generate(),
-                role: ChatRole::Assistant,
-                content: MessageContent::Text(response.reasoning.clone().unwrap_or_default()),
-                metadata: MessageMetadata {
-                    user_id: Some(agent_id.to_string()),
-                    ..Default::default()
-                },
-                options: MessageOptions::default(),
-                created_at: Utc::now(),
-                owner_id: None,
-                has_tool_calls: false,
-                word_count: response
-                    .reasoning
-                    .as_ref()
-                    .map(|r| r.split_whitespace().count() as u32)
-                    .unwrap_or(0),
-                embedding: None,
-                embedding_model: None,
-            });
-        }
+        // // If response was empty but had reasoning, create a text message
+        // if messages.is_empty() && response.reasoning.is_some() {
+        //     messages.push(Self {
+        //         id: MessageId::generate(),
+        //         role: ChatRole::Assistant,
+        //         content: MessageContent::Text(response.reasoning.clone().unwrap_or_default()),
+        //         metadata: MessageMetadata {
+        //             user_id: Some(agent_id.to_string()),
+        //             ..Default::default()
+        //         },
+        //         options: MessageOptions::default(),
+        //         created_at: Utc::now(),
+        //         owner_id: None,
+        //         has_tool_calls: false,
+        //         word_count: response
+        //             .reasoning
+        //             .as_ref()
+        //             .map(|r| r.split_whitespace().count() as u32)
+        //             .unwrap_or(0),
+        //         embedding: None,
+        //         embedding_model: None,
+        //     });
+        // }
 
         messages
     }

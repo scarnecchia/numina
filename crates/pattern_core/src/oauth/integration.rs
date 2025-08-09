@@ -28,8 +28,21 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
         let token = crate::db::ops::get_user_oauth_token(&self.db, &self.user_id, provider).await?;
 
         if let Some(mut token) = token {
+            tracing::debug!(
+                "Found OAuth token for provider '{}', expires at: {}, needs refresh: {}",
+                provider,
+                token.expires_at,
+                token.needs_refresh()
+            );
+
             // Check if token needs refresh
             if token.needs_refresh() && token.refresh_token.is_some() {
+                tracing::info!(
+                    "OAuth token for {} needs refresh (expires: {}), attempting refresh...",
+                    provider,
+                    token.expires_at
+                );
+
                 // Refresh the token
                 let config = match provider {
                     "anthropic" => crate::oauth::auth_flow::OAuthConfig::anthropic(),
@@ -43,23 +56,52 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
                 };
 
                 let flow = DeviceAuthFlow::new(config);
-                let token_response = flow
+
+                tracing::debug!(
+                    "Attempting token refresh with refresh_token: {}",
+                    if token.refresh_token.is_some() {
+                        "[PRESENT]"
+                    } else {
+                        "[MISSING]"
+                    }
+                );
+
+                match flow
                     .refresh_token(token.refresh_token.clone().unwrap())
-                    .await?;
+                    .await
+                {
+                    Ok(token_response) => {
+                        // Calculate new expiry
+                        let new_expires_at = Utc::now()
+                            + chrono::Duration::seconds(token_response.expires_in as i64);
 
-                // Calculate new expiry
-                let new_expires_at =
-                    Utc::now() + chrono::Duration::seconds(token_response.expires_in as i64);
+                        tracing::info!(
+                            "OAuth token refresh successful! New token expires at: {} ({} seconds from now)",
+                            new_expires_at,
+                            token_response.expires_in
+                        );
 
-                // Update the token in database
-                token = crate::db::ops::update_oauth_token(
-                    &self.db,
-                    &token.id,
-                    token_response.access_token,
-                    token_response.refresh_token,
-                    new_expires_at,
-                )
-                .await?;
+                        // Update the token in database
+                        token = crate::db::ops::update_oauth_token(
+                            &self.db,
+                            &token.id,
+                            token_response.access_token,
+                            token_response.refresh_token,
+                            new_expires_at,
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        tracing::error!("OAuth token refresh failed: {}", e);
+                        return Err(e);
+                    }
+                }
+            } else if token.needs_refresh() && token.refresh_token.is_none() {
+                tracing::warn!(
+                    "OAuth token for {} needs refresh but no refresh token available! Token expires: {}",
+                    provider,
+                    token.expires_at
+                );
             }
 
             // Mark token as used
@@ -67,6 +109,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
 
             Ok(Some(Arc::new(token)))
         } else {
+            tracing::debug!("No OAuth token found for provider '{}'", provider);
             Ok(None)
         }
     }

@@ -315,6 +315,7 @@ default_filter = { nsids = [
     "did:plc:yokspuz7ha7rf5mrqmhgdtxw", # penelope
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
+    #"did:plc:mxzuau6m53jtdsbqe6f4laov", # void
     "did:plc:7757w723nk675bqziinitoif", # alice (avengingfemme)
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
