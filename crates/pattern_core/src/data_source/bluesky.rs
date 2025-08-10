@@ -397,7 +397,7 @@ pub struct BlueskyPost {
     pub text: String,
     pub created_at: DateTime<Utc>,
     pub reply: Option<ReplyRef>, // Full reply reference with root and parent
-    pub embed: Option<serde_json::Value>,
+    pub embed: Option<Union<atrium_api::app::bsky::feed::post::RecordEmbedRefs>>,
     pub langs: Vec<String>,
     pub labels: Vec<String>,
     pub facets: Vec<Facet>, // Rich text annotations (mentions, links, hashtags)
@@ -450,105 +450,79 @@ impl BlueskyPost {
 
     /// Check if post has images
     pub fn has_images(&self) -> bool {
-        self.embed
-            .as_ref()
-            .and_then(|e| e.get("$type"))
-            .and_then(|t| t.as_str())
-            .map(|t| t == "app.bsky.embed.images")
-            .unwrap_or(false)
+        use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+        self.embed.as_ref().map_or(false, |e| {
+            matches!(
+                e,
+                Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(_))
+                    | Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(_))
+            )
+        })
     }
 
     /// Extract alt text from image embeds (for accessibility)
     pub fn image_alt_texts(&self) -> Vec<String> {
-        self.embed
-            .as_ref()
-            .and_then(|e| e.get("images"))
-            .and_then(|imgs| imgs.as_array())
-            .map(|images| {
-                images
-                    .iter()
-                    .filter_map(|img| img.get("alt"))
-                    .filter_map(|alt| alt.as_str())
-                    .map(|s| s.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+        match &self.embed {
+            Some(Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(images))) => images
+                .data
+                .images
+                .iter()
+                .map(|img| img.alt.clone())
+                .collect(),
+            Some(Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(
+                record_with_media,
+            ))) => {
+                // Check if the media part contains images
+                use atrium_api::app::bsky::embed::record_with_media::MainMediaRefs;
+                match &record_with_media.data.media {
+                    Union::Refs(MainMediaRefs::AppBskyEmbedImagesMain(images)) => images
+                        .data
+                        .images
+                        .iter()
+                        .map(|img| img.alt.clone())
+                        .collect(),
+                    _ => vec![],
+                }
+            }
+            _ => vec![],
+        }
     }
 
     /// Extract external link from embed (link cards)
     pub fn embedded_link(&self) -> Option<String> {
-        self.embed.as_ref().and_then(|e| {
-            // Check if it's an external embed
-            if e.get("$type")?.as_str()? == "app.bsky.embed.external" {
-                e.get("external")?
-                    .get("uri")?
-                    .as_str()
-                    .map(|s| s.to_string())
-            } else {
-                None
+        use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+        match &self.embed {
+            Some(Union::Refs(RecordEmbedRefs::AppBskyEmbedExternalMain(external))) => {
+                Some(external.data.external.uri.clone())
             }
-        })
+            _ => None,
+        }
     }
 
-    /// Extract quoted post data if this is a quote post
+    /// Extract quoted post URI if this is a quote post
+    pub fn quoted_post_uri(&self) -> Option<String> {
+        use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+
+        match &self.embed {
+            Some(Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordMain(record))) => {
+                // The URI should be in record.data.record.uri
+                Some(record.data.record.uri.clone())
+            }
+            Some(Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(
+                record_with_media,
+            ))) => {
+                // The URI should be in record_with_media.data.record.data.record.uri
+                Some(record_with_media.data.record.data.record.uri.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// This is a stub for backwards compatibility - use quoted_post_uri() and fetch the full post
     pub fn quoted_post(&self) -> Option<QuotedPost> {
-        self.embed.as_ref().and_then(|e| {
-            let type_field = e.get("$type")?.as_str()?;
-
-            // Check for direct record embed
-            let record_obj = if type_field == "app.bsky.embed.record" {
-                e.get("record")?
-            }
-            // Check for record with media (quote post with images)
-            else if type_field == "app.bsky.embed.recordWithMedia" {
-                e.get("record")?.get("record")?
-            } else {
-                return None;
-            };
-
-            // Extract the quoted post data
-            let uri = record_obj.get("uri")?.as_str()?.to_string();
-            let cid = record_obj.get("cid")?.as_str()?.to_string();
-
-            // Author info
-            let author = record_obj.get("author")?;
-            let did = author.get("did")?.as_str()?.to_string();
-            let handle = author.get("handle")?.as_str()?.to_string();
-            let display_name = author
-                .get("displayName")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            // Post content - try to get from value field which contains the actual record
-            let mut text = String::new();
-            let mut created_at = None;
-
-            if let Some(value_obj) = record_obj.get("value") {
-                text = value_obj.get("text")?.as_str()?.to_string();
-                if let Some(created_at_str) = value_obj.get("createdAt").and_then(|v| v.as_str()) {
-                    created_at = chrono::DateTime::parse_from_rfc3339(created_at_str)
-                        .ok()
-                        .map(|dt| dt.to_utc());
-                }
-            }
-
-            // Indexed time as fallback for created_at
-            let indexed_at = record_obj
-                .get("indexedAt")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.to_utc());
-
-            Some(QuotedPost {
-                uri,
-                cid,
-                did,
-                handle,
-                display_name,
-                text,
-                created_at: created_at.or(indexed_at),
-            })
-        })
+        // Return None - the full post data should be fetched using bsky_agent when needed
+        None
     }
 }
 
@@ -1260,7 +1234,8 @@ impl DataSource for BlueskyFirehoseSource {
                                 let author_did = post_view.author.did.as_str().to_string();
                                 thread_users.push((handle.clone(), author_did));
 
-                                let embed_info = extract_embed_info(post_view);
+                                let embed_info =
+                                    extract_embed_info(post_view, self.bsky_agent.as_ref()).await;
 
                                 thread_posts.push((
                                     handle,
@@ -1379,7 +1354,8 @@ impl DataSource for BlueskyFirehoseSource {
                             if let Some((text, _langs, features, _alt_texts)) =
                                 extract_post_data(sibling)
                             {
-                                let embed_info = extract_embed_info(sibling);
+                                let embed_info =
+                                    extract_embed_info(sibling, self.bsky_agent.as_ref()).await;
                                 let author_str = if let Some(name) = &sibling.author.display_name {
                                     format!("{} (@{})", name, sibling.author.handle.as_str())
                                 } else {
@@ -1445,7 +1421,9 @@ impl DataSource for BlueskyFirehoseSource {
                                         if let Some((reply_text, _, _, _)) =
                                             extract_post_data(reply)
                                         {
-                                            let reply_embed_info = extract_embed_info(reply);
+                                            let reply_embed_info =
+                                                extract_embed_info(reply, self.bsky_agent.as_ref())
+                                                    .await;
                                             let reply_author =
                                                 if let Some(name) = &reply.author.display_name {
                                                     format!(
@@ -1528,25 +1506,31 @@ impl DataSource for BlueskyFirehoseSource {
         );
         message.push_str(&relative_time);
 
-        // Display quoted post if present
+        // Display quoted post if present using the same formatting as thread posts
         if let Some(quoted) = item.quoted_post() {
-            message.push_str("\n┌─ Quote Post ─────────────────\n");
-            let quoted_author = if let Some(display_name) = &quoted.display_name {
-                format!("{} (@{})", display_name, quoted.handle)
-            } else {
-                format!("@{}", quoted.handle)
+            let quote_info = EmbedInfo::Quote {
+                uri: quoted.uri.clone(),
+                cid: String::new(), // Not used in display
+                author_handle: quoted.handle.clone(),
+                author_display_name: quoted.display_name.clone(),
+                text: quoted.text.clone(),
+                created_at: quoted.created_at,
             };
-            message.push_str(&format!("│ {}: {}\n", quoted_author, quoted.text));
-
-            if let Some(created_at) = quoted.created_at {
-                let quoted_interval = Utc::now() - created_at;
-                let quoted_relative_time =
-                    format_duration(quoted_interval.to_std().unwrap_or(Duration::from_secs(0)));
-                message.push_str(&format!("│ {} ago\n", quoted_relative_time));
+            let embed_display = quote_info.format_display("");
+            if !embed_display.is_empty() {
+                message.push_str(&embed_display);
             }
+        }
 
-            message.push_str(&format!("│ 🔗 {}\n", quoted.uri));
-            message.push_str("└────────────────────────────\n");
+        // Add image indicator if present
+        if item.has_images() {
+            let alt_texts = item.image_alt_texts();
+            if !alt_texts.is_empty() {
+                message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
+            }
+            for alt_text in alt_texts {
+                message.push_str(&format!("\n alt text: {}", alt_text));
+            }
         }
 
         // Extract and display links from facets
@@ -1571,17 +1555,6 @@ impl DataSource for BlueskyFirehoseSource {
                 message.push_str(&format!(" {}", link));
             }
             message.push_str("]");
-        }
-
-        // Add image indicator if present
-        if item.has_images() {
-            let alt_texts = item.image_alt_texts();
-            if !alt_texts.is_empty() {
-                message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
-            }
-            for alt_text in alt_texts {
-                message.push_str(&format!("\n alt text: {}", alt_text));
-            }
         }
 
         // Add link
@@ -1956,9 +1929,7 @@ impl LexiconIngestor for PostIngestor {
                     .expect("incorrect time format")
                     .to_utc(),
                 reply: post.reply.map(|r| r.data),
-                embed: post
-                    .embed
-                    .map(|e| serde_json::to_value(e).expect("should be reasonably serializable")),
+                embed: post.embed,
                 langs,
                 labels,
                 facets,
@@ -2134,8 +2105,9 @@ fn extract_post_data(
 }
 
 /// Extract full embed info from a PostView
-fn extract_embed_info(
+async fn extract_embed_info(
     post_view: &atrium_api::app::bsky::feed::defs::PostView,
+    bsky_agent: Option<&Arc<bsky_sdk::BskyAgent>>,
 ) -> Option<EmbedInfo> {
     use atrium_api::app::bsky::feed::defs::PostViewEmbedRefs;
 
@@ -2165,6 +2137,41 @@ fn extract_embed_info(
                             view_record,
                         ),
                     ) => {
+                        // If we have a bsky_agent, fetch the full quote post
+                        if let Some(agent) = bsky_agent {
+                            let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
+                                uris: vec![view_record.uri.clone()],
+                            };
+
+                            if let Ok(posts_result) =
+                                agent.api.app.bsky.feed.get_posts(params.into()).await
+                            {
+                                if let Some(post) = posts_result.data.posts.first() {
+                                    // Extract full data from the fetched post
+                                    if let Some((text, _langs, _features, _alt_texts)) =
+                                        extract_post_data(post)
+                                    {
+                                        return Some(EmbedInfo::Quote {
+                                            uri: view_record.uri.clone(),
+                                            cid: view_record.cid.as_ref().to_string(),
+                                            author_handle: post.author.handle.as_str().to_string(),
+                                            author_display_name: post.author.display_name.clone(),
+                                            text,
+                                            created_at: Some(
+                                                chrono::DateTime::parse_from_rfc3339(
+                                                    post.indexed_at.as_str(),
+                                                )
+                                                .ok()
+                                                .map(|dt| dt.to_utc())
+                                                .unwrap_or_else(Utc::now),
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback to using the embedded data
                         if let Ok(quoted_record) =
                             atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
                                 view_record.value.clone(),

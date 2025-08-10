@@ -80,3 +80,18 @@ priority = 1
 tool_name = "context"
 rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
 priority = 1
+
+[[agent.tool_rules]]
+tool_name = "search"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "web"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "data_source"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 4

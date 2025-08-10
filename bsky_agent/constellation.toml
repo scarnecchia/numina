@@ -114,6 +114,20 @@ tool_name = "context"
 rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
 priority = 1
 
+[[agent.tool_rules]]
+tool_name = "search"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "web"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "data_source"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 4
 
 [database]
 type = "embedded"
@@ -295,6 +309,7 @@ default_filter = { nsids = [
     "did:plc:oj4enpdo6uuuikvs73cqvwdm",
     "did:plc:wzsilnxf24ehtmmc3gssy5bu",
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+    "did:plc:vivdsh7kvkb4iqiwcjt4odvx",
 
     # original DIDs allowlist - only see posts from these accounts
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
@@ -329,6 +344,8 @@ default_filter = { nsids = [
     # Example spam accounts would go here
     "did:plc:7iozku5btifey2a2x6lojvyk", # jerkface
     "did:plc:2xreieabu3louljggmfkgc74", # blocked pattern after informed of their nature (belt + suspenders)
+    "did:plc:e6n7jxtu2qrhwvp3j6ib6sq6", # proptermalone
+    "did:plc:klhtmrnregub7we7h6jwiljm", # ed3d
 ] }
 auto_connect_firehose = true # Control when to connect
 

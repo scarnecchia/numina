@@ -48,8 +48,8 @@ surrealdb = { version = "2.3", default-features = false, features = [
 
 # AI/LLM
 # Using fork with OAuth support (system prompt array format)
-#genai = { git = "https://github.com/orual/rust-genai" }
-genai = { path = "../rust-genai" }
+genai = { git = "https://github.com/orual/rust-genai" }
+#genai = { path = "../rust-genai" }
 # genai = { git = "https://github.com/jeremychone/rust-genai" }
 
 # Utilities

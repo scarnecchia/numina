@@ -590,8 +590,7 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
                             ) {
                                 // trailing thinking blocks are a problem.
                                 blocks.push(ContentBlock::Text {
-                                    text: "removed erroneous tool use or result, continue"
-                                        .to_string(),
+                                    text: ".".to_string(),
                                 })
                             }
                         }
