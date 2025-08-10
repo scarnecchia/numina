@@ -12,7 +12,8 @@ use crate::error::Result;
 use crate::memory::MemoryBlock;
 use crate::utils::format_duration;
 use async_trait::async_trait;
-use atrium_api::app::bsky::feed::post::{RecordLabelsRefs, ReplyRefData};
+use atrium_api::app::bsky::feed::defs::PostViewEmbedRefs;
+use atrium_api::app::bsky::feed::post::{RecordEmbedRefs, RecordLabelsRefs, ReplyRefData};
 use atrium_api::app::bsky::richtext::facet::MainFeaturesItem;
 use atrium_api::com::atproto::repo::strong_ref::MainData;
 use atrium_api::types::string::{Cid, Did};
@@ -1485,80 +1486,119 @@ impl DataSource for BlueskyFirehoseSource {
                     message.push_str("\n>>> MAIN POST >>>\n");
                 } else {
                     // Fallback if we can't fetch the parent
-                    message.push_str(&format!(" to {}", reply.parent.uri));
+                    message.push_str(&format!(" to {}:\n", reply.parent.uri));
                 }
             } else {
                 // No BskyAgent available, just show the URI
-                message.push_str(&format!(" to {}", reply.parent.uri));
+                message.push_str(&format!(" to {}:\n", reply.parent.uri));
             }
         } else if item.mentions(&self.source_id) {
-            message.push_str(" mentioned you");
+            message.push_str(" mentioned you:\n");
         }
 
-        message.push_str(":\n");
-
-        // Full post text
-        message.push_str(&format!("@{}: {}", item.handle, item.text));
-        let interval = Utc::now() - item.created_at;
-        let relative_time = format!(
-            "\n{} ago\n",
-            format_duration(interval.to_std().unwrap_or(Duration::from_secs(0)))
-        );
-        message.push_str(&relative_time);
-
-        // Display quoted post if present using the same formatting as thread posts
-        if let Some(quoted) = item.quoted_post() {
-            let quote_info = EmbedInfo::Quote {
-                uri: quoted.uri.clone(),
-                cid: String::new(), // Not used in display
-                author_handle: quoted.handle.clone(),
-                author_display_name: quoted.display_name.clone(),
-                text: quoted.text.clone(),
-                created_at: quoted.created_at,
+        if let Some(bsky_agent) = &self.bsky_agent {
+            let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
+                uris: vec![item.uri.clone()],
             };
-            let embed_display = quote_info.format_display("");
-            if !embed_display.is_empty() {
-                message.push_str(&embed_display);
+
+            if let Ok(posts_result) = bsky_agent.api.app.bsky.feed.get_posts(params.into()).await {
+                if let Some(post) = posts_result.data.posts.first() {
+                    if let Some((post_text, _, _, _)) = extract_post_data(post) {
+                        let post_embed_info =
+                            extract_embed_info(post, self.bsky_agent.as_ref()).await;
+                        let post_author = if let Some(name) = &post.author.display_name {
+                            format!("{} (@{})", name, post.author.handle.as_str())
+                        } else {
+                            format!("@{}", post.author.handle.as_str())
+                        };
+
+                        let is_agent_post = agent_did
+                            .as_ref()
+                            .map(|did| post.author.did.as_str() == did)
+                            .unwrap_or(false);
+                        let post_prefix = if is_agent_post { "[YOU] " } else { "" };
+
+                        let relative_time = format!(" - {}", extract_post_relative_time(post));
+
+                        message.push_str(&format!(
+                            "{}{}: {}{}\n",
+                            post_prefix, post_author, post_text, relative_time
+                        ));
+
+                        // Show embeds if any
+                        if let Some(embed) = post_embed_info {
+                            let embed_display = embed.format_display(" ");
+                            // Add vertical bar and indentation prefix to each line
+                            for line in embed_display.lines() {
+                                if !line.is_empty() {
+                                    message.push_str(&format!("│  {}\n", line));
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
+        } else {
+            // Full post text
+            message.push_str(&format!("@{}: {}", item.handle, item.text));
+            let interval = Utc::now() - item.created_at;
+            let relative_time = format!(
+                "\n{} ago\n",
+                format_duration(interval.to_std().unwrap_or(Duration::from_secs(0)))
+            );
+            message.push_str(&relative_time);
 
-        // Add image indicator if present
-        if item.has_images() {
-            let alt_texts = item.image_alt_texts();
-            if !alt_texts.is_empty() {
-                message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
+            // Extract and display embeds (including quotes)
+            if let Some(embed) = &item.embed {
+                if let Some(post_embed_info) = extract_record_embed(embed) {
+                    // Show embeds if any
+                    let embed_display = post_embed_info.format_display("");
+                    // Add vertical bar and indentation prefix to each line
+                    for line in embed_display.lines() {
+                        if !line.is_empty() {
+                            message.push_str(&format!("│  {}\n", line));
+                        }
+                    }
+                }
             }
-            for alt_text in alt_texts {
-                message.push_str(&format!("\n alt text: {}", alt_text));
+            // Add image indicator if present
+            if item.has_images() {
+                let alt_texts = item.image_alt_texts();
+                if !alt_texts.is_empty() {
+                    message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
+                }
+                for alt_text in alt_texts {
+                    message.push_str(&format!("\n alt text: {}", alt_text));
+                }
             }
-        }
 
-        // Extract and display links from facets
-        let mut links: Vec<_> = item
-            .facets
-            .iter()
-            .flat_map(|facet| &facet.features)
-            .filter_map(|feature| match feature {
-                FacetFeature::Link { uri } => Some(uri.clone()),
-                _ => None,
-            })
-            .collect();
+            // Extract and display links from facets
+            let mut links: Vec<_> = item
+                .facets
+                .iter()
+                .flat_map(|facet| &facet.features)
+                .filter_map(|feature| match feature {
+                    FacetFeature::Link { uri } => Some(uri.clone()),
+                    _ => None,
+                })
+                .collect();
 
-        // Also check for embedded link card
-        if let Some(embed_link) = item.embedded_link() {
-            links.push(embed_link);
-        }
-
-        if !links.is_empty() {
-            message.push_str("\n[🔗 Links:");
-            for link in &links {
-                message.push_str(&format!(" {}", link));
+            // Also check for embedded link card
+            if let Some(embed_link) = item.embedded_link() {
+                links.push(embed_link);
             }
-            message.push_str("]");
-        }
 
-        // Add link
-        message.push_str(&format!("\n🔗 {}", item.uri));
+            if !links.is_empty() {
+                message.push_str("\n[🔗 Links:");
+                for link in &links {
+                    message.push_str(&format!(" {}", link));
+                }
+                message.push_str("]");
+            }
+
+            // Add link
+            message.push_str(&format!("\n🔗 {}", item.uri));
+        }
 
         // Show replies to the main post using constellation
         if self.bsky_agent.is_some() {
@@ -2104,169 +2144,200 @@ fn extract_post_data(
     }
 }
 
+fn extract_record_embed(embed: &Union<RecordEmbedRefs>) -> Option<EmbedInfo> {
+    match embed {
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedExternalMain(external)) => {
+            Some(EmbedInfo::External {
+                uri: external.external.uri.clone(),
+                title: external.external.title.clone(),
+                description: external.external.description.clone(),
+            })
+        }
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(images)) => Some(EmbedInfo::Images {
+            count: images.images.len(),
+            alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
+        }),
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordMain(quoted_record)) => {
+            Some(EmbedInfo::Quote {
+                uri: quoted_record.record.uri.clone(),
+                cid: quoted_record.record.cid.as_ref().to_string(),
+                author_handle: String::new(),
+                author_display_name: None,
+                text: String::new(),
+                created_at: None,
+            })
+        }
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(_record_media)) => None,
+        Union::Refs(RecordEmbedRefs::AppBskyEmbedVideoMain(_embed)) => None,
+        Union::Unknown(_unknown_data) => None,
+    }
+}
+
+async fn extract_embed(
+    embed: &Union<atrium_api::app::bsky::feed::defs::PostViewEmbedRefs>,
+
+    bsky_agent: Option<&Arc<bsky_sdk::BskyAgent>>,
+) -> Option<EmbedInfo> {
+    match embed {
+        Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => {
+            Some(EmbedInfo::Images {
+                count: images_view.images.len(),
+                alt_texts: images_view
+                    .images
+                    .iter()
+                    .map(|img| img.alt.clone())
+                    .collect(),
+            })
+        }
+        Union::Refs(PostViewEmbedRefs::AppBskyEmbedExternalView(external_view)) => {
+            Some(EmbedInfo::External {
+                uri: external_view.external.uri.clone(),
+                title: external_view.external.title.clone(),
+                description: external_view.external.description.clone(),
+            })
+        }
+        Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordView(record_view)) => {
+            match &record_view.record {
+                Union::Refs(atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
+                    view_record,
+                )) => {
+                    // If we have a bsky_agent, fetch the full quote post
+                    if let Some(agent) = bsky_agent {
+                        let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
+                            uris: vec![view_record.uri.clone()],
+                        };
+
+                        if let Ok(posts_result) =
+                            agent.api.app.bsky.feed.get_posts(params.into()).await
+                        {
+                            if let Some(post) = posts_result.data.posts.first() {
+                                // Extract full data from the fetched post
+                                if let Some((text, _langs, _features, _alt_texts)) =
+                                    extract_post_data(post)
+                                {
+                                    return Some(EmbedInfo::Quote {
+                                        uri: view_record.uri.clone(),
+                                        cid: view_record.cid.as_ref().to_string(),
+                                        author_handle: post.author.handle.as_str().to_string(),
+                                        author_display_name: post.author.display_name.clone(),
+                                        text,
+                                        created_at: Some(
+                                            chrono::DateTime::parse_from_rfc3339(
+                                                post.indexed_at.as_str(),
+                                            )
+                                            .ok()
+                                            .map(|dt| dt.to_utc())
+                                            .unwrap_or_else(Utc::now),
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback to using the embedded data
+                    if let Ok(quoted_record) =
+                        atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
+                            view_record.value.clone(),
+                        )
+                    {
+                        let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
+                        Some(EmbedInfo::Quote {
+                            uri: view_record.uri.clone(),
+                            cid: view_record.cid.as_ref().to_string(),
+                            author_handle: view_record.author.handle.as_str().to_string(),
+                            author_display_name: view_record.author.display_name.clone(),
+                            text: quoted_text,
+                            created_at: Some(
+                                chrono::DateTime::parse_from_rfc3339(
+                                    view_record.indexed_at.as_str(),
+                                )
+                                .ok()
+                                .map(|dt| dt.to_utc())
+                                .unwrap_or_else(Utc::now),
+                            ),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(record_with_media)) => {
+            // Extract quote part
+            let quote_info = match &record_with_media.record.record {
+                Union::Refs(atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
+                    view_record,
+                )) => {
+                    if let Ok(quoted_record) =
+                        atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
+                            view_record.value.clone(),
+                        )
+                    {
+                        let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
+                        Some(EmbedInfo::Quote {
+                            uri: view_record.uri.clone(),
+                            cid: view_record.cid.as_ref().to_string(),
+                            author_handle: view_record.author.handle.as_str().to_string(),
+                            author_display_name: view_record.author.display_name.clone(),
+                            text: quoted_text,
+                            created_at: Some(
+                                chrono::DateTime::parse_from_rfc3339(
+                                    view_record.indexed_at.as_str(),
+                                )
+                                .ok()
+                                .map(|dt| dt.to_utc())
+                                .unwrap_or_else(Utc::now),
+                            ),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            // Extract media part
+            let media_info = match &record_with_media.media {
+                Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedImagesView(images)) => {
+                    Some(EmbedInfo::Images {
+                        count: images.images.len(),
+                        alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
+                    })
+                }
+                Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedExternalView(external)) => {
+                    Some(EmbedInfo::External {
+                        uri: external.external.uri.clone(),
+                        title: external.external.title.clone(),
+                        description: external.external.description.clone(),
+                    })
+                }
+                _ => None,
+            };
+
+            // Combine both
+            match (quote_info, media_info) {
+                (Some(quote), Some(media)) => Some(EmbedInfo::QuoteWithMedia {
+                    quote: Box::new(quote),
+                    media: Box::new(media),
+                }),
+                (Some(quote), None) => Some(quote),
+                (None, Some(media)) => Some(media),
+                (None, None) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Extract full embed info from a PostView
 async fn extract_embed_info(
     post_view: &atrium_api::app::bsky::feed::defs::PostView,
     bsky_agent: Option<&Arc<bsky_sdk::BskyAgent>>,
 ) -> Option<EmbedInfo> {
-    use atrium_api::app::bsky::feed::defs::PostViewEmbedRefs;
-
     if let Some(embed) = &post_view.embed {
-        match embed {
-            Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => {
-                Some(EmbedInfo::Images {
-                    count: images_view.images.len(),
-                    alt_texts: images_view
-                        .images
-                        .iter()
-                        .map(|img| img.alt.clone())
-                        .collect(),
-                })
-            }
-            Union::Refs(PostViewEmbedRefs::AppBskyEmbedExternalView(external_view)) => {
-                Some(EmbedInfo::External {
-                    uri: external_view.external.uri.clone(),
-                    title: external_view.external.title.clone(),
-                    description: external_view.external.description.clone(),
-                })
-            }
-            Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordView(record_view)) => {
-                match &record_view.record {
-                    Union::Refs(
-                        atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
-                            view_record,
-                        ),
-                    ) => {
-                        // If we have a bsky_agent, fetch the full quote post
-                        if let Some(agent) = bsky_agent {
-                            let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                                uris: vec![view_record.uri.clone()],
-                            };
-
-                            if let Ok(posts_result) =
-                                agent.api.app.bsky.feed.get_posts(params.into()).await
-                            {
-                                if let Some(post) = posts_result.data.posts.first() {
-                                    // Extract full data from the fetched post
-                                    if let Some((text, _langs, _features, _alt_texts)) =
-                                        extract_post_data(post)
-                                    {
-                                        return Some(EmbedInfo::Quote {
-                                            uri: view_record.uri.clone(),
-                                            cid: view_record.cid.as_ref().to_string(),
-                                            author_handle: post.author.handle.as_str().to_string(),
-                                            author_display_name: post.author.display_name.clone(),
-                                            text,
-                                            created_at: Some(
-                                                chrono::DateTime::parse_from_rfc3339(
-                                                    post.indexed_at.as_str(),
-                                                )
-                                                .ok()
-                                                .map(|dt| dt.to_utc())
-                                                .unwrap_or_else(Utc::now),
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
-                        // Fallback to using the embedded data
-                        if let Ok(quoted_record) =
-                            atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
-                                view_record.value.clone(),
-                            )
-                        {
-                            let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
-                            Some(EmbedInfo::Quote {
-                                uri: view_record.uri.clone(),
-                                cid: view_record.cid.as_ref().to_string(),
-                                author_handle: view_record.author.handle.as_str().to_string(),
-                                author_display_name: view_record.author.display_name.clone(),
-                                text: quoted_text,
-                                created_at: Some(
-                                    chrono::DateTime::parse_from_rfc3339(
-                                        view_record.indexed_at.as_str(),
-                                    )
-                                    .ok()
-                                    .map(|dt| dt.to_utc())
-                                    .unwrap_or_else(Utc::now),
-                                ),
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(record_with_media)) => {
-                // Extract quote part
-                let quote_info = match &record_with_media.record.record {
-                    Union::Refs(
-                        atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
-                            view_record,
-                        ),
-                    ) => {
-                        if let Ok(quoted_record) =
-                            atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
-                                view_record.value.clone(),
-                            )
-                        {
-                            let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
-                            Some(EmbedInfo::Quote {
-                                uri: view_record.uri.clone(),
-                                cid: view_record.cid.as_ref().to_string(),
-                                author_handle: view_record.author.handle.as_str().to_string(),
-                                author_display_name: view_record.author.display_name.clone(),
-                                text: quoted_text,
-                                created_at: Some(
-                                    chrono::DateTime::parse_from_rfc3339(
-                                        view_record.indexed_at.as_str(),
-                                    )
-                                    .ok()
-                                    .map(|dt| dt.to_utc())
-                                    .unwrap_or_else(Utc::now),
-                                ),
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-
-                // Extract media part
-                let media_info = match &record_with_media.media {
-                    Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedImagesView(images)) => {
-                        Some(EmbedInfo::Images {
-                            count: images.images.len(),
-                            alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
-                        })
-                    }
-                    Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedExternalView(external)) => {
-                        Some(EmbedInfo::External {
-                            uri: external.external.uri.clone(),
-                            title: external.external.title.clone(),
-                            description: external.external.description.clone(),
-                        })
-                    }
-                    _ => None,
-                };
-
-                // Combine both
-                match (quote_info, media_info) {
-                    (Some(quote), Some(media)) => Some(EmbedInfo::QuoteWithMedia {
-                        quote: Box::new(quote),
-                        media: Box::new(media),
-                    }),
-                    (Some(quote), None) => Some(quote),
-                    (None, Some(media)) => Some(media),
-                    (None, None) => None,
-                }
-            }
-            _ => None,
-        }
+        extract_embed(embed, bsky_agent).await
     } else {
         None
     }
