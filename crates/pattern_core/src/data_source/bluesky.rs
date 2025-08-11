@@ -375,7 +375,10 @@ impl atrium_xrpc::HttpClient for PatternHttpClient {
 impl Default for PatternHttpClient {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(concat!("pattern/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .unwrap(), // panics for the same reasons Client::new() would: https://docs.rs/reqwest/latest/reqwest/struct.Client.html#panics
         }
     }
 }
