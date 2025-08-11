@@ -10,6 +10,7 @@ use serenity::{
     },
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use futures::StreamExt;
@@ -330,40 +331,155 @@ impl DiscordBot {
                     .await
                     .map_err(|e| format!("Failed to route message: {}", e))?;
 
-                // Collect responses
-                let mut responses = Vec::new();
-                while let Some(event) = response_stream.next().await {
-                    match event {
-                        pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id: _, text, is_final: _ } => {
-                            if !text.is_empty() {
-                                responses.push(text);
+                // Set up idle timeout - resets on any activity
+                let idle_timeout = Duration::from_secs(120); // 2 minutes of inactivity
+                let mut last_activity = tokio::time::Instant::now();
+
+                // Track state
+                let mut current_message = String::new();
+                let mut has_sent_initial_response = false;
+                let mut active_agents: usize = 0;
+                let mut completed_agents = 0;
+
+                // Process stream with idle timeout
+                loop {
+                    match tokio::time::timeout_at(
+                        last_activity + idle_timeout,
+                        response_stream.next(),
+                    )
+                    .await
+                    {
+                        Ok(Some(event)) => {
+                            // Reset idle timer on any event
+                            last_activity = tokio::time::Instant::now();
+
+                            match event {
+                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id: _, text, is_final } => {
+                                    if !text.is_empty() {
+                                        current_message.push_str(&text);
+
+                                        // Send complete sentences/paragraphs as they arrive
+                                        if is_final || text.ends_with('\n') || text.ends_with(". ") || current_message.len() > 1500 {
+                                            if !current_message.trim().is_empty() {
+                                                for chunk in split_message(&current_message, 2000) {
+                                                    if let Err(e) = msg.reply(&ctx.http, chunk).await {
+                                                        warn!("Failed to send response chunk: {}", e);
+                                                    }
+                                                    has_sent_initial_response = true;
+                                                }
+                                                current_message.clear();
+                                            }
+                                        }
+                                    }
+                                },
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id: _, call_id, fn_name, args } => {
+                                    debug!("Tool call started: {} ({})", fn_name, call_id);
+
+                                    // Check if this is a send_message tool call
+                                    if fn_name == "send_message" {
+                                        // Try to extract the content from args
+                                        if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+                                            // Send the message content directly
+                                            for chunk in split_message(content, 2000) {
+                                                if let Err(e) = msg.reply(&ctx.http, chunk).await {
+                                                    warn!("Failed to send message from send_message tool: {}", e);
+                                                }
+                                            }
+                                            has_sent_initial_response = true;
+                                        }
+                                    } else if !has_sent_initial_response {
+                                        // Show tool activity if we haven't sent anything yet
+                                        let tool_msg = match fn_name.as_str() {
+                                            "context" => "💭 Agent is accessing memory...".to_string(),
+                                            "recall" => "🔍 Agent is searching memories...".to_string(),
+                                            "search" => "🔎 Agent is searching...".to_string(),
+                                            _ => format!("🔧 Agent is using {}", fn_name)
+                                        };
+                                        if let Err(e) = msg.reply(&ctx.http, tool_msg).await {
+                                            debug!("Failed to send tool activity: {}", e);
+                                        }
+                                        has_sent_initial_response = true;
+                                    }
+                                },
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallCompleted { agent_id: _, call_id, result } => {
+                                    debug!("Tool call completed: {} - {:?}", call_id, result);
+
+                                    // Check if this was a send_message tool that succeeded
+                                    if let Ok(result_str) = &result {
+                                        if result_str.contains("Message sent successfully") {
+                                            debug!("send_message tool completed successfully");
+                                        }
+                                    }
+                                },
+                                pattern_core::coordination::groups::GroupResponseEvent::Error { agent_id: _, message, recoverable } => {
+                                    warn!("Agent error: {} (recoverable: {})", message, recoverable);
+                                    let error_msg = if recoverable {
+                                        format!("⚠️ {}", message)
+                                    } else {
+                                        format!("❌ Error: {}", message)
+                                    };
+                                    if let Err(e) = msg.reply(&ctx.http, error_msg).await {
+                                        warn!("Failed to send error message: {}", e);
+                                    }
+                                    if !recoverable {
+                                        break; // Stop processing on non-recoverable errors
+                                    }
+                                },
+                                pattern_core::coordination::groups::GroupResponseEvent::AgentStarted { agent_name, .. } => {
+                                    debug!("Agent {} started processing", agent_name);
+                                    active_agents += 1;
+                                },
+                                pattern_core::coordination::groups::GroupResponseEvent::AgentCompleted { agent_name, .. } => {
+                                    debug!("Agent {} completed processing", agent_name);
+                                    completed_agents += 1;
+                                    active_agents = active_agents.saturating_sub(1);
+
+                                    // If all agents have completed, we can exit
+                                    if active_agents == 0 && completed_agents > 0 {
+                                        break;
+                                    }
+                                },
+                                _ => {} // Ignore other events for now
                             }
-                        },
-                        pattern_core::coordination::groups::GroupResponseEvent::Error { agent_id: _, message, recoverable } => {
-                            warn!("Agent error: {} (recoverable: {})", message, recoverable);
-                        },
-                        pattern_core::coordination::groups::GroupResponseEvent::AgentStarted { agent_name, .. } => {
-                            debug!("Agent {} started processing", agent_name);
-                        },
-                        pattern_core::coordination::groups::GroupResponseEvent::AgentCompleted { agent_name, .. } => {
-                            debug!("Agent {} completed processing", agent_name);
-                        },
-                        _ => {} // Ignore other events for now
+                        }
+                        Ok(None) => {
+                            // Stream ended normally
+                            break;
+                        }
+                        Err(_) => {
+                            // Idle timeout
+                            let timeout_msg = if has_sent_initial_response {
+                                "⏱️ (No further activity for 2 minutes - agents may still be processing)"
+                            } else {
+                                "⏱️ Request timed out after 2 minutes of inactivity. No agents responded."
+                            };
+                            if let Err(e) = msg.reply(&ctx.http, timeout_msg).await {
+                                warn!("Failed to send timeout message: {}", e);
+                            }
+                            break;
+                        }
                     }
                 }
 
-                // Format responses
-                let combined_response = if responses.is_empty() {
-                    "No agents responded to your message.".to_string()
-                } else {
-                    responses.join("\n\n")
-                };
+                // Send any remaining buffered content
+                if !current_message.trim().is_empty() {
+                    for chunk in split_message(&current_message, 2000) {
+                        if let Err(e) = msg.reply(&ctx.http, chunk).await {
+                            warn!("Failed to send final response chunk: {}", e);
+                        }
+                    }
+                }
 
-                // Send response
-                for chunk in split_message(&combined_response, 2000) {
-                    msg.reply(&ctx.http, chunk)
-                        .await
-                        .map_err(|e| format!("Failed to send reply: {}", e))?;
+                // If we never sent anything, send a status message
+                if !has_sent_initial_response {
+                    let status_msg = if active_agents > 0 {
+                        "The agents started processing but produced no response."
+                    } else {
+                        "No agents were available to process your message."
+                    };
+                    if let Err(e) = msg.reply(&ctx.http, status_msg).await {
+                        warn!("Failed to send status message: {}", e);
+                    }
                 }
             } else {
                 // Fallback for single agent mode

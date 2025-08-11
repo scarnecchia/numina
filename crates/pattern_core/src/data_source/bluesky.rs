@@ -2357,6 +2357,7 @@ enum EmbedInfo {
     },
     Quote {
         uri: String,
+        #[allow(dead_code)]
         cid: String,
         author_handle: String,
         author_display_name: Option<String>,

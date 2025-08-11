@@ -27,7 +27,7 @@ use crate::{
     },
     context::{
         AgentContext, CompressionStrategy, ContextConfig,
-        heartbeat::{HeartbeatRequest, HeartbeatSender, check_heartbeat_request},
+        heartbeat::{HeartbeatSender, check_heartbeat_request},
     },
     db::{DatabaseError, ops, schema},
     embeddings::EmbeddingProvider,
@@ -1322,9 +1322,9 @@ where
     async fn execute_tools_with_rules(
         &self,
         calls: &[crate::message::ToolCall],
-        agent_id: &AgentId,
-    ) -> Result<Vec<ToolResponse>> {
+    ) -> Result<(Vec<ToolResponse>, bool)> {
         let mut responses = Vec::new();
+        let mut continuation_requested = false;
 
         // Get current rule engine state
         let mut rule_engine = self.tool_rules.write().await;
@@ -1359,7 +1359,7 @@ where
             // Check if tool has ContinueLoop rule (which means it should continue but doesn't need heartbeat param)
             let has_continue_rule = !needs_heartbeat; // If doesn't need heartbeat, it has ContinueLoop
 
-            tracing::info!(
+            tracing::debug!(
                 "🔍 Tool {} heartbeat check: needs_heartbeat={}, has_param={}, has_continue_rule={}, args={:?}",
                 call.fn_name,
                 needs_heartbeat,
@@ -1368,43 +1368,13 @@ where
                 call.fn_arguments
             );
 
-            // Send heartbeat if either:
-            // 1. Tool requires heartbeat AND has the parameter
-            // 2. Tool has ContinueLoop rule (we'll use heartbeat mechanism for continuation)
+            // Track if ANY tool wants continuation - we'll handle it synchronously
             if (needs_heartbeat && has_heartbeat_param) || has_continue_rule {
-                tracing::info!(
-                    "💓 Continuation requested by tool {} (call_id: {}) - reason: {}",
-                    call.fn_name,
-                    call.call_id,
-                    if has_continue_rule {
-                        "ContinueLoop rule"
-                    } else {
-                        "heartbeat parameter"
-                    }
-                );
-
-                let heartbeat_req = HeartbeatRequest {
-                    agent_id: agent_id.clone(),
-                    tool_name: call.fn_name.clone(),
-                    tool_call_id: call.call_id.clone(),
-                };
-
-                // Try to send, but don't block if the channel is full
-                match self.heartbeat_sender.try_send(heartbeat_req) {
-                    Ok(()) => {
-                        tracing::info!("✅ Continuation request sent successfully");
-                    }
-                    Err(e) => {
-                        tracing::warn!("⚠️ Failed to send continuation request: {:?}", e);
-                    }
-                }
-            } else {
+                continuation_requested = true;
                 tracing::debug!(
-                    "❌ No continuation for tool {}: needs_heartbeat={}, has_param={}, has_continue_rule={}",
+                    "💓 Continuation requested by tool {} (call_id: {}) - will handle synchronously",
                     call.fn_name,
-                    needs_heartbeat,
-                    has_heartbeat_param,
-                    has_continue_rule
+                    call.call_id
                 );
             }
 
@@ -1439,14 +1409,11 @@ where
             }
         }
 
-        Ok(responses)
+        Ok((responses, continuation_requested))
     }
 
     /// Execute start constraint tools if any are required
-    async fn execute_start_constraint_tools(
-        &self,
-        agent_id: &AgentId,
-    ) -> Result<Vec<ToolResponse>> {
+    async fn execute_start_constraint_tools(&self) -> Result<Vec<ToolResponse>> {
         let rule_engine = self.tool_rules.read().await;
         let start_tools = rule_engine.get_start_constraint_tools();
 
@@ -1470,11 +1437,13 @@ where
         drop(rule_engine);
 
         // Execute the start tools
-        self.execute_tools_with_rules(&start_calls, agent_id).await
+        self.execute_tools_with_rules(&start_calls)
+            .await
+            .map(|(responses, _)| responses)
     }
 
     /// Execute required exit tools if any are needed
-    async fn execute_required_exit_tools(&self, agent_id: &AgentId) -> Result<Vec<ToolResponse>> {
+    async fn execute_required_exit_tools(&self) -> Result<Vec<ToolResponse>> {
         let rule_engine = self.tool_rules.read().await;
         let exit_tools = rule_engine.get_required_before_exit_tools();
 
@@ -1498,7 +1467,9 @@ where
         drop(rule_engine);
 
         // Execute the exit tools
-        self.execute_tools_with_rules(&exit_calls, agent_id).await
+        self.execute_tools_with_rules(&exit_calls)
+            .await
+            .map(|(responses, _)| responses)
     }
 
     /// Process a message and stream responses as they happen
@@ -1562,6 +1533,40 @@ where
             // Accumulate agent's response text for constellation logging
             let mut agent_response_text = String::new();
 
+            // Extract and attach memory blocks from metadata if present
+            if let Some(blocks_value) = message.metadata.custom.get("memory_blocks") {
+                if let Ok(memory_blocks) = serde_json::from_value::<
+                    Vec<(compact_str::CompactString, crate::memory::MemoryBlock)>,
+                >(blocks_value.clone())
+                {
+                    tracing::info!(
+                        "📎 Attaching {} memory blocks from message metadata",
+                        memory_blocks.len()
+                    );
+
+                    for (label, block) in memory_blocks {
+                        // Add as working memory using the agent handle
+                        match self_clone
+                            .handle()
+                            .await
+                            .insert_working_memory(&label, &block.value)
+                            .await
+                        {
+                            Ok(_) => {
+                                tracing::debug!("Added memory block {} as working memory", label);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to add memory block {} as working memory: {:?}",
+                                    label,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // Update state and persist message
             {
                 let mut ctx = context.write().await;
@@ -1600,7 +1605,7 @@ where
             };
 
             // Execute start constraint tools if any are required
-            match self_clone.execute_start_constraint_tools(&agent_id).await {
+            match self_clone.execute_start_constraint_tools().await {
                 Ok(start_responses) => {
                     if !start_responses.is_empty() {
                         tracing::info!(
@@ -1655,6 +1660,7 @@ where
             };
 
             let mut current_response = response;
+            let mut should_continue_after_tools = false;
 
             loop {
                 let has_unpaired_tool_calls = current_response.has_unpaired_tool_calls();
@@ -1712,7 +1718,7 @@ where
 
                                         // Send individual tool call started events
                                         for call in calls {
-                                            tracing::info!(
+                                            tracing::debug!(
                                                 "🔧 Sending ToolCallStarted event for tool: {} (call_id: {})",
                                                 call.fn_name,
                                                 call.call_id
@@ -1726,11 +1732,16 @@ where
                                         }
 
                                         // Execute tools with rule validation
-                                        match self_clone
-                                            .execute_tools_with_rules(calls, &agent_id)
-                                            .await
-                                        {
-                                            Ok(our_responses) => {
+                                        match self_clone.execute_tools_with_rules(calls).await {
+                                            Ok((our_responses, needs_continuation)) => {
+                                                // Track if we need continuation after ALL tools are done
+                                                if needs_continuation {
+                                                    tracing::info!(
+                                                        "📍 Marking for continuation after tool execution"
+                                                    );
+                                                    should_continue_after_tools = true;
+                                                }
+
                                                 // Log tool executions to constellation tracker
                                                 if let Some(tracker) =
                                                     &context.read().await.constellation_tracker
@@ -1945,11 +1956,14 @@ where
 
                                     // Send individual tool call started events
                                     for call in &block_tool_calls {
-                                        tracing::info!(
-                                            "🔧 Sending ToolCallStarted event for block tool: {} (call_id: {})",
-                                            call.fn_name,
-                                            call.call_id
-                                        );
+                                        // Only log if not send_message or if send_message failed
+                                        if call.fn_name != "send_message" {
+                                            tracing::debug!(
+                                                "🔧 Sending ToolCallStarted event for block tool: {} (call_id: {})",
+                                                call.fn_name,
+                                                call.call_id
+                                            );
+                                        }
                                         send_event(ResponseEvent::ToolCallStarted {
                                             call_id: call.call_id.clone(),
                                             fn_name: call.fn_name.clone(),
@@ -1960,10 +1974,19 @@ where
 
                                     // Execute the tools with rule validation and heartbeat support
                                     let tool_responses = match self_clone
-                                        .execute_tools_with_rules(&block_tool_calls, &agent_id)
+                                        .execute_tools_with_rules(&block_tool_calls)
                                         .await
                                     {
-                                        Ok(responses) => responses,
+                                        Ok((responses, needs_continuation)) => {
+                                            // Track if we need continuation after ALL tools are done
+                                            if needs_continuation {
+                                                tracing::info!(
+                                                    "📍 Marking for continuation after ContentBlock tool execution"
+                                                );
+                                                should_continue_after_tools = true;
+                                            }
+                                            responses
+                                        }
                                         Err(e) => {
                                             // If execution fails, create error responses for all tools
                                             block_tool_calls
@@ -1991,7 +2014,8 @@ where
 
                                         // Send individual tool call completed events
                                         for response in &tool_responses {
-                                            tracing::info!(
+                                            // Log tool completion at debug level
+                                            tracing::debug!(
                                                 "🔧 Sending ToolCallCompleted event for call_id: {}",
                                                 response.call_id
                                             );
@@ -2035,9 +2059,17 @@ where
                         .await;
                     }
 
-                    // Only continue if there are unpaired tool calls that need responses
-                    if !has_unpaired_tool_calls {
+                    // Check if we should continue (either unpaired tool calls or continuation requested)
+                    if !has_unpaired_tool_calls && !should_continue_after_tools {
                         break;
+                    }
+
+                    // If we're continuing due to tools requesting it, reset the flag
+                    if should_continue_after_tools && !has_unpaired_tool_calls {
+                        tracing::info!(
+                            "💓 Continuing conversation loop due to tool continuation request"
+                        );
+                        should_continue_after_tools = false;
                     }
 
                     // Add tool rules from rule engine before rebuilding
@@ -2263,12 +2295,35 @@ where
                 }
             }
 
+            // Check if we exited the loop with pending continuation request
+            if should_continue_after_tools {
+                // CRITICAL: Persist ALL state before sending async heartbeat
+                tracing::info!("💾 Persisting all state before async continuation");
+
+                // 1. Persist memory changes
+                if let Err(e) = self_clone.persist_memory_changes().await {
+                    tracing::error!("Failed to persist memory before heartbeat: {:?}", e);
+                }
+
+                // NOW send the single heartbeat for background processing
+                use crate::context::heartbeat::HeartbeatRequest;
+                let heartbeat_req = HeartbeatRequest {
+                    agent_id: agent_id.clone(),
+                    tool_name: "continuation".to_string(),
+                    tool_call_id: format!("cont_{}", uuid::Uuid::new_v4().simple()),
+                };
+
+                if let Err(e) = self_clone.heartbeat_sender.try_send(heartbeat_req) {
+                    tracing::warn!("Failed to send async heartbeat: {:?}", e);
+                }
+            }
+
             // Update stats and complete
             let stats = context.read().await.get_stats().await;
             let _ = crate::db::ops::update_agent_stats(&db, agent_id.clone(), &stats).await;
 
             // Execute required exit tools before completing
-            match self_clone.execute_required_exit_tools(&agent_id).await {
+            match self_clone.execute_required_exit_tools().await {
                 Ok(exit_responses) => {
                     if !exit_responses.is_empty() {
                         tracing::info!("✅ Executed {} required exit tools", exit_responses.len());
