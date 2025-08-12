@@ -392,10 +392,24 @@ impl From<DatabaseError> for CoreError {
                 data_type: "database record".to_string(),
                 cause: e,
             },
-            DatabaseError::NotFound { entity_type, id } => Self::AgentNotFound {
-                src: format!("database: {} with id {}", entity_type, id),
-                span: (10, 10 + id.len()),
-                id,
+            DatabaseError::NotFound { entity_type, id } => {
+                // Only convert to AgentNotFound if it's actually an agent
+                if entity_type == "agent" {
+                    Self::AgentNotFound {
+                        src: format!("database: {} with id {}", entity_type, id),
+                        span: (10, 10 + id.len()),
+                        id,
+                    }
+                } else {
+                    // For other entity types, create a more generic database error
+                    Self::DatabaseQueryFailed {
+                        query: format!("UPDATE {} WHERE id = '{}'", entity_type, id),
+                        table: entity_type.clone(),
+                        cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(
+                            format!("{} with id '{}' not found in database", entity_type, id)
+                        )),
+                    }
+                }
             },
             DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
                 collection: "unknown".to_string(),

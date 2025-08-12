@@ -459,10 +459,14 @@ impl AgentMessageRouter {
                     .await
             }
             TargetType::Channel => {
-                let channel_info = metadata
-                    .clone()
-                    .unwrap_or_else(|| Value::Object(Default::default()));
-                self.send_to_channel(channel_info, content, metadata, origin)
+                // Include target_id in metadata for channel resolution
+                let mut channel_metadata = metadata.clone().unwrap_or_else(|| Value::Object(Default::default()));
+                if let Some(target_id) = &target.target_id {
+                    if let Value::Object(ref mut map) = channel_metadata {
+                        map.insert("target_id".to_string(), Value::String(target_id.clone()));
+                    }
+                }
+                self.send_to_channel(channel_metadata.clone(), content, Some(channel_metadata), origin)
                     .await
             }
             TargetType::Bluesky => {

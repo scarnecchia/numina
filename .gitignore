@@ -15,3 +15,5 @@ mcp-wrapper.sh
 **/**.db
 **.txt
 **.car
+**.log.**
+**.json

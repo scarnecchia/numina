@@ -1343,7 +1343,39 @@ pub async fn get_oauth_token<C: Connection>(
     get_entity::<OAuthToken, _>(conn, token_id).await
 }
 
-/// Get the most recent OAuth token for a user and provider
+/// Get the most recent OAuth token for a user and provider (including expired ones, for refresh)
+#[cfg(feature = "oauth")]
+pub async fn get_user_oauth_token_any<C: Connection>(
+    conn: &Surreal<C>,
+    user_id: &UserId,
+    provider: &str,
+) -> Result<Option<OAuthToken>> {
+    let query = r#"
+        SELECT * FROM oauth_token
+        WHERE owner_id = $user_id
+        AND provider = $provider
+        ORDER BY last_used_at DESC
+        LIMIT 1
+    "#;
+
+    let mut result = conn
+        .query(query)
+        .bind(("user_id", RecordId::from(user_id.clone())))
+        .bind(("provider", provider.to_string()))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    let tokens: Vec<<OAuthToken as DbEntity>::DbModel> =
+        result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    if let Some(db_model) = tokens.into_iter().next() {
+        Ok(Some(OAuthToken::from_db_model(db_model)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Get the most recent valid (non-expired) OAuth token for a user and provider
 #[cfg(feature = "oauth")]
 pub async fn get_user_oauth_token<C: Connection>(
     conn: &Surreal<C>,

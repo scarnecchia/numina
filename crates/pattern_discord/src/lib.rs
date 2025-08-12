@@ -6,8 +6,10 @@
 pub mod bot;
 pub mod commands;
 pub mod context;
+pub mod data_source;
 pub mod endpoints;
 pub mod error;
+pub mod helpers;
 pub mod routing;
 
 pub use bot::{DiscordBot, DiscordBotConfig};

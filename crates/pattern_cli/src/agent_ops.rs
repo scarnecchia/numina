@@ -2644,7 +2644,19 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
             }
         }
 
-        let discord_endpoint = Arc::new(discord_endpoint);
+        // Don't create Arc yet, we'll update it with bot reference
+        let mut discord_endpoint_base = discord_endpoint;
+
+        // Create the Discord bot in CLI mode (wrapped in Arc for sharing)
+        let bot = Arc::new(DiscordBot::new_cli_mode(
+            agents_with_membership.clone(),
+            group.clone(),
+            Arc::new(pattern_manager.clone()),
+        ));
+        
+        // Connect the bot to the Discord endpoint for timing context
+        discord_endpoint_base = discord_endpoint_base.with_bot(bot.clone());
+        let discord_endpoint = Arc::new(discord_endpoint_base);
 
         // Register on all agents in the group
         for awm in &agents_with_membership {
@@ -2653,91 +2665,90 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                 .await?;
         }
         output.success("✓ Discord endpoint registered on all agents");
-    }
 
-    // Create the Discord bot in CLI mode
-    let bot = DiscordBot::new_cli_mode(
-        agents_with_membership.clone(),
-        group.clone(),
-        Arc::new(pattern_manager.clone()),
-    );
+        // Build Discord client
+        let intents = GatewayIntents::GUILD_MESSAGES
+            | GatewayIntents::DIRECT_MESSAGES
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILDS
+            | GatewayIntents::GUILD_MESSAGE_REACTIONS
+            | GatewayIntents::DIRECT_MESSAGE_REACTIONS;
 
-    // Build Discord client
-    let intents = GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
+        // Extract bot from Arc - we need to consume it for event_handler
+        // But we already gave it to the endpoint, so we need to clone the Arc's contents
+        let bot_for_handler = Arc::try_unwrap(bot.clone()).unwrap_or_else(|arc| (*arc).clone());
+        let mut client_builder = Client::builder(&discord_token, intents).event_handler(bot_for_handler);
 
-    let mut client_builder = Client::builder(&discord_token, intents).event_handler(bot);
+        // Set application ID if provided
+        if let Ok(app_id) = std::env::var("APP_ID") {
+            if let Ok(app_id_u64) = app_id.parse::<u64>() {
+                client_builder = client_builder.application_id(app_id_u64.into());
+                output.info("App ID:", &format!("Set to {}", app_id));
+            } else {
+                output.warning(&format!("Invalid APP_ID format: {}", app_id));
+            }
+        }
 
-    // Set application ID if provided
-    if let Ok(app_id) = std::env::var("APP_ID") {
-        if let Ok(app_id_u64) = app_id.parse::<u64>() {
-            client_builder = client_builder.application_id(app_id_u64.into());
-            output.info("App ID:", &format!("Set to {}", app_id));
+        let mut client = client_builder.await.into_diagnostic()?;
+
+        // If CLI is enabled, spawn Discord bot in background and run CLI in foreground
+        if enable_cli {
+            output.status("Starting Discord bot in background...");
+            output.status("CLI interface available. Type 'quit' or 'exit' to stop both.");
+
+            // Spawn Discord bot in background
+            let discord_handle = tokio::spawn(async move {
+                if let Err(why) = client.start().await {
+                    tracing::error!("Discord bot error: {:?}", why);
+                }
+            });
+
+            // Run CLI chat loop in foreground
+            if let Some(rl) = rl {
+                run_group_chat_loop(
+                    group.clone(),
+                    agents_with_membership,
+                    pattern_manager.clone(),
+                    heartbeat_receiver,
+                    output.clone(),
+                    rl,
+                )
+                .await?;
+            }
+
+            // When CLI exits, also stop Discord bot
+            discord_handle.abort();
         } else {
-            output.warning(&format!("Invalid APP_ID format: {}", app_id));
-        }
-    }
+            // Run Discord bot in foreground (blocking)
+            output.status("Discord bot starting... Press Ctrl+C to stop.");
 
-    let mut client = client_builder.await.into_diagnostic()?;
+            // Spawn a simple heartbeat consumer for Discord-only mode
+            // The heartbeats are already processed internally by agents,
+            // we just need to consume them to prevent the channel from blocking
+            let heartbeat_handle = tokio::spawn(async move {
+                while let Some(heartbeat) = heartbeat_receiver.recv().await {
+                    tracing::debug!(
+                        "💓 Consumed heartbeat in Discord-only mode from agent {}: tool {} (call_id: {})",
+                        heartbeat.agent_id,
+                        heartbeat.tool_name,
+                        heartbeat.tool_call_id
+                    );
+                    // Heartbeats are processed internally by the agents during their tool execution
+                    // We just consume them here to keep the channel flowing
+                }
+                tracing::debug!("Heartbeat receiver closed in Discord-only mode");
+            });
 
-    // If CLI is enabled, spawn Discord bot in background and run CLI in foreground
-    if enable_cli {
-        output.status("Starting Discord bot in background...");
-        output.status("CLI interface available. Type 'quit' or 'exit' to stop both.");
-
-        // Spawn Discord bot in background
-        let discord_handle = tokio::spawn(async move {
+            // Run Discord bot
             if let Err(why) = client.start().await {
-                tracing::error!("Discord bot error: {:?}", why);
+                output.error(&format!("Discord bot error: {:?}", why));
+                heartbeat_handle.abort(); // Clean up heartbeat task
+                return Err(miette::miette!("Failed to run Discord bot"));
             }
-        });
 
-        // Run CLI chat loop in foreground
-        if let Some(rl) = rl {
-            run_group_chat_loop(
-                group.clone(),
-                agents_with_membership,
-                pattern_manager.clone(),
-                heartbeat_receiver,
-                output.clone(),
-                rl,
-            )
-            .await?;
+            // Clean up heartbeat task when Discord bot exits
+            heartbeat_handle.abort();
         }
-
-        // When CLI exits, also stop Discord bot
-        discord_handle.abort();
-    } else {
-        // Run Discord bot in foreground (blocking)
-        output.status("Discord bot starting... Press Ctrl+C to stop.");
-
-        // Spawn a simple heartbeat consumer for Discord-only mode
-        // The heartbeats are already processed internally by agents,
-        // we just need to consume them to prevent the channel from blocking
-        let heartbeat_handle = tokio::spawn(async move {
-            while let Some(heartbeat) = heartbeat_receiver.recv().await {
-                tracing::debug!(
-                    "💓 Consumed heartbeat in Discord-only mode from agent {}: tool {} (call_id: {})",
-                    heartbeat.agent_id,
-                    heartbeat.tool_name,
-                    heartbeat.tool_call_id
-                );
-                // Heartbeats are processed internally by the agents during their tool execution
-                // We just consume them here to keep the channel flowing
-            }
-            tracing::debug!("Heartbeat receiver closed in Discord-only mode");
-        });
-
-        // Run Discord bot
-        if let Err(why) = client.start().await {
-            output.error(&format!("Discord bot error: {:?}", why));
-            heartbeat_handle.abort(); // Clean up heartbeat task
-            return Err(miette::miette!("Failed to run Discord bot"));
-        }
-
-        // Clean up heartbeat task when Discord bot exits
-        heartbeat_handle.abort();
     }
 
     Ok(())

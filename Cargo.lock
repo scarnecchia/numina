@@ -5139,6 +5139,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "compact_str 0.9.0",
  "futures",
  "lazy_static",
  "miette 7.6.0",

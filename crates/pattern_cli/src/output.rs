@@ -43,9 +43,14 @@ impl Output {
             let mut writer = writer.clone();
             // When using SharedWriter, it handles the synchronization
             let _ = writeln!(writer, "{}", content);
+            // Force flush to ensure immediate output
+            let _ = writer.flush();
         } else {
             // Fallback to regular println
             println!("{}", content);
+            // Force flush stdout for immediate output
+            use std::io::{self, Write};
+            let _ = io::stdout().flush();
         }
     }
 

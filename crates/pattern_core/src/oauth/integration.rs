@@ -24,8 +24,8 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
 
     /// Get or refresh OAuth token for a provider
     pub async fn get_token(&self, provider: &str) -> Result<Option<Arc<OAuthToken>>, CoreError> {
-        // Try to get existing token
-        let token = crate::db::ops::get_user_oauth_token(&self.db, &self.user_id, provider).await?;
+        // Try to get existing token (including expired ones, so we can refresh them)
+        let token = crate::db::ops::get_user_oauth_token_any(&self.db, &self.user_id, provider).await?;
 
         if let Some(mut token) = token {
             tracing::debug!(
@@ -82,11 +82,14 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
                         );
 
                         // Update the token in database
+                        // Only update refresh token if a new one was provided
+                        let refresh_to_save = token_response.refresh_token.or_else(|| token.refresh_token.clone());
+                        
                         token = crate::db::ops::update_oauth_token(
                             &self.db,
                             &token.id,
                             token_response.access_token,
-                            token_response.refresh_token,
+                            refresh_to_save,
                             new_expires_at,
                         )
                         .await?;
