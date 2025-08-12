@@ -426,7 +426,25 @@ pub async fn load_model_embedding_providers(
         };
 
         selected_model.ok_or_else(|| {
-            miette::miette!("No models available. Please set API keys in your .env file")
+            if let Some(config_model) = &config.model.model {
+                let available: Vec<_> = models
+                    .iter()
+                    .filter(|m| m.provider == config.model.provider.to_string())
+                    .map(|m| m.id.as_str())
+                    .collect();
+
+                if available.is_empty() {
+                    miette::miette!("No models available. Please set API keys in your .env file")
+                } else {
+                    miette::miette!(
+                        "Model '{}' not found. Available: {:?}",
+                        config_model,
+                        available
+                    )
+                }
+            } else {
+                miette::miette!("No models available. Please set API keys in your .env file")
+            }
         })?
     };
 
