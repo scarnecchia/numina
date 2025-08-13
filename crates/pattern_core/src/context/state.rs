@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 
 use std::sync::Arc;
 
@@ -36,6 +36,10 @@ pub struct AgentHandle {
     pub memory: Memory,
     /// The agent's current state
     pub state: AgentState,
+    
+    /// Watch channel for state changes
+    #[serde(skip)]
+    pub(crate) state_watch: Option<Arc<(watch::Sender<AgentState>, watch::Receiver<AgentState>)>>,
 
     /// Private database connection for controlled access
     #[serde(skip)]
@@ -47,6 +51,19 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
+    /// Get a watch receiver for state changes
+    pub fn state_receiver(&self) -> Option<watch::Receiver<AgentState>> {
+        self.state_watch.as_ref().map(|arc| arc.1.clone())
+    }
+    
+    /// Update the state and notify watchers
+    pub(crate) fn update_state(&mut self, new_state: AgentState) {
+        self.state = new_state;
+        if let Some(arc) = &self.state_watch {
+            let _ = arc.0.send(new_state);
+        }
+    }
+    
     /// Create a new handle with a database connection
     pub fn with_db(mut self, db: surrealdb::Surreal<surrealdb::engine::any::Any>) -> Self {
         self.db = Some(db);
@@ -554,12 +571,15 @@ impl AgentHandle {
 
 impl Default for AgentHandle {
     fn default() -> Self {
+        let state = AgentState::Ready;
+        let (tx, rx) = watch::channel(state);
         Self {
             name: "".to_string(),
             agent_id: AgentId::generate(),
             memory: Memory::new(),
-            state: AgentState::Ready,
+            state,
             agent_type: AgentType::Generic,
+            state_watch: Some(Arc::new((tx, rx))),
             db: None,
             message_router: None,
         }
@@ -675,12 +695,15 @@ impl AgentContext {
         tools: ToolRegistry,
         context_config: ContextConfig,
     ) -> Self {
+        let state = AgentState::Ready;
+        let (tx, rx) = watch::channel(state);
         let handle = AgentHandle {
             agent_id,
             memory,
             name,
             agent_type,
-            state: AgentState::Ready,
+            state,
+            state_watch: Some(Arc::new((tx, rx))),
             db: None,
             message_router: None,
         };

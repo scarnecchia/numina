@@ -246,6 +246,8 @@ pub enum GroupState {
         last_check: DateTime<Utc>,
         /// History of trigger events
         trigger_history: Vec<TriggerEvent>,
+        /// Current index for round-robin through agents
+        current_index: usize,
     },
 }
 

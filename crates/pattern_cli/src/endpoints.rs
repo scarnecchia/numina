@@ -1,17 +1,16 @@
 use async_trait::async_trait;
-use owo_colors::OwoColorize;
 use pattern_core::{
     Result,
     agent::Agent,
     context::message_router::{MessageEndpoint, MessageOrigin},
-    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
+    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager},
     message::{ContentBlock, ContentPart, Message, MessageContent},
 };
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
-use crate::output::Output;
+use crate::{agent_ops::print_group_response_event, output::Output};
 
 /// CLI endpoint that formats messages using Output
 pub struct CliEndpoint {
@@ -59,14 +58,25 @@ impl MessageEndpoint for CliEndpoint {
         };
 
         // Use Output to format the message nicely
-        // Format based on origin
-        if let Some(origin) = origin {
+        // Format based on origin and extract sender name
+        let sender_name = if let Some(origin) = origin {
             self.output
                 .status(&format!("📤 Message from {}", origin.description()));
+            
+            // Extract the agent name from the origin if it's an agent
+            match origin {
+                MessageOrigin::Agent { name, .. } => name.clone(),
+                _ => "Pattern".to_string(),
+            }
         } else {
             self.output.status("📤 Sending message to user:");
-        }
-        self.output.agent_message("Pattern", text);
+            "Pattern".to_string()
+        };
+        
+        // Add a tiny delay to let reasoning chunks finish printing
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        
+        self.output.agent_message(&sender_name, text);
 
         Ok(None)
     }
@@ -117,92 +127,16 @@ impl MessageEndpoint for GroupCliEndpoint {
             .route_message(&self.group, &self.agents, message)
             .await?;
 
+        // Show which source this is from at the beginning
+        self.output.section("[Jetstream] Processing incoming data");
+        
         while let Some(event) = stream.next().await {
-            match event {
-                GroupResponseEvent::Started {
-                    pattern,
-                    agent_count,
-                    ..
-                } => {
-                    self.output
-                        .info("Pattern:", &pattern.bright_cyan().to_string());
-                    self.output
-                        .info("Agents:", &format!("{} responding", agent_count));
-                }
-                GroupResponseEvent::AgentStarted {
-                    agent_name, role, ..
-                } => {
-                    self.output
-                        .info(&format!("{} ({:?})", agent_name, role), "starting response");
-                }
-                GroupResponseEvent::TextChunk {
-                    agent_id,
-                    text,
-                    is_final: _,
-                } => {
-                    self.output.agent_message(&agent_id.to_string(), &text);
-                }
-                GroupResponseEvent::ReasoningChunk {
-                    agent_id,
-                    text,
-                    is_final: _,
-                } => {
-                    let string = format!("{} reasoning\n{}", agent_id, text.dimmed());
-                    self.output.working(&string);
-                }
-                GroupResponseEvent::ToolCallStarted {
-                    agent_id: _,
-                    fn_name,
-                    args,
-                    ..
-                } => {
-                    let args_str =
-                        serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string());
-                    self.output.tool_call(&fn_name, &args_str);
-                }
-                GroupResponseEvent::ToolCallCompleted {
-                    agent_id: _,
-                    call_id: _,
-                    result,
-                } => match result {
-                    Ok(result) => self.output.tool_result(&result),
-                    Err(error) => self.output.error(&format!("Tool error: {}", error)),
-                },
-                GroupResponseEvent::AgentCompleted {
-                    agent_name,
-                    message_id: _,
-                    ..
-                } => {
-                    self.output
-                        .info("Completed:", &agent_name.bright_green().to_string());
-                }
-                GroupResponseEvent::Error {
-                    agent_id: _,
-                    message,
-                    recoverable,
-                } => {
-                    if recoverable {
-                        self.output.warning(&message);
-                    } else {
-                        self.output.error(&message);
-                    }
-                }
-                GroupResponseEvent::Complete {
-                    agent_responses,
-                    execution_time,
-                    ..
-                } => {
-                    println!(); // Ensure we're on a new line
-                    self.output.info(
-                        "Group complete:",
-                        &format!(
-                            "{} agents responded in {:.2}s",
-                            agent_responses.len(),
-                            execution_time.as_secs_f64()
-                        ),
-                    );
-                }
-            }
+            print_group_response_event(
+                event,
+                &self.output,
+                &self.agents,
+                Some("Jetstream")
+            ).await;
         }
 
         Ok(None)

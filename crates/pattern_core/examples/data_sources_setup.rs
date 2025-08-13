@@ -7,14 +7,14 @@ use pattern_core::{
         create_full_data_pipeline, create_knowledge_base, monitor_bluesky_mentions,
         monitor_directory,
     },
-    embeddings::EmbeddingProvider,
+    embeddings::{EmbeddingProvider, SimpleEmbeddingProvider},
     id::{AgentId, UserId},
     memory::Memory,
     model::ModelProvider,
     tool::ToolRegistry,
 };
 use std::sync::Arc;
-use surrealdb::{Surreal, engine::local::SurrealKv};
+use surrealdb::{Surreal, engine::any::Any};
 
 // Use miette Result for examples
 use miette::{IntoDiagnostic, Result};
@@ -22,9 +22,12 @@ use miette::{IntoDiagnostic, Result};
 /// Example 1: Simple file monitoring
 ///
 /// Monitor a directory for changes and notify the agent when files are added/modified
-async fn example_file_monitoring() -> Result<()> {
+async fn example_file_monitoring<E: EmbeddingProvider + Clone + 'static>(
+    embedding_provider: Arc<E>,
+) -> Result<()> {
     // Setup database and agent
-    let db = Surreal::new::<SurrealKv>("data/pattern.db")
+    let db: Surreal<Any> = Surreal::init();
+    db.connect("surrealkv://data/pattern.db")
         .await
         .into_diagnostic()?;
     db.use_ns("pattern")
@@ -35,8 +38,15 @@ async fn example_file_monitoring() -> Result<()> {
     let agent_id = AgentId::generate();
     let agent_name = "FileMonitor".to_string();
 
-    // Create a simple file monitoring data source
-    let coordinator = monitor_directory(agent_id, agent_name, db, "/path/to/watch").await?;
+    // Create a simple file monitoring data source with embedding provider
+    let coordinator = monitor_directory(
+        agent_id,
+        agent_name,
+        db,
+        "/path/to/watch",
+        embedding_provider,
+    )
+    .await?;
 
     println!(
         "File monitoring coordinator created with {} sources",
@@ -49,10 +59,11 @@ async fn example_file_monitoring() -> Result<()> {
 /// Example 2: Knowledge base with semantic search
 ///
 /// Create an indexed knowledge base from a directory of documents
-async fn example_knowledge_base<E: EmbeddingProvider + 'static>(
+async fn example_knowledge_base<E: EmbeddingProvider + Clone + 'static>(
     embedding_provider: Arc<E>,
 ) -> Result<()> {
-    let db = Surreal::new::<SurrealKv>("data/pattern.db")
+    let db: Surreal<Any> = Surreal::init();
+    db.connect("surrealkv://data/pattern.db")
         .await
         .into_diagnostic()?;
     db.use_ns("pattern")
@@ -69,7 +80,7 @@ async fn example_knowledge_base<E: EmbeddingProvider + 'static>(
         agent_name,
         db,
         "/path/to/knowledge/docs",
-        embedding_provider as Arc<dyn EmbeddingProvider>,
+        embedding_provider,
     )
     .await?;
 
@@ -91,8 +102,11 @@ async fn example_knowledge_base<E: EmbeddingProvider + 'static>(
 ///
 /// Monitor Bluesky for mentions and relevant conversations
 /// Note: In real usage, create a DatabaseAgent first and extract its handle
-async fn example_bluesky_monitoring() -> Result<()> {
-    let db = Surreal::new::<SurrealKv>("data/pattern.db")
+async fn example_bluesky_monitoring<E: EmbeddingProvider + Clone + 'static>(
+    embedding_provider: Arc<E>,
+) -> Result<()> {
+    let db: Surreal<Any> = Surreal::init();
+    db.connect("surrealkv://data/pattern.db")
         .await
         .into_diagnostic()?;
     db.use_ns("pattern")
@@ -110,6 +124,7 @@ async fn example_bluesky_monitoring() -> Result<()> {
         agent_name,
         db,
         "pattern.bsky.social",
+        embedding_provider,
         None, // No agent handle in this simple example
     )
     .await?;
@@ -125,7 +140,8 @@ async fn example_bluesky_monitoring() -> Result<()> {
 async fn example_custom_pipeline<E: EmbeddingProvider + 'static>(
     embedding_provider: Arc<E>,
 ) -> Result<()> {
-    let db = Surreal::new::<SurrealKv>("data/pattern.db")
+    let db: Surreal<Any> = Surreal::init();
+    db.connect("surrealkv://data/pattern.db")
         .await
         .into_diagnostic()?;
     db.use_ns("pattern")
@@ -144,6 +160,7 @@ async fn example_custom_pipeline<E: EmbeddingProvider + 'static>(
         languages: vec!["en".to_string()],
         ..Default::default()
     };
+
 
     // Build a comprehensive data pipeline
     let coordinator = DataSourceBuilder::new()
@@ -175,7 +192,7 @@ async fn example_custom_pipeline<E: EmbeddingProvider + 'static>(
             agent_id,
             agent_name,
             db,
-            Some(embedding_provider as Arc<dyn EmbeddingProvider>),
+            Some(embedding_provider),
             None, // No agent handle in this example
         )
         .await?;
@@ -229,7 +246,7 @@ where
             mentions: vec![agent.name().to_string()],
             ..Default::default()
         },
-        embedding_provider as Arc<dyn EmbeddingProvider>,
+        embedding_provider,
         None, // No agent handle for this example
     )
     .await?;
@@ -256,8 +273,11 @@ where
 /// Example 6: Dynamic source management
 ///
 /// Add and remove data sources dynamically during runtime
-async fn example_dynamic_sources() -> Result<()> {
-    let db = Surreal::new::<SurrealKv>("data/pattern.db")
+async fn example_dynamic_sources<E: EmbeddingProvider + Clone + 'static>(
+    embedding_provider: Option<Arc<E>>,
+) -> Result<()> {
+    let db: Surreal<Any> = Surreal::init();
+    db.connect("surrealkv://data/pattern.db")
         .await
         .into_diagnostic()?;
     db.use_ns("pattern")
@@ -269,7 +289,12 @@ async fn example_dynamic_sources() -> Result<()> {
     let agent_name = "DynamicAgent".to_string();
 
     // Start with empty coordinator
-    let mut coordinator = create_coordinator_with_agent_info(agent_id, agent_name, db, None);
+    let mut coordinator = create_coordinator_with_agent_info(
+        agent_id,
+        agent_name,
+        db,
+        embedding_provider,
+    );
 
     // Add sources dynamically based on conditions
     if std::env::var("MONITOR_DOCS").is_ok() {
@@ -291,6 +316,7 @@ async fn example_dynamic_sources() -> Result<()> {
             None,
             BlueskyFilter::default(),
             None,
+            None,  // ATProto auth credentials
         )
         .await?;
         println!("Added Bluesky monitoring");
@@ -316,12 +342,13 @@ async fn main() -> Result<()> {
     println!("=============================\n");
 
     // Run examples (commented out to avoid actual execution)
-    // example_file_monitoring().await?;
-    // example_knowledge_base(embedding_provider).await?;
-    // example_bluesky_monitoring(agent_handle).await?;
-    // example_custom_pipeline(embedding_provider, agent_handle).await?;
-    // example_agent_with_data_sources(db, model, embeddings).await?;
-    // example_dynamic_sources().await?;
+    // let embedding_provider = Arc::new(SimpleEmbeddingProvider::new());
+    // example_file_monitoring(embedding_provider.clone()).await?;
+    // example_knowledge_base(embedding_provider.clone()).await?;
+    // example_bluesky_monitoring(embedding_provider.clone()).await?;
+    // example_custom_pipeline(embedding_provider.clone()).await?;
+    // example_agent_with_data_sources(db, model, embedding_provider.clone()).await?;
+    // example_dynamic_sources(Some(embedding_provider)).await?;
 
     println!("\nExamples demonstrate various data source configurations.");
     println!("Uncomment specific examples to run them.");

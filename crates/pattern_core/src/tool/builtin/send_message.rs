@@ -98,14 +98,14 @@ impl AiTool for SendMessageTool {
 
         // Send the message through the router
         match router
-            .send_message(target, content, params.metadata.clone(), Some(origin))
+            .send_message(target, content.clone(), params.metadata.clone(), Some(origin))
             .await
         {
-            Ok(()) => {
+            Ok(created_uri) => {
                 // Generate a message ID for tracking
                 let message_id = format!("msg_{}", chrono::Utc::now().timestamp_millis());
 
-                // Build details based on target type
+                // Build details based on target type and whether it was a like
                 let details = match params.target.target_type {
                     TargetType::User => {
                         if let Some(id) = &params.target.target_id {
@@ -133,8 +133,21 @@ impl AiTool for SendMessageTool {
                         )
                     }
                     TargetType::Bluesky => {
-                        if let Some(uri) = &params.target.target_id {
-                            format!("Reply sent to Bluesky post: {}", uri)
+                        // Check if this was a "like" action
+                        let is_like = content.trim().eq_ignore_ascii_case("like");
+                        
+                        if let Some(uri) = created_uri.as_ref().or(params.target.target_id.as_ref()) {
+                            if is_like {
+                                // Check if the URI indicates this was a like (contains "app.bsky.feed.like")
+                                if uri.contains("app.bsky.feed.like") {
+                                    format!("Liked Bluesky post: {}", uri)
+                                } else {
+                                    // Fallback if we sent "like" but didn't get a like URI back
+                                    format!("Like action on Bluesky post: {}", params.target.target_id.as_deref().unwrap_or("unknown"))
+                                }
+                            } else {
+                                format!("Reply sent to Bluesky post: {}", uri)
+                            }
                         } else {
                             "Message posted to Bluesky".to_string()
                         }

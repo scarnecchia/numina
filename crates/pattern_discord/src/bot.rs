@@ -1025,11 +1025,47 @@ impl DiscordBot {
                 format!("channel {}", msg.channel_id)
             };
 
+            // Get display name hierarchy: server nickname > global display name > username
+            // Always show username in brackets for clarity
+            let display_name_with_username = if let Some(guild_id) = msg.guild_id {
+                // Try to get member to access server nickname
+                match ctx.http.get_member(guild_id, msg.author.id).await {
+                    Ok(member) => {
+                        if let Some(nick) = member.nick {
+                            // Server nickname available
+                            format!("{} [{}]", nick, msg.author.name)
+                        } else if let Some(ref global_name) = msg.author.global_name {
+                            // No nickname, use global display name
+                            format!("{} [{}]", global_name, msg.author.name)
+                        } else {
+                            // Just username
+                            msg.author.name.clone()
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to get member for nickname: {}", e);
+                        // Fall back to global display name or username
+                        if let Some(ref global_name) = msg.author.global_name {
+                            format!("{} [{}]", global_name, msg.author.name)
+                        } else {
+                            msg.author.name.clone()
+                        }
+                    }
+                }
+            } else {
+                // DM - use global display name if available, always show username
+                if let Some(ref global_name) = msg.author.global_name {
+                    format!("{} [{}]", global_name, msg.author.name)
+                } else {
+                    msg.author.name.clone()
+                }
+            };
+
             // Build context string with better framing
             let discord_context = if msg.guild_id.is_none() {
-                format!("Direct message from Discord user '{}'", msg.author.name)
+                format!("Direct message from Discord user '{}'", display_name_with_username)
             } else {
-                format!("Message from '{}' in Discord {}", msg.author.name, channel_name)
+                format!("Message from '{}' in Discord {}", display_name_with_username, channel_name)
             };
 
             // Create framing prompt that makes responding optional

@@ -836,41 +836,49 @@ where
                                         agent_id
                                     );
 
-                                    // For each memory block, attach it to this agent
-                                    for (label, block) in memory_blocks {
-                                        // First store the memory block if it doesn't exist
-                                        let block_id = block.id.clone();
-                                        if let Err(e) = block.store_with_relations(&db).await {
-                                            tracing::warn!(
-                                                "Failed to store memory block {}: {}",
-                                                label,
-                                                e
-                                            );
-                                            continue;
-                                        }
+                                    // Parallelize memory block storage and attachment
+                                    let attachment_futures = memory_blocks.into_iter().map(|(label, block)| {
+                                        let db = db.clone();
+                                        let agent_id = agent_id.clone();
+                                        
+                                        async move {
+                                            // First store the memory block if it doesn't exist
+                                            let block_id = block.id.clone();
+                                            if let Err(e) = block.store_with_relations(&db).await {
+                                                tracing::warn!(
+                                                    "Failed to store memory block {}: {}",
+                                                    label,
+                                                    e
+                                                );
+                                                return;
+                                            }
 
-                                        // Use the proper ops function to attach memory
-                                        if let Err(e) = crate::db::ops::attach_memory_to_agent(
-                                            &db,
-                                            &agent_id,
-                                            &block_id,
-                                            block.permission,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                "Failed to attach memory block {} to agent: {}",
-                                                label,
-                                                e
-                                            );
-                                        } else {
-                                            tracing::debug!(
-                                                "✅ Attached memory block {} to agent {}",
-                                                label,
-                                                agent_id
-                                            );
+                                            // Use the proper ops function to attach memory
+                                            if let Err(e) = crate::db::ops::attach_memory_to_agent(
+                                                &db,
+                                                &agent_id,
+                                                &block_id,
+                                                block.permission,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to attach memory block {} to agent: {}",
+                                                    label,
+                                                    e
+                                                );
+                                            } else {
+                                                tracing::debug!(
+                                                    "✅ Attached memory block {} to agent {}",
+                                                    label,
+                                                    agent_id
+                                                );
+                                            }
                                         }
-                                    }
+                                    });
+                                    
+                                    // Execute all attachments in parallel
+                                    futures::future::join_all(attachment_futures).await;
                                 }
                             }
 
@@ -1221,8 +1229,25 @@ where
             {
                 tracing::debug!("Creating new memory block {} in database", block.label);
 
-                // Store the new block
-                let stored = block.store_with_relations(&self.db).await?;
+                // Use upsert for new blocks too
+                let record_id = block.id.to_record_id();
+                let db_model = block.to_db_model();
+                
+                let stored: Vec<<MemoryBlock as DbEntity>::DbModel> = self.db
+                    .upsert(record_id)
+                    .content(db_model)
+                    .await
+                    .map_err(|e| crate::CoreError::DatabaseQueryFailed {
+                        query: "UPSERT new memory block".to_string(),
+                        table: "mem".to_string(),
+                        cause: e,
+                    })?;
+                
+                let stored = stored
+                    .into_iter()
+                    .next()
+                    .and_then(|db| MemoryBlock::from_db_model(db).ok())
+                    .unwrap_or(block.clone());
 
                 // Attach to agent
                 match ops::attach_memory_to_agent(
@@ -1251,15 +1276,33 @@ where
 
         // Handle dirty blocks - just need to update
         for block_id in &dirty_blocks {
-            if let Some(block) = memory
+            if let Some(mut block) = memory
                 .get_all_blocks()
                 .into_iter()
                 .find(|b| &b.id == block_id)
             {
                 tracing::debug!("Updating dirty memory block {} in database", block.label);
 
-                // Update the block (store_with_relations will upsert)
-                block.store_with_relations(&self.db).await?;
+                // Use direct upsert method for memory blocks
+                // This avoids transaction conflicts on frequently updated shared blocks
+                let record_id = block.id.to_record_id();
+                
+                // Update the timestamp
+                block.updated_at = chrono::Utc::now();
+                
+                // Convert to database model
+                let db_model = block.to_db_model();
+                
+                // Simple upsert using the Surreal method
+                let _result: Vec<<MemoryBlock as DbEntity>::DbModel> = self.db
+                    .upsert(record_id)
+                    .content(db_model)
+                    .await
+                    .map_err(|e| crate::CoreError::DatabaseQueryFailed {
+                        query: "UPSERT memory block".to_string(),
+                        table: "mem".to_string(),
+                        cause: e,
+                    })?;
             }
         }
 
@@ -1491,15 +1534,23 @@ where
 
         // Spawn the processing task
         tokio::spawn(async move {
-            // wait here until the agent is ready, avoids unexpected parallel operations.
-            let start = tokio::time::Instant::now();
-            loop {
-                if self_clone.handle().await.state == AgentState::Ready {
-                    break;
-                } else if tokio::time::Instant::now() - start >= Duration::from_secs(100) {
-                    break;
-                } else {
-                    tokio::time::sleep(Duration::from_millis(20)).await
+            // Wait for agent to be ready using watch channel
+            let (current_state, maybe_receiver) = self_clone.state().await;
+            if current_state != AgentState::Ready {
+                if let Some(mut receiver) = maybe_receiver {
+                    let timeout = tokio::time::timeout(Duration::from_secs(100), async {
+                        loop {
+                            if *receiver.borrow() == AgentState::Ready {
+                                break;
+                            }
+                            // Wait for state change
+                            if receiver.changed().await.is_err() {
+                                // Channel closed
+                                break;
+                            }
+                        }
+                    });
+                    let _ = timeout.await;
                 }
             }
             self_clone.set_state(AgentState::Processing).await.ok();
@@ -1544,26 +1595,33 @@ where
                         memory_blocks.len()
                     );
 
-                    for (label, block) in memory_blocks {
-                        // Add as working memory using the agent handle
-                        match self_clone
-                            .handle()
-                            .await
-                            .insert_working_memory(&label, &block.value)
-                            .await
-                        {
-                            Ok(_) => {
-                                tracing::debug!("Added memory block {} as working memory", label);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to add memory block {} as working memory: {:?}",
-                                    label,
-                                    e
-                                );
+                    // Parallelize memory block insertion
+                    let insertion_futures = memory_blocks.into_iter().map(|(label, block)| {
+                        let handle = self_clone.handle();
+                        let label = label.clone();
+                        let value = block.value.clone();
+                        
+                        async move {
+                            let handle = handle.await;
+                            match handle.insert_working_memory(&label, &value).await {
+                                Ok(_) => {
+                                    tracing::debug!("Added memory block {} as working memory", label);
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to add memory block {} as working memory: {:?}",
+                                        label,
+                                        e
+                                    );
+                                    Err(e)
+                                }
                             }
                         }
-                    }
+                    });
+
+                    // Execute all insertions in parallel
+                    let _ = futures::future::join_all(insertion_futures).await;
                 }
             }
 
@@ -2763,6 +2821,13 @@ where
     async fn handle(&self) -> crate::context::state::AgentHandle {
         self.handle().await
     }
+    
+    async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        // Get the last_active timestamp from the agent context metadata
+        let context = self.context.read().await;
+        let metadata = context.metadata.read().await;
+        Some(metadata.last_active)
+    }
 
     async fn process_message(self: Arc<Self>, message: Message) -> Result<Response> {
         use crate::message::ResponseMetadata;
@@ -3195,9 +3260,9 @@ where
         context.tools.get_all_as_dynamic()
     }
 
-    async fn state(&self) -> AgentState {
+    async fn state(&self) -> (AgentState, Option<tokio::sync::watch::Receiver<AgentState>>) {
         let context = self.context.read().await;
-        context.handle.state
+        (context.handle.state, context.handle.state_receiver())
     }
 
     /// Set the agent's state
@@ -3205,7 +3270,7 @@ where
         // Update the state in the context
         {
             let mut context = self.context.write().await;
-            context.handle.state = state;
+            context.handle.update_state(state);
             let mut metadata = context.metadata.write().await;
             metadata.last_active = chrono::Utc::now();
         }

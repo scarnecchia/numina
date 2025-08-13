@@ -106,27 +106,95 @@ impl AgentSelector for SupervisorSelector {
             .process_message_stream(supervisor_message)
             .await?;
 
-        // Collect response from stream
+        // Stream response while collecting just enough text to make decision
         use tokio_stream::StreamExt;
-        let mut response_text = String::new();
-        let mut _has_tool_calls = false;
-        let mut buffered_events = Vec::new();
+        use tokio::sync::mpsc;
 
-        while let Some(event) = stream.next().await {
-            match &event {
-                crate::agent::ResponseEvent::TextChunk { text, .. } => {
-                    response_text.push_str(text);
+        let (event_tx, event_rx) = mpsc::channel(100);
+        let (decision_tx, mut decision_rx) = mpsc::channel(1);
+
+        // Spawn task to stream events and collect initial text for decision
+        let supervisor_name_clone = supervisor_name.clone();
+        let agent_names: Vec<String> = agents.iter().map(|a| a.agent.name().to_string()).collect();
+        tokio::spawn(async move {
+            let mut response_text = String::new();
+            let mut decision_made = false;
+
+            while let Some(event) = stream.next().await {
+                // Make decision on first substantive event
+                if !decision_made {
+                    match &event {
+                        crate::agent::ResponseEvent::TextChunk { text, .. } => {
+                            response_text.push_str(text);
+
+                            // On first text chunk, analyze it
+                            if !response_text.is_empty() {
+                                let selected_names = parse_supervisor_response(&response_text);
+
+                                // Determine if this is a direct response or delegation
+                                let is_direct = if response_text.trim() == "." || response_text.trim().is_empty() {
+                                    // Empty or just "." = no selection, supervisor handles
+                                    true
+                                } else if selected_names.is_empty() {
+                                    // No agent names found, check if it's substantive
+                                    response_text.len() > 50 || response_text.contains('.') || response_text.contains('?')
+                                } else if selected_names.len() == 1 && selected_names[0] == supervisor_name_clone {
+                                    // Self-selection
+                                    true
+                                } else {
+                                    // Check if all names are valid agents
+                                    let all_match_agents = selected_names.iter()
+                                        .all(|name| agent_names.contains(name));
+                                    !all_match_agents  // If not all valid, treat as direct response
+                                };
+
+                                tracing::debug!("Supervisor first text: '{}', is_direct: {}", response_text.trim(), is_direct);
+                                let _ = decision_tx.send((response_text.clone(), selected_names, is_direct)).await;
+                                decision_made = true;
+                            }
+                        }
+                        crate::agent::ResponseEvent::ToolCalls { .. } => {
+                            // Tool calls = supervisor is handling it themselves
+                            tracing::debug!("Supervisor using tools, treating as self-selection");
+                            let _ = decision_tx.send((response_text.clone(), vec![], true)).await;
+                            decision_made = true;
+                        }
+                        crate::agent::ResponseEvent::Complete { .. } => {
+                            // Complete without text or tools = empty response
+                            if !decision_made {
+                                let selected_names = parse_supervisor_response(&response_text);
+                                let is_direct = true;  // Empty response = self-handling
+                                tracing::debug!("Supervisor completed with no text/tools, self-selecting");
+                                let _ = decision_tx.send((response_text.clone(), selected_names, is_direct)).await;
+                                decision_made = true;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                crate::agent::ResponseEvent::ToolCalls { .. } => {
-                    _has_tool_calls = true;
+
+                // Forward all events regardless
+                if event_tx.send(event).await.is_err() {
+                    break; // Receiver dropped
                 }
-                _ => {}
             }
-            buffered_events.push(event);
-        }
 
-        // Parse supervisor's response to get selected agent names
-        let selected_names = parse_supervisor_response(&response_text);
+            // If we never made a decision (shouldn't happen), send what we have
+            if !decision_made {
+                let selected_names = parse_supervisor_response(&response_text);
+                let is_direct = response_text.is_empty() || selected_names.is_empty();
+                let _ = decision_tx.send((response_text, selected_names, is_direct)).await;
+            }
+        });
+
+        // Wait for decision from the spawned task
+        let (response_text, selected_names, is_direct_response) = decision_rx.recv()
+            .await
+            .ok_or_else(|| crate::CoreError::AgentGroupError {
+                group_name: "supervisor".to_string(),
+                operation: "select_agents".to_string(),
+                cause: "Supervisor decision channel closed unexpectedly".to_string(),
+            })?;
 
         tracing::info!(
             "Supervisor {} response: text='{}', parsed_names={:?}",
@@ -134,40 +202,6 @@ impl AgentSelector for SupervisorSelector {
             response_text.trim(),
             selected_names
         );
-
-        // Check if the response looks like agent names or a direct response
-        let is_direct_response = if response_text.len() == 0 {
-            true
-        } else if selected_names.is_empty() {
-            // No valid agent names found, check if it's a substantive response
-            let is_substantive = response_text.len() > 50
-                || response_text.contains('.')
-                || response_text.contains('?');
-
-            tracing::info!(
-                "No agent names found. Response length={}, substantive={}",
-                response_text.len(),
-                is_substantive
-            );
-            is_substantive
-        } else if selected_names.len() == 1 && selected_names[0] == supervisor_name {
-            true
-        } else {
-            // Check if all "names" are actually just single words (likely agent names)
-            let all_single_words = selected_names.iter().all(|name| !name.contains(' '));
-            let all_match_agents = selected_names
-                .iter()
-                .all(|name| agents.iter().any(|a| a.agent.name() == name.as_str()));
-
-            tracing::info!(
-                "Found {} names. all_single_words={}, all_match_agents={}",
-                selected_names.len(),
-                all_single_words,
-                all_match_agents
-            );
-
-            !all_single_words || !all_match_agents
-        };
 
         // Check if this selector can select itself
         let can_select_self = match &supervisor.membership.role {
@@ -188,14 +222,8 @@ impl AgentSelector for SupervisorSelector {
                 "Supervisor {} selecting self to handle the message directly",
                 supervisor.agent.name()
             );
-            // Convert buffered events into a stream
-            let (tx, rx) = tokio::sync::mpsc::channel(buffered_events.len());
-            for event in buffered_events {
-                let _ = tx.send(event).await;
-            }
-            drop(tx);
-
-            let response_stream = Box::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+            // Use the streaming channel we already have
+            let response_stream = Box::new(tokio_stream::wrappers::ReceiverStream::new(event_rx))
                 as Box<dyn Stream<Item = crate::agent::ResponseEvent> + Send + Unpin>;
 
             return Ok(super::SelectionResult {
@@ -203,6 +231,9 @@ impl AgentSelector for SupervisorSelector {
                 selector_response: Some(response_stream),
             });
         }
+
+        // Not a direct response, we don't need the event stream
+        drop(event_rx);
 
         // Find the selected agents
         let mut selected = Vec::new();

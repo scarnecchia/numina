@@ -7,8 +7,15 @@ use crate::error::CoreError;
 use crate::id::UserId;
 use crate::oauth::{OAuthToken, auth_flow::DeviceAuthFlow, resolver::OAuthClientBuilder};
 use chrono::Utc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
 use surrealdb::{Connection, Surreal};
+use tokio::sync::Mutex;
+
+// Global refresh lock map to prevent concurrent refreshes for the same token
+static REFRESH_LOCKS: LazyLock<Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>> = LazyLock::new(|| {
+    Arc::new(Mutex::new(HashMap::new()))
+});
 
 /// OAuth-enabled model provider that integrates with genai
 pub struct OAuthModelProvider<C: Connection> {
@@ -37,6 +44,29 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
 
             // Check if token needs refresh
             if token.needs_refresh() && token.refresh_token.is_some() {
+                // Get or create a lock for this specific token to prevent concurrent refreshes
+                let lock_key = format!("{}:{}", self.user_id, provider);
+                let token_lock = {
+                    let mut locks = REFRESH_LOCKS.lock().await;
+                    locks.entry(lock_key.clone())
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                };
+                
+                // Acquire the lock for this token refresh
+                let _guard = token_lock.lock().await;
+                
+                // Re-check if token still needs refresh (another thread might have refreshed it)
+                let token_check = crate::db::ops::get_user_oauth_token_any(&self.db, &self.user_id, provider).await?;
+                if let Some(fresh_token) = token_check {
+                    if !fresh_token.needs_refresh() {
+                        tracing::info!("Token was refreshed by another thread, using fresh token");
+                        return Ok(Some(Arc::new(fresh_token)));
+                    }
+                    // Update our local token in case it changed
+                    token = fresh_token;
+                }
+                
                 tracing::info!(
                     "OAuth token for {} needs refresh (expires: {}), attempting refresh...",
                     provider,
@@ -85,14 +115,26 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
                         // Only update refresh token if a new one was provided
                         let refresh_to_save = token_response.refresh_token.or_else(|| token.refresh_token.clone());
                         
-                        token = crate::db::ops::update_oauth_token(
+                        match crate::db::ops::update_oauth_token(
                             &self.db,
                             &token.id,
                             token_response.access_token,
                             refresh_to_save,
                             new_expires_at,
                         )
-                        .await?;
+                        .await {
+                            Ok(updated_token) => {
+                                token = updated_token;
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to update OAuth token in database: {:?}", e);
+                                return Err(CoreError::OAuthError {
+                                    provider: provider.to_string(),
+                                    operation: "update_oauth_token".to_string(),
+                                    details: format!("Failed to save refreshed token: {:?}", e),
+                                });
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!("OAuth token refresh failed: {}", e);

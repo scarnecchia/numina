@@ -333,6 +333,9 @@ pub async fn initialize_from_config(
     }
 
     output.section("Initializing Groups from Configuration");
+    
+    // Track sleeptime groups that need background monitoring (just track the groups, not agents yet)
+    let mut sleeptime_groups: Vec<AgentGroup> = Vec::new();
 
     for group_config in &config.groups {
         output.status(&format!("Processing group: {}", group_config.name));
@@ -423,9 +426,32 @@ pub async fn initialize_from_config(
                 agent.id()
             ));
         }
+        
+        // Check if this is a sleeptime group that needs background monitoring
+        if matches!(created_group.coordination_pattern, CoordinationPattern::Sleeptime { .. }) {
+            output.info(
+                "Sleeptime group detected",
+                &format!("'{}' will start background monitoring after main group loads", created_group.name),
+            );
+            
+            // Just track the group for now, we'll load agents later
+            sleeptime_groups.push(created_group.clone());
+        }
     }
 
     output.success("Group initialization complete");
+    
+    // Just track the sleeptime groups for now
+    // They will be started after the main group is loaded with agents
+    if !sleeptime_groups.is_empty() {
+        output.info(
+            "Sleeptime groups detected", 
+            &format!("{} groups will start monitoring after main group loads", sleeptime_groups.len())
+        );
+        for group in &sleeptime_groups {
+            output.status(&format!("  - {}: {}", group.name, group.description));
+        }
+    }
     Ok(())
 }
 

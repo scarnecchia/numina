@@ -9,9 +9,37 @@ use surrealdb::{Connection, Surreal};
 pub struct MigrationRunner;
 
 impl MigrationRunner {
+    /// Get the compiled schema hash
+    fn get_compiled_schema_hash() -> u64 {
+        // This is set by build.rs at compile time
+        option_env!("PATTERN_SCHEMA_HASH")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
     /// Run all migrations
     pub async fn run<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        Self::run_with_options(db, false).await
+    }
+    
+    /// Run migrations with options
+    pub async fn run_with_options<C: Connection>(db: &Surreal<C>, force_update: bool) -> Result<()> {
         let start = std::time::Instant::now();
+        
+        // Check if we can skip schema updates
+        if !force_update {
+            let compiled_hash = Self::get_compiled_schema_hash();
+            if compiled_hash != 0 {
+                // Try to get stored schema hash
+                if let Ok(Some(stored_hash)) = Self::get_schema_hash(db).await {
+                    if stored_hash == compiled_hash {
+                        tracing::info!("Schema unchanged (hash: {}), skipping migrations", compiled_hash);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        
         tracing::info!("Starting database migrations...");
 
         let current_version = Self::get_schema_version(db).await?;
@@ -21,83 +49,84 @@ impl MigrationRunner {
             tracing::info!("Running migration v1: Initial schema");
             let migration_start = std::time::Instant::now();
             Self::migrate_v1(db).await?;
+            
+            // Create entity tables using their schema definitions
+            use crate::MemoryBlock;
+            use crate::agent::AgentRecord;
+            use crate::db::entity::{BaseEvent, BaseTask, DbEntity};
+            use crate::db::schema::ToolCall;
+            use crate::message::Message;
+            use crate::users::User;
+
+            // Create all entity tables
+            let entity_start = std::time::Instant::now();
+            tracing::info!("Creating entity tables...");
+            for table_def in [
+                User::schema(),
+                AgentRecord::schema(),
+                BaseTask::schema(),
+                MemoryBlock::schema(),
+                BaseEvent::schema(),
+                Message::schema(),
+                ToolCall::schema(),
+            ] {
+                let table_start = std::time::Instant::now();
+                let table_name = table_def
+                    .schema
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("unknown");
+
+                // Execute table schema
+                db.query(&table_def.schema)
+                    .await
+                    .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+                // Create indexes
+                for index in &table_def.indexes {
+                    db.query(index)
+                        .await
+                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+                }
+
+                tracing::debug!(
+                    "Created table {} in {:?}",
+                    table_name,
+                    table_start.elapsed()
+                );
+            }
+            tracing::info!("Entity tables created in {:?}", entity_start.elapsed());
+
+            // Create auxiliary tables (system_metadata, etc.)
+            let aux_start = std::time::Instant::now();
+            tracing::info!("Creating auxiliary tables...");
+            for table_def in Schema::tables() {
+                // Execute table schema
+                db.query(&table_def.schema)
+                    .await
+                    .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+                // Create indexes
+                for index in &table_def.indexes {
+                    db.query(index)
+                        .await
+                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+                }
+            }
+            tracing::info!("Auxiliary tables created in {:?}", aux_start.elapsed());
+
+            // Create specialized indices (full-text search, vector indices)
+            let indices_start = std::time::Instant::now();
+            tracing::info!("Creating specialized indices...");
+            Self::create_specialized_indices(db).await?;
+            tracing::info!(
+                "Specialized indices created in {:?}",
+                indices_start.elapsed()
+            );
+            
             Self::update_schema_version(db, 1).await?;
             tracing::info!("Migration v1 completed in {:?}", migration_start.elapsed());
         }
-
-        // Create entity tables using their schema definitions
-        use crate::MemoryBlock;
-        use crate::agent::AgentRecord;
-        use crate::db::entity::{BaseEvent, BaseTask, DbEntity};
-        use crate::db::schema::ToolCall;
-        use crate::message::Message;
-        use crate::users::User;
-
-        // Create all entity tables
-        let entity_start = std::time::Instant::now();
-        tracing::info!("Creating entity tables...");
-        for table_def in [
-            User::schema(),
-            AgentRecord::schema(),
-            BaseTask::schema(),
-            MemoryBlock::schema(),
-            BaseEvent::schema(),
-            Message::schema(),
-            ToolCall::schema(),
-        ] {
-            let table_start = std::time::Instant::now();
-            let table_name = table_def
-                .schema
-                .split_whitespace()
-                .nth(2)
-                .unwrap_or("unknown");
-
-            // Execute table schema
-            db.query(&table_def.schema)
-                .await
-                .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-            // Create indexes
-            for index in &table_def.indexes {
-                db.query(index)
-                    .await
-                    .map_err(|e| DatabaseError::QueryFailed(e))?;
-            }
-
-            tracing::debug!(
-                "Created table {} in {:?}",
-                table_name,
-                table_start.elapsed()
-            );
-        }
-        tracing::info!("Entity tables created in {:?}", entity_start.elapsed());
-
-        // Create auxiliary tables (system_metadata, etc.)
-        let aux_start = std::time::Instant::now();
-        tracing::info!("Creating auxiliary tables...");
-        for table_def in Schema::tables() {
-            // Execute table schema
-            db.query(&table_def.schema)
-                .await
-                .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-            // Create indexes
-            for index in &table_def.indexes {
-                db.query(index)
-                    .await
-                    .map_err(|e| DatabaseError::QueryFailed(e))?;
-            }
-        }
-        tracing::info!("Auxiliary tables created in {:?}", aux_start.elapsed());
-
-        // Create specialized indices (full-text search, vector indices)
-        let indices_start = std::time::Instant::now();
-        tracing::info!("Creating specialized indices...");
-        Self::create_specialized_indices(db).await?;
-        tracing::info!(
-            "Specialized indices created in {:?}",
-            indices_start.elapsed()
-        );
 
         // Add more migrations here as needed
         // if current_version < 2 {
@@ -106,6 +135,12 @@ impl MigrationRunner {
         //     Self::update_schema_version(db, 2).await?;
         // }
 
+        // Store the new schema hash
+        let compiled_hash = Self::get_compiled_schema_hash();
+        if compiled_hash != 0 {
+            Self::update_schema_hash(db, compiled_hash).await?;
+        }
+        
         tracing::info!("All database migrations completed in {:?}", start.elapsed());
         Ok(())
     }
@@ -146,6 +181,35 @@ impl MigrationRunner {
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
+        Ok(())
+    }
+
+    /// Get schema hash
+    async fn get_schema_hash<C: Connection>(db: &Surreal<C>) -> Result<Option<u64>> {
+        let mut result = db
+            .query("SELECT schema_hash FROM system_metadata LIMIT 1")
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        #[derive(serde::Deserialize)]
+        struct SchemaHash {
+            schema_hash: Option<u64>,
+        }
+
+        let hashes: Vec<SchemaHash> = result.take(0).unwrap_or_default();
+
+        Ok(hashes.first().and_then(|h| h.schema_hash))
+    }
+    
+    /// Update schema hash
+    async fn update_schema_hash<C: Connection>(db: &Surreal<C>, hash: u64) -> Result<()> {
+        db.query(
+            "UPDATE system_metadata SET schema_hash = $hash, updated_at = time::now()"
+        )
+        .bind(("hash", hash))
+        .await
+        .map_err(|e| DatabaseError::QueryFailed(e))?;
+        
         Ok(())
     }
 

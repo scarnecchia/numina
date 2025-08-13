@@ -305,7 +305,7 @@ impl SearchTool {
                             json!({
                                 "id": msg.id,
                                 "role": msg.role.to_string(),
-                                "content": msg.text_content().unwrap_or_default(),
+                                "content": msg.display_content(),
                                 "created_at": msg.created_at
                             })
                         })
@@ -359,7 +359,7 @@ impl SearchTool {
                                 "agent": agent_name,
                                 "id": msg.id,
                                 "role": msg.role.to_string(),
-                                "content": msg.text_content().unwrap_or_default(),
+                                "content": msg.display_content(),
                                 "created_at": msg.created_at
                             })
                         })

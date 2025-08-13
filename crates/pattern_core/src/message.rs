@@ -1104,6 +1104,77 @@ impl Message {
         }
     }
 
+    /// Extract displayable content from the message for search/display purposes
+    ///
+    /// Unlike text_content(), this extracts text from tool calls, reasoning blocks,
+    /// and other structured content that should be searchable
+    pub fn display_content(&self) -> String {
+        match &self.content {
+            MessageContent::Text(text) => text.clone(),
+            MessageContent::Parts(parts) => {
+                // Concatenate all text parts
+                parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text(text) => Some(text.clone()),
+                        ContentPart::Image { content_type, source } => {
+                            // Include image description for searchability
+                            let source_info = match source {
+                                ImageSource::Url(url) => format!("[Image URL: {}]", url),
+                                ImageSource::Base64(_) => "[Base64 Image]".to_string(),
+                            };
+                            Some(format!("[Image: {}] {}", content_type, source_info))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            MessageContent::ToolCalls(calls) => {
+                // Just dump the JSON for tool calls
+                calls
+                    .iter()
+                    .map(|call| {
+                        format!("[Tool: {}] {}", call.fn_name, serde_json::to_string_pretty(&call.fn_arguments).unwrap_or_else(|_| "{}".to_string()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            MessageContent::ToolResponses(responses) => {
+                // Include tool response content
+                responses
+                    .iter()
+                    .map(|resp| format!("[Tool Response] {}", resp.content))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            MessageContent::Blocks(blocks) => {
+                // Extract text from all block types including reasoning
+                blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        ContentBlock::Thinking { text, .. } => {
+                            // Include reasoning content for searchability
+                            Some(format!("[Reasoning] {}", text))
+                        }
+                        ContentBlock::RedactedThinking { .. } => {
+                            // Note redacted thinking but don't include content
+                            Some("[Redacted Reasoning]".to_string())
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            // Just dump the JSON
+                            Some(format!("[Tool: {}] {}", name, serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".to_string())))
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            Some(format!("[Tool Result] {}", content))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        }
+    }
+
     /// Check if this message contains tool calls
     pub fn has_tool_calls(&self) -> bool {
         matches!(&self.content, MessageContent::ToolCalls(_))

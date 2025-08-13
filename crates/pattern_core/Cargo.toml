@@ -88,6 +88,7 @@ hickory-resolver = "0.24"
 # Web tool dependencies  
 html2md = "0.2"
 scraper = "0.22"
+regex = "1.11.1"
 
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }

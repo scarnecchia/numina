@@ -86,6 +86,9 @@ pub trait Agent: Send + Sync + Debug {
 
     /// Get the agent's handle for controlled access to internals
     async fn handle(&self) -> crate::context::state::AgentHandle;
+    
+    /// Get the agent's last active timestamp
+    async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>>;
 
     /// Process an incoming message and generate a response
     async fn process_message(self: Arc<Self>, message: Message) -> Result<Response>;
@@ -103,7 +106,7 @@ pub trait Agent: Send + Sync + Debug {
     {
         use tokio_stream::wrappers::ReceiverStream;
 
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         // Clone for the spawned task
         let self_clone = self.clone();
@@ -211,8 +214,8 @@ pub trait Agent: Send + Sync + Debug {
     /// Get the list of tools available to this agent
     async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>>;
 
-    /// Get the agent's current state
-    async fn state(&self) -> AgentState;
+    /// Get the agent's current state and a watch receiver for changes
+    async fn state(&self) -> (AgentState, Option<tokio::sync::watch::Receiver<AgentState>>);
 
     /// Update the agent's state
     async fn set_state(&self, state: AgentState) -> Result<()>;

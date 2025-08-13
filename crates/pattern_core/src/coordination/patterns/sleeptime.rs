@@ -5,7 +5,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    AgentId, Result,
+    Result,
     agent::Agent,
     coordination::{
         groups::{
@@ -61,34 +61,46 @@ impl GroupManager for SleeptimeManager {
                 }
             };
 
+            // Get current state first
+            let (last_check, mut trigger_history, mut current_index) = match &group_state {
+                GroupState::Sleeptime {
+                    last_check,
+                    trigger_history,
+                    current_index,
+                } => (*last_check, trigger_history.clone(), *current_index),
+                _ => (Utc::now() - ChronoDuration::hours(1), Vec::new(), 0),
+            };
+
             // Determine which agent to use for intervention
             let selected_agent_id = if let Some(id) = intervention_agent_id {
                 // Use the specified agent
                 id.clone()
             } else {
-                // Find the least recently active agent in the group
-                match Self::find_least_recently_active(&agents) {
-                    Some(agent_id) => agent_id,
-                    None => {
-                        let _ = tx
-                            .send(GroupResponseEvent::Error {
-                                agent_id: None,
-                                message: "No agents available for intervention".to_string(),
-                                recoverable: false,
-                            })
-                            .await;
-                        return;
-                    }
+                // Round-robin through agents when no specific intervention agent
+                let active_agents: Vec<_> = agents
+                    .iter()
+                    .filter(|awm| awm.membership.is_active)
+                    .collect();
+                
+                if active_agents.is_empty() {
+                    let _ = tx
+                        .send(GroupResponseEvent::Error {
+                            agent_id: None,
+                            message: "No active agents available for intervention".to_string(),
+                            recoverable: false,
+                        })
+                        .await;
+                    return;
                 }
-            };
-
-            // Get current state
-            let (last_check, mut trigger_history) = match &group_state {
-                GroupState::Sleeptime {
-                    last_check,
-                    trigger_history,
-                } => (*last_check, trigger_history.clone()),
-                _ => (Utc::now() - ChronoDuration::hours(1), Vec::new()),
+                
+                // Use current_index to select agent
+                let selected_agent = active_agents[current_index % active_agents.len()];
+                let agent_id = selected_agent.agent.id();
+                
+                // Increment index for next time
+                current_index = (current_index + 1) % active_agents.len();
+                
+                agent_id
             };
 
             // Check if it's time to run checks
@@ -97,11 +109,12 @@ impl GroupManager for SleeptimeManager {
                 > ChronoDuration::from_std(*check_interval).unwrap_or(ChronoDuration::minutes(20));
 
             // Send start event
+            let active_count = agents.iter().filter(|awm| awm.membership.is_active).count();
             let _ = tx
                 .send(GroupResponseEvent::Started {
                     group_id: group_id.clone(),
                     pattern: "sleeptime".to_string(),
-                    agent_count: 1, // Always uses intervention agent
+                    agent_count: if intervention_agent_id.is_some() { 1 } else { active_count },
                 })
                 .await;
 
@@ -124,7 +137,9 @@ impl GroupManager for SleeptimeManager {
                 // Sort by priority (highest first)
                 fired_triggers.sort_by(|a, b| b.priority.cmp(&a.priority));
 
-                if !fired_triggers.is_empty() {
+                // Always activate the selected agent during periodic checks
+                // (not just when triggers fire)
+                {
                     // Find intervention agent
                     if let Some(intervention_agent) = agents
                         .iter()
@@ -142,20 +157,26 @@ impl GroupManager for SleeptimeManager {
                             })
                             .await;
 
-                        // Create intervention response - process the message with context about triggers
-                        let trigger_names: Vec<_> =
-                            fired_triggers.iter().map(|t| t.name.as_str()).collect();
-                        let mut intervention_context = format!(
-                            "[Sleeptime Intervention] Triggers fired: {}. {}",
-                            trigger_names.join(", "),
-                            Self::get_intervention_message_static(&fired_triggers)
-                        );
-
-                        let text = message.content.text().map(String::from).unwrap_or_default();
-                        if !text.is_empty() {
-                            intervention_context.push_str("\n\nContext: ");
-                            intervention_context.push_str(&text);
-                        }
+                        // Create intervention response - process the message with context
+                        let intervention_context = if !fired_triggers.is_empty() {
+                            // If triggers fired, include trigger information
+                            let trigger_names: Vec<_> =
+                                fired_triggers.iter().map(|t| t.name.as_str()).collect();
+                            let mut context = format!(
+                                "[Sleeptime Intervention] Triggers fired: {}. {}",
+                                trigger_names.join(", "),
+                                Self::get_intervention_message_static(&fired_triggers)
+                            );
+                            let text = message.content.text().map(String::from).unwrap_or_default();
+                            if !text.is_empty() {
+                                context.push_str("\n\nContext: ");
+                                context.push_str(&text);
+                            }
+                            context
+                        } else {
+                            // No triggers fired, just periodic check - customize per agent
+                            Self::get_agent_specific_context_sync(&agent_name)
+                        };
 
                         // Create intervention message
                         let intervention_message = match message.role {
@@ -302,24 +323,6 @@ impl GroupManager for SleeptimeManager {
                             .await;
                         return;
                     }
-                } else {
-                    // No triggers fired, just emit info message
-                    let _ = tx
-                        .send(GroupResponseEvent::TextChunk {
-                            agent_id: selected_agent_id.clone(),
-                            text: "[Sleeptime] Routine check complete. All systems nominal."
-                                .to_string(),
-                            is_final: true,
-                        })
-                        .await;
-
-                    agent_responses.push(AgentResponse {
-                        agent_id: selected_agent_id.clone(),
-                        response: text_response(
-                            "[Sleeptime] Routine check complete. All systems nominal.",
-                        ),
-                        responded_at: Utc::now(),
-                    });
                 }
 
                 // Keep trigger history to reasonable size (last 1000 events)
@@ -354,6 +357,7 @@ impl GroupManager for SleeptimeManager {
             let new_state = GroupState::Sleeptime {
                 last_check: if should_check { Utc::now() } else { last_check },
                 trigger_history,
+                current_index,
             };
 
             // Send completion event
@@ -382,22 +386,62 @@ impl GroupManager for SleeptimeManager {
 }
 
 impl SleeptimeManager {
+    /// Get agent-specific context sync prompt
+    fn get_agent_specific_context_sync(agent_name: &str) -> String {
+        let prompt = match agent_name {
+            "Pattern" => {
+                "Context sync check:\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis.\n\nProvide brief status updates only if intervention is needed."
+            }
+            "Entropy" => {
+                "Context sync check:\n\nAnalyze task complexity in recent interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates only if intervention is needed."
+            }
+            "Flux" => {
+                "Context sync check:\n\nCheck temporal patterns and time blindness indicators. Any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates only if intervention is needed."
+            }
+            "Archive" => {
+                "Context sync check:\n\nReview memory coherence and pattern recognition. Any important context that needs preservation? Patterns across conversations that should be noted?\n\nProvide brief status updates only if intervention is needed."
+            }
+            "Momentum" => {
+                "Context sync check:\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition?\n\nProvide brief status updates only if intervention is needed."
+            }
+            "Anchor" => {
+                "Context sync check:\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?\n\nProvide brief status updates only if intervention is needed."
+            }
+            _ => {
+                // Generic prompt for unknown agents
+                "Context sync check:\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed."
+            }
+        };
+        
+        format!("[Periodic Context Sync]\n\n{}", prompt)
+    }
+
     /// Find the agent that was least recently active
-    fn find_least_recently_active(
+    /// This uses the agent's internal last_active timestamp
+    #[allow(dead_code)] // Will be used later
+    async fn find_least_recently_active(
         agents: &[AgentWithMembership<Arc<dyn Agent>>],
-    ) -> Option<AgentId> {
+    ) -> Option<crate::AgentId> {
+        // Get active agents with their last activity times
+        let mut active_agents_with_times = Vec::new();
+        
+        for awm in agents.iter().filter(|awm| awm.membership.is_active) {
+            let last_active = awm.agent.last_active().await;
+            active_agents_with_times.push((awm, last_active));
+        }
+        
+        if active_agents_with_times.is_empty() {
+            return None;
+        }
+        
         // Find the agent with the oldest last_active timestamp
-        // TODO: Need to query database for actual last_active timestamps
-        // TODO: Pass db connection through or expose last_active via Agent trait
-        agents
-            .iter()
-            .filter(|awm| awm.membership.is_active)
-            .min_by_key(|awm| {
-                // TODO: Use actual last_active timestamp once available
-                // For now, use joined_at as a proxy
-                awm.membership.joined_at
+        // If an agent has no last_active (None), treat it as very old
+        active_agents_with_times
+            .into_iter()
+            .min_by_key(|(awm, last_active)| {
+                last_active.unwrap_or_else(|| awm.membership.joined_at)
             })
-            .map(|awm| awm.agent.id())
+            .map(|(awm, _)| awm.agent.id())
     }
 
     async fn evaluate_trigger_static(
@@ -582,6 +626,7 @@ mod tests {
             state: GroupState::Sleeptime {
                 last_check: Utc::now() - ChronoDuration::hours(1), // Force check
                 trigger_history: vec![],
+                current_index: 0,
             },
             members: vec![], // Empty for test
         };

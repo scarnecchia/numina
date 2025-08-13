@@ -1,11 +1,12 @@
 mod agent_ops;
+mod background_tasks;
 mod commands;
 mod endpoints;
 mod output;
 mod tracing_writer;
 
 use clap::{Parser, Subcommand};
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     config::{self},
@@ -34,6 +35,10 @@ struct Cli {
     /// Database file path (overrides config)
     #[arg(long)]
     db_path: Option<PathBuf>,
+    
+    /// Force schema update even if unchanged
+    #[arg(long, global = true)]
+    force_schema_update: bool,
 
     /// Enable debug logging
     #[arg(long)]
@@ -559,7 +564,12 @@ async fn main() -> Result<()> {
     tracing::info!("Using database config: {:?}", config.database);
 
     // Initialize database
-    client::init_db(config.database.clone()).await?;
+    if cli.force_schema_update {
+        tracing::info!("Forcing schema update...");
+        client::init_db_with_options(config.database.clone(), true).await?;
+    } else {
+        client::init_db(config.database.clone()).await?;
+    }
 
     // Initialize groups from configuration (skip for auth/atproto/config commands to avoid API key issues)
     let skip_group_init = matches!(
@@ -603,6 +613,15 @@ async fn main() -> Result<()> {
                 };
 
                 // Group was already loaded with relations in get_group_by_name
+
+                // Check if this is a Context Sync group that needs background monitoring
+                let is_context_sync = group.name == "Context Sync";
+                if is_context_sync {
+                    output.info(
+                        "Context Sync group detected",
+                        "Will start background monitoring after setup"
+                    );
+                }
 
                 // Create a shared constellation activity tracker for the group
                 // Use the group ID directly as the memory ID - they're in different namespaces
@@ -693,7 +712,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -728,7 +747,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -763,7 +782,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -798,7 +817,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -833,13 +852,49 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
                     CoordinationPattern::Sleeptime { .. } => {
                         let manager = SleeptimeManager;
-                        if *discord {
+                        
+                        // Start background monitoring if this is the Context Sync group
+                        if is_context_sync {
+                            output.success("Starting Context Sync background monitoring...");
+                            
+                            // Create agents with membership for the monitoring task
+                            let agents_with_membership: Vec<_> = agents
+                                .iter()
+                                .zip(group.members.iter())
+                                .map(|(agent, (_, membership))| {
+                                    pattern_core::coordination::groups::AgentWithMembership {
+                                        agent: Arc::clone(agent),
+                                        membership: membership.clone(),
+                                    }
+                                })
+                                .collect();
+                            
+                            // Start the background monitoring task
+                            let monitoring_handle = background_tasks::start_context_sync_monitoring(
+                                group.clone(),
+                                agents_with_membership.clone(),
+                                manager.clone(),
+                                output.clone(),
+                            ).await?;
+                            
+                            output.info(
+                                "Background task started",
+                                "Context sync will run periodically in the background"
+                            );
+                            
+                            // Don't enter interactive chat for Context Sync, just let it run
+                            output.status("Context Sync group is now running in background mode");
+                            output.status("Press Ctrl+C to stop monitoring");
+                            
+                            // Wait for the monitoring task to complete (or be cancelled)
+                            monitoring_handle.await.into_diagnostic()?;
+                        } else if *discord {
                             #[cfg(feature = "discord")]
                             {
                                 agent_ops::run_discord_bot_with_group(
@@ -868,7 +923,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group, agents, manager, heartbeat_receiver)
+                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }

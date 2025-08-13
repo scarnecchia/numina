@@ -132,7 +132,7 @@ impl MessageOrigin {
                 agent_id: _,
                 name,
                 reason,
-            } => format!("from {} for {}", name, reason),
+            } => format!("{} ({})", name, reason),
             Self::Other {
                 origin_type,
                 source_id,
@@ -383,7 +383,7 @@ impl AgentMessageRouter {
         content: String,
         metadata: Option<Value>,
         origin: Option<MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         match target.target_type {
             TargetType::User => {
                 let user_id = target
@@ -483,7 +483,7 @@ impl AgentMessageRouter {
         content: String,
         metadata: Option<Value>,
         origin: Option<MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         debug!(
             "Routing message from agent {} to user {}",
             self.agent_id, user_id
@@ -516,7 +516,7 @@ impl AgentMessageRouter {
             );
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Send a message to another agent
@@ -526,7 +526,7 @@ impl AgentMessageRouter {
         content: String,
         metadata: Option<Value>,
         origin: Option<MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         debug!(
             "Routing message from agent {} to agent {}",
             self.agent_id, target_agent_id
@@ -592,7 +592,7 @@ impl AgentMessageRouter {
         // Store the message in the database
         self.store_queued_message(queued).await?;
 
-        Ok(())
+        Ok(None)
     }
 
     /// Send a message to a group
@@ -602,7 +602,7 @@ impl AgentMessageRouter {
         content: String,
         metadata: Option<Value>,
         origin: Option<MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         debug!(
             "Routing message from agent {} to group {}",
             self.agent_id, group_id
@@ -618,7 +618,7 @@ impl AgentMessageRouter {
             };
 
             endpoint.send(message, metadata, origin.as_ref()).await?;
-            return Ok(());
+            return Ok(None);
         }
 
         // Otherwise log a warning and fall back to basic routing
@@ -641,7 +641,7 @@ impl AgentMessageRouter {
         let members = group.members;
         if members.is_empty() {
             warn!("Group {} has no members", group_id);
-            return Ok(());
+            return Ok(None);
         }
 
         info!(
@@ -681,7 +681,7 @@ impl AgentMessageRouter {
             sent_count, group_id
         );
 
-        Ok(())
+        Ok(None)
     }
 
     /// Send a message to a channel (Discord, etc)
@@ -691,7 +691,7 @@ impl AgentMessageRouter {
         content: String,
         metadata: Option<Value>,
         origin: Option<MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         debug!("Routing message from agent {} to channel", self.agent_id);
 
         // Extract channel type from the info
@@ -713,7 +713,7 @@ impl AgentMessageRouter {
             warn!("No endpoint registered for channel type: {}", channel_type);
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Send a message to Bluesky
@@ -723,7 +723,7 @@ impl AgentMessageRouter {
         content: String,
         metadata: Option<Value>,
         origin: Option<MessageOrigin>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         debug!("Routing message from agent {} to Bluesky", self.agent_id);
 
         // Look for Bluesky endpoint
@@ -746,7 +746,7 @@ impl AgentMessageRouter {
             warn!("No Bluesky endpoint registered");
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Store a queued message in the database
@@ -1056,7 +1056,7 @@ impl MessageEndpoint for BlueskyEndpoint {
                         })?;
 
                         info!("Liked on Bluesky: {}", result.uri);
-                        return Ok(None);
+                        return Ok(Some(result.uri.clone()));
                     } else {
                         Some(self.create_reply_refs(reply_to).await?)
                     }

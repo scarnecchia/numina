@@ -47,19 +47,26 @@ pub async fn init_db_instance<C: Connection>(
                 format!("surrealkv://{}", path)
             };
             // Connect to the embedded database
+            tracing::info!("Connecting to embedded database at: {}", path);
+            let connect_start = std::time::Instant::now();
             let db = any::connect(path)
                 .await
                 .map_err(|e| DatabaseError::ConnectionFailed(e))?;
+            tracing::info!("Database connection established in {:?}", connect_start.elapsed());
 
             // For embedded mode, we need to select a namespace and database
+            let ns_start = std::time::Instant::now();
             db.use_ns("pattern")
                 .use_db("pattern")
                 .await
                 .map_err(|e| DatabaseError::ConnectionFailed(e))?;
+            tracing::info!("Namespace/database selected in {:?}", ns_start.elapsed());
 
             // Run migrations
+            let migration_start = std::time::Instant::now();
             use crate::db::migration::MigrationRunner;
             MigrationRunner::run(&db).await?;
+            tracing::info!("Migrations completed in {:?}", migration_start.elapsed());
 
             Ok(db)
         }
@@ -105,6 +112,11 @@ pub async fn init_db_instance<C: Connection>(
 
 /// Initialize the database connection
 pub async fn init_db(config: DatabaseConfig) -> Result<()> {
+    init_db_with_options(config, false).await
+}
+
+/// Initialize the database connection with options
+pub async fn init_db_with_options(config: DatabaseConfig, force_schema_update: bool) -> Result<()> {
     match config {
         DatabaseConfig::Embedded { path, .. } => {
             let path = if path.is_empty() {
@@ -124,7 +136,11 @@ pub async fn init_db(config: DatabaseConfig) -> Result<()> {
                 format!("surrealkv://{}", path)
             };
             // Connect to the embedded database
-            match DB.connect(&path).await {
+            tracing::info!("Connecting to global DB at: {}", path);
+            let connect_start = std::time::Instant::now();
+            let connect_result = DB.connect(&path).await;
+            tracing::info!("Global DB connection completed in {:?}", connect_start.elapsed());
+            match connect_result {
                 Ok(_) => {}
                 Err(surrealdb::Error::Api(surrealdb::error::Api::AlreadyConnected)) => {
                     // Already connected, that's fine for tests
@@ -183,7 +199,7 @@ pub async fn init_db(config: DatabaseConfig) -> Result<()> {
     }
 
     // Initialize the schema
-    crate::db::migration::MigrationRunner::run(&DB).await?;
+    crate::db::migration::MigrationRunner::run_with_options(&DB, force_schema_update).await?;
 
     Ok(())
 }

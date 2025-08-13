@@ -145,6 +145,291 @@ impl WebTool {
             last_fetch_url: Arc::new(std::sync::Mutex::new(None)),
         }
     }
+    
+    /// Search using Kagi with session cookies and auth header
+    async fn search_kagi(&self, query: &str, limit: usize) -> Result<WebOutput> {
+        // Get auth credentials from environment
+        let kagi_session = std::env::var("KAGI_SESSION")
+            .map_err(|_| CoreError::ToolExecutionFailed {
+                tool_name: "web".to_string(),
+                cause: "KAGI_SESSION environment variable not set".to_string(),
+                parameters: serde_json::json!({ "query": query }),
+            })?;
+        
+        let kagi_search = std::env::var("KAGI_SEARCH")
+            .unwrap_or_default(); // Optional, may not be needed
+        
+        let kagi_auth = std::env::var("KAGI_AUTH")
+            .unwrap_or_default(); // Optional auth header
+        
+        // Build cookie header
+        let mut cookie = format!("kagi_session={}", kagi_session);
+        if !kagi_search.is_empty() {
+            cookie.push_str(&format!("; _kagi_search={}", kagi_search));
+        }
+        
+        let mut request = self
+            .client
+            .client
+            .get("https://kagi.com/search")
+            .query(&[("q", query)])
+            .header("Cookie", cookie)
+            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        
+        // Add auth header if present
+        if !kagi_auth.is_empty() {
+            request = request.header("X-Kagi-Authorization", kagi_auth);
+        }
+        
+        let response = request
+            .send()
+            .await
+            .map_err(|e| CoreError::ToolExecutionFailed {
+                tool_name: "web".to_string(),
+                cause: format!("Kagi search request failed: {}", e),
+                parameters: serde_json::json!({ "query": query }),
+            })?;
+            
+        if !response.status().is_success() {
+            return Err(CoreError::ToolExecutionFailed {
+                tool_name: "web".to_string(),
+                cause: format!("Kagi returned status: {}", response.status()),
+                parameters: serde_json::json!({ "query": query }),
+            });
+        }
+
+        let html = response
+            .text()
+            .await
+            .map_err(|e| CoreError::ToolExecutionFailed {
+                tool_name: "web".to_string(),
+                cause: format!("Failed to read Kagi response: {}", e),
+                parameters: serde_json::json!({ "query": query }),
+            })?;
+            
+        // Parse Kagi HTML results with scraper
+        let document = scraper::Html::parse_document(&html);
+        
+        // Kagi uses specific selectors for their search results
+        let result_selector = scraper::Selector::parse(".search-result, ._0_result, .result").unwrap();
+        let title_selector = scraper::Selector::parse("h3 a, .result-title a, ._0_title a, a._0_title_link").unwrap();
+        let url_selector = scraper::Selector::parse(".result-url, ._0_url, cite").unwrap();
+        let desc_selector = scraper::Selector::parse(".result-desc, ._0_snippet, .search-result__snippet").unwrap();
+        
+        let mut results = Vec::new();
+        
+        for (i, result_elem) in document.select(&result_selector).enumerate() {
+            if i >= limit {
+                break;
+            }
+            
+            // Try to extract title and URL from the link
+            let title_elem = result_elem.select(&title_selector).next();
+            let (title, url) = if let Some(elem) = title_elem {
+                let title = elem.text().collect::<String>().trim().to_string();
+                let url = elem.value().attr("href")
+                    .map(|u| {
+                        // Kagi sometimes uses relative URLs
+                        if u.starts_with("/url?") {
+                            // Extract actual URL from redirect
+                            u.split("url=")
+                                .nth(1)
+                                .and_then(|s| s.split('&').next())
+                                .and_then(|s| urlencoding::decode(s).ok())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| u.to_string())
+                        } else if u.starts_with("http") {
+                            u.to_string()
+                        } else {
+                            format!("https://kagi.com{}", u)
+                        }
+                    })
+                    .unwrap_or_default();
+                (title, url)
+            } else {
+                // Fallback: try to find any link in the result
+                let link = result_elem.select(&scraper::Selector::parse("a[href]").unwrap()).next();
+                if let Some(link_elem) = link {
+                    let title = link_elem.text().collect::<String>().trim().to_string();
+                    let url = link_elem.value().attr("href").unwrap_or("").to_string();
+                    (title, url)
+                } else {
+                    continue;
+                }
+            };
+            
+            // Try to extract URL from cite if not found
+            let url = if url.is_empty() {
+                result_elem
+                    .select(&url_selector)
+                    .next()
+                    .map(|e| e.text().collect::<String>().trim().to_string())
+                    .unwrap_or(url)
+            } else {
+                url
+            };
+            
+            // Extract snippet
+            let snippet = result_elem
+                .select(&desc_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_else(|| {
+                    // Fallback: get text content of result, excluding title
+                    result_elem
+                        .text()
+                        .collect::<String>()
+                        .lines()
+                        .filter(|line| !line.trim().is_empty() && !line.contains(&title))
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string()
+                });
+                
+            if !url.is_empty() && !title.is_empty() {
+                results.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+        
+        Ok(WebOutput {
+            content: None,
+            results: Some(results),
+            metadata: None,
+            next_offset: None,
+        })
+    }
+    
+    /// Search using Brave Search (no API key required for basic searches)
+    async fn search_brave(&self, query: &str, limit: usize) -> Result<WebOutput> {
+        let response = self
+            .client
+            .client
+            .get("https://search.brave.com/search")
+            .query(&[("q", query)])
+            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .send()
+            .await
+            .map_err(|e| CoreError::ToolExecutionFailed {
+                tool_name: "web".to_string(),
+                cause: format!("Brave search request failed: {}", e),
+                parameters: serde_json::json!({ "query": query }),
+            })?;
+            
+        let html = response
+            .text()
+            .await
+            .map_err(|e| CoreError::ToolExecutionFailed {
+                tool_name: "web".to_string(),
+                cause: format!("Failed to read Brave search results: {}", e),
+                parameters: serde_json::json!({ "query": query }),
+            })?;
+            
+        // Parse Brave search results with scraper
+        let document = scraper::Html::parse_document(&html);
+        
+        // Brave uses data attributes for result types
+        let result_selector = scraper::Selector::parse("[data-type='web']").unwrap();
+        let title_selector = scraper::Selector::parse(".snippet-title, h3, .title").unwrap();
+        let url_selector = scraper::Selector::parse(".snippet-url cite, cite, .result-url").unwrap();
+        let desc_selector = scraper::Selector::parse(".snippet-description, .snippet-content").unwrap();
+        
+        let mut results = Vec::new();
+        
+        for (i, result_elem) in document.select(&result_selector).enumerate() {
+            if i >= limit {
+                break;
+            }
+            
+            let title = result_elem
+                .select(&title_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+                
+            let url = result_elem
+                .select(&url_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .or_else(|| {
+                    // Try to find URL in href attributes
+                    result_elem
+                        .select(&scraper::Selector::parse("a[href]").unwrap())
+                        .next()
+                        .and_then(|a| a.value().attr("href"))
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+                
+            let snippet = result_elem
+                .select(&desc_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_else(|| {
+                    // Fallback: get text content skipping title
+                    result_elem
+                        .text()
+                        .collect::<String>()
+                        .lines()
+                        .skip(1)
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string()
+                });
+                
+            if !url.is_empty() && !title.is_empty() {
+                results.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+        
+        Ok(WebOutput {
+            content: None,
+            results: Some(results),
+            metadata: None,
+            next_offset: None,
+        })
+    }
+
+    /// Preprocess HTML to remove script and style tags for cleaner markdown conversion
+    fn preprocess_html(html: &str) -> String {
+        // Use regex for reliable removal of script/style content
+        let script_regex = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
+        let style_regex = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+        let comment_regex = regex::Regex::new(r"(?s)<!--.*?-->").unwrap();
+        let svg_regex = regex::Regex::new(r"(?is)<svg[^>]*>.*?</svg>").unwrap();
+        let noscript_regex = regex::Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").unwrap();
+        
+        // Remove inline event handlers and javascript: URLs
+        let onclick_regex = regex::Regex::new(r#"\s*on\w+\s*=\s*["'][^"']*["']"#).unwrap();
+        let js_url_regex = regex::Regex::new(r#"href\s*=\s*["']javascript:[^"']*["']"#).unwrap();
+        
+        let mut cleaned = script_regex.replace_all(html, "").to_string();
+        cleaned = style_regex.replace_all(&cleaned, "").to_string();
+        cleaned = comment_regex.replace_all(&cleaned, "").to_string();
+        cleaned = svg_regex.replace_all(&cleaned, "").to_string();
+        cleaned = noscript_regex.replace_all(&cleaned, "").to_string();
+        cleaned = onclick_regex.replace_all(&cleaned, "").to_string();
+        cleaned = js_url_regex.replace_all(&cleaned, "href=\"#\"").to_string();
+        
+        // Also remove common ad/tracking elements by id/class patterns
+        let ad_regex = regex::Regex::new(r#"(?is)<div[^>]*(?:class|id)=["'][^"']*(?:ad[sv]?|banner|sponsor|promo|widget|sidebar|popup|overlay|modal|cookie|gdpr|newsletter|signup|subscribe)[^"']*["'][^>]*>.*?</div>"#).unwrap();
+        cleaned = ad_regex.replace_all(&cleaned, "").to_string();
+        
+        cleaned
+    }
 
     /// Fetch content from a URL with pagination support
     async fn fetch_url(
@@ -280,7 +565,11 @@ impl WebTool {
 
         let content = match format {
             WebFormat::Html => text,
-            WebFormat::Markdown => html2md::parse_html(&text),
+            WebFormat::Markdown => {
+                // Preprocess HTML to remove script and style tags for cleaner markdown
+                let cleaned_html = Self::preprocess_html(&text);
+                html2md::parse_html(&cleaned_html)
+            }
         };
 
         // Store in cache
@@ -295,9 +584,37 @@ impl WebTool {
         Ok(content)
     }
 
-    /// Search the web using DuckDuckGo
+    /// Search the web using Kagi (if available) or fallback providers
     async fn search_web(&self, query: String, limit: usize) -> Result<WebOutput> {
         let limit = limit.max(1).min(20);
+        
+        // Try Kagi first if we have a session cookie
+        if std::env::var("KAGI_SESSION").is_ok() {
+            match self.search_kagi(&query, limit).await {
+                Ok(output) if output.results.as_ref().map(|r| !r.is_empty()).unwrap_or(false) => {
+                    return Ok(output);
+                },
+                Err(e) => {
+                    tracing::warn!("Kagi search failed, falling back: {}", e);
+                }
+                _ => {
+                    tracing::debug!("Kagi returned no results, trying fallback");
+                }
+            }
+        }
+        
+        // Try Brave Search as primary fallback
+        match self.search_brave(&query, limit).await {
+            Ok(output) if output.results.as_ref().map(|r| !r.is_empty()).unwrap_or(false) => {
+                return Ok(output);
+            },
+            Err(e) => {
+                tracing::warn!("Brave search failed, trying DuckDuckGo: {}", e);
+            }
+            _ => {
+                tracing::debug!("Brave returned no results, trying DuckDuckGo");
+            }
+        }
 
         // Use DuckDuckGo HTML interface
         let search_url = "https://html.duckduckgo.com/html/";
