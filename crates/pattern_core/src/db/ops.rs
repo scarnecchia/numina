@@ -1419,7 +1419,7 @@ pub async fn update_oauth_token<C: Connection>(
     new_expires_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<OAuthToken> {
     let mut update_query = conn
-        .update(RecordId::from(token_id.clone()))
+        .update((OAuthToken::table_name(), token_id.to_key()))
         .patch(PatchOp::replace("/access_token", new_access_token))
         .patch(PatchOp::replace(
             "/expires_at",
@@ -1451,8 +1451,8 @@ pub async fn mark_oauth_token_used<C: Connection>(
     conn: &Surreal<C>,
     token_id: &OAuthTokenId,
 ) -> Result<()> {
-    let _: Option<serde_json::Value> = conn
-        .update(RecordId::from(token_id.clone()))
+    let _: Option<<OAuthToken as DbEntity>::DbModel> = conn
+        .update((OAuthToken::table_name(), token_id.to_key()))
         .patch(PatchOp::replace(
             "/last_used_at",
             surrealdb::Datetime::from(Utc::now()),
@@ -1500,22 +1500,13 @@ pub async fn delete_user_oauth_tokens<C: Connection>(
         .await
         .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-    let token_records: Vec<serde_json::Value> =
+    let token_records: Vec<<OAuthToken as DbEntity>::DbModel> =
         result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
 
     let token_ids: Vec<OAuthTokenId> = token_records
         .into_iter()
-        .filter_map(|v| {
-            v.get("id").and_then(|id| {
-                // Extract the ID string from the record
-                if let serde_json::Value::String(id_str) = id {
-                    // Parse it as OAuthTokenId
-                    id_str.parse::<OAuthTokenId>().ok()
-                } else {
-                    None
-                }
-            })
-        })
+        .map(|m| OAuthToken::from_db_model(m).expect("db model type"))
+        .map(|v| v.id)
         .collect();
 
     let count = token_ids.len();
