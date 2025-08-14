@@ -73,6 +73,24 @@
             };
           };
 
+
+          "pattern-cli" = {
+            imports = [ globalCrateConfig ];
+            autoWire = [ "crate" "clippy" ];
+            path = ./../../crates/pattern_cli;
+            crane = {
+              args = {
+                buildInputs =
+                  commonBuildInputs
+                  ++ [
+                    pkgs.openssl
+                    pkgs.pkg-config
+                  ];
+                nativeBuildInputs = [ pkgs.pkg-config ];
+              };
+            };
+          };
+
           "pattern-discord" = {
             imports = [ globalCrateConfig ];
             autoWire = [ "crate" "clippy" ];
@@ -90,26 +108,13 @@
             };
           };
 
-          "pattern-main" = {
-            imports = [ globalCrateConfig ];
-            autoWire = [ "crate" "clippy" ];
-            path = ./../../crates/pattern_main;
-            crane = {
-              args = {
-                buildInputs =
-                  commonBuildInputs
-                  ++ [
-                    pkgs.openssl
-                  ];
-                nativeBuildInputs = [ pkgs.pkg-config ];
-              };
-            };
-          };
+
+
         };
       };
 
       # Define the default package
-      packages.default = self'.packages.pattern-main;
+      packages.default = self'.packages.pattern-cli;
       # packages.pattern = self'.packages.pattern-main;
       # packages.pattern-core = self'.packages.pattern-core;
       # packages.pattern-discord = self'.packages.pattern-discord;

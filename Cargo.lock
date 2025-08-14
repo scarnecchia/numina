@@ -2073,12 +2073,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
-
-[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5058,7 +5052,7 @@ checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
 
 [[package]]
 name = "pattern-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -5191,41 +5185,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pattern-main"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs 5.0.1",
- "dotenv",
- "futures",
- "miette 7.6.0",
- "mockall",
- "once_cell",
- "parking_lot",
- "pattern-core",
- "pattern-discord",
- "pattern-mcp",
- "pattern-nd",
- "pretty_assertions",
- "schemars 1.0.4",
- "serde",
- "serde_json",
- "surrealdb",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "toml 0.8.23",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "pattern-mcp"
 version = "0.1.0"
 dependencies = [
@@ -5278,7 +5237,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "axum 0.7.9",
@@ -5308,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "pattern_cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "atrium-api",

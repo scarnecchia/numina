@@ -1,26 +1,38 @@
 # CLAUDE.md - Pattern MCP
 
-Model Context Protocol implementation for Pattern - currently a skeleton awaiting development.
+Model Context Protocol implementation for Pattern - client fully functional, server stub only.
 
 ## Current Status
 
-**STATUS: Stub implementation only**
+### ✅ MCP Client - IMPLEMENTED
+- All three transports working (stdio, HTTP, SSE)
+- Tool discovery via rmcp SDK
+- Dynamic tool wrapper system
+- Integration with Pattern's tool registry
+- Mock tools for testing when no server available
+- Basic auth support (Bearer tokens, custom headers)
+- Needs testing with real MCP servers
+
+### 🚧 MCP Server - STUB ONLY
 - Basic crate structure exists
 - Smoke tests in place
-- Core functionality not implemented
-- Lower priority than MCP client integration
+- Core server functionality not implemented
+- Lower priority
 
-## Planned Architecture
+## MCP Client Architecture
 
-### MCP Server
-- Expose Pattern tools to external MCP clients
-- Support stdio, HTTP, and SSE transports
-- Tool registration and discovery
+### Transport Support
+- **stdio**: Child process communication via rmcp's TokioChildProcess
+- **HTTP**: Streamable HTTP via rmcp's StreamableHttpClientTransport  
+- **SSE**: Server-Sent Events via rmcp's SseClientTransport
+- **Auth**: Bearer tokens and Authorization headers supported
 
-### MCP Client (Higher Priority)
-- Consume external MCP tools
-- Integrate with agent tool registry
-- Dynamic tool discovery
+### Tool Integration Flow
+1. Connect to MCP server via configured transport
+2. Discover available tools using rmcp peer
+3. Wrap each tool in McpToolWrapper (implements DynamicTool)
+4. Register wrapped tools with Pattern's tool registry
+5. Handle tool invocations via channel-based request/response
 
 ## MCP Schema Requirements
 

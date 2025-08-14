@@ -8,39 +8,54 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 ### 🚧 Current Development Priorities
 
-1. **MCP Client Integration** - 🔴 HIGH PRIORITY
-   - Integrate MCP client to consume external tools
-   - Allow agents to use MCP-provided capabilities
-   - Tool discovery and registration
-   
-2. **Bug Fixes** - 🔴 IMMEDIATE
+1. **Bug Fixes** - 🔴 IMMEDIATE
    - Address any critical issues blocking usage
    - See current issue tracker
 
-3. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
+2. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
    - Basic Axum server structure exists
-   - Need to implement actual handlers
+   - Auth handlers partially implemented
+   - Most endpoints still need implementation
    - Required for multi-user hosting
-   - Enable non-technical user access
 
-4. **Discord Slash Commands** - 🟡 IN PROGRESS  
-   - Core bot functionality working
-   - Missing slash command implementations
-   - Message handling and coordination complete
+3. **MCP Client Refinement** - 🟡 NEEDS VERIFICATION
+   - All transports implemented (stdio, HTTP, SSE)
+   - Tool discovery and wrapper system working
+   - Needs testing with real MCP servers
+   - Auth support may need improvements
 
-5. **Task Management System** - 🟢 QUEUED
+4. **Task Management System** - 🟢 QUEUED
    - Database schema exists
    - Need CLI commands and user-facing features
    - ADHD-aware task breakdown planned
 
+5. **MCP Server** - 🟢 LOWER PRIORITY
+   - Stub implementation only
+   - Expose Pattern tools to external clients
+
 ## Completed Features
 
-### ✅ Agent Groups 
+### ✅ Agent Groups
 - Full CLI support with create/add-member/status/list commands
 - All coordination patterns working (RoundRobin, Dynamic, Pipeline, Supervisor, Voting, Sleeptime)
 - Discord and Bluesky integration
 - Runtime message routing through patterns
 - More use cases and templates to be added
+
+### ✅ Discord Integration
+- Full message handling with batching and merging
+- Typing indicators with auto-refresh
+- Reaction handling on bot messages
+- All slash commands implemented (/help, /status, /memory, /archival, /context, /search, /list)
+- Group integration with coordination patterns
+- Data source mode for event ingestion
+
+### ✅ MCP Client
+- All three transports implemented (stdio, HTTP, SSE)
+- Tool discovery and dynamic wrapper system
+- Integration with Pattern's tool registry
+- Mock tools for testing when no server available
+- Basic auth support (Bearer tokens)
 
 ### ✅ Bluesky/ATProto Integration
 - Jetstream firehose consumer fully operational
@@ -52,7 +67,7 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 ### ✅ Data Source Framework
 - Flexible trait supporting pull/push patterns
 - File watching with indexing
-- Discord message ingestion  
+- Discord message ingestion
 - Coordinator managing multiple sources
 - Prompt templates for notifications
 
@@ -75,13 +90,13 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 ```
 pattern/
 ├── crates/
+│   ├── pattern_api/      # Shared API types and contracts
 │   ├── pattern_cli/      # Command-line testing tool
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
-│   ├── pattern_nd/       # ADHD-specific tools and agent personalities
-│   ├── pattern_mcp/      # MCP server implementation (stub)
 │   ├── pattern_discord/  # Discord bot integration
+│   ├── pattern_mcp/      # MCP client (working) and server (stub)
+│   ├── pattern_nd/       # ADHD-specific tools and agent personalities
 │   ├── pattern_server/   # Backend API server (in development)
-│   └── pattern_main/     # Main orchestrator binary
 ├── docs/                 # Architecture and integration guides
 ```
 
@@ -123,7 +138,7 @@ pub struct User {
 
 ### API Provider Issues
 - **Anthropic Thinking Mode**: Message compression can create invalid sequences with tool calls
-- **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations  
+- **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations
 - **Gemini Empty Contents**: "contents is not specified" error when all messages filtered out
 - **Tool call validation**: Compression sometimes leaves unpaired tool calls (affects Flux agent)
 - See `docs/known-api-issues.md` for workarounds
@@ -142,7 +157,7 @@ Data sources can attach memory blocks to messages for agent context:
 - Bluesky creates/retrieves user profile blocks automatically
 - Router needs to create RELATE edges for block attachment (TODO)
 
-### 🔧 Anti-looping Protection  
+### 🔧 Anti-looping Protection
 - Router returns errors instead of silently dropping messages
 - 30-second cooldown between rapid agent-to-agent messages
 - Prevents acknowledgment loops
