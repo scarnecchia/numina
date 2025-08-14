@@ -327,7 +327,6 @@ pattern/
 │   ├── pattern_mcp/      # MCP server implementation
 │   ├── pattern_macros/   # Proc macro crate providing some helpers for SurrealDB
 │   ├── pattern_discord/  # Discord bot integration
-│   ├── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
 │   └── pattern_server/   # Backend server binary
 ├── docs/                 # Architecture and integration guides
 └── CLAUDE.md             # Development reference (LLM-focused, but...it's written in english so)
