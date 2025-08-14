@@ -84,6 +84,10 @@ pub(crate) mod test {
             unimplemented!("Test agent")
         }
 
+        async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+            Some(chrono::Utc::now())
+        }
+
         async fn get_shared_memories(
             &self,
         ) -> Result<Vec<(AgentId, compact_str::CompactString, MemoryBlock)>> {
@@ -98,8 +102,8 @@ pub(crate) mod test {
             vec![]
         }
 
-        async fn state(&self) -> AgentState {
-            AgentState::Ready
+        async fn state(&self) -> (AgentState, Option<tokio::sync::watch::Receiver<AgentState>>) {
+            (AgentState::Ready, None)
         }
 
         async fn set_state(&self, _state: AgentState) -> Result<()> {

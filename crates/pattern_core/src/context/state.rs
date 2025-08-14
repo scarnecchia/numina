@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use surrealdb::RecordId;
 use tokio::sync::{RwLock, watch};
 
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use crate::{
     AgentId, AgentState, AgentType, CoreError, IdType, Result,
     db::{DatabaseError, DbEntity},
+    id::MessageId,
     memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
     message::{Message, MessageContent, Response, ToolCall, ToolResponse},
     tool::ToolRegistry,
@@ -36,7 +38,7 @@ pub struct AgentHandle {
     pub memory: Memory,
     /// The agent's current state
     pub state: AgentState,
-    
+
     /// Watch channel for state changes
     #[serde(skip)]
     pub(crate) state_watch: Option<Arc<(watch::Sender<AgentState>, watch::Receiver<AgentState>)>>,
@@ -55,7 +57,7 @@ impl AgentHandle {
     pub fn state_receiver(&self) -> Option<watch::Receiver<AgentState>> {
         self.state_watch.as_ref().map(|arc| arc.1.clone())
     }
-    
+
     /// Update the state and notify watchers
     pub(crate) fn update_state(&mut self, new_state: AgentState) {
         self.state = new_state;
@@ -63,7 +65,7 @@ impl AgentHandle {
             let _ = arc.0.send(new_state);
         }
     }
-    
+
     /// Create a new handle with a database connection
     pub fn with_db(mut self, db: surrealdb::Surreal<surrealdb::engine::any::Any>) -> Self {
         self.db = Some(db);
@@ -290,30 +292,58 @@ impl AgentHandle {
             ))
         })?;
 
-        // Build the query dynamically using graph traversal
-        let mut sql = format!(
-            "SELECT * FROM msg WHERE (<-agent_messages<-agent:⟨{}⟩..)",
-            self.agent_id.to_key()
-        );
+        // If we have a content search, we need to do two queries:
+        // 1. Get all message IDs belonging to this agent
+        // 2. Query msg table directly with content search
+        // Then filter in code
+        let (sql, _needs_messages_extraction, _needs_agent_filtering) = if query.is_some() {
+            // Build conditions for msg table query (without agent filter)
+            let mut conditions = vec!["content @@ $search_query".to_string()];
 
-        // Add optional filters
-        if query.is_some() {
-            sql.push_str(" AND content @@ $search_query");
-        }
+            if role_filter.is_some() {
+                conditions.push("role = $role".to_string());
+            }
+            if start_time.is_some() {
+                conditions.push("created_at >= $start_time".to_string());
+            }
+            if end_time.is_some() {
+                conditions.push("created_at <= $end_time".to_string());
+            }
 
-        if role_filter.is_some() {
-            sql.push_str(" AND role = $role");
-        }
+            // Query msg table directly with content search (we'll filter by agent after)
+            let sql = format!(
+                "SELECT * FROM msg WHERE {} ORDER BY created_at DESC LIMIT {}",
+                conditions.join(" AND "),
+                limit * 10  // Get more results since we'll filter some out
+            );
+            (sql, false, true)
+        } else {
+            // No content search - use existing graph traversal approach
+            let mut conditions = vec![];
+            if role_filter.is_some() {
+                conditions.push("role = $role");
+            }
+            if start_time.is_some() {
+                conditions.push("created_at >= $start_time");
+            }
+            if end_time.is_some() {
+                conditions.push("created_at <= $end_time");
+            }
 
-        if start_time.is_some() {
-            sql.push_str(" AND created_at >= $start_time");
-        }
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", conditions.join(" AND "))
+            };
 
-        if end_time.is_some() {
-            sql.push_str(" AND created_at <= $end_time");
-        }
-
-        sql.push_str(" ORDER BY created_at DESC LIMIT $limit");
+            // Query the agent_messages relation table directly
+            let sql = format!(
+                "SELECT position, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY position DESC LIMIT $limit FETCH messages",
+                where_clause,
+                self.agent_id.to_key()
+            );
+            (sql, true, false)
+        };
 
         // Build query and bind all parameters
         let mut query_builder = db.query(&sql).bind(("limit", limit));
@@ -335,17 +365,80 @@ impl AgentHandle {
             query_builder = query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
         }
 
-        let db_messages: Vec<<Message as DbEntity>::DbModel> = query_builder
+        // Execute the query
+        let mut result = query_builder
             .await
-            .map_err(DatabaseError::from)?
-            .take(0)
             .map_err(DatabaseError::from)?;
 
-        // Convert from DbModel to domain type
-        let messages: Vec<Message> = db_messages
-            .into_iter()
-            .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
-            .collect();
+        // Extract messages based on query type
+        let mut messages: Vec<Message> = if _needs_messages_extraction {
+            // Graph traversal query - messages are nested under "messages" field
+            let db_messages: Vec<Vec<<Message as DbEntity>::DbModel>> = result
+                .take("messages")
+                .map_err(DatabaseError::from)?;
+
+            db_messages
+                .into_iter().flatten()
+                .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
+                .collect()
+        } else {
+            // Direct msg table query - messages are at the top level
+            let db_messages: Vec<<Message as DbEntity>::DbModel> = result
+                .take(0)
+                .map_err(DatabaseError::from)?;
+
+            let mut converted_messages: Vec<Message> = db_messages
+                .into_iter()
+                .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
+                .collect();
+
+            // If we did a content search, we need to filter by agent
+            if _needs_agent_filtering {
+                // Get all message IDs belonging to this agent
+                let agent_record_id: RecordId = self.agent_id.clone().into();
+                let agent_msg_sql = format!(
+                    "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
+                    agent_record_id
+                );
+
+                let mut agent_msg_result = db.query(&agent_msg_sql)
+                    .await
+                    .map_err(DatabaseError::from)?;
+
+                // Debug: print the raw result
+                //tracing::info!("Agent messages query raw result: {:?}", agent_msg_result);
+
+                // Extract the "out" field from each result object
+                #[derive(serde::Deserialize)]
+                struct OutRecord {
+                    out: RecordId,
+                }
+
+                let out_records: Vec<OutRecord> = agent_msg_result
+                    .take(0)
+                    .map_err(DatabaseError::from)?;
+
+                let agent_msg_ids: Vec<RecordId> = out_records
+                    .into_iter()
+                    .map(|r| r.out)
+                    .collect();
+
+                let agent_msg_id_set: std::collections::HashSet<RecordId> =
+                    agent_msg_ids.into_iter().collect();
+
+                // Filter messages to only those belonging to this agent
+                converted_messages.retain(|msg| {
+                    let msg_record_id = RecordId::from((MessageId::PREFIX, msg.id.to_key()));
+                    agent_msg_id_set.contains(&msg_record_id)
+                });
+            }
+
+            converted_messages
+        };
+
+
+        // Apply limit in application code since we may get more than limit from the query
+        messages.truncate(limit);
 
         Ok(messages)
     }
@@ -369,7 +462,7 @@ impl AgentHandle {
 
         // First, find the constellation this agent belongs to
         let constellation_query = format!(
-            "SELECT VALUE <-constellation_agents<-constellation FROM agent:⟨{}⟩ LIMIT 1",
+            "SELECT VALUE <-constellation_agents<-constellation FROM agent:{} LIMIT 1",
             self.agent_id.to_key()
         );
 
@@ -419,10 +512,31 @@ impl AgentHandle {
             }
         }
 
-        // Now build query to get messages from all these agents
-        // We'll get agent_messages relations and then fetch the messages
-        let mut sql = format!(
-            r#"SELECT in AS agent_id, out AS message FROM agent_messages
+        // Build conditions for msg filtering
+        let mut conditions = vec![];
+        if query.is_some() {
+            conditions.push("content @@ $search_query");
+        }
+        if role_filter.is_some() {
+            conditions.push("role = $role");
+        }
+        if start_time.is_some() {
+            conditions.push("created_at >= $start_time");
+        }
+        if end_time.is_some() {
+            conditions.push("created_at <= $end_time");
+        }
+
+        // Build WHERE clause for msg filtering
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        // Build query to get messages from all constellation agents using efficient traversal
+        let sql = format!(
+            r#"SELECT position, in AS agent_id, ->(msg{}) AS messages FROM agent_messages
             WHERE in IN (
                 -- Direct agents in the constellation
                 SELECT VALUE out FROM constellation_agents
@@ -434,15 +548,12 @@ impl AgentHandle {
                     SELECT VALUE out FROM composed_of
                     WHERE in = {}
                 )
-            )"#,
-            constellation_id, constellation_id
+            ) AND out IS NOT NULL
+            ORDER BY position DESC
+            LIMIT $limit
+            FETCH messages"#,
+            where_clause, constellation_id, constellation_id
         );
-
-        // TODO: Optimize by applying filters in the query instead of in code
-        // This would require a more complex query that joins through the relations
-        // For now, we fetch all relations and filter in code
-
-        sql.push_str(" ORDER BY msg.created_at DESC LIMIT $limit");
 
         // Build query and bind all parameters
         let mut query_builder = db.query(&sql).bind(("limit", limit));
@@ -596,6 +707,7 @@ impl AgentHandle {
             memory,
             state: AgentState::Ready,
             agent_type: AgentType::Generic,
+            state_watch: None,
             db: None,
             message_router: None,
         }

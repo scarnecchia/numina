@@ -5,6 +5,9 @@ agent_type = "assistant"
 bluesky_handle = "pattern.atproto.systems" # Update with actual
 persona_path = "../flux-persona-block.md"
 
+[context]
+max_messages = 200
+
 [model]
 provider = "Gemini"
 model = "gemini-2.5-flash"

@@ -77,10 +77,19 @@ macro_rules! define_id_type {
         }
 
         impl From<$type_name> for ::surrealdb::RecordId {
-            fn from(id: $type_name) -> Self {
+            fn from(value: $type_name) -> Self {
                 ::surrealdb::RecordId::from_table_key(
                     <$type_name as $crate::id::IdType>::PREFIX,
-                    id.0,
+                    value.0,
+                )
+            }
+        }
+
+        impl std::fmt::Display for $type_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}:{}",
+                    <$type_name as $crate::id::IdType>::PREFIX,
+                    self.0,
                 )
             }
         }
@@ -91,12 +100,6 @@ macro_rules! define_id_type {
                     <$type_name as $crate::id::IdType>::PREFIX,
                     &id.0,
                 )
-            }
-        }
-
-        impl ::std::fmt::Display for $type_name {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                write!(f, "{}", self.0)
             }
         }
 

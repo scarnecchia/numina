@@ -8,11 +8,9 @@ use pattern_core::{
 use crate::output::Output;
 
 /// Show database statistics
-pub async fn stats(config: &PatternConfig) -> Result<()> {
-    let output = Output::new();
-
+pub async fn stats(config: &PatternConfig, output: &Output) -> Result<()> {
     output.section("Database Statistics");
-    println!();
+    output.print("");
 
     // Count entities - for now, just print responses
     let agent_response = DB
@@ -45,7 +43,7 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
         "Tool calls",
         &tool_call_count.to_string().bright_white().to_string(),
     );
-    println!();
+    output.print("");
 
     // Most active agents
     let active_agents_query = r#"
@@ -75,7 +73,7 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
                 ));
             }
         }
-        println!();
+        output.print("");
     }
 
     // Database info
@@ -111,16 +109,138 @@ pub async fn stats(config: &PatternConfig) -> Result<()> {
 }
 
 /// Run a raw SQL query
-pub async fn query(sql: &str) -> Result<()> {
-    let output = Output::new();
-
-    output.info("Running query:", &sql.bright_cyan().to_string());
-    println!();
+pub async fn query(sql: &str, output: &Output) -> Result<()> {
 
     // Execute the query
-    let response = DB.query(sql).await.into_diagnostic()?;
+    let mut response = DB.query(sql).await.into_diagnostic()?;
 
-    output.status(&format!("Results: {:#?}", response));
-
+    // Process each statement result
+    let num_statements = response.num_statements();
+    
+    if num_statements == 0 {
+        output.status("No results");
+        return Ok(());
+    }
+    
+    for statement_idx in 0..num_statements {
+        // Print separator like SurrealDB CLI
+        output.print(&format!("\n{} Query {} {}", 
+            "-".repeat(8).dimmed(), 
+            (statement_idx + 1).to_string().bright_cyan(),
+            "-".repeat(8).dimmed()
+        ));
+        output.print("");
+        
+        match response.take::<surrealdb::Value>(statement_idx) {
+            Ok(value) => {
+                // Convert to JSON
+                let wrapped_json = serde_json::to_value(&value).into_diagnostic()?;
+                let json_value = unwrap_surrealdb_value(wrapped_json);
+                
+                // Flatten nested arrays for cleaner output
+                let final_value = match json_value {
+                    serde_json::Value::Array(rows) => {
+                        let mut flattened = Vec::new();
+                        for item in rows {
+                            match item {
+                                serde_json::Value::Array(inner) => {
+                                    flattened.extend(inner);
+                                }
+                                other => {
+                                    flattened.push(other);
+                                }
+                            }
+                        }
+                        serde_json::Value::Array(flattened)
+                    }
+                    other => other,
+                };
+                
+                // Pretty print with custom formatting
+                let pretty = serde_json::to_string_pretty(&final_value).into_diagnostic()?;
+                output.print(&pretty);
+            }
+            Err(_) => {
+                output.status("Query produced no output");
+            }
+        }
+    }
+    
+    output.print("");
     Ok(())
+}
+
+/// Recursively unwrap surrealdb's type descriptors from JSON
+fn unwrap_surrealdb_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(mut map) => {
+            // Check if this is a wrapped type (single key that's a type name)
+            if map.len() == 1 {
+                let key = map.keys().next().unwrap().clone();
+                match key.as_str() {
+                    // Simple unwrappers - just take the inner value
+                    "Array" | "Object" | "Strand" | "Number" | "Bool" | "Datetime" 
+                    | "Uuid" | "Bytes" | "Duration" => {
+                        let inner = map.remove(&key).unwrap();
+                        return unwrap_surrealdb_value(inner);
+                    }
+                    // Int needs special handling
+                    "Int" | "Float" => {
+                        if let Some(n) = map.remove(&key) {
+                            return n;
+                        }
+                    }
+                    // Thing (record ID) - convert to string representation
+                    "Thing" => {
+                        if let Some(thing_val) = map.remove(&key) {
+                            // Thing has { tb: "table", id: "id" } structure
+                            if let serde_json::Value::Object(mut thing_map) = thing_val {
+                                if let (Some(tb), Some(id)) = (
+                                    thing_map.remove("tb").and_then(|v| v.as_str().map(|s| s.to_string())),
+                                    thing_map.remove("id")
+                                ) {
+                                    // Format as table:id
+                                    let id_str = match id {
+                                        serde_json::Value::String(s) => s,
+                                        other => other.to_string(),
+                                    };
+                                    return serde_json::Value::String(format!("{}:{}", tb, id_str));
+                                } else {
+                                    // If we can't extract tb/id, return as object
+                                    return serde_json::Value::Object(thing_map);
+                                }
+                            } else {
+                                // Not an object, return as-is
+                                return thing_val;
+                            }
+                        }
+                    }
+                    // None becomes null
+                    "None" => {
+                        return serde_json::Value::Null;
+                    }
+                    // Geometry types - just unwrap for now
+                    "Geometry" | "Point" | "Line" | "Polygon" | "MultiPoint" 
+                    | "MultiLine" | "MultiPolygon" | "Collection" => {
+                        let inner = map.remove(&key).unwrap();
+                        return unwrap_surrealdb_value(inner);
+                    }
+                    _ => {}
+                }
+            }
+            
+            // Not a wrapper, recursively process all values
+            let mut result = serde_json::Map::new();
+            for (k, v) in map {
+                result.insert(k, unwrap_surrealdb_value(v));
+            }
+            serde_json::Value::Object(result)
+        }
+        serde_json::Value::Array(arr) => {
+            // Recursively process array elements
+            serde_json::Value::Array(arr.into_iter().map(unwrap_surrealdb_value).collect())
+        }
+        // Primitives pass through
+        other => other,
+    }
 }

@@ -4,109 +4,63 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 ## Project Status
 
-**Current Status**: Core foundation complete, ready for feature development
-
-### ⚠️ Known API Issues (2025-08-03)
-1. **Anthropic Thinking Mode**: Message compression can create invalid sequences when final assistant message has tool calls
-   - See `docs/known-api-issues.md` for details and workarounds
-2. **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations
-   - Needs response structure validation
+**Current State**: Core multi-agent framework operational, expanding integrations
 
 ### 🚧 Current Development Priorities
-1. **Model Configuration** - ✅ COMPLETE (2025-07-24)
-   - Created `pattern_core/src/model/defaults.rs` with comprehensive model registry
-   - Implemented `enhance_model_info()` to fix provider-supplied ModelInfo
-   - Added accurate July 2025 model specifications for all major providers
-   - Dynamic `calculate_max_tokens()` respects model-specific limits
-   - Smart caching with CacheControl::Ephemeral for Anthropic optimization
-   - Integrated MessageCompressor with multiple compression strategies
 
-2. **Agent Groups** - ✅ COMPLETE (needs user testing) - Fully usable via CLI
-3. **Data Source Abstraction** - ✅ COMPLETE (2025-07-28)
-   - Created flexible `DataSource` trait supporting both pull and streaming modes
-   - Implemented `FileDataSource` with watch support and optional indexing
-   - Built `DataIngestionCoordinator` to manage multiple sources
-   - Created `DataSourceTool` for agent interaction
-   - Integrated prompt templates for all agent inputs
-   - Type-erased wrapper pattern maintains concrete types while providing generic interface
-   - See `docs/data-sources.md` for detailed implementation guide
+1. **MCP Client Integration** - 🔴 HIGH PRIORITY
+   - Integrate MCP client to consume external tools
+   - Allow agents to use MCP-provided capabilities
+   - Tool discovery and registration
+   
+2. **Bug Fixes** - 🔴 IMMEDIATE
+   - Address any critical issues blocking usage
+   - See current issue tracker
 
-4. **Bluesky/ATProto Integration** - ✅ COMPLETE (2025-07-28)
-   - Created `BlueskyFirehoseSource` using rocketman crate for Jetstream consumption
-   - Implemented core types: BlueskyPost, BlueskyFilter, BlueskyFirehoseCursor
-   - Added rich text support with Facets for mentions, links, and hashtags
-   - Created custom `PostIngestor` implementing LexiconIngestor trait
-   - Integrated with rocketman's handle_message for proper event processing
-   - Added Bluesky-specific prompt templates (post, reply, mention)
-   - ✅ Added BlueskyEndpoint for posting to Bluesky (2025-07-29 1am)
-     - Agents can now post to Bluesky via TargetType::Bluesky
-     - Basic posting functionality complete
-     - Reply threading stubbed out (returns error) - TODO for morning
-   - ✅ Enhanced data source notifications (2025-07-30)
-     - Made format_notification async across all data sources
-     - Added AgentHandle to data sources for memory access
-     - BlueskyFirehoseSource now supports BskyAgent for API calls
-     - Fetch full thread context (up to 4 posts up) for replies
-     - Auto-create memory blocks for Bluesky users with profile info
-     - Include reply candidates in notifications for agent response
-   - TODO: Test with live Jetstream connection
-   - TODO: Implement proper reply threading (get CID from parent post)
-   - See `docs/bluesky-integration-plan.md` and `docs/data-sources.md` for details
+3. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
+   - Basic Axum server structure exists
+   - Need to implement actual handlers
+   - Required for multi-user hosting
+   - Enable non-technical user access
 
-5. **Task Management System** - ADHD-aware task breakdown and tracking
-6. **MCP Tools Integration** - Task-related tools and agent communication
+4. **Discord Slash Commands** - 🟡 IN PROGRESS  
+   - Core bot functionality working
+   - Missing slash command implementations
+   - Message handling and coordination complete
 
-## Agent Groups Implementation ✅ COMPLETE (needs user testing)
+5. **Task Management System** - 🟢 QUEUED
+   - Database schema exists
+   - Need CLI commands and user-facing features
+   - ADHD-aware task breakdown planned
 
-The agent groups framework is now fully implemented! Groups allow multiple agents to work together using coordination patterns.
+## Completed Features
 
-**⚠️ Testing Status**: Basic operations work and CLI commands function correctly. Overall integrity needs user testing to validate edge cases and real-world usage.
+### ✅ Agent Groups 
+- Full CLI support with create/add-member/status/list commands
+- All coordination patterns working (RoundRobin, Dynamic, Pipeline, Supervisor, Voting, Sleeptime)
+- Discord and Bluesky integration
+- Runtime message routing through patterns
+- More use cases and templates to be added
 
-### What's Implemented
+### ✅ Bluesky/ATProto Integration
+- Jetstream firehose consumer fully operational
+- Thread context fetching with constellation API
+- Memory block creation for users
+- Rich text processing with mentions/links
+- Reply handling and posting capabilities
 
-#### Phase 1: Configuration Structure ✅
-- Added `GroupConfig` struct to `pattern_core/src/config.rs`
-- Defined `GroupMemberConfig` with name, optional agent_id, role, and capabilities
-- Integrated into main `PatternConfig` structure with groups vector
+### ✅ Data Source Framework
+- Flexible trait supporting pull/push patterns
+- File watching with indexing
+- Discord message ingestion  
+- Coordinator managing multiple sources
+- Prompt templates for notifications
 
-#### Phase 2: Database Operations ✅
-- `create_group()` - Create a new agent group
-- `create_group_for_user()` - Create group associated with user's constellation
-- `get_group_by_name()` - Find group by name for a user
-- `add_agent_to_group()` - Add an agent with a role and membership metadata
-- `list_groups_for_user()` - List all groups owned by a user
-- `get_group_members()` - Get all agents in a group with their roles
-- Constellation operations for proper user->constellation->group relationships
-
-#### Phase 3: CLI Commands ✅
-- `pattern-cli group list` - Show all groups for current user
-- `pattern-cli group create <name> -d <description> -p <pattern>` - Create a group
-- `pattern-cli group add-member <group> <agent> --role <role>` - Add agent to group
-- `pattern-cli group status <name>` - Show group details and members
-- `pattern-cli chat --group <name>` - Chat with a group using its coordination pattern
-
-**Note**: For multi-word descriptions in `just`, escape quotes: `just cli group create MyGroup --description \"My test group\"`
-Or use the shortcut: `just group-create MyGroup "My test group"`
-
-#### Phase 4: Runtime Integration ✅
-- Group chat routes messages through coordination patterns (RoundRobin, Dynamic, Pipeline, etc.)
-- Each agent in the group responds based on the pattern
-- Supports all coordination patterns with proper manager instantiation
-- Type-erased `dyn Agent` support for flexible group composition
-
-### Still TODO
-
-#### Phase 5: ADHD-Specific Templates
-Create predefined group configurations in `pattern_nd`:
-- **Main Group**: Round-robin between executive function agents
-- **Crisis Group**: Dynamic selection based on urgency
-- **Planning Group**: Pipeline pattern for task breakdown
-- **Memory Group**: Supervisor pattern for memory management
-
-#### Phase 6: Config Persistence
-- Save groups to config file
-- Load groups from config on startup
-- Merge config groups with database groups
+### ✅ Model Configuration
+- Comprehensive model registry with July 2025 specs
+- Dynamic token calculation
+- Smart caching with Anthropic optimization
+- Message compression strategies
 
 ## Development Principles
 
@@ -123,15 +77,15 @@ pattern/
 ├── crates/
 │   ├── pattern_cli/      # Command-line testing tool
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
-│   ├── pattern_nd/       # Tools and agent personalities specific to the neurodivergent support constellation
-│   ├── pattern_mcp/      # MCP server implementation
+│   ├── pattern_nd/       # ADHD-specific tools and agent personalities
+│   ├── pattern_mcp/      # MCP server implementation (stub)
 │   ├── pattern_discord/  # Discord bot integration
-│   └── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
+│   ├── pattern_server/   # Backend API server (in development)
+│   └── pattern_main/     # Main orchestrator binary
 ├── docs/                 # Architecture and integration guides
 ```
 
 **Each crate has its own `CLAUDE.md` with specific implementation guidelines.**
-
 
 ## Core Architecture
 
@@ -146,6 +100,8 @@ pattern/
 - **Round-robin**: Fair distribution with skip-inactive support
 - **Sleeptime**: Background monitoring with intervention triggers
 - **Pipeline**: Sequential processing through agent stages
+- **Supervisor**: Hierarchical delegation
+- **Voting**: Consensus-based decisions
 
 ### Entity System
 Uses `#[derive(Entity)]` macro for SurrealDB integration:
@@ -163,6 +119,40 @@ pub struct User {
 }
 ```
 
+## Known Issues
+
+### API Provider Issues
+- **Anthropic Thinking Mode**: Message compression can create invalid sequences with tool calls
+- **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations  
+- **Gemini Empty Contents**: "contents is not specified" error when all messages filtered out
+- **Tool call validation**: Compression sometimes leaves unpaired tool calls (affects Flux agent)
+- See `docs/known-api-issues.md` for workarounds
+
+### Export Issues
+- **CAR Export**: Not archiving full message history - pattern matching issues preventing complete export
+  - Related to unused `CompressionSettings` struct in `pattern_core/src/export/types.rs`
+  - Lower priority but needs fixing for proper data portability
+
+## Implementation Notes
+
+### 🔧 Memory Block Pass-through
+Data sources can attach memory blocks to messages for agent context:
+- DataSource trait returns memory blocks with notifications
+- Coordinator includes blocks in message metadata
+- Bluesky creates/retrieves user profile blocks automatically
+- Router needs to create RELATE edges for block attachment (TODO)
+
+### 🔧 Anti-looping Protection  
+- Router returns errors instead of silently dropping messages
+- 30-second cooldown between rapid agent-to-agent messages
+- Prevents acknowledgment loops
+
+### 🔧 Constellation Integration
+- Thread siblings fetched from constellation.microcosm.blue
+- Engagement metrics and agent interaction tracking
+- Smart filtering based on agent DID and friend lists
+- Rich thread context display with [YOU] markers
+
 ## Feature Development Workflow
 
 1. **Branch Creation**: `git checkout -b feature/task-management`
@@ -170,231 +160,6 @@ pub struct User {
 3. **Testing**: Add tests that validate actual behavior
 4. **Validation**: Run `just pre-commit-all` before commit
 5. **PR**: Create pull request with clear description
-
-## Current TODO List
-
-### High Priority
-- [X] Implement message compression with archival - COMPLETE
-- [X] Add live query support for agent stats
-- [X] Build agent groups framework
-- [X] Create basic binary (CLI/TUI) for user testing - COMPLETE
-- [X] Implement data source abstraction for agents - COMPLETE
-- [ ] **Enhanced Data Source Context** - IN PROGRESS (2025-07-30)
-  - Make `format_notification` async in DataSource trait
-  - Add optional AgentHandle to data sources for memory access
-  - Enhance Bluesky notifications with thread context, user relationships
-  - Auto-create/attach memory blocks for Bluesky users
-  - Implementation plan:
-    1. Update DataSource trait: make format_notification async
-    2. Update all implementations (file, bluesky, type-erased wrapper)
-    3. Add set_agent_handle() method to trait
-    4. Pass AgentHandle when creating sources in coordinator
-    5. Add BskyAgent to BlueskyFirehoseSource for API calls
-    6. Implement memory block creation/lookup in format_notification
-- [ ] **Backend API Server**
-  - Create unified server that combines:
-    - HTTP/WebSocket API for Pattern framework
-    - MCP client/server integration
-    - Discord bot integration
-  - Architecture plan below
-
-### 🔧 Memory Block Pass-through (2025-08-06) - IN PROGRESS
-
-**Goal**: Pass memory blocks from data sources to receiving agents
-
-**What's Done**:
-1. ✅ Updated `DataSource` trait - `format_notification` returns `Option<(String, Vec<(CompactString, MemoryBlock)>)>`
-2. ✅ Updated all implementations (FileDataSource, BlueskyFirehoseSource, TypeErasedSource)
-3. ✅ Coordinator includes memory blocks in metadata when sending messages
-4. ✅ Bluesky creates/retrieves memory blocks for thread participants:
-   - Post author, parent post authors, siblings, replies
-   - Uses existing `fetch_user_profile_for_memory` helper
-   - Inserts new blocks then retrieves to avoid duplicates
-   - Only creates blocks AFTER filtering to avoid waste
-
-**What's Needed**:
-1. Update `AgentMessageRouter` to extract memory blocks from metadata
-2. Create RELATE edges to attach blocks to target agent
-3. Test with live Bluesky data
-
-**Router Implementation Plan**:
-```rust
-// In AgentMessageRouter::send_message() or delivery method:
-if let Some(metadata) = metadata {
-    if let Some(blocks_value) = metadata.get("memory_blocks") {
-        if let Ok(blocks) = serde_json::from_value::<Vec<(CompactString, MemoryBlock)>>(blocks_value) {
-            // For each block, create RELATE edge to target agent
-            // INSERT RELATE agent:123->owns_memory->memory:456
-        }
-    }
-}
-```
-
-### 🔧 Recent Fixes (2025-08-06 session)
-
-**Anti-looping Protection** ✅:
-- Modified `AgentMessageRouter` to return `ToolExecutionFailed` errors instead of silently dropping messages
-- Added recent message cache with 30-second cooldown between rapid agent-to-agent messages
-- Helps agents break out of acknowledgment loops
-
-**Jetstream Group Routing** ✅:
-- Fixed "No group endpoint registered" warnings by registering endpoints on data source's router
-- Issue: Data source created its own router instance instead of using Pattern agent's router
-- Solution: Register both CLI and group endpoints on the data source's router after creation
-
-**Constellation Thread Siblings** ✅:
-- Added types: `ConstellationLinksResponse`, `ConstellationRecord`, `ThreadContext` with engagement metrics
-- Implemented `PatternHttpClient::fetch_thread_siblings()` to query constellation.microcosm.blue
-- Implemented `PatternHttpClient::build_thread_context()` for comprehensive thread fetching
-- Enhanced ThreadContext with `PostEngagement` (likes, replies, reposts) and `AgentInteraction` tracking
-- Smart filtering based on agent DID, friends list, excluded DIDs, and allowlists
-- Integrated into `format_notification` with rich display:
-  - Shows thread context walking UP (reduced to 4 levels)
-  - Shows sibling posts with engagement metrics and AT URIs
-  - [YOU] markers for agent's own posts throughout
-  - Replies to siblings (up to 2 per sibling)
-  - Replaced broken `get_post_thread` call with constellation-based reply fetching
-- Constellation API format: `https://constellation.microcosm.blue/links?target=<urlencoded-at-uri>&collection=app.bsky.feed.post&path=.reply.parent.uri`
-
-**Other Fixes**:
-- Fixed tracing-subscriber errors on exit by dropping writer before exit
-- Fixed multiple Output instance creation causing terminal display issues
-- Fixed duplicate Jetstream notifications by removing data source registration from agent creation
-
-**Known Issues**:
-- Tool call validation error after compression - Flux agent hitting message validation when compression leaves unpaired tool calls
-
-### Medium Priority
-- [X] Make agent groups usable via CLI and config system - COMPLETE
-- [ ] Complete pattern-specific agent groups implementation (main, crisis, planning, memory)
-- [ ] Implement task CRUD operations in pattern-core or pattern-nd
-- [ ] Create ADHD-aware task manager with breakdown (pattern-nd)
-- [ ] Add task-related MCP tools (create, update, list, breakdown)
-- [ ] Add Discord context tools to MCP
-- [ ] Implement time tracking with ADHD multipliers
-- [ ] Add energy/attention monitoring
-- [ ] Add vector search for archival memory using embeddings
-- [X] Implement Bluesky/ATProto firehose consumer - COMPLETE
-- [X] Add Bluesky posting endpoint to message router - COMPLETE (basic posting works, reply threading TODO)
-
-## Backend API Server Architecture
-
-### Overview
-Create a unified backend server that provides multiple interfaces to the Pattern framework:
-- HTTP REST API for web/mobile clients
-- WebSocket API for real-time updates
-- MCP server for tool integration
-- MCP client for consuming external tools
-- Discord bot for chat integration
-
-### Crate Structure
-
-#### `pattern-api` (Shared Types)
-- Request/response DTOs
-- WebSocket message types
-- Event definitions
-- Error types
-- API versioning
-
-Key endpoints:
-- **Auth**: `/api/v1/auth/*` - User authentication
-- **Users**: `/api/v1/users/*` - User management
-- **Agents**: `/api/v1/agents/*` - Agent CRUD and management
-- **Groups**: `/api/v1/groups/*` - Group management
-- **Messages**: `/api/v1/messages/*` - Message history
-- **Chat**: `/api/v1/chat/*` - Real-time chat endpoints
-- **WebSocket**: `/ws` - Real-time updates
-
-#### `pattern-server` (Server Implementation)
-- Axum HTTP server
-- WebSocket handlers
-- MCP server integration
-- Discord bot runner
-- Database connection pool
-- Authentication middleware
-- Rate limiting
-- CORS handling
-
-Architecture:
-```
-pattern-server
-├── src/
-│   ├── main.rs           # Server entry point
-│   ├── config.rs         # Server configuration
-│   ├── state.rs          # Shared app state
-│   ├── auth/            # Authentication logic
-│   ├── handlers/        # HTTP request handlers
-│   │   ├── agents.rs
-│   │   ├── chat.rs
-│   │   ├── groups.rs
-│   │   └── users.rs
-│   ├── websocket/       # WebSocket handling
-│   ├── mcp/            # MCP client/server
-│   └── discord/        # Discord bot integration
-```
-
-#### `pattern-client` (Future Client SDK)
-- HTTP client wrapper
-- WebSocket client
-- Type-safe API calls
-- Automatic retries
-- Token management
-
-### Implementation Plan
-
-1. **Phase 1: Basic HTTP API**
-   - Set up Axum server structure
-   - Implement user authentication (JWT or session-based)
-   - Add basic CRUD endpoints for agents/groups
-   - Database connection pooling
-   - Error handling and logging
-
-2. **Phase 2: Chat Functionality**
-   - HTTP chat endpoints
-   - WebSocket support for real-time messaging
-   - Message streaming for long responses
-   - Typing indicators and presence
-
-3. **Phase 3: MCP Integration**
-   - MCP server for Pattern tools
-   - MCP client for external tools
-   - Tool discovery and registration
-   - Permission management
-
-4. **Phase 4: Discord Bot**
-   - Run Discord bot in same process
-   - Share database and agent infrastructure
-   - Command routing to API handlers
-   - DM and channel support
-
-5. **Phase 5: Advanced Features**
-   - Rate limiting per user/endpoint
-   - Metrics and monitoring
-   - Admin API endpoints
-   - Batch operations
-   - Import/export functionality
-
-### Security Considerations
-- JWT or session-based auth
-- Rate limiting per user
-- CORS configuration
-- Input validation
-- SQL injection prevention (already handled by SurrealDB)
-- Secure WebSocket connections (WSS)
-
-### Database Schema Updates
-May need to add:
-- API keys/tokens table
-- Rate limit tracking
-- Session storage
-- Audit logs
-
-### Documentation
-Each major component has dedicated docs in `docs/`:
-- **Architecture**: System design and component interactions
-- **Guides**: Integration and setup instructions
-- **API**: Common patterns and gotchas
-- **Troubleshooting**: Known issues and solutions
 
 ## Build Commands
 
@@ -411,13 +176,19 @@ just watch                    # Auto-recompile on changes
 cargo test --lib -- db::     # Run specific module tests
 ```
 
-## Partner-Centric Architecture
+## Architecture Notes
 
-Pattern uses a partner-centric model ensuring privacy:
+### Partner-Centric Model
 - **Partner**: Person receiving ADHD support (owns constellation)
 - **Conversant**: Someone interacting through partner's agents
 - **Privacy**: DM content never bleeds into public channels
 - **Scaling**: Each partner gets full constellation, hibernated when inactive
+
+### Backend API Server (In Development)
+- Basic Axum server structure exists in `pattern_server`
+- Handlers need implementation
+- Required for multi-user hosting and non-technical users
+- Will provide HTTP/WebSocket APIs, MCP integration, Discord bot hosting
 
 ## References
 

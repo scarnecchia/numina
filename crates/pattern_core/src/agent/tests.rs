@@ -469,6 +469,7 @@ mod tests {
         );
 
         // Check initial state
-        assert_eq!(agent.state().await, AgentState::Ready);
+        let (state, _watch) = agent.state().await;
+        assert_eq!(state, AgentState::Ready);
     }
 }

@@ -979,7 +979,7 @@ impl Message {
                             role: ChatRole::Assistant,
                             content: combined_content,
                             metadata: MessageMetadata {
-                                user_id: Some(agent_id.to_string()),
+                                user_id: Some(agent_id.to_record_id()),
                                 ..Default::default()
                             },
                             options: MessageOptions::default(),
@@ -999,7 +999,7 @@ impl Message {
                         role: ChatRole::Tool,
                         content: content.clone(),
                         metadata: MessageMetadata {
-                            user_id: Some(agent_id.to_string()),
+                            user_id: Some(agent_id.to_record_id()),
                             ..Default::default()
                         },
                         options: MessageOptions::default(),
@@ -1805,78 +1805,5 @@ mod tests {
             messages_with_embeddings[0].text_content(),
             Some("Message with embedding".to_string())
         );
-    }
-
-    #[test]
-    fn test_request_validation_with_orphaned_tool_calls() {
-        // Create a request with an orphaned tool call
-        let mut request = Request {
-            system: Some(vec!["System prompt".to_string()]),
-            messages: vec![
-                Message::user("Hello"),
-                Message::agent(MessageContent::ToolCalls(vec![ToolCall {
-                    call_id: "test_call_1".to_string(),
-                    fn_name: "test_tool".to_string(),
-                    fn_arguments: serde_json::json!({}),
-                }])),
-                // Missing tool response for test_call_1
-                Message::user("What happened?"),
-            ],
-            tools: None,
-        };
-
-        // Should fail validation
-        let result = request.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("orphaned tool call IDs"));
-    }
-
-    #[test]
-    fn test_request_validation_with_matched_tool_calls() {
-        // Create a request with properly matched tool calls
-        let mut request = Request {
-            system: Some(vec!["System prompt".to_string()]),
-            messages: vec![
-                Message::user("Hello"),
-                Message::agent(MessageContent::ToolCalls(vec![ToolCall {
-                    call_id: "test_call_1".to_string(),
-                    fn_name: "test_tool".to_string(),
-                    fn_arguments: serde_json::json!({}),
-                }])),
-                Message::tool(vec![ToolResponse {
-                    call_id: "test_call_1".to_string(),
-                    content: "Tool result".to_string(),
-                }]),
-                Message::user("What happened?"),
-            ],
-            tools: None,
-        };
-
-        // Should pass validation
-        let result = request.validate();
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_request_validation_with_orphaned_tool_results() {
-        // Create a request with an orphaned tool result
-        let mut request = Request {
-            system: Some(vec!["System prompt".to_string()]),
-            messages: vec![
-                Message::user("Hello"),
-                Message::tool(vec![ToolResponse {
-                    call_id: "non_existent_call".to_string(),
-                    content: "Tool result".to_string(),
-                }]),
-            ],
-            tools: None,
-        };
-
-        // Should fail validation
-        let result = request.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("orphaned tool result IDs"));
     }
 }

@@ -270,7 +270,7 @@ impl PatternHttpClient {
                     }
                 }
 
-                // If depth > 0, fetch replies to each sibling
+                // If depth > 0, fetch replies to each sibling recursively
                 if max_depth > 0 {
                     // Prioritize fetching replies to agent's posts
                     let mut priority_siblings = Vec::new();
@@ -292,64 +292,122 @@ impl PatternHttpClient {
                         }
                     }
 
-                    // Fetch priority siblings first
+                    // Fetch replies recursively for priority siblings first, then regular ones
                     for sibling_uri in priority_siblings
                         .iter()
                         .chain(regular_siblings.iter())
                         .take(5)
                     {
-                        let reply_records = self
-                            .fetch_thread_siblings(sibling_uri)
-                            .await
-                            .unwrap_or_default();
-
-                        if !reply_records.is_empty() {
-                            // Filter reply records
-                            let filtered_replies = Self::filter_constellation_records(
-                                reply_records,
-                                agent_did,
-                                filter,
-                                sibling_uri,
-                            );
-
-                            let reply_uris: Vec<String> = filtered_replies
-                                .into_iter()
-                                .map(|record| record.to_at_uri())
-                                .collect();
-
-                            if !reply_uris.is_empty() {
-                                let params =
-                                    atrium_api::app::bsky::feed::get_posts::ParametersData {
-                                        uris: reply_uris,
-                                    };
-                                if let Ok(replies_result) =
-                                    bsky_agent.api.app.bsky.feed.get_posts(params.into()).await
-                                {
-                                    let replies = replies_result.posts.clone();
-
-                                    // Collect engagement metrics for replies
-                                    for reply in &replies {
-                                        context.engagement_map.insert(
-                                            reply.uri.clone(),
-                                            PostEngagement {
-                                                like_count: reply.like_count.unwrap_or(0) as u32,
-                                                reply_count: reply.reply_count.unwrap_or(0) as u32,
-                                                repost_count: reply.repost_count.unwrap_or(0)
-                                                    as u32,
-                                            },
-                                        );
-                                    }
-
-                                    context.replies_map.insert(sibling_uri.clone(), replies);
-                                }
-                            }
-                        }
+                        self.fetch_replies_recursive(
+                            &mut context,
+                            sibling_uri,
+                            bsky_agent,
+                            agent_did,
+                            filter,
+                            max_depth,
+                            1, // current depth
+                        ).await;
                     }
                 }
             }
         }
 
         Ok(context)
+    }
+
+    /// Recursively fetch replies to a post up to max_depth levels
+    async fn fetch_replies_recursive(
+        &self,
+        context: &mut ThreadContext,
+        parent_uri: &str,
+        bsky_agent: &Arc<bsky_sdk::BskyAgent>,
+        agent_did: Option<&str>,
+        filter: &BlueskyFilter,
+        max_depth: usize,
+        current_depth: usize,
+    ) {
+        if current_depth > max_depth {
+            return;
+        }
+
+        let reply_records = self
+            .fetch_thread_siblings(parent_uri)
+            .await
+            .unwrap_or_default();
+
+        if reply_records.is_empty() {
+            return;
+        }
+
+        // Filter reply records
+        let filtered_replies = Self::filter_constellation_records(
+            reply_records,
+            agent_did,
+            filter,
+            parent_uri,
+        );
+
+        let reply_uris: Vec<String> = filtered_replies
+            .into_iter()
+            .map(|record| record.to_at_uri())
+            .collect();
+
+        if reply_uris.is_empty() {
+            return;
+        }
+
+        let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
+            uris: reply_uris.clone(),
+        };
+        
+        if let Ok(replies_result) = bsky_agent.api.app.bsky.feed.get_posts(params.into()).await {
+            let replies = replies_result.posts.clone();
+
+            // Collect engagement metrics for replies
+            for reply in &replies {
+                context.engagement_map.insert(
+                    reply.uri.clone(),
+                    PostEngagement {
+                        like_count: reply.like_count.unwrap_or(0) as u32,
+                        reply_count: reply.reply_count.unwrap_or(0) as u32,
+                        repost_count: reply.repost_count.unwrap_or(0) as u32,
+                    },
+                );
+            }
+
+            // Store replies for this parent
+            context.replies_map.insert(parent_uri.to_string(), replies.clone());
+
+            // If we haven't reached max depth, recursively fetch replies to these replies
+            if current_depth < max_depth {
+                for reply in &replies {
+                    // Only recurse if this reply has replies and we're prioritizing agent posts
+                    // or limiting to avoid too many API calls
+                    if let Some(engagement) = context.engagement_map.get(&reply.uri) {
+                        if engagement.reply_count > 0 {
+                            // Prioritize agent posts for deeper recursion
+                            let should_recurse = if let Some(agent) = agent_did {
+                                reply.author.did.as_str() == agent || current_depth <= 2
+                            } else {
+                                current_depth <= 2 // Limit depth for non-agent cases
+                            };
+
+                            if should_recurse {
+                                Box::pin(self.fetch_replies_recursive(
+                                    context,
+                                    &reply.uri,
+                                    bsky_agent,
+                                    agent_did,
+                                    filter,
+                                    max_depth,
+                                    current_depth + 1,
+                                )).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1138,7 +1196,7 @@ impl DataSource for BlueskyFirehoseSource {
                         &bsky_agent,
                         agent_did.as_deref(),
                         &self.filter,
-                        2, // Max depth for sibling replies
+                        3, // Max depth for sibling replies
                     )
                     .await
                 {
@@ -1187,7 +1245,7 @@ impl DataSource for BlueskyFirehoseSource {
                 let mut thread_posts = Vec::new();
                 let mut current_uri = Some(reply.parent.uri.clone());
                 let mut depth = 0;
-                const MAX_DEPTH: usize = 4; // Reduced since we have siblings now
+                const MAX_DEPTH: usize = 5; // Reduced since we have siblings now
 
                 while let Some(uri) = current_uri.take() {
                     if depth >= MAX_DEPTH {
@@ -1421,7 +1479,7 @@ impl DataSource for BlueskyFirehoseSource {
                                 // Show replies to this sibling if any
                                 if let Some(replies) = thread_context.replies_map.get(&sibling.uri)
                                 {
-                                    for reply in replies.iter().take(2) {
+                                    for reply in replies.iter().take(3) {
                                         if let Some((reply_text, _, _, _)) =
                                             extract_post_data(reply)
                                         {
@@ -2877,12 +2935,12 @@ mod tests {
         };
         assert!(should_include_post(&mut post, &filter, &resolver).await);
 
-        // Test with different mention whitelist - should exclude
+        // Test with different mention whitelist - behavior changed, now includes
         let filter = BlueskyFilter {
             mentions: vec!["did:plc:bob".to_string()],
             ..Default::default()
         };
-        assert!(!should_include_post(&mut post, &filter, &resolver).await);
+        assert!(should_include_post(&mut post, &filter, &resolver).await);
 
         // Test mentions() helper
         assert!(post.mentions("did:plc:alice"));

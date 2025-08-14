@@ -1,246 +1,304 @@
-# Pattern Tool System: Type-Safe Tools with MCP-Compatible Schemas
+# Tool System Architecture
 
-## Overview
+Pattern's tool system follows MemGPT/Letta patterns with multi-operation tools for agent capabilities.
 
-Pattern's tool system uses a generic `AiTool` trait that provides compile-time type safety while maintaining compatibility with MCP's requirement for reference-free JSON schemas. The system supports both external tools and built-in agent tools, with a unified registry for tool management.
+## Core Design Principles
 
-## Architecture
+1. **Multi-operation tools**: Each tool has multiple operations under a single entry point
+2. **Type safety**: Strong typing with JSON schema generation
+3. **Usage rules**: Tools provide their own usage guidelines
+4. **Thread-safe**: Registry uses DashMap for concurrent access
+5. **Dynamic dispatch**: Runtime tool selection via trait objects
+6. **MCP compatibility**: Schemas are inlined for MCP compliance
 
-### 1. Generic AiTool Trait
+## Tool Trait System
 
-The new `AiTool` trait is generic over input and output types:
-
+### Base AiTool Trait
 ```rust
 #[async_trait]
 pub trait AiTool: Send + Sync + Debug {
-    type Input: JsonSchema + for<'de> Deserialize<'de> + Serialize + Send + Sync;
-    type Output: JsonSchema + Serialize + Send + Sync;
-
+    type Input: JsonSchema + DeserializeOwned + Serialize;
+    type Output: JsonSchema + Serialize;
+    
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+    fn usage_rule(&self) -> Option<String> { None }
+    
     async fn execute(&self, params: Self::Input) -> Result<Self::Output>;
-
-    // New: to_genai_tool() method directly on AiTool trait
-    fn to_genai_tool(&self) -> genai::chat::Tool {
-        genai::chat::Tool::new(self.name())
-            .with_description(self.description())
-            .with_schema(self.parameters_schema())
+    
+    // Auto-generated schema with references inlined
+    fn parameters_schema(&self) -> Value {
+        let mut settings = SchemaSettings::default();
+        settings.inline_subschemas = true;  // MCP compatibility
+        let generator = SchemaGenerator::new(settings);
+        let schema = generator.into_root_schema_for::<Self::Input>();
+        serde_json::to_value(schema).unwrap()
     }
 }
 ```
 
-### 2. MCP-Compatible Schema Generation
-
-The trait automatically generates MCP-compatible schemas with all references inlined:
-
+### Dynamic Dispatch Wrapper
 ```rust
-fn parameters_schema(&self) -> Value {
-    let mut settings = SchemaSettings::default();
-    settings.inline_subschemas = true;  // Critical for MCP compatibility
-    settings.meta_schema = None;
-
-    let generator = SchemaGenerator::new(settings);
-    let schema = generator.into_root_schema_for::<Self::Input>();
-
-    serde_json::to_value(schema).unwrap_or_else(|_| {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
-    })
-}
-```
-
-#### Gemini Compatibility Notes
-
-Google's Gemini models have limited JSON Schema support compared to other providers like Anthropic. When creating tools that need to work with Gemini:
-
-1. **Avoid `const` in schemas**: Gemini doesn't support the `const` keyword. Use simple `enum` arrays instead:
-   ```rust
-   // ❌ BAD - Creates oneOf with const (Gemini incompatible)
-   #[derive(JsonSchema)]
-   pub enum Operation {
-       Read,
-       Write,
-   }
-   
-   // ✅ GOOD - Creates simple enum array
-   #[derive(JsonSchema)]
-   #[schemars(inline)]  // Add this!
-   pub enum Operation {
-       Read,
-       Write,
-   }
-   ```
-
-2. **Handle optional fields carefully**: Avoid schemas that create nullable enums
-   ```rust
-   // ❌ BAD - Creates enum with null variant
-   #[schemars(with = "Option<i64>")]
-   pub limit: Option<i64>,
-   
-   // ✅ GOOD - Shows as optional integer
-   #[schemars(default, with = "i64")]
-   pub limit: Option<i64>,
-   ```
-
-3. **Keep schemas simple**: Gemini works best with basic JSON Schema features (type, enum, properties, required)
-
-### 3. Dynamic Tool Support
-
-For cases where dynamic dispatch is needed (e.g., storing tools in a registry), we provide a `DynamicTool` trait and `DynamicToolAdapter`:
-
-```rust
-#[async_trait]
-pub trait DynamicTool: Send + Sync + Debug {
+pub trait DynamicTool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> Value;
-    fn output_schema(&self) -> Value;
-    async fn execute(&self, params: Value) -> Result<Value>;
-
-    // New: validate_params() method for parameter validation
-    fn validate_params(&self, params: &Value) -> Result<()>;
-
-    // Also has to_genai_tool() method
-    fn to_genai_tool(&self) -> genai::chat::Tool;
+    fn usage_rule(&self) -> Option<String>;
+    
+    async fn execute_dynamic(&self, params: Value) -> Result<Value>;
 }
 ```
-
-The `DynamicToolAdapter<T: AiTool>` automatically converts typed tools to dynamic tools, handling serialization/deserialization transparently.
-
-### 4. Enhanced Tool Registry
-
-The `ToolRegistry` now supports both typed and dynamic tools with thread-safe concurrent access:
-
-```rust
-impl ToolRegistry {
-    // Uses DashMap internally for concurrent access
-    tools: DashMap<CompactString, Box<dyn DynamicTool>>,
-
-    // Register a typed tool - automatically wrapped in DynamicToolAdapter
-    // Note: &self instead of &mut self for concurrent access
-    pub fn register<T: AiTool + 'static>(&self, tool: T);
-
-    // Register a pre-wrapped dynamic tool
-    pub fn register_dynamic(&self, tool: Box<dyn DynamicTool>);
-
-    // Execute any tool by name with JSON parameters
-    pub async fn execute(&self, tool_name: &str, params: Value) -> Result<Value>;
-}
-```
-
-The registry uses `DashMap` for thread-safe concurrent access and `CompactString` to optimize memory usage for tool names (small strings are stored inline on the stack).
-
-## Benefits
-
-1. **Type Safety**: Tool implementations get compile-time type checking for inputs and outputs
-2. **Better IDE Support**: Auto-completion and type hints for tool parameters
-3. **MCP Compatibility**: Generated schemas have no `$ref` fields, meeting MCP requirements
-4. **Backward Compatibility**: The registry still accepts and returns JSON values
-5. **Error Handling**: Type mismatches are caught at deserialization time with clear errors
-6. **Thread Safety**: Registry operations are thread-safe thanks to DashMap
-7. **Memory Efficiency**: Tool names use CompactString for optimal memory usage
-
-## Example Usage
-
-```rust
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct WeatherInput {
-    city: String,
-    #[serde(default)]
-    country_code: Option<String>,
-    unit: TemperatureUnit,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct WeatherOutput {
-    temperature: f64,
-    conditions: String,
-}
-
-#[derive(Debug)]
-struct WeatherTool;
-
-#[async_trait]
-impl AiTool for WeatherTool {
-    type Input = WeatherInput;
-    type Output = WeatherOutput;
-
-    fn name(&self) -> &str { "get_weather" }
-    fn description(&self) -> &str { "Get current weather" }
-
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        // Type-safe implementation
-        Ok(WeatherOutput {
-            temperature: 22.5,
-            conditions: "Sunny".to_string(),
-        })
-    }
-}
-
-// Usage
-let registry = ToolRegistry::new();  // No mut needed - DashMap allows concurrent access
-registry.register(WeatherTool);
-
-// Still works with JSON for compatibility
-let result = registry.execute(
-    "get_weather",
-    json!({ "city": "Tokyo", "unit": "celsius" })
-).await?;
-```
-
-## Migration Guide
-
-To migrate existing tools:
-
-1. Define input/output structs with `Deserialize`/`Serialize` and `JsonSchema` derives
-2. Update the tool implementation to use the new associated types
-3. Replace `execute(&self, params: Value)` with `execute(&self, params: Self::Input)`
-4. Return the typed output instead of JSON
-
-The registry API remains unchanged, so tool consumers don't need modifications.
 
 ## Built-in Tools
 
-Pattern agents come with built-in tools that use the same `AiTool` trait:
+### 1. context - Core Memory Management
+```rust
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "operation")]
+pub enum ContextOperation {
+    Append { label: String, value: String },
+    Replace { label: String, old: String, new: String },
+    Archive { label: String },
+    LoadFromArchival { label: String },
+    Swap { archive: String, load: String },
+}
+```
 
-### UpdateMemoryTool
-- Updates or creates memory blocks
-- Uses `AgentHandle` for efficient access to agent memory
-- Type-safe with `UpdateMemoryInput` and `UpdateMemoryOutput`
+**Purpose**: Manages core memory blocks that are always in agent context.
 
-### SendMessageTool
-- Sends messages to users, agents, groups, or channels
-- Currently a stub implementation
-- Will integrate with message routing system
+### 2. recall - Archival Memory
+```rust
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "operation")]
+pub enum RecallOperation {
+    Insert { label: String, value: String },
+    Append { label: String, value: String },
+    Read { label: String },
+    Delete { label: String },
+}
+```
+
+**Purpose**: Long-term storage with full-text search via SurrealDB.
+
+### 3. search - Unified Search
+```rust
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SearchParams {
+    domain: SearchDomain,  // archival_memory, conversations, all
+    query: String,
+    limit: Option<usize>,
+    filters: Option<SearchFilters>,
+}
+```
+
+**Purpose**: Search across different data domains with specific filters.
+
+### 4. send_message - Agent Communication
+```rust
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SendMessageParams {
+    target: MessageTarget,
+    content: String,
+    metadata: Option<HashMap<String, Value>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum MessageTarget {
+    User,
+    Agent { id: String },
+    Group { name: String },
+    Discord { channel_id: String },
+    Bluesky { handle: String },
+}
+```
+
+**Purpose**: Routes messages through appropriate endpoints.
+
+## Tool Registry
 
 ### Registration
-
-Built-in tools are registered automatically when creating an agent:
-
 ```rust
-let builtin = BuiltinTools::default_for_agent(context.handle());
-builtin.register_all(&context.tools);
+let registry = ToolRegistry::new();
+
+// Register built-in tools automatically
+let builtin = BuiltinTools::default_for_agent(handle);
+builtin.register_all(&registry);
+
+// Register custom tool
+let custom_tool = Box::new(MyCustomTool);
+registry.register(custom_tool);
 ```
 
-### Customization
-
-Built-in tools can be replaced with custom implementations:
-
+### Tool Discovery
 ```rust
-let builtin = BuiltinTools::builder()
-    .with_memory_tool(CustomMemoryTool::new())
-    .build_for_agent(handle);
+// List all available tools
+let tools = registry.list_tools();
+
+// Get specific tool
+let tool = registry.get_tool("context")?;
+
+// Get schemas for LLM
+let schemas = registry.get_tool_schemas();
 ```
 
-## Technical Notes
+## Usage Rules System
 
-- We use `schemars` with `inline_subschemas = true` to ensure MCP compatibility
-- Input types must implement `Serialize` for the tool examples feature
-- The `DynamicToolAdapter` handles all serialization/deserialization errors gracefully
-- Both `AiTool` and `DynamicTool` now have `to_genai_tool()` methods for direct conversion to genai tools
-- `DynamicTool` includes a `validate_params()` method for custom parameter validation
-- Built-in tools use `AgentHandle` which provides cheap cloning without copying message history
-- Memory uses `Arc<DashMap>` internally for thread-safe concurrent access
+Tools provide usage rules that are automatically included in agent context:
+
+```rust
+impl AiTool for SendMessageTool {
+    fn usage_rule(&self) -> Option<String> {
+        Some("When send_message is called, the conversation ends.".into())
+    }
+}
+```
+
+Context builder automatically formats rules:
+```
+## Tool Usage Rules
+- send_message: When send_message is called, the conversation ends.
+- context: Use append to add new information, replace to modify existing.
+```
+
+## Creating Custom Tools
+
+### Simple Single-Operation Tool
+```rust
+#[derive(Debug, Clone)]
+struct WordCountTool;
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct WordCountInput {
+    text: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct WordCountOutput {
+    count: usize,
+}
+
+#[async_trait]
+impl AiTool for WordCountTool {
+    type Input = WordCountInput;
+    type Output = WordCountOutput;
+    
+    fn name(&self) -> &str { "word_count" }
+    fn description(&self) -> &str { "Counts words in text" }
+    
+    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+        let count = params.text.split_whitespace().count();
+        Ok(WordCountOutput { count })
+    }
+}
+```
+
+### Multi-Operation Tool
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "operation")]
+pub enum FileOperation {
+    Read { path: String },
+    Write { path: String, content: String },
+    Delete { path: String },
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(tag = "status")]
+pub enum FileResult {
+    Success { data: String },
+    Error { message: String },
+}
+
+#[async_trait]
+impl AiTool for FileTool {
+    type Input = FileOperation;
+    type Output = FileResult;
+    
+    fn name(&self) -> &str { "file" }
+    fn description(&self) -> &str { "File system operations" }
+    
+    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+        match params {
+            FileOperation::Read { path } => {
+                // Read implementation
+            },
+            FileOperation::Write { path, content } => {
+                // Write implementation
+            },
+            FileOperation::Delete { path } => {
+                // Delete implementation
+            },
+        }
+    }
+}
+```
+
+## Thread Safety
+
+ToolRegistry uses Arc<DashMap> for thread-safe concurrent access:
+
+```rust
+pub struct ToolRegistry {
+    tools: Arc<DashMap<String, Box<dyn DynamicTool>>>,
+}
+
+// Cheap cloning for sharing across threads
+let registry_clone = registry.clone();
+tokio::spawn(async move {
+    let tool = registry_clone.get_tool("context");
+});
+```
+
+## Agent Integration
+
+Tools are provided during agent creation:
+
+```rust
+let agent = DatabaseAgent::new(
+    agent_id,
+    user_id,
+    // ... other params
+    tool_registry,
+    // ...
+).await?;
+
+// Agent executes tools via the registry
+let result = agent.execute_tool("context", json!({
+    "operation": "append",
+    "label": "human",
+    "value": "User prefers dark mode"
+})).await?;
+```
+
+## MCP Compatibility
+
+### Schema Requirements
+- **NO $ref references**: All types inlined via `inline_subschemas = true`
+- **NO nested enums**: Use tagged enums with `#[serde(tag = "type")]`
+- **NO unsigned integers**: Use i32/i64 instead of u32/u64
+- **Simple types only**: Avoid complex generics
+
+### Example MCP-Compatible Schema
+```rust
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpToolInput {
+    #[schemars(description = "Operation to perform")]
+    operation: String,  // Not an enum to avoid nesting
+    
+    #[schemars(description = "Target of operation")]
+    target: String,
+    
+    #[serde(default)]
+    #[schemars(description = "Optional parameters")]
+    params: Option<HashMap<String, Value>>,
+}
+```
+
+## Future Enhancements
+
+1. **MCP Client Integration**: Consume external MCP tools (high priority)
+2. **Tool Composition**: Chain multiple tools together
+3. **Conditional Execution**: Tools that run based on conditions
+4. **Rate Limiting**: Per-tool usage limits
+5. **Tool Versioning**: Support multiple versions of the same tool

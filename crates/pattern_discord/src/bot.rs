@@ -1,6 +1,6 @@
 use serenity::{
     async_trait,
-    builder::{CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage},
+    builder::{CreateInteractionResponse, CreateInteractionResponseMessage},
     client::{Context, EventHandler},
     model::{
         application::{Command, CommandInteraction, Interaction},
@@ -29,6 +29,7 @@ struct BufferedReaction {
     emoji: String,
     user_name: String,
     message_preview: String,
+    #[allow(dead_code)]
     channel_id: u64,
     timestamp: std::time::Instant,
 }
@@ -184,21 +185,8 @@ impl EventHandler for DiscordBot {
             ready.user.id, ready.user.id
         );
 
-        // Register slash commands
-        let commands = vec![
-            CreateCommand::new("chat")
-                .description("Chat with Pattern agents")
-                .dm_permission(true),
-            CreateCommand::new("status")
-                .description("Check Pattern status")
-                .dm_permission(true),
-            CreateCommand::new("memory")
-                .description("View memory blocks")
-                .dm_permission(true),
-            CreateCommand::new("help")
-                .description("Show available commands")
-                .dm_permission(true),
-        ];
+        // Register slash commands using the new comprehensive implementations
+        let commands = crate::slash_commands::create_commands();
 
         for command in commands {
             match Command::create_global_command(&ctx.http, command).await {
@@ -381,11 +369,11 @@ impl EventHandler for DiscordBot {
         // Get the original message to see if it was from our bot
         if let Ok(msg) = ctx.http.get_message(reaction.channel_id, reaction.message_id).await {
             info!("Retrieved message for reaction - author: {}, bot check starting", msg.author.name);
-            
+
             // Check if the message was from our bot
             if let Ok(current_user) = ctx.http.get_current_user().await {
                 info!("Current bot user: {}, message author: {}", current_user.name, msg.author.name);
-                
+
                 if msg.author.id == current_user.id {
                     info!("Reaction is on bot's message - processing");
                     // Someone reacted to our bot's message
@@ -466,7 +454,7 @@ impl EventHandler for DiscordBot {
                                                 while let Some(event) = stream.next().await {
                                                     match event {
                                                         pattern_core::coordination::groups::GroupResponseEvent::TextChunk { text, is_final, .. } => {
-                                                            if !text.is_empty() {
+                                                            if text.len() > 1 {
                                                                 response_text.push_str(&text);
 
                                                                 // Send complete chunks as they arrive
@@ -549,13 +537,13 @@ impl DiscordBot {
         let start_time = self.current_message_start.lock().await;
         start_time.as_ref().map(|start| start.elapsed())
     }
-    
+
     /// Get the current message ID being processed
     pub async fn get_current_message_id(&self) -> Option<u64> {
         let current = self.current_message_id.lock().await;
         *current
     }
-    
+
     /// Select the appropriate group based on message content
     #[allow(dead_code)]
     fn select_group_for_message(&self, message: &str) -> String {
@@ -924,36 +912,36 @@ impl DiscordBot {
 
             let mut current = self.current_message_id.lock().await;
             *current = Some(msg.id.get());
-            
+
             let mut start_time = self.current_message_start.lock().await;
             *start_time = Some(std::time::Instant::now());
-            
+
             info!("Processing message {} from {}", msg.id, msg.author.name);
         }
-        
+
         // Start typing indicator that refreshes every 8 seconds
         {
             let mut typing_handle = self.typing_handle.lock().await;
-            
+
             // Cancel any existing typing task
             if let Some(handle) = typing_handle.take() {
                 handle.abort();
             }
-            
+
             let channel_id = msg.channel_id;
             let http = ctx.http.clone();
-            
+
             // Spawn task to keep typing indicator alive
             let handle = tokio::spawn(async move {
                 loop {
                     // Send typing indicator
                     let _ = channel_id.start_typing(&http);
-                    
+
                     // Wait 8 seconds (typing lasts 10 seconds, so refresh at 8)
                     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                 }
             });
-            
+
             *typing_handle = Some(handle);
         }
 
@@ -967,10 +955,10 @@ impl DiscordBot {
 
             let mut current = self.current_message_id.lock().await;
             *current = None;
-            
+
             let mut start_time = self.current_message_start.lock().await;
             *start_time = None;
-            
+
             // Stop typing indicator
             let mut typing_handle = self.typing_handle.lock().await;
             if let Some(handle) = typing_handle.take() {
@@ -991,7 +979,7 @@ impl DiscordBot {
     async fn process_message_inner(&self, ctx: &Context, msg: &Message) -> Result<(), String> {
         // Track when we started processing for delay calculation
         let processing_start = std::time::Instant::now();
-        
+
         if self.cli_mode {
             // Create Pattern message with Discord metadata
             let discord_channel_id = msg.channel_id.get();

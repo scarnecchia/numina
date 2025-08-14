@@ -23,7 +23,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 
 # MCP SDK
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["transport-child-process", "client"] }
 
 # HTTP Server
 axum = { workspace = true }
@@ -34,6 +34,7 @@ tower-http = { workspace = true }
 pattern-core = { path = "../pattern_core" }
 #hyper-tls.workspace = true
 ureq.workspace = true
+reqwest.workspace = true
 
 # SSE support
 tokio-stream = "0.1"

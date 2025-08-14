@@ -243,7 +243,7 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
         // Default to sending to the agent that owns this coordinator
         let default_target = crate::tool::builtin::MessageTarget {
             target_type: crate::tool::builtin::TargetType::Agent,
-            target_id: Some(agent_router.agent_id().to_string()),
+            target_id: Some(agent_router.agent_id().to_record_id()),
         };
 
         Self {

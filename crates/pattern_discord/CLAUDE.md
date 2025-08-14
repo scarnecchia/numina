@@ -1,42 +1,42 @@
 # CLAUDE.md - Pattern Discord
 
-This crate provides Discord bot integration for the Pattern system, enabling multi-agent support through Discord's chat interface.
+Discord bot integration for the Pattern system, enabling multi-agent support through Discord's chat interface.
 
-## Core Principles
+## Current Status
 
-- **Natural Conversation Flow**: Bot should feel like chatting with a helpful friend, not a command interface
-- **Context Awareness**: Understand channel vs DM contexts, user relationships, and conversation history
-- **Non-Intrusive**: Support without spamming or overwhelming channels
-- **Privacy First**: DM content never leaks to public channels
-- **Graceful Degradation**: Handle Discord API issues without losing user data
+### ✅ Working Features
+- **Message handling**: Full processing with batching, merging, and queue management
+- **Typing indicators**: Auto-refresh every 8 seconds during processing
+- **Reaction handling**: Process reactions on bot messages as new inputs
+- **Group integration**: Routes messages to agent groups with coordination patterns
+- **Data source**: Discord messages can be ingested as data source events
+- **Basic commands**: `/chat`, `/status`, `/memory`, `/help` partially implemented
+
+### 🚧 In Progress
+- **Slash commands**: Core structure exists but many commands need implementation
+- **Command routing**: Natural language command detection planned
 
 ## Architecture Overview
 
 ### Key Components
 
 1. **Bot Core** (`bot.rs`)
-   - Serenity framework integration
+   - Serenity framework integration (1400+ lines of sophisticated bot code)
    - Event handling (messages, reactions, joins)
-   - Command routing (slash and natural language)
-   - Connection resilience
+   - Message queue with smart batching
+   - Connection resilience and error recovery
 
-2. **Agent Routing** (`routing.rs`)
-   - Message analysis for agent selection
-   - Group-based routing (main, crisis, planning, memory)
-   - DM vs channel context handling
-   - Multi-agent conversation coordination
+2. **Message Processing**
+   - Smart merging of rapid messages from same user
+   - Queue management with configurable delays
+   - Typing indicator management
+   - Reaction buffering during processing
 
-3. **Context Management** (`context.rs`)
-   - User identity tracking
-   - Channel history access
-   - Conversation threading
-   - Privacy boundaries
-
-4. **Command System** (`commands/`)
-   - Slash commands for explicit interactions
-   - Natural language command detection
-   - Help system that's actually helpful
-   - Debug commands for troubleshooting
+3. **Integration Points**
+   - Agent group routing based on content
+   - CLI mode for terminal-based testing
+   - Data source mode for event ingestion
+   - Endpoint registration for agent messaging
 
 ## Discord-Specific Patterns
 
@@ -90,130 +90,53 @@ fn select_agent_group(content: &str) -> AgentGroup {
 }
 ```
 
-## Command Guidelines
+## Implementation Features
 
-### Slash Commands
-```rust
-// Clear, action-oriented names
-/pattern help     - Show available commands
-/pattern status   - Check bot and agent status
-/pattern memory   - Interact with memory system
-/pattern task     - Task management
-/pattern energy   - Check/set energy state
+### Message Queue System
+- **Smart batching**: Merges rapid messages from same user
+- **Configurable delays**: `DISCORD_BATCH_DELAY_MS` (default 1500ms)
+- **Max message size**: Splits responses over 2000 chars
+- **Reaction buffering**: Stores reactions during processing
 
-// Admin/Debug commands
-/pattern reload   - Reload configuration
-/pattern debug    - Show debug information
-/pattern agents   - List active agents
+### Processing State Management
+- Tracks current message ID and start time
+- Prevents concurrent processing
+- Buffers reactions during busy state
+- Cleans up typing indicators on completion
+
+### Error Handling
+- Graceful degradation on API failures
+- Connection resilience with auto-reconnect
+- Rate limit awareness
+- Comprehensive logging
+
+## Configuration
+
+Environment variables:
+- `DISCORD_TOKEN`: Bot authentication token
+- `DISCORD_BATCH_DELAY_MS`: Message batching delay (default 1500)
+- `DISCORD_MAX_MESSAGE_LENGTH`: Max Discord message size (default 2000)
+
+## Testing
+
+Run with Discord integration:
+```bash
+pattern-cli chat --discord
+pattern-cli chat --discord --group main
 ```
-
-### Natural Language Detection
-- "Hey Pattern" - Wake word for explicit attention
-- "Pattern:" - Alternative wake word
-- @mention - Always responds when mentioned
-- DMs - Always active, no wake word needed
 
 ## Privacy & Security
 
-### DM Isolation
-```rust
-// Never mix DM and guild contexts
-struct MessageContext {
-    source: MessageSource,
-    // ...
-}
-
-enum MessageSource {
-    DirectMessage { user_id: UserId },
-    GuildChannel { guild_id: GuildId, channel_id: ChannelId },
-}
-
-// Enforce at type level
-impl MessageContext {
-    fn can_access_history(&self, other: &MessageContext) -> bool {
-        match (&self.source, &other.source) {
-            (DirectMessage { user_id: a }, DirectMessage { user_id: b }) => a == b,
-            (GuildChannel { guild_id: a, .. }, GuildChannel { guild_id: b, .. }) => a == b,
-            _ => false,
-        }
-    }
-}
-```
-
-### Permission Checks
-- Check bot permissions before operations
-- Respect user privacy settings
-- Don't store messages without consent
-- Clear data on user request
-
-## Error Handling
-
-### Discord API Errors
-```rust
-match result {
-    Err(SerenityError::Http(e)) => {
-        match e {
-            HttpError::UnsuccessfulRequest(ErrorResponse { status_code, .. }) => {
-                match status_code {
-                    429 => // Rate limited, back off
-                    403 => // No permission, notify user gently
-                    404 => // Message/channel deleted, clean up
-                    _ => // Log and continue
-                }
-            }
-        }
-    }
-}
-```
-
-### Connection Resilience
-- Auto-reconnect on disconnect
-- Queue important messages during outages
-- Graceful degradation of features
-- Status updates in designated channel
-
-## Performance Considerations
-
-- Cache user preferences to reduce DB queries
-- Batch Discord API requests when possible
-- Use intents to reduce event overhead
-- Implement message queuing for high-volume channels
-- Background task for cleanup and maintenance
-
-## Testing Discord Features
-
-```bash
-# Test with a local bot token
-DISCORD_TOKEN=your_test_token cargo run --features discord
-
-# Test specific handlers
-cargo test -p pattern-discord test_message_routing
-
-# Integration tests with test server
-cargo test -p pattern-discord --features integration_tests
-```
-
-## Common Issues
-
-1. **"Bot not responding"**
-   - Check intents configuration
-   - Verify bot has channel permissions
-   - Check for rate limiting
-
-2. **"Commands not showing"**
-   - Ensure commands are registered globally/per-guild
-   - Check bot has applications.commands scope
-   - Wait for command propagation (up to 1 hour)
-
-3. **"Memory not persisting"**
-   - Verify user ID mapping is consistent
-   - Check database connection
-   - Ensure proper shutdown handling
+- DM content isolation from public channels
+- User permission checking
+- No message content logging in production
+- Rate limit compliance
 
 ## Future Enhancements
 
-- Voice channel support for body doubling
-- Thread auto-creation for task tracking
-- Reaction-based quick actions
-- Scheduled reminders via Discord events
-- Multi-modal support (images, files)
+- Natural language command parsing
+- Ephemeral responses for sensitive data
+- Voice channel support
+- Embed formatting for rich responses
+- Thread management
+- Role-based access control

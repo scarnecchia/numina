@@ -1,52 +1,124 @@
 # Pattern Documentation
 
-Pattern is a multi-agent cognitive support system designed specifically for ADHD brains, using Letta's multi-agent architecture with shared memory.
+Pattern is a multi-agent cognitive support system designed specifically for ADHD brains, inspired by MemGPT's stateful agent architecture.
+
+## Current State
+
+✅ **Working**: Agent groups, Bluesky integration, Discord bot, data sources, CLI  
+🚧 **In Progress**: MCP client, API server, Discord slash commands  
+📋 **Planned**: Task management, MCP server
 
 ## Documentation Structure
 
-### 📐 Architecture
-- [Pattern ADHD Architecture](architecture/PATTERN_ADHD_ARCHITECTURE.md) - Core system design
-- [Memory and Groups](architecture/MEMORY_AND_GROUPS.md) - Memory hierarchy and Letta groups
-- [Agent Architecture](architecture/pattern-agent-architecture.md) - Individual agent details
-- [System Prompts](architecture/pattern-system-prompts.md) - Agent personality definitions
-- [Agent Routing](architecture/AGENT-ROUTING.md) - How messages are routed to agents
+### 📐 Core Architecture
+- [Pattern Agent Architecture](architecture/pattern-agent-architecture.md) - Agent framework design
+- [Database Backend](architecture/database-backend.md) - SurrealDB patterns and entities
+- [Memory System](architecture/memory-and-groups.md) - MemGPT-style memory blocks
+- [Tool System](architecture/tool-system.md) - Multi-operation tool architecture
+- [Context Building](architecture/context-building.md) - How agent context is constructed
 
-### 📚 Setup Guides
-- [Discord Setup](guides/DISCORD_SETUP.md) - Setting up the Discord bot
-- [MCP HTTP Setup](guides/MCP_HTTP_SETUP.md) - Configuring HTTP transport for MCP
-- [Usage Guide](guides/USAGE.md) - General usage instructions
-- [Testing Guide](guides/TESTING.md) - How to test Pattern
+### 🔧 Implementation Guides
+- [Data Sources](data-sources.md) - How to integrate data sources with agents
+- [Group Coordination](group-coordination-guide.md) - Using agent groups and patterns
+- [Tool System Guide](tool-system-guide.md) - Creating and registering tools
+- [Config Design](config-design.md) - Configuration system architecture
 
-### 🔧 Development Guides
-- [Letta Integration](guides/LETTA_INTEGRATION.md) - Multi-agent implementation with Letta
-- [MCP Integration](guides/MCP_INTEGRATION.md) - MCP tools and workflows
-- [Agent Coordination](guides/AGENT_COORDINATION.md) - Managing multi-agent systems
-- [MCP SDK Guide](guides/MCP_SDK_GUIDE.md) - Working with the MCP Rust SDK
-- [LSP Edit Guide](guides/LSP_EDIT_GUIDE.md) - Using language server protocol tools
-- [CLAUDE.md](../CLAUDE.md) - Main development reference and TODOs
+### 🔌 Integration Guides
+- [Discord Setup](guides/discord-setup.md) - Discord bot configuration
+- [Bluesky Integration](bluesky-integration-plan.md) - ATProto firehose setup
+- [MCP Integration](guides/mcp-integration.md) - Model Context Protocol (planned)
 
-### 📖 API References
-- [Letta API Reference](api/LETTA_API_REFERENCE.md) - Common Letta API patterns and gotchas
-- [Database API](api/DATABASE_API.md) - Database operations and schema
+### 📚 API References
+- [Database API](api/database-api.md) - Database operations and patterns
+- [Quick Reference](quick-reference.md) - Common patterns and code snippets
 
 ### 🐛 Troubleshooting
-- [Discord Issues](troubleshooting/DISCORD_ISSUES.md) - Known Discord integration issues
-- [SurrealDB Issues](troubleshooting/SURREAL_ISSUES.md) - Common SurrealDB problems and solutions
-
-### 🎯 Feature Concepts
-- [Bluesky Shame Feature](BLUESKY_SHAME_FEATURE.md) - Public accountability posts concept
+- [Known API Issues](known-api-issues.md) - Provider-specific workarounds
+- [Agent Loops](troubleshooting/agent-loops.md) - Preventing message loops
+- [Discord Issues](troubleshooting/discord-issues.md) - Discord integration issues
+- [SurrealDB Patterns](troubleshooting/surrealdb-patterns.md) - Database gotchas
 
 ## Quick Start
 
-1. Copy `.env.example` to `.env` and configure
-2. Run `cargo run --features full` to start Pattern with all features
-3. See [Discord Setup](guides/DISCORD_SETUP.md) for bot configuration
-4. See [MCP HTTP Setup](guides/MCP_HTTP_SETUP.md) for MCP server setup
+### CLI Usage
+```bash
+# Chat with a single agent
+pattern-cli chat
 
-## Scripts
+# Chat with an agent group
+pattern-cli chat --group main
 
-Utility scripts are in the `scripts/` directory:
-- `cleanup_mcp.sh` - Remove MCP server registration from Letta
-- `register_mcp_manually.sh` - Manually register MCP server when Letta is ready
-- `test_bot.sh` - Test the Discord bot
-- `test_mcp_connection.sh` - Test MCP HTTP connectivity
+# Use Discord integration
+pattern-cli chat --discord
+
+# Manage agent groups
+pattern-cli group create MyGroup --description "Test group" --pattern round-robin
+pattern-cli group add-member MyGroup agent-name --role member
+pattern-cli group status MyGroup
+```
+
+### Creating an Agent
+```rust
+use pattern_core::agent::DatabaseAgent;
+
+let agent = DatabaseAgent::new(
+    agent_id,
+    user_id,
+    agent_type,
+    name,
+    system_prompt,
+    memory,
+    db.clone(),
+    model_provider,
+    tool_registry,
+    embedding_provider,
+    heartbeat_sender,
+).await?;
+```
+
+### Adding a Data Source
+```rust
+use pattern_core::data_source::{FileDataSource, FileStorageMode};
+
+let source = FileDataSource::new(
+    "docs".to_string(),
+    PathBuf::from("./docs"),
+    FileStorageMode::Indexed,
+    Some(embedding_provider),
+)?;
+
+coordinator.add_source("docs", source).await?;
+```
+
+## Development
+
+See [CLAUDE.md](../CLAUDE.md) in the project root for:
+- Current development priorities
+- Implementation guidelines
+- Known issues and workarounds
+- Build commands
+
+## Key Concepts
+
+### Agent Groups
+Groups allow multiple agents to collaborate using coordination patterns:
+- **Round-robin**: Fair distribution
+- **Dynamic**: Capability-based routing
+- **Pipeline**: Sequential processing
+- **Supervisor**: Hierarchical delegation
+- **Voting**: Consensus decisions
+- **Sleeptime**: Background monitoring
+
+### Memory System
+MemGPT-style memory with:
+- **Core memory**: Always in context (persona, human)
+- **Archival memory**: Searchable long-term storage
+- **Conversation history**: Recent messages
+- Thread-safe with Arc<DashMap>
+
+### Data Sources
+Flexible data ingestion:
+- File watching with indexing
+- Discord message streams
+- Bluesky firehose
+- Custom sources via trait implementation

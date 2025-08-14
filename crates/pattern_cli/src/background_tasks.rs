@@ -13,7 +13,7 @@ use pattern_core::{
     },
     message::{Message, MessageContent},
 };
-use crate::{agent_ops::print_group_response_event, output::Output};
+use crate::{chat::print_group_response_event, output::Output};
 
 /// Start a background monitoring task for a sleeptime group
 ///
@@ -44,7 +44,7 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
     // Spawn the background monitoring task
     let handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(check_interval);
-        
+
         // Skip the first tick so we don't immediately fire on startup
         interval.tick().await;
 
@@ -61,7 +61,7 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
 
             // Create a generic trigger check message
             // The sleeptime manager will customize it for the specific agent being activated
-            let trigger_message = Message::system(MessageContent::from_text(
+            let trigger_message = Message::user(MessageContent::from_text(
                 "Context sync check: Review your domain and report any notable patterns or concerns. Provide brief status updates only if intervention is needed."
             ));
 
@@ -72,13 +72,13 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
                     let agents_clone = agents.clone();
                     let output_clone = output.clone();
                     let group_name_clone = group_name.clone();
-                    
+
                     use futures::StreamExt;
                     use pattern_core::coordination::groups::GroupResponseEvent;
-                    
+
                     // Show which group this is from at the start
                     output_clone.section(&format!("[Background] {}", group_name_clone));
-                    
+
                     // Process the response stream
                     while let Some(event) = stream.next().await {
                         // Check for state updates in Complete event
@@ -89,10 +89,10 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
                                 tracing::debug!("Updated group state for next iteration: {:?}", new_state);
                             }
                         }
-                        
+
                         print_group_response_event(
-                            event, 
-                            &output_clone, 
+                            event,
+                            &output_clone,
                             &agents_clone,
                             Some("Background")
                         ).await;

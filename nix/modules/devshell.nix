@@ -19,6 +19,7 @@
           bacon
           rust-analyzer
           clang
+          surreal
           pkg-config
           cargo-expand
         ];

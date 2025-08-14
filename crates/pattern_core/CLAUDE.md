@@ -1,211 +1,93 @@
 # CLAUDE.md - Pattern Core
 
-Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support. Inspired by MemGPT architecture for stateful agents.
+Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
-## Current Status (2025-07-28)
+## Current Status
 
-### Data Sources ✅ COMPLETE (2025-07-28)
-- **DataSource Trait**: Generic abstraction supporting pull/push patterns with cursor management
-- **FileDataSource**: Concrete implementation with ephemeral and indexed modes
-- **DataIngestionCoordinator**: Manages sources and routes data to agents via templates
-- **Prompt Templates**: Jinja2-style templates using minijinja for agent notifications
-- **DataSourceTool**: Agent-accessible operations for data source management
-- **Embedding Integration**: Reuses agent's embedding provider for indexed sources
-- **Type Erasure**: Maintains concrete types while providing Value-based interface
-- **See**: `docs/data-sources.md` for detailed implementation guide
+### ✅ Complete Features
+- **Agent Groups**: Full database operations, CLI integration, all coordination patterns working
+- **Data Sources**: Generic abstraction with file/Discord/Bluesky implementations
+- **Memory System**: MemGPT-style blocks with archival, semantic search, thread-safe access
+- **Tool System**: Multi-operation tools (context, recall, search) with automatic rule bundling
+- **Message Router**: Agent-to-agent messaging with anti-looping protection
+- **Model Configuration**: Comprehensive registry with provider-specific optimizations
 
-### Agent Groups ✅ COMPLETE (2025-07-24) - NEEDS USER TESTING
-- **Configuration**: `GroupConfig` and `GroupMemberConfig` in config system
-- **Database Operations**: Full CRUD operations with constellation relationships
-- **Coordination Patterns**: All 6 patterns working (Dynamic, RoundRobin, Pipeline, Supervisor, Voting, Sleeptime)
-- **CLI Integration**: group list/create/add-member/status commands
-- **Group Chat**: `pattern-cli chat --group <name>` routes through coordination patterns
-- **Type-erased Agents**: Groups work with `Arc<dyn Agent>` for flexibility and shared ownership
-- **Trait Refactoring**: `GroupManager` trait made dyn-compatible with `async_trait`
-- **⚠️ NEEDS USER TESTING**: Overall integrity and edge cases need validation
-- **Design Note**: Using `Arc<dyn Agent>` is intentional - agents can belong to multiple groups (overlap allowed)
+### 🚧 In Progress
+- **Memory Block Pass-through**: Router needs to create RELATE edges for attached blocks
+- **MCP Client Integration**: Consume external MCP tools (high priority)
 
 ## Critical Implementation Notes
 
 ### Entity System Sacred Patterns ⚠️
 
-1. **Edge Entity Pattern - DO NOT CHANGE**:
-   ```rust
-   // In the macro (pattern_macros/src/lib.rs):
-   // YES THIS LOOKS WEIRD AND REDUNDANT. DO NOT CHANGE, IT BREAKS THE MACRO!!!!
-   if let (Some(relation_name), Some(edge_entity)) =
-       (&field_opts.relation, &field_opts.edge_entity)
-   {
-       // Edge entity handling...
-   }
-   ```
+**Edge Entity Pattern - DO NOT CHANGE**:
+The macro looks redundant but it's required. Users should ONLY specify `edge_entity`:
 
-   But users should ONLY specify `edge_entity` attribute:
-   ```rust
-   // Correct usage:
-   #[entity(edge_entity = "agent_memories")]
-   pub memories: Vec<(TestMemory, AgentMemoryRelation)>,
+```rust
+// Correct usage:
+#[entity(edge_entity = "agent_memories")]
+pub memories: Vec<(TestMemory, AgentMemoryRelation)>,
 
-   // WRONG - don't specify both:
-   // #[entity(relation = "agent_memories", edge_entity = "AgentMemoryRelation")]
-   ```
-
-2. **Enum Serialization for SurrealDB**:
-   ```rust
-   impl Serialize for BaseAgentType {
-       fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-       where S: serde::Serializer,
-       {
-           match self {
-               BaseAgentType::Assistant => serializer.serialize_str("assistant"),
-               BaseAgentType::Custom(s) => serializer.serialize_str(s),
-           }
-       }
-   }
-   ```
-
-3. **Complex Types with `db_type = "object"`**:
-   ```rust
-   #[entity(db_type = "object")]
-   pub compression_strategy: CompressionStrategy,
-   ```
-   Generates `FLEXIBLE TYPE object` for enums with associated data.
+// WRONG - don't specify both:
+// #[entity(relation = "agent_memories", edge_entity = "AgentMemoryRelation")]
+```
 
 ### Database Patterns (CRITICAL)
 
 1. **SurrealDB Response Handling**:
-   - **NEVER** try to get `Vec<serde_json::Value>` from a SurrealDB response - it "literally NEVER works"
-   - **ALWAYS** print the raw response before attempting `.take()` when debugging
-   - Response `.take()` can return nested vectors, DELETE queries need special handling
+   - NEVER try to get `Vec<serde_json::Value>` from a SurrealDB response
+   - ALWAYS print raw response before `.take()` when debugging
    - Use `unwrap_surreal_value` helper for nested value extraction
 
 2. **Parameterized Queries**:
-   - **ALWAYS** use parameter binding to prevent SQL injection
+   - ALWAYS use parameter binding to prevent SQL injection
    - Example: `query("SELECT * FROM user WHERE id = $id").bind(("id", user_id))`
 
-### Technical Decisions
-
-1. **Snowflake IDs for Message Ordering**:
-   - Using ferroid crate for distributed monotonic IDs
-   - Stored as String in `position` field
-   - Guarantees order even with rapid message creation
-
-2. **Concurrent Memory Access**:
-   - Use `alter_block` for atomic updates to avoid deadlocks
+3. **Concurrent Memory Access**:
+   - Use `alter_block` for atomic updates
    - Never hold refs across async boundaries
    - Extract data and drop locks immediately
 
-## Tool System ✅ COMPLETE
+## Tool System Architecture
 
-Following Letta/MemGPT patterns, all tools have been refactored into domain-based multi-operation tools:
+Following Letta/MemGPT patterns with multi-operation tools:
 
-### Completed Tools
-1. **context** ✅ - Operations on context blocks
-   - `append` - Add content to existing memory (always uses \n separator)
-   - `replace` - Replace specific content within memory
-   - `archive` - Move a core memory block to archival storage
-   - `load_from_archival` - Load an archival memory block into core
-   - `swap` - Atomic operation to archive one block and load another
+### Core Tools
+1. **context** - Operations on context blocks
+   - `append`, `replace`, `archive`, `load_from_archival`, `swap`
 
-2. **recall** ✅ - Long-term storage operations
-   - `insert` - Add new memories to archival storage
-   - `append` - Add content to existing archival memory (always uses \n separator)
-   - `read` - Read specific archival memory by label
-   - `delete` - Remove archived memories
+2. **recall** - Long-term storage operations
+   - `insert`, `append`, `read`, `delete`
+   - Full-text search with SurrealDB's BM25 analyzer
 
-   **Implementation Notes**:
-   - Archival memories are stored as regular MemoryBlocks with `MemoryType::Archival`
-   - AgentHandle now has private DB connection with controlled access methods
-   - DB methods: `search_archival_memories`, `insert_archival_memory`, `delete_archival_memory`, `count_archival_memories`
-   - Graceful fallback: tries DB first, falls back to in-memory if unavailable
-   - Full-text search working with SurrealDB's @@ operator and BM25 analyzer
+3. **search** - Unified search across domains
+   - Supports archival_memory, conversations, all
+   - Domain-specific filters and limits
 
-3. **search** ✅ - Unified search across domains
-   - `domain` - Where to search: "archival_memory", "conversations", "all"
-   - `query` - Search text
-   - `limit` - Maximum results
-   - Domain-specific filters (role for conversations, time ranges, etc.)
-
-   **Implementation Notes**:
-   - Single interface for all search operations
-   - Extensible to add new domains (files, tasks, etc.)
-   - Uses appropriate indexes/methods per domain
-
-### Remaining core tools
-
-5. **interact_with_files** - File system operations
-   - `read` - Read file contents
-   - `search` - Search within files
-   - `edit` (optional) - Modify files
+4. **send_message** - Agent communication
+   - Routes through AgentMessageRouter
+   - Supports CLI, Group, Discord, Queue endpoints
 
 ### Implementation Notes
-- Each tool has a single entry point with operation selection
-- Tool usage rules are bundled with tools (via `usage_rule()` trait method)
+- Each tool has single entry point with operation enum
+- Tool usage rules bundled with tools via `usage_rule()` trait
 - ToolRegistry automatically provides rules to context builder
-- Operations use enums for type safety
+- Archival labels included in context for intelligent memory management
 
-### Memory Context Management
-The context builder includes archival memory labels to enable intelligent memory management:
-- All archival labels included if under 50 entries
-- Above 50, shows most recently accessed + most frequently accessed
-- Labels grouped by prefix for organization (e.g., all "meeting_notes_*" together)
-- Format: `label: description` to provide semantic hints
+## Message System Architecture
 
-This allows agents to make informed decisions about memory swapping without needing to search first.
+### Router Design
+- Each agent has its own router (not singleton)
+- Database queuing provides natural buffering
+- Call chain prevents infinite loops
+- Anti-looping: 30-second cooldown between rapid messages
 
-## Message System Implementation TODOS
-
-#### Phase 4: Additional Endpoints (MEDIUM PRIORITY)
-**STATUS: Only CliEndpoint implemented so far**
-
-1. **GroupEndpoint** (TODO)
-   - Query group members from database
-   - Apply coordination pattern for routing
-   - Handle offline members appropriately
-
-2. **DiscordEndpoint** (TODO - when Discord integration ready)
-   - Use Discord bot to send messages
-   - Map channel IDs appropriately
-   - Handle rate limits and errors
-
-3. **QueueEndpoint** (Stub exists but not functional)
-   - Currently has unused fields warning
-   - Needs proper implementation for database queuing
-
-### 🎯 Implementation Order
-1. ✅ Wire router to send_message tool (COMPLETE)
-2. ✅ Set up live queries (COMPLETE)
-3. ✅ Add slash commands for testing (COMPLETE)
-4. 🧪 TEST: Agent-to-agent messaging with CLI endpoint
-   - Run two agents in separate terminals
-   - Use `/send` command to send messages between them
-   - Verify messages are received and processed
-5. Add message origin context
-   - Create MessageOrigin struct with origin_type, source_id, description, context
-   - Update send_message to accept optional origin
-   - Use ChatRole::User for external sources, ChatRole::Assistant for agent's own messages
-   - Include origin in message metadata for agent awareness
-6. Add scheduled wakeups (enables time-based features)
-7. Implement additional endpoints as needed
-
-### 💡 Design Decisions
-- Each agent has its own router (not a singleton) for flexibility
-- Database queuing provides natural buffering for offline agents
-- Call chain prevents infinite loops while allowing controlled recursion
-- Heartbeats and scheduled wakeups are separate systems with different use cases
-
-## Eventually
- - Add provider capability flags to ModelProvider trait for multi-modal support
-   - Currently using lowest-common-denominator approach (converting Parts to Text)
-   - Some providers support multi-modal assistant responses, others don't
-   - Would allow smarter content conversion based on provider capabilities
-
-## Core Principles
-
-- **Type Safety First**: Use generics and strong typing wherever possible
-- **Memory Efficiency**: CompactString for small strings, Arc<DashMap> for thread-safe collections
-- **Pure Rust**: No C dependencies in this crate
-- **Error Clarity**: Use miette for rich error diagnostics
+### Endpoints
+- **CliEndpoint**: Terminal output ✅
+- **GroupEndpoint**: Coordination pattern routing ✅
+- **DiscordEndpoint**: Discord integration ✅
+- **QueueEndpoint**: Database persistence (stub)
+- **BlueskyEndpoint**: ATProto posting ✅
 
 ## Architecture Overview
 
@@ -217,36 +99,33 @@ This allows agents to make informed decisions about memory swapping without need
    - AgentType enum with feature-gated ADHD variants
 
 2. **Memory System** (`memory.rs`)
-   - MemGPT-style memory blocks with character limits
    - Arc<DashMap> for thread-safe concurrent access
-   - Persistent memory between conversations
+   - Character-limited blocks with overflow handling
+   - Persistent between conversations
 
 3. **Tool System** (`tool/`)
    - Type-safe `AiTool<Input, Output>` trait
-   - Dynamic dispatch via `DynamicTool` trait
+   - Dynamic dispatch via `DynamicTool`
    - Thread-safe `ToolRegistry` using DashMap
-   - Built-in tools (update_memory, send_message)
 
 4. **Coordination** (`coordination/`)
-   - Agent groups with dynamic/round-robin/sleeptime patterns
-   - Selector registry (load balancing, random, capability-based)
+   - All patterns implemented and working
+   - Type-erased `Arc<dyn Agent>` for group flexibility
    - Message routing and response aggregation
 
 5. **Database** (`db/`)
-   - SurrealKV embedded database with vector search
+   - SurrealKV embedded database
    - Entity system with `#[derive(Entity)]` macro
    - RELATE-based relationships (no foreign keys)
 
 6. **Data Sources** (`data_source/`)
-   - Generic `DataSource` trait for pull/push data consumption
-   - `FileDataSource` with watch and indexing support
-   - `DataIngestionCoordinator` for multi-source management
-   - Prompt templates for agent notifications
+   - Generic trait for pull/push consumption
    - Type-erased wrapper for concrete→generic bridging
+   - Prompt templates using minijinja
 
-### Common Patterns
+## Common Patterns
 
-#### Creating a Tool
+### Creating a Tool
 ```rust
 #[derive(Debug, Clone)]
 struct MyTool;
@@ -265,32 +144,12 @@ impl AiTool for MyTool {
 }
 ```
 
-#### Entity Definition
-```rust
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "user")]
-pub struct User {
-    pub id: UserId,
-    pub username: String,
-
-    // Relations use RELATE, not foreign keys
-    #[entity(relation = "owns")]
-    pub owned_agent_ids: Vec<AgentId>,
-}
-```
-
-#### Error Handling
+### Error Handling
 ```rust
 // Use specific error variants with context
 return Err(CoreError::tool_not_found(name, available_tools));
 return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks));
 ```
-
-## Testing Guidelines
-- Test actual behavior, not mocks
-- Use MockModelProvider and MockEmbeddingProvider for testing
-- Keep unit tests fast (<1 second), slow tests in integration
-- All error paths must be tested with proper assertions
 
 ## Performance Notes
 - CompactString inlines strings ≤ 24 bytes
@@ -298,10 +157,10 @@ return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks)
 - AgentHandle provides cheap cloning for built-in tools
 - Database operations are non-blocking with optimistic updates
 
-## Embedding Providers (`embeddings/`)
-- **Candle (local)**: Pure Rust with Jina models (512/768 dims) - Use for offline/privacy
-- **OpenAI**: text-embedding-3-small/large - Use for production quality
-- **Cohere**: embed-english-v3.0 - Alternative cloud provider
-- **Ollama**: Stub only - TODO: Complete implementation
+## Embedding Providers
+- **Candle (local)**: Pure Rust with Jina models (512/768 dims)
+- **OpenAI**: text-embedding-3-small/large
+- **Cohere**: embed-english-v3.0
+- **Ollama**: Stub only - TODO
 
 **Known Issues**: BERT models fail in Candle (dtype errors), use Jina models instead.

@@ -81,7 +81,7 @@ impl GroupManager for SleeptimeManager {
                     .iter()
                     .filter(|awm| awm.membership.is_active)
                     .collect();
-                
+
                 if active_agents.is_empty() {
                     let _ = tx
                         .send(GroupResponseEvent::Error {
@@ -92,14 +92,14 @@ impl GroupManager for SleeptimeManager {
                         .await;
                     return;
                 }
-                
+
                 // Use current_index to select agent
                 let selected_agent = active_agents[current_index % active_agents.len()];
                 let agent_id = selected_agent.agent.id();
-                
+
                 // Increment index for next time
                 current_index = (current_index + 1) % active_agents.len();
-                
+
                 agent_id
             };
 
@@ -390,7 +390,7 @@ impl SleeptimeManager {
     fn get_agent_specific_context_sync(agent_name: &str) -> String {
         let prompt = match agent_name {
             "Pattern" => {
-                "Context sync check:\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis.\n\nProvide brief status updates only if intervention is needed."
+                "Context sync check:\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis. Self-check for reflexive validation in past interactions and correct if required.\n\nProvide brief status updates only if intervention is needed."
             }
             "Entropy" => {
                 "Context sync check:\n\nAnalyze task complexity in recent interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates only if intervention is needed."
@@ -405,14 +405,14 @@ impl SleeptimeManager {
                 "Context sync check:\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition?\n\nProvide brief status updates only if intervention is needed."
             }
             "Anchor" => {
-                "Context sync check:\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?\n\nProvide brief status updates only if intervention is needed."
+                "Context sync check:\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?  Self-check for reflexive validation in past interactions and correct constellation members if required.\n\nProvide brief status updates or message partner if intervention is needed."
             }
             _ => {
                 // Generic prompt for unknown agents
                 "Context sync check:\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed."
             }
         };
-        
+
         format!("[Periodic Context Sync]\n\n{}", prompt)
     }
 
@@ -424,16 +424,16 @@ impl SleeptimeManager {
     ) -> Option<crate::AgentId> {
         // Get active agents with their last activity times
         let mut active_agents_with_times = Vec::new();
-        
+
         for awm in agents.iter().filter(|awm| awm.membership.is_active) {
             let last_active = awm.agent.last_active().await;
             active_agents_with_times.push((awm, last_active));
         }
-        
+
         if active_agents_with_times.is_empty() {
             return None;
         }
-        
+
         // Find the agent with the oldest last_active timestamp
         // If an agent has no last_active (None), treat it as very old
         active_agents_with_times

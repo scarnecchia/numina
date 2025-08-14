@@ -78,6 +78,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 #hyper-tls = { version = "0.6", features = ["vendored"] }
 ureq = { version = "*" } #features = ["vendored"] }
 
+# MCP client transport dependencies
+sse-stream = "0.2"
+http = "1.0"
+
 
 # Discord
 serenity = { version = "0.12", default-features = false, features = [
@@ -89,13 +93,17 @@ serenity = { version = "0.12", default-features = false, features = [
     "standard_framework",
 ] }
 
-# MCP
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", features = [
     "transport-io",
+    "transport-sse-client",
     "transport-sse-server",
+    "transport-streamable-http-client",
     "transport-streamable-http-server",
+    "transport-child-process",
     "server",
-] }
+    "reqwest",
+    "client",
+] } # MCP
 
 # Testing
 mockall = "0.13"

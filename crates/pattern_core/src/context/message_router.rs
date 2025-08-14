@@ -550,8 +550,8 @@ impl AgentMessageRouter {
                             "Message loop detected: rapid messages between agents within 30 seconds. Please wait before sending another message."
                         ),
                         parameters: serde_json::json!({
-                            "from": self.agent_id.to_string(),
-                            "to": target_agent_id.to_string(),
+                            "from": self.agent_id.to_record_id(),
+                            "to": target_agent_id.to_record_id(),
                             "elapsed_seconds": last_time.elapsed().as_secs()
                         }),
                     });
@@ -584,7 +584,7 @@ impl AgentMessageRouter {
                 ),
                 parameters: serde_json::json!({
                     "call_chain": queued.call_chain,
-                    "target": target_agent_id.to_string()
+                    "target": target_agent_id.to_record_id()
                 }),
             });
         }

@@ -128,6 +128,7 @@ pub struct GroupExport {
 
 /// Compression settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CompressionSettings {
     pub algorithm: String,
     pub level: i32,

@@ -2,15 +2,17 @@ use async_trait::async_trait;
 use pattern_core::{
     Result,
     agent::Agent,
-    context::message_router::{MessageEndpoint, MessageOrigin},
+    context::message_router::{MessageEndpoint, MessageOrigin, BlueskyEndpoint},
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager},
     message::{ContentBlock, ContentPart, Message, MessageContent},
+    db::{client::DB, ops::atproto::get_user_atproto_identities},
+    config::PatternConfig,
 };
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
-
-use crate::{agent_ops::print_group_response_event, output::Output};
+use owo_colors::OwoColorize;
+use crate::{chat::print_group_response_event, output::Output};
 
 /// CLI endpoint that formats messages using Output
 pub struct CliEndpoint {
@@ -62,7 +64,7 @@ impl MessageEndpoint for CliEndpoint {
         let sender_name = if let Some(origin) = origin {
             self.output
                 .status(&format!("📤 Message from {}", origin.description()));
-            
+
             // Extract the agent name from the origin if it's an agent
             match origin {
                 MessageOrigin::Agent { name, .. } => name.clone(),
@@ -72,10 +74,10 @@ impl MessageEndpoint for CliEndpoint {
             self.output.status("📤 Sending message to user:");
             "Pattern".to_string()
         };
-        
+
         // Add a tiny delay to let reasoning chunks finish printing
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
+
         self.output.agent_message(&sender_name, text);
 
         Ok(None)
@@ -129,7 +131,7 @@ impl MessageEndpoint for GroupCliEndpoint {
 
         // Show which source this is from at the beginning
         self.output.section("[Jetstream] Processing incoming data");
-        
+
         while let Some(event) = stream.next().await {
             print_group_response_event(
                 event,
@@ -145,4 +147,72 @@ impl MessageEndpoint for GroupCliEndpoint {
     fn endpoint_type(&self) -> &'static str {
         "group"
     }
+}
+
+/// Set up Bluesky endpoint for an agent if configured
+pub async fn setup_bluesky_endpoint(
+    agent: &Arc<dyn Agent>,
+    config: &PatternConfig,
+    output: &Output,
+) -> Result<()> {
+    // Check if agent has a bluesky_handle configured
+    let bluesky_handle = if let Some(handle) = &config.agent.bluesky_handle {
+        handle.clone()
+    } else {
+        // No Bluesky handle configured for this agent
+        return Ok(());
+    };
+
+    output.status(&format!(
+        "Checking Bluesky credentials for {}",
+        bluesky_handle.bright_cyan()
+    ));
+
+    // Look up ATProto identity for this handle
+    let identities = get_user_atproto_identities(&DB, &config.user.id)
+        .await?;
+
+    // Find identity matching the handle
+    let identity = identities
+        .into_iter()
+        .find(|i| i.handle == bluesky_handle || i.id.to_record_id() == bluesky_handle);
+
+    if let Some(identity) = identity {
+        // Get credentials
+        if let Some(creds) = identity.get_auth_credentials() {
+            output.status(&format!(
+                "Setting up Bluesky endpoint for {}",
+                identity.handle.bright_cyan()
+            ));
+
+            // Create Bluesky endpoint
+            match BlueskyEndpoint::new(creds, identity.handle.clone()).await {
+                Ok(endpoint) => {
+                    // Register as the Bluesky endpoint for this agent
+                    agent
+                        .register_endpoint("bluesky".to_string(), Arc::new(endpoint))
+                        .await?;
+                    output.success(&format!(
+                        "Bluesky endpoint configured for {}",
+                        identity.handle.bright_green()
+                    ));
+                }
+                Err(e) => {
+                    output.warning(&format!("Failed to create Bluesky endpoint: {:?}", e));
+                }
+            }
+        } else {
+            output.warning(&format!(
+                "No credentials available for Bluesky account {}",
+                bluesky_handle
+            ));
+        }
+    } else {
+        output.warning(&format!(
+            "No ATProto identity found for handle '{}'. Run 'pattern-cli atproto login' to authenticate.",
+            bluesky_handle
+        ));
+    }
+
+    Ok(())
 }

@@ -240,6 +240,34 @@ pub enum McpError {
         config_errors: Vec<String>,
         example_config: String,
     },
+    
+    #[error("Channel error: {0}")]
+    #[diagnostic(
+        code(pattern::mcp::channel_error),
+        help("Communication channel error occurred")
+    )]
+    ChannelError(String),
+    
+    #[error("Operation timed out: {0}")]
+    #[diagnostic(
+        code(pattern::mcp::timeout),
+        help("Operation exceeded timeout limit")
+    )]
+    Timeout(String),
+    
+    #[error("Not implemented: {0}")]
+    #[diagnostic(
+        code(pattern::mcp::not_implemented),
+        help("This feature is not yet implemented")
+    )]
+    NotImplemented(String),
+    
+    #[error("RMCP error: {0}")]
+    #[diagnostic(
+        code(pattern::mcp::rmcp_error),
+        help("Error from underlying RMCP library")
+    )]
+    Rmcp(#[from] rmcp::ErrorData),
 }
 
 #[derive(Debug, Clone)]

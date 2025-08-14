@@ -1,8 +1,13 @@
 mod agent_ops;
 mod background_tasks;
+mod chat;
 mod commands;
+mod data_sources;
+mod discord;
 mod endpoints;
+mod message_display;
 mod output;
+mod slash_commands;
 mod tracing_writer;
 
 use clap::{Parser, Subcommand};
@@ -35,7 +40,7 @@ struct Cli {
     /// Database file path (overrides config)
     #[arg(long)]
     db_path: Option<PathBuf>,
-    
+
     /// Force schema update even if unchanged
     #[arg(long, global = true)]
     force_schema_update: bool,
@@ -686,7 +691,7 @@ async fn main() -> Result<()> {
                         if *discord {
                             #[cfg(feature = "discord")]
                             {
-                                agent_ops::run_discord_bot_with_group(
+                                discord::run_discord_bot_with_group(
                                     group_name,
                                     manager,
                                     model.clone(),
@@ -703,7 +708,7 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         } else if has_bluesky_config {
-                            agent_ops::chat_with_group_and_jetstream(
+                            chat::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
                                 model.clone(),
@@ -712,7 +717,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
+                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -721,7 +726,7 @@ async fn main() -> Result<()> {
                         if *discord {
                             #[cfg(feature = "discord")]
                             {
-                                agent_ops::run_discord_bot_with_group(
+                                discord::run_discord_bot_with_group(
                                     group_name,
                                     manager,
                                     model.clone(),
@@ -738,7 +743,7 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         } else if has_bluesky_config {
-                            agent_ops::chat_with_group_and_jetstream(
+                            chat::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
                                 model.clone(),
@@ -747,7 +752,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
+                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -756,7 +761,7 @@ async fn main() -> Result<()> {
                         if *discord {
                             #[cfg(feature = "discord")]
                             {
-                                agent_ops::run_discord_bot_with_group(
+                                discord::run_discord_bot_with_group(
                                     group_name,
                                     manager,
                                     model.clone(),
@@ -773,7 +778,7 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         } else if has_bluesky_config {
-                            agent_ops::chat_with_group_and_jetstream(
+                            chat::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
                                 model.clone(),
@@ -782,7 +787,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
+                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -791,7 +796,7 @@ async fn main() -> Result<()> {
                         if *discord {
                             #[cfg(feature = "discord")]
                             {
-                                agent_ops::run_discord_bot_with_group(
+                                discord::run_discord_bot_with_group(
                                     group_name,
                                     manager,
                                     model.clone(),
@@ -808,7 +813,7 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         } else if has_bluesky_config {
-                            agent_ops::chat_with_group_and_jetstream(
+                            chat::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
                                 model.clone(),
@@ -817,7 +822,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
+                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -826,7 +831,7 @@ async fn main() -> Result<()> {
                         if *discord {
                             #[cfg(feature = "discord")]
                             {
-                                agent_ops::run_discord_bot_with_group(
+                                discord::run_discord_bot_with_group(
                                     group_name,
                                     manager,
                                     model.clone(),
@@ -843,7 +848,7 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         } else if has_bluesky_config {
-                            agent_ops::chat_with_group_and_jetstream(
+                            chat::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
                                 model.clone(),
@@ -852,17 +857,17 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
+                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
                     CoordinationPattern::Sleeptime { .. } => {
                         let manager = SleeptimeManager;
-                        
+
                         // Start background monitoring if this is the Context Sync group
                         if is_context_sync {
                             output.success("Starting Context Sync background monitoring...");
-                            
+
                             // Create agents with membership for the monitoring task
                             let agents_with_membership: Vec<_> = agents
                                 .iter()
@@ -874,7 +879,7 @@ async fn main() -> Result<()> {
                                     }
                                 })
                                 .collect();
-                            
+
                             // Start the background monitoring task
                             let monitoring_handle = background_tasks::start_context_sync_monitoring(
                                 group.clone(),
@@ -882,22 +887,22 @@ async fn main() -> Result<()> {
                                 manager.clone(),
                                 output.clone(),
                             ).await?;
-                            
+
                             output.info(
                                 "Background task started",
                                 "Context sync will run periodically in the background"
                             );
-                            
+
                             // Don't enter interactive chat for Context Sync, just let it run
                             output.status("Context Sync group is now running in background mode");
                             output.status("Press Ctrl+C to stop monitoring");
-                            
+
                             // Wait for the monitoring task to complete (or be cancelled)
                             monitoring_handle.await.into_diagnostic()?;
                         } else if *discord {
                             #[cfg(feature = "discord")]
                             {
-                                agent_ops::run_discord_bot_with_group(
+                                discord::run_discord_bot_with_group(
                                     group_name,
                                     manager,
                                     model.clone(),
@@ -914,7 +919,7 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         } else if has_bluesky_config {
-                            agent_ops::chat_with_group_and_jetstream(
+                            chat::chat_with_group_and_jetstream(
                                 group_name,
                                 manager,
                                 model.clone(),
@@ -923,7 +928,7 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            agent_ops::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
+                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
                                 .await?;
                         }
                     }
@@ -955,7 +960,7 @@ async fn main() -> Result<()> {
                     heartbeat_sender,
                 )
                 .await?;
-                agent_ops::chat_with_agent(agent, heartbeat_receiver).await?;
+                chat::chat_with_agent(agent, heartbeat_receiver).await?;
             }
         }
         Commands::Agent { cmd } => match cmd {
@@ -994,9 +999,12 @@ async fn main() -> Result<()> {
                 rule_type,
             } => commands::agent::remove_rule(agent, tool, rule_type.as_deref()).await?,
         },
-        Commands::Db { cmd } => match cmd {
-            DbCommands::Stats => commands::db::stats(&config).await?,
-            DbCommands::Query { sql } => commands::db::query(sql).await?,
+        Commands::Db { cmd } => {
+            let output = crate::output::Output::new();
+            match cmd {
+                DbCommands::Stats => commands::db::stats(&config, &output).await?,
+                DbCommands::Query { sql } => commands::db::query(sql, &output).await?
+            }
         },
         Commands::Debug { cmd } => match cmd {
             DebugCommands::SearchArchival {
@@ -1050,9 +1058,12 @@ async fn main() -> Result<()> {
                     .await?;
             }
         },
-        Commands::Config { cmd } => match cmd {
-            ConfigCommands::Show => commands::config::show(&config).await?,
-            ConfigCommands::Save { path } => commands::config::save(&config, path).await?,
+        Commands::Config { cmd } => {
+            let output = crate::output::Output::new();
+            match cmd {
+                ConfigCommands::Show => commands::config::show(&config, &output).await?,
+                ConfigCommands::Save { path } => commands::config::save(&config, path, &output).await?,
+            }
         },
         Commands::Group { cmd } => match cmd {
             GroupCommands::List => commands::group::list(&config).await?,

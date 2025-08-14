@@ -6,23 +6,22 @@ use std::path::PathBuf;
 use crate::output::Output;
 
 /// Show current configuration
-pub async fn show(config: &PatternConfig) -> Result<()> {
-    let output = Output::new();
-
+pub async fn show(config: &PatternConfig, output: &Output) -> Result<()> {
     output.section("Current Configuration");
-    println!();
+    output.print("");
 
     // Display the current config in TOML format
     let toml_str = toml::to_string_pretty(config).into_diagnostic()?;
     // Print the TOML directly without indentation since it's already formatted
-    print!("{}", toml_str);
+    for line in toml_str.lines() {
+        output.print(line);
+    }
 
     Ok(())
 }
 
 /// Save current configuration to file
-pub async fn save(config: &PatternConfig, path: &PathBuf) -> Result<()> {
-    let output = Output::new();
+pub async fn save(config: &PatternConfig, path: &PathBuf, output: &Output) -> Result<()> {
 
     output.info(
         "💾",
@@ -33,7 +32,7 @@ pub async fn save(config: &PatternConfig, path: &PathBuf) -> Result<()> {
     config::save_config(config, path).await?;
 
     output.success("Configuration saved successfully!");
-    println!();
+    output.print("");
     output.status("To use this configuration, run:");
     output.status(&format!(
         "{} --config {}",

@@ -510,10 +510,9 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-        assert_eq!(
-            result.message.as_ref().unwrap(),
-            "Appended to recall memory 'user_preferences'"
-        );
+        // Message format has changed to include more details
+        assert!(result.message.as_ref().unwrap().contains("Successfully appended"));
+        assert!(result.message.as_ref().unwrap().contains("user_preferences"));
 
         // Verify the append
         {

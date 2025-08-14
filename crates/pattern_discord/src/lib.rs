@@ -11,6 +11,7 @@ pub mod endpoints;
 pub mod error;
 pub mod helpers;
 pub mod routing;
+pub mod slash_commands;
 
 pub use bot::{DiscordBot, DiscordBotConfig};
 pub use commands::{Command, CommandHandler, SlashCommand};

@@ -1,8 +1,10 @@
-//! Pattern MCP - Model Context Protocol Server
+//! Pattern MCP - Model Context Protocol Client and Server
 //!
-//! This crate provides the MCP server implementation that exposes
-//! Pattern's agent capabilities through the Model Context Protocol.
+//! This crate provides both MCP client and server implementations:
+//! - Client: Connect to external MCP servers and consume their tools
+//! - Server: Expose Pattern's agent capabilities through MCP
 
+pub mod client;
 pub mod error;
 pub mod registry;
 pub mod server;
@@ -13,10 +15,20 @@ pub use registry::{ToolRegistry, ToolRegistryBuilder};
 pub use server::{McpServer, McpServerBuilder};
 pub use transport::{Transport, TransportType};
 
+// Client exports
+pub use client::{
+    AuthConfig, McpClientService, McpServerConfig, McpToolWrapper,
+    ToolRequest, ToolResponse, TransportConfig,
+};
+
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
+        // Server types
         McpServer, McpServerBuilder, ToolRegistry, ToolRegistryBuilder, Transport, TransportType,
+        // Client types
+        AuthConfig, McpClientService, McpServerConfig, McpToolWrapper, TransportConfig,
+        // Common types
         error::{McpError, Result},
     };
 }

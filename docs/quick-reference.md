@@ -1,292 +1,302 @@
 # Pattern Quick Reference Guide
 
-This guide provides a quick overview of Pattern's current state and key implementation details.
+Quick overview of Pattern's current implementation and key patterns.
 
 ## Project Structure
 
 ```
 pattern/
 ├── crates/
-│   ├── pattern_api/      # API types
-│   ├── pattern_cli/      # Command-line testing tool
-│   ├── pattern_core/     # Agent framework, memory, tools, coordination
-│   ├── pattern_nd/       # Tools and agent personalities specific to the neurodivergent support constellation
-│   ├── pattern_mcp/      # MCP server implementation
-│   ├── pattern_macros/   # Proc macro crate providing some helpers for SurrealDB
-│   ├── pattern_discord/  # Discord bot integration
-│   ├── pattern_main/     # Main orchestrator binary (mostly legacy as of yet)
-│   └── pattern_server/   # Backend server binary
-├── docs/                 # Architecture and integration guides
+│   ├── pattern_api/      # Shared API types
+│   ├── pattern_cli/      # Command-line interface
+│   ├── pattern_core/     # Core framework
+│   ├── pattern_nd/       # ADHD-specific tools
+│   ├── pattern_mcp/      # MCP server (stub)
+│   ├── pattern_macros/   # Entity derive macros
+│   ├── pattern_discord/  # Discord bot
+│   ├── pattern_server/   # Backend API (in dev)
+│   └── pattern_main/     # Main orchestrator
+├── docs/                 # Documentation
 └── pattern.toml          # Configuration
 ```
 
+## CLI Commands
 
-## Agent Architecture
+```bash
+# Single agent chat
+pattern-cli chat
 
-### DatabaseAgent
+# Group chat
+pattern-cli chat --group main
 
-```rust
-// Generic over Connection, ModelProvider, and EmbeddingProvider
-let agent = DatabaseAgent::<C, M, E>::new(
-    agent_id,
-    db,
-    model_provider,
-    "model-name",
-    embedding_provider,
-    tool_registry,
-).await?;
+# Discord mode
+pattern-cli chat --discord
+pattern-cli chat --discord --group main
+
+# Agent management
+pattern-cli agent create <name> --type assistant
+pattern-cli agent list
+pattern-cli agent status <name>
+
+# Group management
+pattern-cli group create <name> --description "desc" --pattern round-robin
+pattern-cli group add-member <group> <agent> --role member
+pattern-cli group list
+pattern-cli group status <name>
+
+# Memory inspection
+pattern-cli memory list <agent-name>
+pattern-cli memory show <agent-name> <block-label>
 ```
 
-### AgentContext Structure
+## Agent Creation
 
 ```rust
-AgentContext {
-    handle: AgentHandle {        // Cheap, cloneable
-        agent_id: AgentId,
-        memory: Memory,          // Arc<DashMap> internally
-    },
-    tools: ToolRegistry,         // DashMap internally
-    history: Arc<RwLock<MessageHistory>>,  // Large data
-    metadata: Arc<RwLock<AgentContextMetadata>>,  // Stats
-}
+use pattern_core::agent::DatabaseAgent;
+
+let agent = DatabaseAgent::new(
+    agent_id,
+    user_id,
+    agent_type,
+    name,
+    system_prompt,
+    memory,
+    db.clone(),
+    model_provider,
+    tool_registry,
+    embedding_provider,
+    heartbeat_sender,
+).await?;
 ```
 
 ## Built-in Tools
 
-### Registration
-
-```rust
-// Automatic registration
-let builtin = BuiltinTools::default_for_agent(context.handle());
-builtin.register_all(&context.tools);
-
-// Custom tools
-let builtin = BuiltinTools::builder()
-    .with_memory_tool(CustomMemoryTool::new())
-    .build_for_agent(handle);
+### context (Memory Operations)
+```json
+{
+  "operation": "append",
+  "label": "human",
+  "value": "User prefers dark mode"
+}
 ```
+Operations: `append`, `replace`, `archive`, `load_from_archival`, `swap`
 
-### Available Tools
+### recall (Archival Memory)
+```json
+{
+  "operation": "insert",
+  "label": "meeting_notes_2024",
+  "value": "Discussed project timeline"
+}
+```
+Operations: `insert`, `append`, `read`, `delete`
 
-1. **update_memory**
-   ```json
-   {
-     "label": "human",
-     "value": "User's name is Alice",
-     "description": "User information"
-   }
-   ```
+### search (Unified Search)
+```json
+{
+  "domain": "archival_memory",
+  "query": "project timeline",
+  "limit": 10
+}
+```
+Domains: `archival_memory`, `conversations`, `all`
 
-2. **send_message**
-   ```json
-   {
-     "target": { "type": "user" },
-     "content": "Hello!",
-     "metadata": {}
-   }
-   ```
-   - Has built-in usage rule: "the conversation will end when called"
+### send_message (Agent Communication)
+```json
+{
+  "target": {
+    "type": "agent",
+    "id": "agent-123"
+  },
+  "content": "Please review this"
+}
+```
+Target types: `user`, `agent`, `group`, `discord`, `bluesky`
 
 ## Memory System
 
 ```rust
-// Memory uses Arc<DashMap> internally for thread safety
+// Thread-safe with Arc<DashMap>
 let memory = Memory::with_owner(user_id);
-memory.create_block("persona", "I am a helpful assistant")?;
-memory.update_block_value("persona", "I am Pattern")?;
 
-// Clone is cheap - shares underlying storage
-let memory_clone = memory.clone();
+// Core memory blocks
+memory.create_block("persona", "I am Pattern")?;
+memory.create_block("human", "User info here")?;
+
+// Update operations
+memory.update_block_value("human", "New info")?;
+memory.append_to_block("human", "\nAdditional info")?;
+
+// Archival operations (via recall tool)
+agent.execute_tool("recall", json!({
+    "operation": "insert",
+    "label": "notes_2024",
+    "value": "Important information"
+})).await?;
 ```
 
-## Tool Development
+## Data Sources
 
-### Type-Safe Tools
+```rust
+use pattern_core::data_source::{
+    DataIngestionCoordinator,
+    FileDataSource,
+    FileStorageMode
+};
 
+// Create coordinator
+let coordinator = DataIngestionCoordinator::new(
+    message_router,
+    agent.embedding_provider(),
+)?;
+
+// Add file source
+let source = FileDataSource::new(
+    "docs",
+    PathBuf::from("./docs"),
+    FileStorageMode::Indexed,
+    Some(embedding_provider),
+)?;
+coordinator.add_source("docs", source).await?;
+
+// Add Bluesky source
+let bsky_source = BlueskyFirehoseSource::new(
+    jetstream_url,
+    filter,
+    agent_did,
+)?;
+coordinator.add_source("bluesky", bsky_source).await?;
+```
+
+## Group Coordination Patterns
+
+```rust
+use pattern_core::coordination::{
+    CoordinationPattern,
+    GroupManager,
+    RoundRobinManager,
+    DynamicManager
+};
+
+// Round-robin distribution
+let manager = RoundRobinManager::new(agents);
+
+// Dynamic routing
+let manager = DynamicManager::new(
+    agents,
+    DynamicSelector::Capability("task_breakdown"),
+);
+
+// Pipeline processing
+let manager = PipelineManager::new(agents);
+
+// Send to group
+let response = manager.send_message(
+    message,
+    Some(metadata),
+).await?;
+```
+
+## Database Patterns
+
+```rust
+// ALWAYS use parameter binding
+let result = db.query(
+    "SELECT * FROM agent WHERE user_id = $user_id"
+).bind(("user_id", user_id)).await?;
+
+// Entity with RELATE edges
+#[derive(Entity)]
+#[entity(entity_type = "user")]
+struct User {
+    pub id: UserId,
+    #[entity(relation = "owns")]
+    pub agents: Vec<Agent>,
+}
+
+// Create RELATE edge
+db.query(
+    "RELATE $user->owns->$agent"
+).bind(("user", user_id))
+ .bind(("agent", agent_id))
+ .await?;
+```
+
+## Error Handling
+
+```rust
+use pattern_core::error::CoreError;
+
+// Specific error variants with context
+return Err(CoreError::tool_not_found(
+    name,
+    available_tools
+));
+
+return Err(CoreError::memory_not_found(
+    &agent_id,
+    &block_name,
+    available_blocks
+));
+```
+
+## Environment Variables
+
+```bash
+# Database
+DATABASE_URL=ws://localhost:8000
+
+# Discord
+DISCORD_TOKEN=your-bot-token
+DISCORD_BATCH_DELAY_MS=1500
+
+# Bluesky
+BLUESKY_IDENTIFIER=your.handle.bsky.social
+BLUESKY_PASSWORD=app-password
+JETSTREAM_URL=wss://jetstream.atproto.tools
+
+# Model providers
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GOOGLE_API_KEY=...
+```
+
+## Common Patterns
+
+### Creating Custom Tool
 ```rust
 #[derive(Debug, Clone)]
 struct MyTool;
 
 #[async_trait]
 impl AiTool for MyTool {
-    type Input = MyInput;   // Must impl JsonSchema + Deserialize
-    type Output = MyOutput; // Must impl JsonSchema + Serialize
+    type Input = MyInput;
+    type Output = MyOutput;
 
     fn name(&self) -> &str { "my_tool" }
     fn description(&self) -> &str { "Does something" }
-
-    fn usage_rule(&self) -> Option<&'static str> {
-        Some("Use when user needs something done")
-    }
-
+    
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         // Implementation
     }
 }
+
+// Register
+tool_registry.register(Box::new(MyTool));
 ```
 
-### Tool Rules
-
+### Anti-looping Protection
 ```rust
-// Create agent with tool rules
-let agent = DatabaseAgent::new(
-    // ... other params ...
-    tool_rules: vec![
-        ToolRule {
-            tool_name: "send_message".to_string(),
-            rule_type: ToolRuleType::ExitLoop,
-            conditions: vec![],
-            priority: 8,
-        },
-    ],
-);
+// Router has built-in cooldown
+router.set_cooldown_duration(Duration::from_secs(30));
+
+// Messages between agents throttled automatically
 ```
 
-Available rule types:
-- `StartConstraint` - Tool must run at conversation start
-- `MaxCalls(u32)` - Limit tool usage per conversation
-- `ExitLoop` - Tool ends the conversation
-- `ContinueLoop` - Tool skips heartbeat checks
-- `Cooldown(Duration)` - Minimum time between calls
-- `RequiresPreceding` - Tool needs prerequisites
+## Performance Notes
 
-### MCP Schema Compatibility
-
-```rust
-// Schemas are automatically inlined (no $ref)
-let schema = tool.parameters_schema();
-assert!(!schema.to_string().contains("$ref"));
-```
-
-## Database Operations
-
-### SurrealDB Patterns
-
-```rust
-// Create with typed ID
-let record: DbUser = db
-    .create((UserIdType::PREFIX, id.uuid().to_string()))
-    .content(data)
-    .await?
-    .unwrap_surreal_value()?;  // Helper for nested responses
-
-// Query with proper escaping
-let query = format!(
-    "SELECT * FROM {} WHERE owner_id = {}:`{}`",
-    MemoryIdType::PREFIX,
-    UserIdType::PREFIX,
-    user_id.uuid()
-);
-
-// Cross-agent memory sharing
-agent.share_memory_with(
-    "task_insights",
-    other_agent_id,
-    MemoryAccessLevel::Read,
-).await?;
-```
-
-## Testing
-
-### Mock Providers
-
-```rust
-// For testing agents
-let model = Arc::new(RwLock::new(MockModelProvider {
-    response: "Test response".to_string(),
-}));
-
-let embeddings = Arc::new(MockEmbeddingProvider::default());
-
-let agent = DatabaseAgent::new(
-    agent_id,
-    db,
-    model,
-    "mock-model",
-    Some(embeddings),
-    tools,
-).await?;
-```
-
-## Common Patterns
-
-### Error Handling
-
-```rust
-// Use specific error types with context
-CoreError::memory_not_found(&agent_id, &label, available_blocks)
-CoreError::tool_not_found(&name, available_tools)
-```
-
-### Feature Flags
-
-```toml
-[dependencies]
-pattern-core = { features = ["embed-candle", "embed-cloud"] }
-```
-
-Available features:
-- `embed-candle` - Local embeddings with Jina models
-- `embed-cloud` - OpenAI/Cohere embeddings
-- `embed-ollama` - Ollama embeddings (stub)
-
-
-
-## Key Commands
-
-```bash
-just               # List all commands
-just pre-commit-all # Run all checks before committing
-just test          # Run all tests
-just fmt           # Format code
-just watch         # Auto-recompile on changes
-```
-
-### Tool Rules CLI
-
-```bash
-# Add tool rules to agents
-pattern-cli agent add-rule MyAgent send_message exit-loop
-pattern-cli agent add-rule MyAgent validate requires-preceding -c load_data
-pattern-cli agent add-rule MyAgent api_call max-calls -p 5
-
-# List and manage rules
-pattern-cli agent list-rules MyAgent
-pattern-cli agent remove-rule MyAgent send_message exit-loop
-```
-
-## Configuration
-
-### pattern.toml
-
-```toml
-[database]
-path = "data/surreal.db"  # SurrealDB embedded storage
-
-[mcp]
-transport = "sse"  # or "stdio", "http"
-port = 8080
-
-[discord]
-token = "YOUR_TOKEN"
-prefix = "!"
-
-[models]
-default = "claude-3-7-sonnet-latest"
-
-[models.mapping] # need to re-add this with the new system
-routine = "claude-3-5-haiku-latest"
-interactive = "claude-3-7-sonnet-latest"
-
-[embedding]
-provider = "candle"  # or "openai", "cohere"
-model = "jinaai/jina-embeddings-v2-small-en"
-```
-
-## Debugging Tips
-
-1. **Check ID formats**: All IDs should be `prefix_uuid` format
-2. **Memory is thread-safe**: Can clone and share across threads
-3. **Tools must be Clone**: Required for registry storage
-4. **Use MockProviders**: For testing without API calls
-5. **Check feature flags**: Some functionality requires specific features
+- CompactString inlines ≤24 byte strings
+- DashMap shards for concurrent access
+- AgentHandle provides cheap cloning
+- Memory uses Arc internally
+- Database ops are non-blocking

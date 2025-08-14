@@ -164,6 +164,11 @@ impl Output {
         self.write_line(&format!("  {} {}", format!("{}:", key).dimmed(), value));
     }
 
+    /// Print a raw line (no formatting)
+    pub fn print(&self, content: &str) {
+        self.write_line(content);
+    }
+
     /// Print a prompt for user input
     #[allow(dead_code)]
     pub fn prompt(&self, prompt: &str) {
