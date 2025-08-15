@@ -1,9 +1,9 @@
+use crate::bot::DiscordBot;
 use serde_json::Value;
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, UserId as DiscordUserId};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use crate::bot::DiscordBot;
 
 use pattern_core::Result;
 use pattern_core::context::message_router::{MessageEndpoint, MessageOrigin};
@@ -33,7 +33,7 @@ impl DiscordEndpoint {
             default_dm_user: None,
         }
     }
-    
+
     /// Set the bot reference for context access
     pub fn with_bot(mut self, bot: Arc<DiscordBot>) -> Self {
         self.bot = Some(bot);
@@ -53,7 +53,10 @@ impl DiscordEndpoint {
 
         // If we have a guild context, we could search for channel by name
         // For now, we'll just log that we couldn't resolve it
-        debug!("Could not resolve channel name '{}' to ID - using numeric IDs only for now", channel_ref);
+        debug!(
+            "Could not resolve channel name '{}' to ID - using numeric IDs only for now",
+            channel_ref
+        );
         None
     }
 
@@ -90,7 +93,12 @@ impl DiscordEndpoint {
         let trimmed = text.trim();
 
         // Log what we're checking
-        debug!("Checking if '{}' (len {}, chars {}) is a reaction", trimmed, trimmed.len(), trimmed.chars().count());
+        debug!(
+            "Checking if '{}' (len {}, chars {}) is a reaction",
+            trimmed,
+            trimmed.len(),
+            trimmed.chars().count()
+        );
 
         // Check for standard Discord emoji format :name:
         if trimmed.starts_with(':') && trimmed.ends_with(':') && trimmed.len() > 2 {
@@ -114,7 +122,8 @@ impl DiscordEndpoint {
                    (ch >= '\u{2700}' && ch <= '\u{27BF}') ||   // Dingbats
                    (ch >= '\u{1F600}' && ch <= '\u{1F64F}') ||  // Emoticons
                    (ch >= '\u{1F900}' && ch <= '\u{1F9FF}') ||  // Supplemental symbols
-                   (ch >= '\u{2000}' && ch <= '\u{206F}')       // General punctuation (includes some emoji)
+                   (ch >= '\u{2000}' && ch <= '\u{206F}')
+                // General punctuation (includes some emoji)
                 {
                     debug!("Detected unicode emoji");
                     return true;
@@ -133,9 +142,9 @@ impl DiscordEndpoint {
         // Check for custom emoji format :name:id or <:name:id>
         if trimmed.starts_with("<:") && trimmed.ends_with('>') {
             // Parse custom emoji <:name:id>
-            let inner = &trimmed[2..trimmed.len()-1];
+            let inner = &trimmed[2..trimmed.len() - 1];
             if let Some(colon_pos) = inner.rfind(':') {
-                if let Ok(id) = inner[colon_pos+1..].parse::<u64>() {
+                if let Ok(id) = inner[colon_pos + 1..].parse::<u64>() {
                     let name = inner[..colon_pos].to_string();
                     return serenity::model::channel::ReactionType::Custom {
                         animated: false,
@@ -148,9 +157,9 @@ impl DiscordEndpoint {
 
         // Check for animated custom emoji <a:name:id>
         if trimmed.starts_with("<a:") && trimmed.ends_with('>') {
-            let inner = &trimmed[3..trimmed.len()-1];
+            let inner = &trimmed[3..trimmed.len() - 1];
             if let Some(colon_pos) = inner.rfind(':') {
-                if let Ok(id) = inner[colon_pos+1..].parse::<u64>() {
+                if let Ok(id) = inner[colon_pos + 1..].parse::<u64>() {
                     let name = inner[..colon_pos].to_string();
                     return serenity::model::channel::ReactionType::Custom {
                         animated: true,
@@ -174,12 +183,19 @@ impl DiscordEndpoint {
 
     /// Send a message to a specific Discord channel
     async fn send_to_channel(&self, channel_id: ChannelId, content: String) -> Result<()> {
-        info!("send_to_channel called with content: '{}', is_reaction: {}", content, Self::is_discord_reaction(&content));
+        info!(
+            "send_to_channel called with content: '{}', is_reaction: {}",
+            content,
+            Self::is_discord_reaction(&content)
+        );
 
         // Check if this is just an emoji - if so, try to add it as a reaction to the last message
         if Self::is_discord_reaction(&content) {
             // Try to get the last message in the channel (excluding our own)
-            match channel_id.messages(&self.http, serenity::builder::GetMessages::new().limit(10)).await {
+            match channel_id
+                .messages(&self.http, serenity::builder::GetMessages::new().limit(10))
+                .await
+            {
                 Ok(messages) => {
                     // Find the first message that's not from us
                     if let Ok(current_user) = self.http.get_current_user().await {
@@ -189,29 +205,44 @@ impl DiscordEndpoint {
                                 let mut reaction_type = Self::parse_discord_emoji(&content);
 
                                 // If it's :name: format, try to resolve it to a custom emoji
-                                if content.trim().starts_with(':') && content.trim().ends_with(':') {
-                                    let emoji_name = content.trim().trim_start_matches(':').trim_end_matches(':');
+                                if content.trim().starts_with(':') && content.trim().ends_with(':')
+                                {
+                                    let emoji_name = content
+                                        .trim()
+                                        .trim_start_matches(':')
+                                        .trim_end_matches(':');
 
                                     // Get guild ID from the message
                                     if let Some(guild_id) = msg.guild_id {
                                         // Try to get guild emojis
                                         if let Ok(emojis) = self.http.get_emojis(guild_id).await {
                                             // Find emoji by name
-                                            if let Some(emoji) = emojis.iter().find(|e| e.name == emoji_name) {
-                                                info!("Found custom emoji {} with ID {}", emoji_name, emoji.id);
+                                            if let Some(emoji) =
+                                                emojis.iter().find(|e| e.name == emoji_name)
+                                            {
+                                                info!(
+                                                    "Found custom emoji {} with ID {}",
+                                                    emoji_name, emoji.id
+                                                );
                                                 reaction_type = serenity::model::channel::ReactionType::Custom {
                                                     animated: emoji.animated,
                                                     id: emoji.id,
                                                     name: Some(emoji.name.clone()),
                                                 };
                                             } else {
-                                                debug!("Custom emoji '{}' not found in guild", emoji_name);
+                                                debug!(
+                                                    "Custom emoji '{}' not found in guild",
+                                                    emoji_name
+                                                );
                                             }
                                         }
                                     }
                                 }
 
-                                info!("Adding reaction {:?} to message {} in channel {}", reaction_type, msg.id, channel_id);
+                                info!(
+                                    "Adding reaction {:?} to message {} in channel {}",
+                                    reaction_type, msg.id, channel_id
+                                );
 
                                 // Try to add the reaction
                                 match msg.react(&self.http, reaction_type).await {
@@ -294,7 +325,8 @@ impl MessageEndpoint for DiscordEndpoint {
         // Check metadata for routing information
         if let Some(ref meta) = metadata {
             // Check if we should reply to a specific message (for delayed responses)
-            let reply_to_id = meta.get("discord_message_id")
+            let reply_to_id = meta
+                .get("discord_message_id")
                 .or_else(|| meta.get("custom").and_then(|v| v.get("discord_message_id")))
                 .and_then(|v| v.as_u64());
 
@@ -306,11 +338,12 @@ impl MessageEndpoint for DiscordEndpoint {
                 if let Some(msg_id) = reply_to_id {
                     // Check if this is a delayed response
                     // First check metadata (for batched messages)
-                    let mut should_reply = meta.get("response_delay_ms")
+                    let mut should_reply = meta
+                        .get("response_delay_ms")
                         .and_then(|v| v.as_u64())
                         .map(|delay| delay > 30000)
                         .unwrap_or(false);
-                    
+
                     // If not in metadata, check bot's current processing time
                     if !should_reply {
                         if let Some(ref bot) = self.bot {
@@ -318,7 +351,10 @@ impl MessageEndpoint for DiscordEndpoint {
                                 let elapsed = duration.as_millis() as u64;
                                 should_reply = elapsed > 30000;
                                 if should_reply {
-                                    debug!("Using reply threading: message processing took {}ms", elapsed);
+                                    debug!(
+                                        "Using reply threading: message processing took {}ms",
+                                        elapsed
+                                    );
                                 }
                             }
                         }
@@ -326,9 +362,16 @@ impl MessageEndpoint for DiscordEndpoint {
 
                     if should_reply {
                         // Use reply for delayed responses
-                        if let Ok(original_msg) = self.http.get_message(channel, serenity::model::id::MessageId::new(msg_id)).await {
+                        if let Ok(original_msg) = self
+                            .http
+                            .get_message(channel, serenity::model::id::MessageId::new(msg_id))
+                            .await
+                        {
                             if let Err(e) = original_msg.reply(&self.http, &content).await {
-                                warn!("Failed to reply to message: {}, falling back to channel send", e);
+                                warn!(
+                                    "Failed to reply to message: {}, falling back to channel send",
+                                    e
+                                );
                                 self.send_to_channel(channel, content).await?;
                             } else {
                                 info!("Replied to message {} in channel {}", msg_id, channel_id);
@@ -357,7 +400,8 @@ impl MessageEndpoint for DiscordEndpoint {
 
             // Then check custom metadata (from incoming discord message)
             if let Some(custom) = meta.get("custom").and_then(|v| v.as_object()) {
-                if let Some(channel_id) = custom.get("discord_channel_id").and_then(|v| v.as_u64()) {
+                if let Some(channel_id) = custom.get("discord_channel_id").and_then(|v| v.as_u64())
+                {
                     self.send_to_channel(ChannelId::new(channel_id), content)
                         .await?;
                     return Ok(Some(format!("channel:{}", channel_id)));

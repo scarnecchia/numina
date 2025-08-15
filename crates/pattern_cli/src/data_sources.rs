@@ -4,10 +4,7 @@
 
 use pattern_core::{
     config::PatternConfig,
-    db::{
-        client::DB,
-        ops::atproto::get_user_atproto_identities,
-    },
+    db::{client::DB, ops::atproto::get_user_atproto_identities},
 };
 
 /// Get Bluesky credentials from configuration

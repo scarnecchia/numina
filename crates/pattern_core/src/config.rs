@@ -84,9 +84,17 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 
+    /// Path to file containing system prompt (alternative to inline)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt_path: Option<PathBuf>,
+
     /// Agent persona (creates a core memory block)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
+
+    /// Path to file containing persona (alternative to inline)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_path: Option<PathBuf>,
 
     /// Additional instructions
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,6 +308,54 @@ impl AgentConfig {
 
         // Resolve paths relative to the config file's directory
         let base_dir = path.parent().unwrap_or(Path::new("."));
+
+        // Load system prompt from system_prompt_path if specified
+        if let Some(ref system_prompt_path) = config.system_prompt_path {
+            let resolved_path = resolve_path(base_dir, system_prompt_path);
+            match tokio::fs::read_to_string(&resolved_path).await {
+                Ok(system_prompt_content) => {
+                    config.system_prompt = Some(system_prompt_content.trim().to_string());
+                    // Clear system_prompt_path since we've loaded it inline
+                    config.system_prompt_path = None;
+                }
+                Err(e) => {
+                    return Err(crate::CoreError::ConfigurationError {
+                        field: "system_prompt_path".to_string(),
+                        config_path: path.display().to_string(),
+                        expected: format!("readable file at {}", resolved_path.display()),
+                        cause: crate::error::ConfigError::Io(e.to_string()),
+                    });
+                }
+            }
+        }
+
+        // Load persona from persona_path if specified
+        if let Some(ref persona_path) = config.persona_path {
+            let resolved_path = resolve_path(base_dir, persona_path);
+            tracing::info!("Loading persona from path: {}", resolved_path.display());
+            match tokio::fs::read_to_string(&resolved_path).await {
+                Ok(persona_content) => {
+                    tracing::info!("Loaded persona content: {} chars", persona_content.len());
+                    config.persona = Some(persona_content.trim().to_string());
+                    // Clear persona_path since we've loaded it inline
+                    config.persona_path = None;
+                    tracing::info!("Persona loaded and persona_path cleared");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load persona from {}: {}",
+                        resolved_path.display(),
+                        e
+                    );
+                    return Err(crate::CoreError::ConfigurationError {
+                        field: "persona_path".to_string(),
+                        config_path: path.display().to_string(),
+                        expected: format!("readable file at {}", resolved_path.display()),
+                        cause: crate::error::ConfigError::Io(e.to_string()),
+                    });
+                }
+            }
+        }
 
         // Resolve memory block content_paths
         for (_, memory_block) in config.memory.iter_mut() {
@@ -594,7 +650,9 @@ impl Default for AgentConfig {
             id: None,
             name: "Assistant".to_string(),
             system_prompt: None,
+            system_prompt_path: None,
             persona: None,
+            persona_path: None,
             instructions: None,
             memory: HashMap::new(),
             bluesky_handle: None,
@@ -773,7 +831,9 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
         id: overlay.id.or(base.id),
         name: overlay.name.unwrap_or(base.name),
         system_prompt: overlay.system_prompt.or(base.system_prompt),
+        system_prompt_path: None, // Not present in PartialAgentConfig, so always None in merge
         persona: overlay.persona.or(base.persona),
+        persona_path: None, // Not present in PartialAgentConfig, so always None in merge
         instructions: overlay.instructions.or(base.instructions),
         memory: if let Some(overlay_memory) = overlay.memory {
             // Merge memory blocks, overlay takes precedence

@@ -3,7 +3,7 @@
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-use super::{ToolRequest, ToolResponse, ClientTransport};
+use super::{ClientTransport, ToolRequest, ToolResponse};
 use crate::Result;
 use pattern_core::tool::DynamicTool;
 
@@ -59,18 +59,29 @@ impl McpClientService {
 
     /// Initialize connection to the MCP server
     pub async fn initialize(&mut self) -> Result<()> {
-        info!("MCP client service connecting to: {}", self.server_config.name);
+        info!(
+            "MCP client service connecting to: {}",
+            self.server_config.name
+        );
 
         match ClientTransport::stdio(
             self.server_config.command.clone(),
-            self.server_config.args.clone()
-        ).await {
+            self.server_config.args.clone(),
+        )
+        .await
+        {
             Ok(transport) => {
-                info!("Successfully connected to MCP server: {}", self.server_config.name);
+                info!(
+                    "Successfully connected to MCP server: {}",
+                    self.server_config.name
+                );
                 self.connection = Some(transport);
             }
             Err(e) => {
-                warn!("Failed to connect to MCP server {}: {}", self.server_config.name, e);
+                warn!(
+                    "Failed to connect to MCP server {}: {}",
+                    self.server_config.name, e
+                );
                 return Err(e);
             }
         }
@@ -87,11 +98,18 @@ impl McpClientService {
 
         // Use persistent connection to discover tools
         if let Some(transport) = &self.connection {
-            info!("Discovering tools from connected MCP server: {}", self.server_config.name);
+            info!(
+                "Discovering tools from connected MCP server: {}",
+                self.server_config.name
+            );
 
             match ToolDiscovery::discover_tools(transport.peer()).await {
                 Ok(discovered_tools) => {
-                    info!("Discovered {} tools from {}", discovered_tools.len(), self.server_config.name);
+                    info!(
+                        "Discovered {} tools from {}",
+                        discovered_tools.len(),
+                        self.server_config.name
+                    );
 
                     for tool_info in discovered_tools {
                         let tool_wrapper = McpToolWrapper::new(
@@ -106,7 +124,10 @@ impl McpClientService {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to discover tools from {}: {}", self.server_config.name, e);
+                    warn!(
+                        "Failed to discover tools from {}: {}",
+                        self.server_config.name, e
+                    );
                 }
             }
         }
@@ -161,7 +182,10 @@ impl McpClientService {
     /// Run the service, processing tool requests
     pub async fn run(mut self) -> tokio::task::JoinHandle<()> {
         let is_connected = self.connection.is_some();
-        info!("Starting MCP client service with connection: {}", is_connected);
+        info!(
+            "Starting MCP client service with connection: {}",
+            is_connected
+        );
 
         tokio::spawn(async move {
             while let Some(request) = self.request_rx.recv().await {
@@ -190,15 +214,12 @@ impl McpClientService {
                             "echoed": text,
                             "original_params": request.params,
                             "_mock": true
-                        })
+                        }),
                     )
                 } else {
-                    ToolResponse::error(
-                        request.id,
-                        "Missing required parameter 'text'".to_string()
-                    )
+                    ToolResponse::error(request.id, "Missing required parameter 'text'".to_string())
                 }
-            },
+            }
             "current_time" => {
                 let now = chrono::Utc::now();
                 ToolResponse::success(
@@ -208,15 +229,13 @@ impl McpClientService {
                         "unix_timestamp": now.timestamp(),
                         "formatted": now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                         "_mock": true
-                    })
-                )
-            },
-            _ => {
-                ToolResponse::error(
-                    request.id,
-                    format!("Tool '{}' not found (mock implementation)", request.tool)
+                    }),
                 )
             }
+            _ => ToolResponse::error(
+                request.id,
+                format!("Tool '{}' not found (mock implementation)", request.tool),
+            ),
         }
     }
 }
@@ -242,14 +261,15 @@ mod tests {
     async fn test_mock_tool_execution() {
         use pattern_core::tool::DynamicTool;
         use serde_json::json;
-        use tokio::time::{timeout, Duration};
+        use tokio::time::{Duration, timeout};
 
         let server_config = McpServerConfig::default();
         let service = McpClientService::new(server_config);
 
         // Get tools first
         let tools = service.get_tools().await.unwrap();
-        let echo_tool = tools.iter()
+        let echo_tool = tools
+            .iter()
             .find(|t| t.name() == "echo")
             .expect("Echo tool should exist");
 
@@ -260,9 +280,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Test with timeout to prevent hanging
-        let result = timeout(Duration::from_secs(5), echo_tool.execute(json!({
-            "text": "Hello, MCP!"
-        }))).await;
+        let result = timeout(
+            Duration::from_secs(5),
+            echo_tool.execute(json!({
+                "text": "Hello, MCP!"
+            })),
+        )
+        .await;
 
         // Check that we got a response within timeout
         assert!(result.is_ok(), "Tool execution timed out");

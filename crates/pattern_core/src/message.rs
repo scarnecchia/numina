@@ -1117,7 +1117,10 @@ impl Message {
                     .iter()
                     .filter_map(|part| match part {
                         ContentPart::Text(text) => Some(text.clone()),
-                        ContentPart::Image { content_type, source } => {
+                        ContentPart::Image {
+                            content_type,
+                            source,
+                        } => {
                             // Include image description for searchability
                             let source_info = match source {
                                 ImageSource::Url(url) => format!("[Image URL: {}]", url),
@@ -1134,7 +1137,12 @@ impl Message {
                 calls
                     .iter()
                     .map(|call| {
-                        format!("[Tool: {}] {}", call.fn_name, serde_json::to_string_pretty(&call.fn_arguments).unwrap_or_else(|_| "{}".to_string()))
+                        format!(
+                            "[Tool: {}] {}",
+                            call.fn_name,
+                            serde_json::to_string_pretty(&call.fn_arguments)
+                                .unwrap_or_else(|_| "{}".to_string())
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -1163,7 +1171,12 @@ impl Message {
                         }
                         ContentBlock::ToolUse { name, input, .. } => {
                             // Just dump the JSON
-                            Some(format!("[Tool: {}] {}", name, serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".to_string())))
+                            Some(format!(
+                                "[Tool: {}] {}",
+                                name,
+                                serde_json::to_string_pretty(input)
+                                    .unwrap_or_else(|_| "{}".to_string())
+                            ))
                         }
                         ContentBlock::ToolResult { content, .. } => {
                             Some(format!("[Tool Result] {}", content))

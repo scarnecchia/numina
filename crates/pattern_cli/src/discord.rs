@@ -4,6 +4,15 @@
 //! including endpoint configuration and bot lifecycle management.
 
 #[cfg(feature = "discord")]
+#[cfg(feature = "discord")]
+use crate::{
+    agent_ops::load_model_embedding_providers,
+    chat::{GroupSetup, run_group_chat_loop, setup_group},
+    data_sources::get_bluesky_credentials,
+    endpoints::CliEndpoint,
+    output::Output,
+};
+#[cfg(feature = "discord")]
 use miette::{IntoDiagnostic, Result};
 #[cfg(feature = "discord")]
 use owo_colors::OwoColorize;
@@ -11,26 +20,15 @@ use owo_colors::OwoColorize;
 use pattern_core::{
     Agent,
     config::PatternConfig,
+    coordination::groups::GroupManager,
     data_source::{BlueskyFilter, DataSourceBuilder},
     db::client::DB,
     tool::builtin::DataSourceTool,
-    coordination::groups::GroupManager,
 };
 #[cfg(feature = "discord")]
 use pattern_discord::{bot::DiscordBot, endpoints::DiscordEndpoint};
 #[cfg(feature = "discord")]
 use std::sync::Arc;
-#[cfg(feature = "discord")]
-use tokio::sync::RwLock;
-
-#[cfg(feature = "discord")]
-use crate::{
-    agent_ops::load_model_embedding_providers,
-    chat::{run_group_chat_loop, setup_group, GroupSetup},
-    data_sources::get_bluesky_credentials,
-    endpoints::CliEndpoint,
-    output::Output,
-};
 
 /// Set up Discord endpoint for an agent if configured
 #[cfg(feature = "discord")]
@@ -197,7 +195,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                     })
                     .clone();
 
-                let mut data_sources = DataSourceBuilder::new()
+                let data_sources = DataSourceBuilder::new()
                     .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
                     .build_with_target(
                         pattern_agent.id(),
@@ -241,7 +239,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                     .await;
 
                 // Register DataSourceTool on all agent tool registries
-                let data_source_tool = DataSourceTool::new(Arc::new(RwLock::new(data_sources)));
+                let data_source_tool = DataSourceTool::new(Arc::new(data_sources));
                 for tools in &agent_tools {
                     tools.register(data_source_tool.clone());
                 }
@@ -307,7 +305,8 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
         // Extract bot from Arc - we need to consume it for event_handler
         // But we already gave it to the endpoint, so we need to clone the Arc's contents
         let bot_for_handler = Arc::try_unwrap(bot.clone()).unwrap_or_else(|arc| (*arc).clone());
-        let mut client_builder = Client::builder(&discord_token, intents).event_handler(bot_for_handler);
+        let mut client_builder =
+            Client::builder(&discord_token, intents).event_handler(bot_for_handler);
 
         // Set application ID if provided
         if let Ok(app_id) = std::env::var("APP_ID") {

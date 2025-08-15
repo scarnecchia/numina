@@ -1,18 +1,18 @@
+use crate::{chat::print_group_response_event, output::Output};
 use async_trait::async_trait;
+use owo_colors::OwoColorize;
 use pattern_core::{
     Result,
     agent::Agent,
-    context::message_router::{MessageEndpoint, MessageOrigin, BlueskyEndpoint},
-    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager},
-    message::{ContentBlock, ContentPart, Message, MessageContent},
-    db::{client::DB, ops::atproto::get_user_atproto_identities},
     config::PatternConfig,
+    context::message_router::{BlueskyEndpoint, MessageEndpoint, MessageOrigin},
+    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager},
+    db::{client::DB, ops::atproto::get_user_atproto_identities},
+    message::{ContentBlock, ContentPart, Message, MessageContent},
 };
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
-use owo_colors::OwoColorize;
-use crate::{chat::print_group_response_event, output::Output};
 
 /// CLI endpoint that formats messages using Output
 pub struct CliEndpoint {
@@ -133,12 +133,7 @@ impl MessageEndpoint for GroupCliEndpoint {
         self.output.section("[Jetstream] Processing incoming data");
 
         while let Some(event) = stream.next().await {
-            print_group_response_event(
-                event,
-                &self.output,
-                &self.agents,
-                Some("Jetstream")
-            ).await;
+            print_group_response_event(event, &self.output, &self.agents, Some("Jetstream")).await;
         }
 
         Ok(None)
@@ -169,8 +164,7 @@ pub async fn setup_bluesky_endpoint(
     ));
 
     // Look up ATProto identity for this handle
-    let identities = get_user_atproto_identities(&DB, &config.user.id)
-        .await?;
+    let identities = get_user_atproto_identities(&DB, &config.user.id).await?;
 
     // Find identity matching the handle
     let identity = identities

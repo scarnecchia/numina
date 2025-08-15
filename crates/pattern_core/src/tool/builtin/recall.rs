@@ -511,8 +511,20 @@ mod tests {
 
         assert!(result.success);
         // Message format has changed to include more details
-        assert!(result.message.as_ref().unwrap().contains("Successfully appended"));
-        assert!(result.message.as_ref().unwrap().contains("user_preferences"));
+        assert!(
+            result
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("Successfully appended")
+        );
+        assert!(
+            result
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("user_preferences")
+        );
 
         // Verify the append
         {

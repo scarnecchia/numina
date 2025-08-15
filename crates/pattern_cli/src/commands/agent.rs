@@ -331,7 +331,9 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
             } else {
                 Some(agent.base_instructions.clone())
             },
+            system_prompt_path: None,
             persona: None, // Will be extracted from memory blocks
+            persona_path: None,
             instructions: None,
             bluesky_handle: None,
             memory: HashMap::new(), // Will be populated from memory blocks

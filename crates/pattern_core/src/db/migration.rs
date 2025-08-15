@@ -21,11 +21,14 @@ impl MigrationRunner {
     pub async fn run<C: Connection>(db: &Surreal<C>) -> Result<()> {
         Self::run_with_options(db, false).await
     }
-    
+
     /// Run migrations with options
-    pub async fn run_with_options<C: Connection>(db: &Surreal<C>, force_update: bool) -> Result<()> {
+    pub async fn run_with_options<C: Connection>(
+        db: &Surreal<C>,
+        force_update: bool,
+    ) -> Result<()> {
         let start = std::time::Instant::now();
-        
+
         // Check if we can skip schema updates
         if !force_update {
             let compiled_hash = Self::get_compiled_schema_hash();
@@ -33,13 +36,16 @@ impl MigrationRunner {
                 // Try to get stored schema hash
                 if let Ok(Some(stored_hash)) = Self::get_schema_hash(db).await {
                     if stored_hash == compiled_hash {
-                        tracing::info!("Schema unchanged (hash: {}), skipping migrations", compiled_hash);
+                        tracing::info!(
+                            "Schema unchanged (hash: {}), skipping migrations",
+                            compiled_hash
+                        );
                         return Ok(());
                     }
                 }
             }
         }
-        
+
         tracing::info!("Starting database migrations...");
 
         let current_version = Self::get_schema_version(db).await?;
@@ -49,7 +55,7 @@ impl MigrationRunner {
             tracing::info!("Running migration v1: Initial schema");
             let migration_start = std::time::Instant::now();
             Self::migrate_v1(db).await?;
-            
+
             // Create entity tables using their schema definitions
             use crate::MemoryBlock;
             use crate::agent::AgentRecord;
@@ -123,7 +129,7 @@ impl MigrationRunner {
                 "Specialized indices created in {:?}",
                 indices_start.elapsed()
             );
-            
+
             Self::update_schema_version(db, 1).await?;
             tracing::info!("Migration v1 completed in {:?}", migration_start.elapsed());
         }
@@ -140,7 +146,7 @@ impl MigrationRunner {
         if compiled_hash != 0 {
             Self::update_schema_hash(db, compiled_hash).await?;
         }
-        
+
         tracing::info!("All database migrations completed in {:?}", start.elapsed());
         Ok(())
     }
@@ -200,16 +206,14 @@ impl MigrationRunner {
 
         Ok(hashes.first().and_then(|h| h.schema_hash))
     }
-    
+
     /// Update schema hash
     async fn update_schema_hash<C: Connection>(db: &Surreal<C>, hash: u64) -> Result<()> {
-        db.query(
-            "UPDATE system_metadata SET schema_hash = $hash, updated_at = time::now()"
-        )
-        .bind(("hash", hash))
-        .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
-        
+        db.query("UPDATE system_metadata SET schema_hash = $hash, updated_at = time::now()")
+            .bind(("hash", hash))
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
         Ok(())
     }
 

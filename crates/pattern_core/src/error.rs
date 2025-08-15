@@ -405,12 +405,13 @@ impl From<DatabaseError> for CoreError {
                     Self::DatabaseQueryFailed {
                         query: format!("UPDATE {} WHERE id = '{}'", entity_type, id),
                         table: entity_type.clone(),
-                        cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(
-                            format!("{} with id '{}' not found in database", entity_type, id)
-                        )),
+                        cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
+                            "{} with id '{}' not found in database",
+                            entity_type, id
+                        ))),
                     }
                 }
-            },
+            }
             DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
                 collection: "unknown".to_string(),
                 dimension_mismatch: None,

@@ -306,7 +306,8 @@ impl PatternHttpClient {
                             filter,
                             max_depth,
                             1, // current depth
-                        ).await;
+                        )
+                        .await;
                     }
                 }
             }
@@ -340,12 +341,8 @@ impl PatternHttpClient {
         }
 
         // Filter reply records
-        let filtered_replies = Self::filter_constellation_records(
-            reply_records,
-            agent_did,
-            filter,
-            parent_uri,
-        );
+        let filtered_replies =
+            Self::filter_constellation_records(reply_records, agent_did, filter, parent_uri);
 
         let reply_uris: Vec<String> = filtered_replies
             .into_iter()
@@ -359,7 +356,7 @@ impl PatternHttpClient {
         let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
             uris: reply_uris.clone(),
         };
-        
+
         if let Ok(replies_result) = bsky_agent.api.app.bsky.feed.get_posts(params.into()).await {
             let replies = replies_result.posts.clone();
 
@@ -376,7 +373,9 @@ impl PatternHttpClient {
             }
 
             // Store replies for this parent
-            context.replies_map.insert(parent_uri.to_string(), replies.clone());
+            context
+                .replies_map
+                .insert(parent_uri.to_string(), replies.clone());
 
             // If we haven't reached max depth, recursively fetch replies to these replies
             if current_depth < max_depth {
@@ -401,7 +400,8 @@ impl PatternHttpClient {
                                     filter,
                                     max_depth,
                                     current_depth + 1,
-                                )).await;
+                                ))
+                                .await;
                             }
                         }
                     }

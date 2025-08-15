@@ -24,8 +24,9 @@ use surrealdb::RecordId;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::{data_sources::get_bluesky_credentials, endpoints::setup_bluesky_endpoint, output::Output};
-
+use crate::{
+    data_sources::get_bluesky_credentials, endpoints::setup_bluesky_endpoint, output::Output,
+};
 
 /// Build a ContextConfig and CompressionStrategy from an AgentConfig with optional overrides
 fn build_context_config(
@@ -60,8 +61,6 @@ fn build_context_config(
 
     (context_config, compression_strategy)
 }
-
-
 
 /// Load an existing agent from the database or create a new one
 pub async fn load_or_create_agent(
@@ -152,8 +151,8 @@ pub async fn load_agent_memories_and_messages(
     );
 
     // Handle message history result
-    agent_record.messages = messages_result
-        .map_err(|e| miette::miette!("Failed to load message history: {}", e))?;
+    agent_record.messages =
+        messages_result.map_err(|e| miette::miette!("Failed to load message history: {}", e))?;
 
     tracing::debug!(
         "After loading message history: {} messages",
@@ -161,8 +160,8 @@ pub async fn load_agent_memories_and_messages(
     );
 
     // Handle memory blocks result
-    let memory_tuples = memories_result
-        .map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
+    let memory_tuples =
+        memories_result.map_err(|e| miette::miette!("Failed to load memory blocks: {}", e))?;
 
     output.status(&format!(
         "Loaded {} memory blocks for agent {}",
@@ -448,22 +447,24 @@ pub async fn create_agent_from_record_with_tracker(
         let existing_block = agent.get_memory("constellation_activity").await?;
 
         let _block = if let Some(existing) = existing_block {
-            // Reuse the existing block's ID to avoid duplicates
+            // Block already exists in memory and database - just use it as-is
             tracing::info!(
-                "Found existing constellation_activity block with id: {}",
+                "Found existing constellation_activity block with id: {}, skipping update to avoid index conflicts",
                 existing.id
             );
-            let updated_block =
-                pattern_core::constellation_memory::create_constellation_activity_block(
-                    existing.id.clone(),
-                    record.owner_id.clone(),
-                    tracker.format_as_memory_content().await,
-                );
-            agent
-                .update_memory("constellation_activity", updated_block.clone())
-                .await?;
 
-            updated_block
+            // OLD CODE - causes "Key already present" panic in SurrealDB index:
+            // let updated_block =
+            //     pattern_core::constellation_memory::create_constellation_activity_block(
+            //         existing.id.clone(),
+            //         record.owner_id.clone(),
+            //         tracker.format_as_memory_content().await,
+            //     );
+            // agent
+            //     .update_memory("constellation_activity", updated_block.clone())
+            //     .await?;
+
+            existing
         } else {
             // Check database for any existing constellation_activity blocks for this agent
             tracing::info!("No constellation_activity block in memory, checking database");
@@ -480,22 +481,24 @@ pub async fn create_agent_from_record_with_tracker(
                 .map(|(mem, _)| mem.clone());
 
             if let Some(existing) = existing_constellation_block {
-                // Found one in database, reuse its ID
+                // Found one in database - just use it as-is
                 tracing::info!(
-                    "Found existing constellation_activity block in database with id: {}",
+                    "Found existing constellation_activity block in database with id: {}, skipping update",
                     existing.id
                 );
-                let updated_block =
-                    pattern_core::constellation_memory::create_constellation_activity_block(
-                        existing.id.clone(),
-                        record.owner_id.clone(),
-                        tracker.format_as_memory_content().await,
-                    );
-                agent
-                    .update_memory("constellation_activity", updated_block.clone())
-                    .await?;
 
-                updated_block
+                // OLD CODE - causes "Key already present" panic:
+                // let updated_block =
+                //     pattern_core::constellation_memory::create_constellation_activity_block(
+                //         existing.id.clone(),
+                //         record.owner_id.clone(),
+                //         tracker.format_as_memory_content().await,
+                //     );
+                // agent
+                //     .update_memory("constellation_activity", updated_block.clone())
+                //     .await?;
+
+                existing
             } else {
                 // Really first time - create new block with the tracker's memory ID
                 tracing::info!(
@@ -527,6 +530,57 @@ pub async fn create_agent_from_record_with_tracker(
         //     pattern_core::memory::MemoryPermission::ReadWrite,
         // )
         // .await?;
+    }
+
+    // Load persona from config if present
+    output.info("🔍", &format!(
+        "Checking for persona in config - agent.persona is_some: {}, agent.persona_path is_some: {}",
+        config.agent.persona.is_some(),
+        config.agent.persona_path.is_some()
+    ));
+    if let Some(persona) = &config.agent.persona {
+        output.info(
+            "📝",
+            &format!("Found persona in config: {} chars", persona.len()),
+        );
+        match agent.get_memory("persona").await {
+            Ok(Some(mut existing)) => {
+                // Update existing block preserving its ID
+                if existing.value != *persona {
+                    output.status("Updating persona in agent's core memory...");
+                    existing.value = persona.clone();
+                    existing.description = Some("Agent's persona and identity".to_string());
+                    existing.permission = pattern_core::memory::MemoryPermission::Append;
+
+                    if let Err(e) = agent.update_memory("persona", existing).await {
+                        output.warning(&format!("Failed to update persona memory: {}", e));
+                    } else {
+                        output.success("✅ Persona updated in memory");
+                    }
+                } else {
+                    output.info("✓", "Persona already up to date in memory");
+                }
+            }
+            Ok(None) | Err(_) => {
+                // Create new block
+                output.status("Adding persona to agent's core memory...");
+                let persona_block = pattern_core::memory::MemoryBlock::owned(
+                    config.user.id.clone(),
+                    "persona",
+                    persona.clone(),
+                )
+                .with_description("Agent's persona and identity")
+                .with_permission(pattern_core::memory::MemoryPermission::Append);
+
+                if let Err(e) = agent.update_memory("persona", persona_block).await {
+                    output.warning(&format!("Failed to add persona memory: {}", e));
+                } else {
+                    output.success("✅ Persona added to memory");
+                }
+            }
+        }
+    } else {
+        output.info("ℹ", "No persona found in config");
     }
 
     // Wrap in Arc before calling monitoring methods
@@ -586,7 +640,6 @@ pub async fn register_data_sources<M, E>(
     register_data_sources_with_target(agent, config, tools, embedding_provider, None).await
 }
 
-
 pub async fn register_data_sources_with_target<M, E>(
     agent: Arc<DatabaseAgent<M, E>>,
     config: &PatternConfig,
@@ -612,7 +665,7 @@ pub async fn register_data_sources_with_target<M, E>(
                 })
                 .clone();
             tracing::info!("filter: {:?}", filter);
-            let mut data_sources = if let Some(target) = target {
+            let data_sources = if let Some(target) = target {
                 DataSourceBuilder::new()
                     .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
                     .build_with_target(
@@ -645,11 +698,10 @@ pub async fn register_data_sources_with_target<M, E>(
                 .start_monitoring("bluesky_jetstream")
                 .await
                 .unwrap();
-            tools.register(DataSourceTool::new(Arc::new(RwLock::new(data_sources))));
+            tools.register(DataSourceTool::new(Arc::new(data_sources)));
         });
     }
 }
-
 
 /// Create an agent with the specified configuration
 pub async fn create_agent(
@@ -743,6 +795,10 @@ pub async fn create_agent(
     // Update memory blocks from config only if they don't exist or have changed
     // First check persona
     if let Some(persona) = &config.agent.persona {
+        output.info(
+            "📝",
+            &format!("Found persona in config: {} chars", persona.len()),
+        );
         match agent.get_memory("persona").await {
             Ok(Some(mut existing)) => {
                 // Update existing block preserving its ID
@@ -754,7 +810,11 @@ pub async fn create_agent(
 
                     if let Err(e) = agent.update_memory("persona", existing).await {
                         output.warning(&format!("Failed to update persona memory: {}", e));
+                    } else {
+                        output.success("✅ Persona updated in memory");
                     }
+                } else {
+                    output.info("✓", "Persona already up to date in memory");
                 }
             }
             Ok(None) | Err(_) => {
@@ -767,9 +827,13 @@ pub async fn create_agent(
 
                 if let Err(e) = agent.update_memory("persona", persona_block).await {
                     output.warning(&format!("Failed to add persona memory: {}", e));
+                } else {
+                    output.success("✅ Persona added to memory");
                 }
             }
         }
+    } else {
+        output.info("ℹ", "No persona found in config");
     }
 
     // Check and update other configured memory blocks
@@ -949,9 +1013,6 @@ pub async fn create_agent(
     Ok(agent_dyn)
 }
 
-
-
-
 /// Load or create an agent from a group member configuration
 pub async fn load_or_create_agent_from_member(
     member: &pattern_core::config::GroupMemberConfig,
@@ -980,9 +1041,60 @@ pub async fn load_or_create_agent_from_member(
         // Load memories and messages
         load_agent_memories_and_messages(&mut agent_record, &output).await?;
 
-        // Create runtime agent from record (reusing existing function)
-        // Build a config that preserves the bluesky_handle from main_config if available
+        // Create runtime agent from record
+        // Build a config, but also check if we have a config_path to load missing blocks from
         let bluesky_handle = main_config.and_then(|cfg| cfg.agent.bluesky_handle.clone());
+
+        // If member also has a config_path, load it for any missing blocks (like persona)
+        let agent_config = if let Some(config_path) = &member.config_path {
+            output.status(&format!(
+                "Loading config from {} for missing memory blocks",
+                config_path.display().bright_cyan()
+            ));
+            match pattern_core::config::AgentConfig::load_from_file(config_path).await {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    output.warning(&format!(
+                        "Failed to load config from {}: {}",
+                        config_path.display(),
+                        e
+                    ));
+                    // Fall back to minimal config
+                    pattern_core::config::AgentConfig {
+                        id: Some(agent_id.clone()),
+                        name: agent_record.name.clone(),
+                        system_prompt: None,
+                        system_prompt_path: None,
+                        persona: None,
+                        persona_path: None,
+                        instructions: None,
+                        memory: Default::default(),
+                        bluesky_handle: bluesky_handle.clone(),
+                        tool_rules: Vec::new(),
+                        tools: Vec::new(),
+                        model: None,
+                        context: None,
+                    }
+                }
+            }
+        } else {
+            // No config_path, use minimal config
+            pattern_core::config::AgentConfig {
+                id: Some(agent_id.clone()),
+                name: agent_record.name.clone(),
+                system_prompt: None,
+                system_prompt_path: None,
+                persona: None,
+                persona_path: None,
+                instructions: None,
+                memory: Default::default(),
+                bluesky_handle: bluesky_handle.clone(),
+                tool_rules: Vec::new(),
+                tools: Vec::new(),
+                model: None,
+                context: None,
+            }
+        };
 
         let config = PatternConfig {
             user: pattern_core::config::UserConfig {
@@ -990,19 +1102,7 @@ pub async fn load_or_create_agent_from_member(
                 name: None,
                 settings: Default::default(),
             },
-            agent: pattern_core::config::AgentConfig {
-                id: Some(agent_id.clone()),
-                name: agent_record.name.clone(),
-                system_prompt: None,
-                persona: None,
-                instructions: None,
-                memory: Default::default(),
-                bluesky_handle,
-                tool_rules: Vec::new(),
-                tools: Vec::new(),
-                model: None,
-                context: None,
-            },
+            agent: agent_config,
             model: pattern_core::config::ModelConfig {
                 provider: "Gemini".to_string(),
                 model: model_name,
@@ -1162,7 +1262,9 @@ pub async fn load_or_create_agent_from_member(
             id: None,
             name: member.name.clone(),
             system_prompt: None,
+            system_prompt_path: None,
             persona: None,
+            persona_path: None,
             instructions: None,
             memory: Default::default(),
             bluesky_handle: main_config.and_then(|cfg| cfg.agent.bluesky_handle.clone()),

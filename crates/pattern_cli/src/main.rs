@@ -445,6 +445,20 @@ enum DebugCommands {
         #[arg(long)]
         memory_type: Option<String>,
     },
+    /// Clean up message context by removing unpaired/out-of-order messages
+    ContextCleanup {
+        /// Agent name
+        agent: String,
+        /// Interactive mode (prompt for each action)
+        #[arg(short = 'i', long, default_value = "true")]
+        interactive: bool,
+        /// Dry run - show what would be deleted without actually deleting
+        #[arg(short = 'd', long)]
+        dry_run: bool,
+        /// Limit to recent N messages
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -624,7 +638,7 @@ async fn main() -> Result<()> {
                 if is_context_sync {
                     output.info(
                         "Context Sync group detected",
-                        "Will start background monitoring after setup"
+                        "Will start background monitoring after setup",
                     );
                 }
 
@@ -717,8 +731,14 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
-                                .await?;
+                            chat::chat_with_group(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
+                            .await?;
                         }
                     }
                     CoordinationPattern::Dynamic { .. } => {
@@ -752,8 +772,14 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
-                                .await?;
+                            chat::chat_with_group(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
+                            .await?;
                         }
                     }
                     CoordinationPattern::Pipeline { .. } => {
@@ -787,8 +813,14 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
-                                .await?;
+                            chat::chat_with_group(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
+                            .await?;
                         }
                     }
                     CoordinationPattern::Supervisor { .. } => {
@@ -822,8 +854,14 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
-                                .await?;
+                            chat::chat_with_group(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
+                            .await?;
                         }
                     }
                     CoordinationPattern::Voting { .. } => {
@@ -857,8 +895,14 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
-                                .await?;
+                            chat::chat_with_group(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
+                            .await?;
                         }
                     }
                     CoordinationPattern::Sleeptime { .. } => {
@@ -881,16 +925,18 @@ async fn main() -> Result<()> {
                                 .collect();
 
                             // Start the background monitoring task
-                            let monitoring_handle = background_tasks::start_context_sync_monitoring(
-                                group.clone(),
-                                agents_with_membership.clone(),
-                                manager.clone(),
-                                output.clone(),
-                            ).await?;
+                            let monitoring_handle =
+                                background_tasks::start_context_sync_monitoring(
+                                    group.clone(),
+                                    agents_with_membership.clone(),
+                                    manager.clone(),
+                                    output.clone(),
+                                )
+                                .await?;
 
                             output.info(
                                 "Background task started",
-                                "Context sync will run periodically in the background"
+                                "Context sync will run periodically in the background",
                             );
 
                             // Don't enter interactive chat for Context Sync, just let it run
@@ -928,8 +974,14 @@ async fn main() -> Result<()> {
                             )
                             .await?;
                         } else {
-                            chat::chat_with_group(group_name, manager, model.clone(), *no_tools, &config)
-                                .await?;
+                            chat::chat_with_group(
+                                group_name,
+                                manager,
+                                model.clone(),
+                                *no_tools,
+                                &config,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1003,9 +1055,9 @@ async fn main() -> Result<()> {
             let output = crate::output::Output::new();
             match cmd {
                 DbCommands::Stats => commands::db::stats(&config, &output).await?,
-                DbCommands::Query { sql } => commands::db::query(sql, &output).await?
+                DbCommands::Query { sql } => commands::db::query(sql, &output).await?,
             }
-        },
+        }
         Commands::Debug { cmd } => match cmd {
             DebugCommands::SearchArchival {
                 agent,
@@ -1057,14 +1109,24 @@ async fn main() -> Result<()> {
                 commands::debug::modify_memory(agent, label, new_label, permission, memory_type)
                     .await?;
             }
+            DebugCommands::ContextCleanup {
+                agent,
+                interactive,
+                dry_run,
+                limit,
+            } => {
+                commands::debug::context_cleanup(agent, *interactive, *dry_run, *limit).await?;
+            }
         },
         Commands::Config { cmd } => {
             let output = crate::output::Output::new();
             match cmd {
                 ConfigCommands::Show => commands::config::show(&config, &output).await?,
-                ConfigCommands::Save { path } => commands::config::save(&config, path, &output).await?,
+                ConfigCommands::Save { path } => {
+                    commands::config::save(&config, path, &output).await?
+                }
             }
-        },
+        }
         Commands::Group { cmd } => match cmd {
             GroupCommands::List => commands::group::list(&config).await?,
             GroupCommands::Create {

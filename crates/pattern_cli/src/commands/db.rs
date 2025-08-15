@@ -110,33 +110,33 @@ pub async fn stats(config: &PatternConfig, output: &Output) -> Result<()> {
 
 /// Run a raw SQL query
 pub async fn query(sql: &str, output: &Output) -> Result<()> {
-
     // Execute the query
     let mut response = DB.query(sql).await.into_diagnostic()?;
 
     // Process each statement result
     let num_statements = response.num_statements();
-    
+
     if num_statements == 0 {
         output.status("No results");
         return Ok(());
     }
-    
+
     for statement_idx in 0..num_statements {
         // Print separator like SurrealDB CLI
-        output.print(&format!("\n{} Query {} {}", 
-            "-".repeat(8).dimmed(), 
+        output.print(&format!(
+            "\n{} Query {} {}",
+            "-".repeat(8).dimmed(),
             (statement_idx + 1).to_string().bright_cyan(),
             "-".repeat(8).dimmed()
         ));
         output.print("");
-        
+
         match response.take::<surrealdb::Value>(statement_idx) {
             Ok(value) => {
                 // Convert to JSON
                 let wrapped_json = serde_json::to_value(&value).into_diagnostic()?;
                 let json_value = unwrap_surrealdb_value(wrapped_json);
-                
+
                 // Flatten nested arrays for cleaner output
                 let final_value = match json_value {
                     serde_json::Value::Array(rows) => {
@@ -155,7 +155,7 @@ pub async fn query(sql: &str, output: &Output) -> Result<()> {
                     }
                     other => other,
                 };
-                
+
                 // Pretty print with custom formatting
                 let pretty = serde_json::to_string_pretty(&final_value).into_diagnostic()?;
                 output.print(&pretty);
@@ -165,7 +165,7 @@ pub async fn query(sql: &str, output: &Output) -> Result<()> {
             }
         }
     }
-    
+
     output.print("");
     Ok(())
 }
@@ -179,8 +179,8 @@ fn unwrap_surrealdb_value(value: serde_json::Value) -> serde_json::Value {
                 let key = map.keys().next().unwrap().clone();
                 match key.as_str() {
                     // Simple unwrappers - just take the inner value
-                    "Array" | "Object" | "Strand" | "Number" | "Bool" | "Datetime" 
-                    | "Uuid" | "Bytes" | "Duration" => {
+                    "Array" | "Object" | "Strand" | "Number" | "Bool" | "Datetime" | "Uuid"
+                    | "Bytes" | "Duration" => {
                         let inner = map.remove(&key).unwrap();
                         return unwrap_surrealdb_value(inner);
                     }
@@ -196,8 +196,10 @@ fn unwrap_surrealdb_value(value: serde_json::Value) -> serde_json::Value {
                             // Thing has { tb: "table", id: "id" } structure
                             if let serde_json::Value::Object(mut thing_map) = thing_val {
                                 if let (Some(tb), Some(id)) = (
-                                    thing_map.remove("tb").and_then(|v| v.as_str().map(|s| s.to_string())),
-                                    thing_map.remove("id")
+                                    thing_map
+                                        .remove("tb")
+                                        .and_then(|v| v.as_str().map(|s| s.to_string())),
+                                    thing_map.remove("id"),
                                 ) {
                                     // Format as table:id
                                     let id_str = match id {
@@ -220,15 +222,15 @@ fn unwrap_surrealdb_value(value: serde_json::Value) -> serde_json::Value {
                         return serde_json::Value::Null;
                     }
                     // Geometry types - just unwrap for now
-                    "Geometry" | "Point" | "Line" | "Polygon" | "MultiPoint" 
-                    | "MultiLine" | "MultiPolygon" | "Collection" => {
+                    "Geometry" | "Point" | "Line" | "Polygon" | "MultiPoint" | "MultiLine"
+                    | "MultiPolygon" | "Collection" => {
                         let inner = map.remove(&key).unwrap();
                         return unwrap_surrealdb_value(inner);
                     }
                     _ => {}
                 }
             }
-            
+
             // Not a wrapper, recursively process all values
             let mut result = serde_json::Map::new();
             for (k, v) in map {

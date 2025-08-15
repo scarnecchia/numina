@@ -4,22 +4,33 @@
     , self'
     , pkgs
     , lib
+    , system
     , ...
-    }: {
-      devShells.default = pkgs.mkShell {
+    }:
+    let
+      # Create a custom pkgs instance that allows unfree packages
+      pkgsWithUnfree = import inputs.nixpkgs {
+        inherit system;
+        config = {
+          allowUnfree = true;
+        };
+      };
+    in
+    {
+      devShells.default = pkgsWithUnfree.mkShell {
         name = "pattern-shell";
         inputsFrom = [
           self'.devShells.rust
 
           config.pre-commit.devShell # See ./nix/modules/pre-commit.nix
         ];
-        packages = with pkgs; [
+        packages = with pkgsWithUnfree; [
           just
           nixd # Nix language server
           bacon
           rust-analyzer
           clang
-          surreal
+          #surrealdb
           pkg-config
           cargo-expand
         ];

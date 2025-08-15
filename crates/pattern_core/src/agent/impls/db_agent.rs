@@ -840,7 +840,7 @@ where
                                     let attachment_futures = memory_blocks.into_iter().map(|(label, block)| {
                                         let db = db.clone();
                                         let agent_id = agent_id.clone();
-                                        
+
                                         async move {
                                             // First store the memory block if it doesn't exist
                                             let block_id = block.id.clone();
@@ -876,7 +876,7 @@ where
                                             }
                                         }
                                     });
-                                    
+
                                     // Execute all attachments in parallel
                                     futures::future::join_all(attachment_futures).await;
                                 }
@@ -1187,7 +1187,7 @@ where
     }
 
     /// Persist memory changes to database
-    async fn persist_memory_changes(&self) -> Result<()> {
+    pub async fn persist_memory_changes(&self) -> Result<()> {
         let context = self.context.read().await;
         let memory = &context.handle.memory;
 
@@ -1232,8 +1232,9 @@ where
                 // Use upsert for new blocks too
                 let record_id = block.id.to_record_id();
                 let db_model = block.to_db_model();
-                
-                let stored: Vec<<MemoryBlock as DbEntity>::DbModel> = self.db
+
+                let stored: Vec<<MemoryBlock as DbEntity>::DbModel> = self
+                    .db
                     .upsert(record_id)
                     .content(db_model)
                     .await
@@ -1242,7 +1243,7 @@ where
                         table: "mem".to_string(),
                         cause: e,
                     })?;
-                
+
                 let stored = stored
                     .into_iter()
                     .next()
@@ -1286,15 +1287,16 @@ where
                 // Use direct upsert method for memory blocks
                 // This avoids transaction conflicts on frequently updated shared blocks
                 let record_id = block.id.to_record_id();
-                
+
                 // Update the timestamp
                 block.updated_at = chrono::Utc::now();
-                
+
                 // Convert to database model
                 let db_model = block.to_db_model();
-                
+
                 // Simple upsert using the Surreal method
-                let _result: Vec<<MemoryBlock as DbEntity>::DbModel> = self.db
+                let _result: Vec<<MemoryBlock as DbEntity>::DbModel> = self
+                    .db
                     .upsert(record_id)
                     .content(db_model)
                     .await
@@ -1538,7 +1540,7 @@ where
             let (current_state, maybe_receiver) = self_clone.state().await;
             if current_state != AgentState::Ready {
                 if let Some(mut receiver) = maybe_receiver {
-                    let timeout = tokio::time::timeout(Duration::from_secs(100), async {
+                    let timeout = tokio::time::timeout(Duration::from_secs(200), async {
                         loop {
                             if *receiver.borrow() == AgentState::Ready {
                                 break;
@@ -1600,12 +1602,15 @@ where
                         let handle = self_clone.handle();
                         let label = label.clone();
                         let value = block.value.clone();
-                        
+
                         async move {
                             let handle = handle.await;
                             match handle.insert_working_memory(&label, &value).await {
                                 Ok(_) => {
-                                    tracing::debug!("Added memory block {} as working memory", label);
+                                    tracing::info!(
+                                        "Added memory block {} as working memory",
+                                        label
+                                    );
                                     Ok(())
                                 }
                                 Err(e) => {
@@ -1625,6 +1630,8 @@ where
                 }
             }
 
+            let _ = self.persist_memory_changes().await;
+
             // Update state and persist message
             {
                 let mut ctx = context.write().await;
@@ -1639,6 +1646,7 @@ where
                 .inspect_err(|e| {
                     crate::log_error!("Failed to persist incoming message", e);
                 });
+
                 ctx.add_message(message).await;
             }
 
@@ -1731,6 +1739,8 @@ where
                     // Only emit aggregated reasoning if we don't have thinking blocks
                     if !has_thinking_blocks {
                         if let Some(reasoning) = &current_response.reasoning {
+                            agent_response_text.push_str("\n[Reasoning]:\n");
+                            agent_response_text.push_str(&reasoning);
                             send_event(ResponseEvent::ReasoningChunk {
                                 text: reasoning.clone(),
                                 is_final: true,
@@ -1974,6 +1984,8 @@ where
                                             other_blocks.push(block.clone());
                                         }
                                         ContentBlock::Thinking { text, .. } => {
+                                            agent_response_text.push_str("\n[Reasoning]:\n");
+                                            agent_response_text.push_str(&text.to_lowercase());
                                             send_event(ResponseEvent::ReasoningChunk {
                                                 text: text.clone(),
                                                 is_final: false,
@@ -2225,6 +2237,8 @@ where
                     // Only emit aggregated reasoning if we don't have thinking blocks
                     if !has_thinking_blocks {
                         if let Some(reasoning) = &current_response.reasoning {
+                            agent_response_text.push_str("[Reasoning]:");
+                            agent_response_text.push_str(&reasoning.to_lowercase());
                             send_event(ResponseEvent::ReasoningChunk {
                                 text: reasoning.clone(),
                                 is_final: true,
@@ -2306,6 +2320,8 @@ where
                                         ContentBlock::Thinking { text, .. } => {
                                             // Thinking content is already handled via reasoning_content
                                             // but we could emit it as a ReasoningChunk if not already done
+                                            agent_response_text.push_str("\n[Reasoning]:\n");
+                                            agent_response_text.push_str(&text.to_lowercase());
                                             send_event(ResponseEvent::ReasoningChunk {
                                                 text: text.clone(),
                                                 is_final: true,
@@ -2821,7 +2837,7 @@ where
     async fn handle(&self) -> crate::context::state::AgentHandle {
         self.handle().await
     }
-    
+
     async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         // Get the last_active timestamp from the agent context metadata
         let context = self.context.read().await;
@@ -2921,51 +2937,50 @@ where
             context.metadata.write().await.last_active = Utc::now();
         };
 
-        // Persist memory block synchronously during initial setup
-        // TODO: Consider spawning background task for updates after agent is initialized
+        // Persist memory block to database
+        tracing::debug!("persisting memory key {}", key);
 
-        //tracing::debug!("persisting memory key {}", key);
-        // Retry logic for concurrent upserts of constellation_activity block
-        // let mut attempts = 0;
-        // const MAX_RETRIES: u32 = 3;
+        // Retry logic for concurrent upserts
+        let mut attempts = 0;
+        const MAX_RETRIES: u32 = 3;
 
-        // loop {
-        //     match crate::db::ops::persist_agent_memory(
-        //         &self.db,
-        //         agent_id.clone(),
-        //         &memory,
-        //         crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
-        //     )
-        //     .await
-        //     {
-        //         Ok(_) => break,
-        //         Err(e) => {
-        //             // Check if it's a duplicate key error in the full-text search index
-        //             if let crate::db::DatabaseError::QueryFailed(ref surreal_err) = e {
-        //                 let error_str = surreal_err.to_string();
-        //                 if error_str.contains("Duplicate insert key")
-        //                     && error_str.contains("mem_value_search")
-        //                 {
-        //                     attempts += 1;
-        //                     if attempts < MAX_RETRIES {
-        //                         tracing::warn!(
-        //                             "Duplicate key error updating memory '{}' (attempt {}/{}), retrying...",
-        //                             key,
-        //                             attempts,
-        //                             MAX_RETRIES
-        //                         );
-        //                         // Small delay with jitter to reduce contention
-        //                         let delay_ms = 50u64 + (attempts as u64 * 100);
-        //                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
-        //                             .await;
-        //                         continue;
-        //                     }
-        //                 }
-        //             }
-        //             return Err(e.into());
-        //         }
-        //     }
-        // }
+        loop {
+            match crate::db::ops::persist_agent_memory(
+                &self.db,
+                agent_id.clone(),
+                &memory,
+                crate::memory::MemoryPermission::ReadWrite, // Agent has full access to its own memory
+            )
+            .await
+            {
+                Ok(_) => break,
+                Err(e) => {
+                    // Check if it's a duplicate key error in the full-text search index
+                    if let crate::db::DatabaseError::QueryFailed(ref surreal_err) = e {
+                        let error_str = surreal_err.to_string();
+                        if error_str.contains("Duplicate insert key")
+                            && error_str.contains("mem_value_search")
+                        {
+                            attempts += 1;
+                            if attempts < MAX_RETRIES {
+                                tracing::warn!(
+                                    "Duplicate key error updating memory '{}' (attempt {}/{}), retrying...",
+                                    key,
+                                    attempts,
+                                    MAX_RETRIES
+                                );
+                                // Small delay with jitter to reduce contention
+                                let delay_ms = 50u64 + (attempts as u64 * 100);
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                continue;
+                            }
+                        }
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
 
         Ok(())
     }

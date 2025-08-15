@@ -4,17 +4,16 @@ use compact_str::CompactString;
 use futures::stream::Stream;
 use pattern_core::{
     CoreError, Result,
-    data_source::{BufferConfig, DataSource, DataSourceMetadata, StreamEvent, traits::DataSourceStatus},
+    data_source::{
+        BufferConfig, DataSource, DataSourceMetadata, StreamEvent, traits::DataSourceStatus,
+    },
     memory::MemoryBlock,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serenity::{
     http::Http,
-    model::{
-        channel::Message,
-        id::ChannelId,
-    },
+    model::{channel::Message, id::ChannelId},
 };
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -45,7 +44,8 @@ impl From<Message> for DiscordMessage {
             author_id: msg.author.id.to_string(),
             author_name: msg.author.name.clone(),
             content: msg.content.clone(),
-            timestamp: DateTime::<Utc>::from_timestamp(msg.timestamp.unix_timestamp(), 0).unwrap_or_else(Utc::now),
+            timestamp: DateTime::<Utc>::from_timestamp(msg.timestamp.unix_timestamp(), 0)
+                .unwrap_or_else(Utc::now),
             is_bot: msg.author.bot,
             mentions: msg.mentions.iter().map(|u| u.id.to_string()).collect(),
             reply_to: msg.referenced_message.as_ref().map(|m| m.id.to_string()),
@@ -143,7 +143,10 @@ impl DiscordDataSource {
         limit: usize,
     ) -> Result<Vec<DiscordMessage>> {
         let messages = channel_id
-            .messages(&self.http, serenity::builder::GetMessages::new().limit(limit as u8))
+            .messages(
+                &self.http,
+                serenity::builder::GetMessages::new().limit(limit as u8),
+            )
             .await
             .map_err(|e| CoreError::DataSourceError {
                 source_name: "discord".to_string(),
@@ -180,18 +183,10 @@ impl DataSource for DiscordDataSource {
         &self.source_id
     }
 
-    async fn pull(
-        &mut self,
-        limit: usize,
-        after: Option<Self::Cursor>,
-    ) -> Result<Vec<Self::Item>> {
+    async fn pull(&mut self, limit: usize, after: Option<Self::Cursor>) -> Result<Vec<Self::Item>> {
         // Extract channel ID from cursor or use first configured channel
         let channel_id = if let Some(cursor) = after.as_ref() {
-            cursor
-                .channel_id
-                .parse::<u64>()
-                .ok()
-                .map(ChannelId::new)
+            cursor.channel_id.parse::<u64>().ok().map(ChannelId::new)
         } else if !self.config.channel_filter.is_empty() {
             self.config.channel_filter[0]
                 .parse::<u64>()
@@ -208,7 +203,7 @@ impl DataSource for DiscordDataSource {
         })?;
 
         let messages = self.fetch_channel_history(channel_id, limit).await?;
-        
+
         // Update cursor if we got messages
         if let Some(last_msg) = messages.last() {
             self.current_cursor = Some(DiscordCursor {
@@ -225,7 +220,8 @@ impl DataSource for DiscordDataSource {
     async fn subscribe(
         &mut self,
         _from: Option<Self::Cursor>,
-    ) -> Result<Box<dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin>> {
+    ) -> Result<Box<dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin>>
+    {
         if self.receiver.is_none() {
             warn!("Discord stream not started. Call start_stream() first.");
             // Return empty stream
@@ -333,13 +329,13 @@ impl Stream for DiscordMessageStream {
                     last_message_id: msg.message_id.clone(),
                     timestamp: msg.timestamp,
                 };
-                
+
                 let event = StreamEvent {
                     item: msg,
                     cursor,
                     timestamp: Utc::now(),
                 };
-                
+
                 Poll::Ready(Some(Ok(event)))
             }
             Poll::Ready(None) => Poll::Ready(None),
@@ -357,10 +353,7 @@ pub fn discord_message_to_memory_block(msg: &DiscordMessage) -> MemoryBlock {
         msg.content
     );
 
-    MemoryBlock::new(
-        format!("discord_msg_{}", msg.message_id),
-        content,
-    )
+    MemoryBlock::new(format!("discord_msg_{}", msg.message_id), content)
 }
 
 /// Builder for Discord data source with scrollback buffer
@@ -401,7 +394,10 @@ impl DiscordDataSourceBuilder {
         // Pre-fetch history for initial channels
         for channel_id in self.initial_channels {
             let channel = ChannelId::new(channel_id);
-            match source.fetch_channel_history(channel, source.config.scrollback_limit).await {
+            match source
+                .fetch_channel_history(channel, source.config.scrollback_limit)
+                .await
+            {
                 Ok(messages) => {
                     info!(
                         "Fetched {} messages from Discord channel {}",

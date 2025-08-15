@@ -503,7 +503,7 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
     }
 
     /// Start monitoring a source
-    pub async fn start_monitoring(&mut self, source_id: &str) -> Result<()> {
+    pub async fn start_monitoring(&self, source_id: &str) -> Result<()> {
         // First check if already monitoring
         {
             let sources = self.sources.read().await;

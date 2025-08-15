@@ -114,7 +114,7 @@ chunk_size = 20
 summarization_model = "claude-3-5-haiku-20241022"
 
 [context]
-max_messages = 300
+max_messages = 250
 
 [bluesky]
 default_filter = { nsids = [

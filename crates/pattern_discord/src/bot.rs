@@ -20,8 +20,8 @@ use pattern_core::{
     coordination::groups::{AgentWithMembership, GroupManager},
 };
 
-use tokio::sync::Mutex;
 use std::collections::{HashMap, VecDeque};
+use tokio::sync::Mutex;
 
 /// Buffered reaction for batch processing
 #[derive(Debug, Clone)]
@@ -209,7 +209,11 @@ impl EventHandler for DiscordBot {
         // Log message context for debugging
         info!(
             "Received message - Guild: {:?}, Channel: {}, Author: {} ({}), Content length: {}",
-            msg.guild_id, msg.channel_id, msg.author.name, msg.author.id, msg.content.len()
+            msg.guild_id,
+            msg.channel_id,
+            msg.author.name,
+            msg.author.id,
+            msg.content.len()
         );
 
         // Check if this is a thread and log it
@@ -217,8 +221,10 @@ impl EventHandler for DiscordBot {
             match channel {
                 serenity::model::channel::Channel::Guild(guild_channel) => {
                     if guild_channel.thread_metadata.is_some() {
-                        info!("Message is in a thread: {} (parent: {:?})",
-                            guild_channel.name, guild_channel.parent_id);
+                        info!(
+                            "Message is in a thread: {} (parent: {:?})",
+                            guild_channel.name, guild_channel.parent_id
+                        );
                     }
                 }
                 _ => {}
@@ -261,15 +267,22 @@ impl EventHandler for DiscordBot {
             // Try to merge with existing message from same user in same channel
             let mut merged = false;
             for queued_msg in queue.iter_mut() {
-                if queued_msg.author_name == msg.author.name && queued_msg.channel_id == msg.channel_id.get() {
+                if queued_msg.author_name == msg.author.name
+                    && queued_msg.channel_id == msg.channel_id.get()
+                {
                     // Merge messages from same user
-                    info!("Merging message from {} into existing queue entry", msg.author.name);
+                    info!(
+                        "Merging message from {} into existing queue entry",
+                        msg.author.name
+                    );
 
                     // Calculate time since the original message
                     let time_diff = queued_msg.timestamp.elapsed().as_secs();
 
                     // Append the new content with separator and timestamp
-                    queued_msg.content.push_str(&format!("\n--- [+{}s later] ---\n", time_diff));
+                    queued_msg
+                        .content
+                        .push_str(&format!("\n--- [+{}s later] ---\n", time_diff));
                     queued_msg.content.push_str(&msg.content);
 
                     // Update the message ID to the latest one for reply purposes
@@ -287,14 +300,19 @@ impl EventHandler for DiscordBot {
                     let mut channel_merged = false;
                     for queued_msg in queue.iter_mut() {
                         if queued_msg.channel_id == msg.channel_id.get() {
-                            info!("Queue full, merging message from {} into existing channel entry", msg.author.name);
+                            info!(
+                                "Queue full, merging message from {} into existing channel entry",
+                                msg.author.name
+                            );
 
                             // Calculate time since the original message
                             let time_diff = queued_msg.timestamp.elapsed().as_secs();
 
                             // Merge as different user in same channel with timestamp
-                            queued_msg.content.push_str(&format!("\n\n[Also from {} - +{}s later]:\n{}",
-                                msg.author.name, time_diff, msg.content));
+                            queued_msg.content.push_str(&format!(
+                                "\n\n[Also from {} - +{}s later]:\n{}",
+                                msg.author.name, time_diff, msg.content
+                            ));
                             queued_msg.msg_id = msg.id.get();
 
                             channel_merged = true;
@@ -305,8 +323,14 @@ impl EventHandler for DiscordBot {
                     if !channel_merged {
                         // Last resort: merge into the last entry
                         if let Some(last_msg) = queue.back_mut() {
-                            info!("Queue full, force-merging message from {} into last entry", msg.author.name);
-                            last_msg.content.push_str(&format!("\n\n[Also from {} in different context]:\n{}", msg.author.name, msg.content));
+                            info!(
+                                "Queue full, force-merging message from {} into last entry",
+                                msg.author.name
+                            );
+                            last_msg.content.push_str(&format!(
+                                "\n\n[Also from {} in different context]:\n{}",
+                                msg.author.name, msg.content
+                            ));
                             last_msg.msg_id = msg.id.get();
                         }
                     }
@@ -322,7 +346,11 @@ impl EventHandler for DiscordBot {
                 }
             }
 
-            info!("Queue status: {} entries after processing message from {}", queue.len(), msg.author.name);
+            info!(
+                "Queue status: {} entries after processing message from {}",
+                queue.len(),
+                msg.author.name
+            );
 
             // Show indicator based on whether we merged or queued
             let indicator = if merged { '🔄' } else { '📥' };
@@ -367,12 +395,22 @@ impl EventHandler for DiscordBot {
         );
 
         // Get the original message to see if it was from our bot
-        if let Ok(msg) = ctx.http.get_message(reaction.channel_id, reaction.message_id).await {
-            info!("Retrieved message for reaction - author: {}, bot check starting", msg.author.name);
+        if let Ok(msg) = ctx
+            .http
+            .get_message(reaction.channel_id, reaction.message_id)
+            .await
+        {
+            info!(
+                "Retrieved message for reaction - author: {}, bot check starting",
+                msg.author.name
+            );
 
             // Check if the message was from our bot
             if let Ok(current_user) = ctx.http.get_current_user().await {
-                info!("Current bot user: {}, message author: {}", current_user.name, msg.author.name);
+                info!(
+                    "Current bot user: {}, message author: {}",
+                    current_user.name, msg.author.name
+                );
 
                 if msg.author.id == current_user.id {
                     info!("Reaction is on bot's message - processing");
@@ -389,7 +427,11 @@ impl EventHandler for DiscordBot {
                                 buffer.push_back(BufferedReaction {
                                     emoji: reaction.emoji.to_string(),
                                     user_name: user.name.clone(),
-                                    message_preview: msg.content.chars().take(100).collect::<String>(),
+                                    message_preview: msg
+                                        .content
+                                        .chars()
+                                        .take(100)
+                                        .collect::<String>(),
                                     channel_id: reaction.channel_id.get(),
                                     timestamp: std::time::Instant::now(),
                                 });
@@ -399,7 +441,10 @@ impl EventHandler for DiscordBot {
                                     buffer.pop_front();
                                 }
 
-                                info!("Buffered reaction from {} (currently processing)", user.name);
+                                info!(
+                                    "Buffered reaction from {} (currently processing)",
+                                    user.name
+                                );
                             } else {
                                 // Process immediately
                                 let notification = format!(
@@ -416,43 +461,54 @@ impl EventHandler for DiscordBot {
 
                                 // Route this as a Pattern message to the agents
                                 if self.cli_mode {
-                                let mut pattern_msg = PatternMessage::user(notification);
-                                pattern_msg.metadata.custom = serde_json::json!({
-                                    "discord_channel_id": reaction.channel_id.get(),
-                                    "discord_message_id": reaction.message_id.get(),
-                                    "is_reaction": true,
-                                });
+                                    let mut pattern_msg = PatternMessage::user(notification);
+                                    pattern_msg.metadata.custom = serde_json::json!({
+                                        "discord_channel_id": reaction.channel_id.get(),
+                                        "discord_message_id": reaction.message_id.get(),
+                                        "is_reaction": true,
+                                    });
 
-                                // Route through the group
-                                if let (Some(group), Some(agents_with_membership), Some(group_manager)) = (
-                                    &self.group,
-                                    &self.agents_with_membership,
-                                    &self.group_manager,
-                                ) {
-                                    info!("Routing reaction notification through {} group", group.name);
+                                    // Route through the group
+                                    if let (
+                                        Some(group),
+                                        Some(agents_with_membership),
+                                        Some(group_manager),
+                                    ) = (
+                                        &self.group,
+                                        &self.agents_with_membership,
+                                        &self.group_manager,
+                                    ) {
+                                        info!(
+                                            "Routing reaction notification through {} group",
+                                            group.name
+                                        );
 
-                                    // Create a simple task to route the message
-                                    let group_clone = group.clone();
-                                    let agents_clone = agents_with_membership.clone();
-                                    let manager_clone = group_manager.clone();
-                                    let pattern_msg_clone = pattern_msg.clone();
+                                        // Create a simple task to route the message
+                                        let group_clone = group.clone();
+                                        let agents_clone = agents_with_membership.clone();
+                                        let manager_clone = group_manager.clone();
+                                        let pattern_msg_clone = pattern_msg.clone();
 
-                                    // Clone what we need for the async block
-                                    let ctx_clone = ctx.clone();
-                                    let channel_id = reaction.channel_id;
+                                        // Clone what we need for the async block
+                                        let ctx_clone = ctx.clone();
+                                        let channel_id = reaction.channel_id;
 
-                                    // Spawn task to handle reaction routing without blocking
-                                    tokio::spawn(async move {
-                                        match manager_clone
-                                            .route_message(&group_clone, &agents_clone, pattern_msg_clone)
-                                            .await
-                                        {
-                                            Ok(mut stream) => {
-                                                use futures::StreamExt;
-                                                let mut response_text = String::new();
+                                        // Spawn task to handle reaction routing without blocking
+                                        tokio::spawn(async move {
+                                            match manager_clone
+                                                .route_message(
+                                                    &group_clone,
+                                                    &agents_clone,
+                                                    pattern_msg_clone,
+                                                )
+                                                .await
+                                            {
+                                                Ok(mut stream) => {
+                                                    use futures::StreamExt;
+                                                    let mut response_text = String::new();
 
-                                                while let Some(event) = stream.next().await {
-                                                    match event {
+                                                    while let Some(event) = stream.next().await {
+                                                        match event {
                                                         pattern_core::coordination::groups::GroupResponseEvent::TextChunk { text, is_final, .. } => {
                                                             if text.len() > 1 {
                                                                 response_text.push_str(&text);
@@ -485,22 +541,32 @@ impl EventHandler for DiscordBot {
                                                         }
                                                         _ => {}
                                                     }
-                                                }
+                                                    }
 
-                                                // Send any remaining text
-                                                if !response_text.trim().is_empty() {
-                                                    if let Err(e) = channel_id.say(&ctx_clone.http, &response_text).await {
-                                                        warn!("Failed to send final reaction response: {}", e);
+                                                    // Send any remaining text
+                                                    if !response_text.trim().is_empty() {
+                                                        if let Err(e) = channel_id
+                                                            .say(&ctx_clone.http, &response_text)
+                                                            .await
+                                                        {
+                                                            warn!(
+                                                                "Failed to send final reaction response: {}",
+                                                                e
+                                                            );
+                                                        }
                                                     }
                                                 }
+                                                Err(e) => {
+                                                    warn!(
+                                                        "Failed to route reaction notification: {}",
+                                                        e
+                                                    );
+                                                }
                                             }
-                                            Err(e) => {
-                                                warn!("Failed to route reaction notification: {}", e);
-                                            }
-                                        }
-                                    });
-                                } else {
-                                    info!("No group configured to handle reactions");
+                                        });
+                                    } else {
+                                        info!("No group configured to handle reactions");
+                                    }
                                 }
                             }
                         }
@@ -508,7 +574,6 @@ impl EventHandler for DiscordBot {
                 }
             }
         }
-    }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -652,7 +717,10 @@ impl DiscordBot {
             return;
         }
 
-        info!("Processing {} queued messages as batch", queued_messages.len());
+        info!(
+            "Processing {} queued messages as batch",
+            queued_messages.len()
+        );
 
         // Mark as processing
         {
@@ -673,7 +741,8 @@ impl DiscordBot {
         let channel_id = queued_messages[0].channel_id;
 
         // Build concatenated message with special framing
-        let mut combined_content = String::from("=== Multiple Discord messages arrived while you were busy ===\n\n");
+        let mut combined_content =
+            String::from("=== Multiple Discord messages arrived while you were busy ===\n\n");
 
         // Store message IDs for reference
         let mut message_ids = Vec::new();
@@ -726,7 +795,10 @@ impl DiscordBot {
         // Create Pattern message
         let mut pattern_msg = PatternMessage::user(combined_content);
         // Use the last message ID for replies (most recent message to reply to)
-        let last_msg_id = queued_messages.last().map(|m| m.msg_id).unwrap_or(queued_messages[0].msg_id);
+        let last_msg_id = queued_messages
+            .last()
+            .map(|m| m.msg_id)
+            .unwrap_or(queued_messages[0].msg_id);
         pattern_msg.metadata.custom = serde_json::json!({
             "discord_channel_id": channel_id,
             "discord_message_id": last_msg_id,  // Reply to the last message in batch
@@ -778,7 +850,9 @@ impl DiscordBot {
                         // Send any remaining response
                         if !response.trim().is_empty() {
                             for chunk in split_message(&response, 2000) {
-                                if let Err(e) = ChannelId::new(channel_id).say(&ctx.http, chunk).await {
+                                if let Err(e) =
+                                    ChannelId::new(channel_id).say(&ctx.http, chunk).await
+                                {
                                     warn!("Failed to send final batch response: {}", e);
                                 }
                             }
@@ -814,12 +888,15 @@ impl DiscordBot {
                     // Try to remove the reaction
                     let reaction_type = serenity::all::ReactionType::Unicode(emoji.to_string());
                     if let Ok(current_user) = ctx.http.get_current_user().await {
-                        let _ = ctx.http.delete_reaction(
-                            ChannelId::new(channel_id),
-                            serenity::all::MessageId::new(*msg_id),
-                            current_user.id,
-                            &reaction_type,
-                        ).await;
+                        let _ = ctx
+                            .http
+                            .delete_reaction(
+                                ChannelId::new(channel_id),
+                                serenity::all::MessageId::new(*msg_id),
+                                current_user.id,
+                                &reaction_type,
+                            )
+                            .await;
                     }
                 }
             }
@@ -1051,9 +1128,15 @@ impl DiscordBot {
 
             // Build context string with better framing
             let discord_context = if msg.guild_id.is_none() {
-                format!("Direct message from Discord user '{}'", display_name_with_username)
+                format!(
+                    "Direct message from Discord user '{}'",
+                    display_name_with_username
+                )
             } else {
-                format!("Message from '{}' in Discord {}", display_name_with_username, channel_name)
+                format!(
+                    "Message from '{}' in Discord {}",
+                    display_name_with_username, channel_name
+                )
             };
 
             // Create framing prompt that makes responding optional
@@ -1274,7 +1357,8 @@ impl DiscordBot {
                             response = "No response from entity.".to_string();
                         }
 
-                        msg.channel_id.say(&ctx.http, response)
+                        msg.channel_id
+                            .say(&ctx.http, response)
                             .await
                             .map_err(|e| format!("Failed to send reply: {}", e))?;
                     }
@@ -1282,7 +1366,8 @@ impl DiscordBot {
             }
         } else {
             // TODO: Implement full database mode with user lookup
-            msg.channel_id.say(&ctx.http, "Full mode not yet implemented")
+            msg.channel_id
+                .say(&ctx.http, "Full mode not yet implemented")
                 .await
                 .map_err(|e| format!("Failed to reply: {}", e))?;
         }

@@ -17,11 +17,13 @@ use pattern_core::{
     tool::builtin::DataSourceTool,
 };
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 
 use crate::{
-    agent_ops::{load_agent_memories_and_messages, create_agent_from_record_with_tracker, load_model_embedding_providers},
+    agent_ops::{
+        create_agent_from_record_with_tracker, load_agent_memories_and_messages,
+        load_model_embedding_providers,
+    },
     data_sources::get_bluesky_credentials,
     endpoints::CliEndpoint,
     output::Output,
@@ -117,7 +119,13 @@ pub async fn chat_with_agent(
 
                 // Check for slash commands
                 if line.trim().starts_with('/') {
-                    match handle_slash_command(&line, crate::slash_commands::CommandContext::SingleAgent(&agent), &output).await {
+                    match handle_slash_command(
+                        &line,
+                        crate::slash_commands::CommandContext::SingleAgent(&agent),
+                        &output,
+                    )
+                    .await
+                    {
                         Ok(should_exit) => {
                             if should_exit {
                                 output.status("Goodbye!");
@@ -294,7 +302,7 @@ pub struct GroupSetup {
     pub group: AgentGroup,
     pub agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
     pub pattern_agent: Option<Arc<dyn Agent>>,
-    pub agent_tools: Vec<ToolRegistry>,  // Each agent's tool registry
+    pub agent_tools: Vec<ToolRegistry>, // Each agent's tool registry
     #[allow(dead_code)] // Used during agent creation, kept for potential future use
     pub constellation_tracker:
         Arc<pattern_core::constellation_memory::ConstellationActivityTracker>,
@@ -338,11 +346,30 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
     // Load all agents in the group
     tracing::info!("Group has {} members to load", group.members.len());
     let mut agents = Vec::new();
-    let mut agent_tools = Vec::new();  // Track each agent's tool registry
+    let mut agent_tools = Vec::new(); // Track each agent's tool registry
     let mut pattern_agent_index = None;
+
+    // Find the group config to get member config_paths
+    let group_config = config.groups.iter().find(|g| g.name == group_name).cloned();
+
+    if group_config.is_some() {
+        output.info("✓", &format!("Found group config for '{}'", group_name));
+    } else {
+        output.warning(&format!(
+            "No group config found for '{}' in config file",
+            group_name
+        ));
+    }
 
     // First pass: create all agents WITHOUT data sources
     for (i, (mut agent_record, _membership)) in group.members.clone().into_iter().enumerate() {
+        output.section(&format!(
+            "Loading agent {}/{}: {}",
+            i + 1,
+            group.members.len(),
+            agent_record.name.bright_cyan()
+        ));
+
         // Load memories and messages for the agent
         load_agent_memories_and_messages(&mut agent_record, output).await?;
 
@@ -350,6 +377,87 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
         if agent_record.name == "Pattern" {
             pattern_agent_index = Some(i);
         }
+
+        // Find the member config for this agent
+        let member_config = group_config.as_ref().and_then(|gc| {
+            output.status(&format!(
+                "Searching {} group members for agent_id {}",
+                gc.members.len(),
+                agent_record.id
+            ));
+            gc.members
+                .iter()
+                .find(|m| m.agent_id.as_ref() == Some(&agent_record.id))
+                .cloned()
+        });
+
+        if let Some(ref member) = member_config {
+            output.info(
+                "✓",
+                &format!(
+                    "Found member config for {} (has config_path: {})",
+                    member.name,
+                    member.config_path.is_some()
+                ),
+            );
+        } else {
+            output.warning(&format!(
+                "No member config found for agent_id {}",
+                agent_record.id
+            ));
+        }
+
+        // Load agent config if member has a config_path
+        let agent_config = if let Some(member) = &member_config {
+            if let Some(config_path) = &member.config_path {
+                output.status(&format!(
+                    "Loading config for {} from {}",
+                    agent_record.name.bright_cyan(),
+                    config_path.display()
+                ));
+                match pattern_core::config::AgentConfig::load_from_file(config_path).await {
+                    Ok(cfg) => {
+                        output.success(&format!(
+                            "Loaded config (has persona: {})",
+                            cfg.persona.is_some()
+                        ));
+                        Some(cfg)
+                    }
+                    Err(e) => {
+                        output.warning(&format!("Failed to load config: {}", e));
+                        None
+                    }
+                }
+            } else {
+                output.info("ℹ", "Member has no config_path");
+                None
+            }
+        } else {
+            output.info("ℹ", "No member config, using defaults");
+            None
+        };
+
+        // Build full config with loaded agent config or defaults
+        let full_config = if let Some(agent_cfg) = agent_config {
+            output.info(
+                "📋",
+                &format!(
+                    "Using loaded config (persona: {} chars)",
+                    agent_cfg.persona.as_ref().map(|p| p.len()).unwrap_or(0)
+                ),
+            );
+            PatternConfig {
+                user: config.user.clone(),
+                agent: agent_cfg,
+                model: config.model.clone(),
+                database: config.database.clone(),
+                groups: config.groups.clone(),
+                bluesky: config.bluesky.clone(),
+            }
+        } else {
+            output.info("📋", "Using default config (no persona)");
+            config.clone()
+        };
 
         // Create agent with its own tool registry
         let tools = ToolRegistry::new();
@@ -359,7 +467,7 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
                 agent_record.clone(),
                 model.clone(),
                 !no_tools,
-                config,
+                &full_config,
                 heartbeat_sender.clone(),
                 Some(constellation_tracker.clone()),
                 output,
@@ -384,7 +492,7 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
                 agent_record.clone(),
                 model.clone(),
                 !no_tools,
-                config,
+                &full_config,
                 heartbeat_sender.clone(),
                 Some(constellation_tracker.clone()),
                 output,
@@ -428,55 +536,80 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
         if group_config.name != group.name {
             if let GroupPatternConfig::Sleeptime { .. } = &group_config.pattern {
                 // Check if this sleeptime group has the same members as our current group
-                let our_names: std::collections::HashSet<_> = group.members.iter().map(|(a, _)| &a.name).collect();
-                let their_names: std::collections::HashSet<_> = group_config.members.iter().map(|m| &m.name).collect();
+                let our_names: std::collections::HashSet<_> =
+                    group.members.iter().map(|(a, _)| &a.name).collect();
+                let their_names: std::collections::HashSet<_> =
+                    group_config.members.iter().map(|m| &m.name).collect();
 
                 if our_names == their_names {
                     output.info(
                         "Starting background monitoring",
-                        &format!("Detected sleeptime group '{}' with same members", group_config.name)
+                        &format!(
+                            "Detected sleeptime group '{}' with same members",
+                            group_config.name
+                        ),
                     );
 
                     // Load the sleeptime group from DB to get proper IDs and coordination pattern
-                    if let Some(sleeptime_group) = ops::get_group_by_name(&DB, &config.user.id, &group_config.name).await? {
+                    if let Some(sleeptime_group) =
+                        ops::get_group_by_name(&DB, &config.user.id, &group_config.name).await?
+                    {
                         // Use members directly from the loaded group
                         let sleeptime_members = &sleeptime_group.members;
 
                         // Map our loaded agents to the sleeptime group's membership data
                         tracing::info!("Mapping agents to sleeptime group membership:");
-                        tracing::info!("  Loaded agents: {:?}", agents.iter().map(|a| a.name()).collect::<Vec<_>>());
-                        tracing::info!("  Sleeptime members: {:?}", sleeptime_members.iter().map(|(a, _)| &a.name).collect::<Vec<_>>());
+                        tracing::info!(
+                            "  Loaded agents: {:?}",
+                            agents.iter().map(|a| a.name()).collect::<Vec<_>>()
+                        );
+                        tracing::info!(
+                            "  Sleeptime members: {:?}",
+                            sleeptime_members
+                                .iter()
+                                .map(|(a, _)| &a.name)
+                                .collect::<Vec<_>>()
+                        );
 
                         let sleeptime_agents: Vec<AgentWithMembership<Arc<dyn Agent>>> = agents
                             .iter()
                             .filter_map(|agent| {
                                 // Find the matching membership by agent name
                                 let agent_name = agent.name();
-                                let found = sleeptime_members.iter()
+                                let found = sleeptime_members
+                                    .iter()
                                     .find(|(a, _)| a.name == agent_name)
                                     .map(|(_, membership)| AgentWithMembership {
                                         agent: agent.clone(),
                                         membership: membership.clone(),
                                     });
                                 if found.is_none() {
-                                    tracing::warn!("Could not find sleeptime membership for agent: {}", agent_name);
+                                    tracing::warn!(
+                                        "Could not find sleeptime membership for agent: {}",
+                                        agent_name
+                                    );
                                 }
                                 found
                             })
                             .collect();
 
-                        tracing::info!("Matched {} of {} agents", sleeptime_agents.len(), agents.len());
+                        tracing::info!(
+                            "Matched {} of {} agents",
+                            sleeptime_agents.len(),
+                            agents.len()
+                        );
 
                         if sleeptime_agents.len() == agents.len() {
                             // Start background monitoring
                             let manager = pattern_core::coordination::SleeptimeManager;
-                            let monitoring_handle = crate::background_tasks::start_context_sync_monitoring(
-                                sleeptime_group.clone(),
-                                sleeptime_agents,
-                                manager,
-                                output.clone(),
-                            )
-                            .await?;
+                            let monitoring_handle =
+                                crate::background_tasks::start_context_sync_monitoring(
+                                    sleeptime_group.clone(),
+                                    sleeptime_agents,
+                                    manager,
+                                    output.clone(),
+                                )
+                                .await?;
 
                             // Spawn the monitoring task to run in background
                             tokio::spawn(async move {
@@ -485,7 +618,10 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
                                 }
                             });
 
-                            output.success(&format!("Background monitoring started for '{}'", sleeptime_group.name));
+                            output.success(&format!(
+                                "Background monitoring started for '{}'",
+                                sleeptime_group.name
+                            ));
                         } else {
                             output.warning(&format!(
                                 "Could not match all agents for sleeptime group '{}'",
@@ -568,7 +704,6 @@ pub async fn init_group_chat<M: GroupManager + Clone + 'static>(
 
     Ok(agents_with_membership)
 }
-
 
 /// Run the group chat loop with initialized agents
 pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
@@ -672,8 +807,10 @@ pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
                             agents: &agents_with_membership,
                             default_agent,
                         },
-                        &output
-                    ).await {
+                        &output,
+                    )
+                    .await
+                    {
                         Ok(should_exit) => {
                             if should_exit {
                                 output.status("Goodbye!");
@@ -719,8 +856,13 @@ pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
 
                             // Process the stream of events
                             while let Some(event) = stream.next().await {
-                                print_group_response_event(event, &output, &agents_with_membership, None)
-                                    .await;
+                                print_group_response_event(
+                                    event,
+                                    &output,
+                                    &agents_with_membership,
+                                    None,
+                                )
+                                .await;
                             }
                         }
                         Err(e) => {
@@ -769,7 +911,10 @@ pub async fn print_group_response_event(
             agent_name, role, ..
         } => {
             let prefix = source_tag.map(|s| format!("[{}] ", s)).unwrap_or_default();
-            output.status(&format!("{}Agent {} ({:?}) processing...", prefix, agent_name, role));
+            output.status(&format!(
+                "{}Agent {} ({:?}) processing...",
+                prefix, agent_name, role
+            ));
         }
         GroupResponseEvent::TextChunk {
             agent_id,
@@ -867,7 +1012,9 @@ pub async fn print_group_response_event(
             output.status(&format!("{} completed", agent_name));
         }
         GroupResponseEvent::Complete { execution_time, .. } => {
-            let label = source_tag.map(|s| format!("[{}] Execution time", s)).unwrap_or_else(|| "Execution time".to_string());
+            let label = source_tag
+                .map(|s| format!("[{}] Execution time", s))
+                .unwrap_or_else(|| "Execution time".to_string());
             output.info(&label, &format!("{:?}", execution_time));
         }
         GroupResponseEvent::Error {
@@ -977,7 +1124,7 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
 
                 tracing::info!("filter: {:?}", filter);
 
-                let mut data_sources = DataSourceBuilder::new()
+                let data_sources = DataSourceBuilder::new()
                     .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
                     .build_with_target(
                         pattern_agent.id(),
@@ -1024,7 +1171,7 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
                     .await;
 
                 // Register DataSourceTool on all agent tool registries
-                let data_source_tool = DataSourceTool::new(Arc::new(RwLock::new(data_sources)));
+                let data_source_tool = DataSourceTool::new(Arc::new(data_sources));
                 for tools in &agent_tools {
                     tools.register(data_source_tool.clone());
                 }

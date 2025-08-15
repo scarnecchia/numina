@@ -87,7 +87,9 @@ macro_rules! define_id_type {
 
         impl std::fmt::Display for $type_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}:{}",
+                write!(
+                    f,
+                    "{}:{}",
                     <$type_name as $crate::id::IdType>::PREFIX,
                     self.0,
                 )

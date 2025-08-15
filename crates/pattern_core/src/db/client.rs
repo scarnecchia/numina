@@ -52,7 +52,10 @@ pub async fn init_db_instance<C: Connection>(
             let db = any::connect(path)
                 .await
                 .map_err(|e| DatabaseError::ConnectionFailed(e))?;
-            tracing::info!("Database connection established in {:?}", connect_start.elapsed());
+            tracing::info!(
+                "Database connection established in {:?}",
+                connect_start.elapsed()
+            );
 
             // For embedded mode, we need to select a namespace and database
             let ns_start = std::time::Instant::now();
@@ -139,7 +142,10 @@ pub async fn init_db_with_options(config: DatabaseConfig, force_schema_update: b
             tracing::info!("Connecting to global DB at: {}", path);
             let connect_start = std::time::Instant::now();
             let connect_result = DB.connect(&path).await;
-            tracing::info!("Global DB connection completed in {:?}", connect_start.elapsed());
+            tracing::info!(
+                "Global DB connection completed in {:?}",
+                connect_start.elapsed()
+            );
             match connect_result {
                 Ok(_) => {}
                 Err(surrealdb::Error::Api(surrealdb::error::Api::AlreadyConnected)) => {

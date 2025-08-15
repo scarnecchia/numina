@@ -98,7 +98,12 @@ impl AiTool for SendMessageTool {
 
         // Send the message through the router
         match router
-            .send_message(target, content.clone(), params.metadata.clone(), Some(origin))
+            .send_message(
+                target,
+                content.clone(),
+                params.metadata.clone(),
+                Some(origin),
+            )
             .await
         {
             Ok(created_uri) => {
@@ -135,15 +140,19 @@ impl AiTool for SendMessageTool {
                     TargetType::Bluesky => {
                         // Check if this was a "like" action
                         let is_like = content.trim().eq_ignore_ascii_case("like");
-                        
-                        if let Some(uri) = created_uri.as_ref().or(params.target.target_id.as_ref()) {
+
+                        if let Some(uri) = created_uri.as_ref().or(params.target.target_id.as_ref())
+                        {
                             if is_like {
                                 // Check if the URI indicates this was a like (contains "app.bsky.feed.like")
                                 if uri.contains("app.bsky.feed.like") {
                                     format!("Liked Bluesky post: {}", uri)
                                 } else {
                                     // Fallback if we sent "like" but didn't get a like URI back
-                                    format!("Like action on Bluesky post: {}", params.target.target_id.as_deref().unwrap_or("unknown"))
+                                    format!(
+                                        "Like action on Bluesky post: {}",
+                                        params.target.target_id.as_deref().unwrap_or("unknown")
+                                    )
                                 }
                             } else {
                                 format!("Reply sent to Bluesky post: {}", uri)

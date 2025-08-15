@@ -1144,3 +1144,463 @@ pub async fn modify_memory(
     }
     Ok(())
 }
+
+/// Clean up message context by removing unpaired/out-of-order messages
+pub async fn context_cleanup(
+    agent_name: &str,
+    interactive: bool,
+    dry_run: bool,
+    limit: Option<usize>,
+) -> Result<()> {
+    use pattern_core::message::{ContentBlock, Message, MessageContent};
+    use std::collections::HashSet;
+    use std::io::{self, Write};
+
+    let output = Output::new();
+
+    output.section("Context Cleanup");
+    println!();
+
+    // Find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        output.info(
+            "Agent:",
+            &format!(
+                "{} (ID: {})",
+                agent_record.name.bright_cyan(),
+                agent_record.id.to_string().dimmed()
+            ),
+        );
+
+        if dry_run {
+            output.warning("DRY RUN - No messages will be deleted");
+        }
+        println!();
+
+        // Create an agent handle to search messages properly
+        let memory = Memory::with_owner(&agent_record.owner_id);
+        let mut handle = AgentHandle::default();
+        handle.name = agent_record.name.clone();
+        handle.agent_id = agent_record.id.clone();
+        handle.agent_type = agent_record.agent_type.clone();
+        handle.memory = memory;
+        handle.state = AgentState::Ready;
+        let handle = handle.with_db(DB.clone());
+
+        // Get all messages for this agent (no text query, just get everything)
+        let messages = match handle
+            .search_conversations(None, None, None, None, limit.unwrap_or(1000))
+            .await
+        {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                output.error(&format!("Failed to get messages: {}", e));
+                return Ok(());
+            }
+        };
+
+        output.info("Messages", &format!("Found {} messages", messages.len()));
+
+        // Analyze messages for issues
+        let mut unpaired_tool_calls: Vec<&Message> = Vec::new();
+        let mut unpaired_tool_results: Vec<&Message> = Vec::new();
+        let mut out_of_order: Vec<(&Message, &Message)> = Vec::new();
+        let mut tool_call_ids: HashSet<String> = HashSet::new();
+        let mut tool_result_ids: HashSet<String> = HashSet::new();
+
+        // First pass: collect all tool call and result IDs
+        for message in &messages {
+            match &message.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        tool_call_ids.insert(call.call_id.clone());
+                    }
+                }
+                MessageContent::ToolResponses(responses) => {
+                    for response in responses {
+                        tool_result_ids.insert(response.call_id.clone());
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                tool_call_ids.insert(id.clone());
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                tool_result_ids.insert(tool_use_id.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Second pass: find unpaired and check ordering
+        // Messages are in reverse chronological order (newest first)
+        for (i, message) in messages.iter().enumerate() {
+            match &message.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        if !tool_result_ids.contains(&call.call_id) {
+                            unpaired_tool_calls.push(message);
+                            break;
+                        }
+                        // Check ordering: result should come before call in reverse chrono
+                        // (i.e., at a lower index since newer messages have lower indices)
+                        if i > 0 {
+                            let found_result_before = messages[..i].iter().any(|m| {
+                                match &m.content {
+                                    MessageContent::ToolResponses(responses) => {
+                                        responses.iter().any(|r| r.call_id == call.call_id)
+                                    }
+                                    MessageContent::Blocks(blocks) => {
+                                        blocks.iter().any(|b| matches!(b,
+                                            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.call_id
+                                        ))
+                                    }
+                                    _ => false
+                                }
+                            });
+                            if !found_result_before {
+                                // Find the result message that's out of order
+                                if let Some(result_msg) = messages[i+1..].iter().find(|m| {
+                                    match &m.content {
+                                        MessageContent::ToolResponses(responses) => {
+                                            responses.iter().any(|r| r.call_id == call.call_id)
+                                        }
+                                        MessageContent::Blocks(blocks) => {
+                                            blocks.iter().any(|b| matches!(b,
+                                                ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.call_id
+                                            ))
+                                        }
+                                        _ => false
+                                    }
+                                }) {
+                                    out_of_order.push((message, result_msg));
+                                }
+                            }
+                        }
+                    }
+                }
+                MessageContent::ToolResponses(responses) => {
+                    for response in responses {
+                        if !tool_call_ids.contains(&response.call_id) {
+                            unpaired_tool_results.push(message);
+                            break;
+                        }
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                if !tool_result_ids.contains(id) {
+                                    unpaired_tool_calls.push(message);
+                                    break;
+                                }
+                                // Check ordering for blocks too
+                                if i > 0 {
+                                    let found_result_before = messages[..i].iter().any(|m| {
+                                        match &m.content {
+                                            MessageContent::ToolResponses(responses) => {
+                                                responses.iter().any(|r| &r.call_id == id)
+                                            }
+                                            MessageContent::Blocks(blocks) => {
+                                                blocks.iter().any(|b| matches!(b,
+                                                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                                                ))
+                                            }
+                                            _ => false
+                                        }
+                                    });
+                                    if !found_result_before {
+                                        if let Some(result_msg) = messages[i+1..].iter().find(|m| {
+                                            match &m.content {
+                                                MessageContent::ToolResponses(responses) => {
+                                                    responses.iter().any(|r| &r.call_id == id)
+                                                }
+                                                MessageContent::Blocks(blocks) => {
+                                                    blocks.iter().any(|b| matches!(b,
+                                                        ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                                                    ))
+                                                }
+                                                _ => false
+                                            }
+                                        }) {
+                                            out_of_order.push((message, result_msg));
+                                        }
+                                    }
+                                }
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                if !tool_call_ids.contains(tool_use_id) {
+                                    unpaired_tool_results.push(message);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Display issues found
+        println!("{}", "Issues Found:".bright_yellow());
+        println!("{}", "─".repeat(50).dimmed());
+
+        if unpaired_tool_calls.is_empty()
+            && unpaired_tool_results.is_empty()
+            && out_of_order.is_empty()
+        {
+            output.success("No issues found! All tool calls are paired and properly ordered.");
+            return Ok(());
+        }
+
+        let mut messages_to_delete: Vec<&Message> = Vec::new();
+
+        if !unpaired_tool_calls.is_empty() {
+            println!(
+                "  {} Unpaired tool calls (no matching results):",
+                "⚠".bright_yellow()
+            );
+            for msg in &unpaired_tool_calls {
+                println!("    - Message ID: {}", msg.id.to_string().dimmed());
+                println!(
+                    "      Role: {}",
+                    format!("{:?}", msg.role).bright_yellow().to_string()
+                );
+                println!(
+                    "      Time: {}",
+                    msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                );
+
+                // Display content using same logic as search_conversations
+                if let Some(text) = msg.text_content() {
+                    let preview = if text.len() > 200 {
+                        format!("{}...", &text[..200])
+                    } else {
+                        text.to_string()
+                    };
+                    println!("      Content:");
+                    for line in preview.lines() {
+                        println!("        {}", line.dimmed());
+                    }
+                } else {
+                    // Show details about non-text content
+                    match &msg.content {
+                        MessageContent::ToolCalls(calls) => {
+                            println!("      Content: [Tool calls: {} calls]", calls.len());
+                            for (j, call) in calls.iter().enumerate().take(3) {
+                                println!(
+                                    "        Call {}: {} (id: {})",
+                                    j + 1,
+                                    call.fn_name,
+                                    call.call_id
+                                );
+                            }
+                            if calls.len() > 3 {
+                                println!("        ... and {} more calls", calls.len() - 3);
+                            }
+                        }
+                        MessageContent::ToolResponses(responses) => {
+                            println!(
+                                "      Content: [Tool responses: {} responses]",
+                                responses.len()
+                            );
+                            for (j, resp) in responses.iter().enumerate().take(3) {
+                                let content_preview = if resp.content.len() > 100 {
+                                    format!("{}...", &resp.content[..100])
+                                } else {
+                                    resp.content.clone()
+                                };
+                                println!(
+                                    "        Response {} (call_id: {}): {}",
+                                    j + 1,
+                                    resp.call_id,
+                                    content_preview.dimmed()
+                                );
+                            }
+                            if responses.len() > 3 {
+                                println!("        ... and {} more responses", responses.len() - 3);
+                            }
+                        }
+                        MessageContent::Blocks(blocks) => {
+                            println!("      Content: [Blocks: {} blocks]", blocks.len());
+                            for (j, block) in blocks.iter().enumerate().take(3) {
+                                match block {
+                                    ContentBlock::Text { text } => {
+                                        let preview = if text.len() > 100 {
+                                            format!("{}...", &text[..100])
+                                        } else {
+                                            text.clone()
+                                        };
+                                        println!(
+                                            "        Block {}: Text - {}",
+                                            j + 1,
+                                            preview.dimmed()
+                                        );
+                                    }
+                                    ContentBlock::ToolUse { name, id, .. } => {
+                                        println!(
+                                            "        Block {}: Tool Use - {} (id: {})",
+                                            j + 1,
+                                            name,
+                                            id
+                                        );
+                                    }
+                                    ContentBlock::ToolResult {
+                                        tool_use_id,
+                                        content,
+                                        ..
+                                    } => {
+                                        let preview = if content.len() > 100 {
+                                            format!("{}...", &content[..100])
+                                        } else {
+                                            content.clone()
+                                        };
+                                        println!(
+                                            "        Block {}: Tool Result (tool_use_id: {}) - {}",
+                                            j + 1,
+                                            tool_use_id,
+                                            preview.dimmed()
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if blocks.len() > 3 {
+                                println!("        ... and {} more blocks", blocks.len() - 3);
+                            }
+                        }
+                        _ => {
+                            println!("      Content: [Non-text content]");
+                        }
+                    }
+                }
+
+                messages_to_delete.push(msg);
+                println!();
+            }
+            println!();
+        }
+
+        if !unpaired_tool_results.is_empty() {
+            println!(
+                "  {} Unpaired tool results (no matching calls):",
+                "⚠".bright_yellow()
+            );
+            for msg in &unpaired_tool_results {
+                println!("    - Message ID: {}", msg.id.to_string().dimmed());
+                if let MessageContent::ToolResponses(responses) = &msg.content {
+                    for response in responses {
+                        println!(
+                            "      Tool response (Call ID: {})",
+                            response.call_id.dimmed()
+                        );
+                    }
+                }
+                messages_to_delete.push(msg);
+            }
+            println!();
+        }
+
+        if !out_of_order.is_empty() {
+            println!(
+                "  {} Out-of-order tool call/result pairs:",
+                "⚠".bright_yellow()
+            );
+            // Deduplicate the pairs
+            let mut seen = HashSet::new();
+            for (call_msg, result_msg) in &out_of_order {
+                let key = (call_msg.id.to_string(), result_msg.id.to_string());
+                if seen.insert(key) {
+                    println!(
+                        "    - Call: {} ({})",
+                        call_msg.id.to_string().dimmed(),
+                        call_msg.created_at.format("%H:%M:%S").to_string().dimmed()
+                    );
+                    println!(
+                        "      Result: {} ({})",
+                        result_msg.id.to_string().dimmed(),
+                        result_msg
+                            .created_at
+                            .format("%H:%M:%S")
+                            .to_string()
+                            .dimmed()
+                    );
+                    println!(
+                        "      {} Result came AFTER call (should be before)",
+                        "⚠".bright_red()
+                    );
+                    // Add both to delete list
+                    messages_to_delete.push(call_msg);
+                    messages_to_delete.push(result_msg);
+                }
+            }
+            println!();
+        }
+
+        // Ask for confirmation or handle non-interactive mode
+        if !messages_to_delete.is_empty() {
+            println!(
+                "{}",
+                format!("Found {} messages to clean up", messages_to_delete.len()).bright_white()
+            );
+
+            if interactive && !dry_run {
+                print!("Proceed with cleanup? [y/N]: ");
+                io::stdout().flush().unwrap();
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).unwrap();
+
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    output.status("Cleanup cancelled");
+                    return Ok(());
+                }
+            }
+
+            // Delete messages (or show what would be deleted)
+            for msg in messages_to_delete {
+                if dry_run {
+                    output.status(&format!("Would delete message: {}", msg.id));
+                } else {
+                    let _: Option<<Message as DbEntity>::DbModel> = DB
+                        .delete(RecordId::from(msg.id.clone()))
+                        .await
+                        .into_diagnostic()?;
+
+                    output.success(&format!("Deleted message: {}", msg.id));
+                }
+            }
+
+            if !dry_run {
+                output.success("Context cleanup complete!");
+            } else {
+                output.info("Dry run complete", "No messages were deleted");
+            }
+        }
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
+    }
+
+    Ok(())
+}

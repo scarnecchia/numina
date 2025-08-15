@@ -33,7 +33,11 @@ impl<'a> CommandContext<'a> {
                 }
                 Ok((*agent).clone())
             }
-            CommandContext::Group { agents, default_agent, .. } => {
+            CommandContext::Group {
+                agents,
+                default_agent,
+                ..
+            } => {
                 if let Some(agent_name) = name {
                     // Find agent in group by name
                     for agent_with_membership in *agents {
@@ -45,7 +49,9 @@ impl<'a> CommandContext<'a> {
                 } else if let Some(agent) = default_agent {
                     Ok((*agent).clone())
                 } else {
-                    Err(miette::miette!("No default agent available, please specify an agent"))
+                    Err(miette::miette!(
+                        "No default agent available, please specify an agent"
+                    ))
                 }
             }
         }
@@ -93,7 +99,8 @@ pub async fn handle_slash_command(
                     ));
                 }
                 output.print("");
-                output.status("Tip: Specify agent name with commands, e.g., /memory Pattern system");
+                output
+                    .status("Tip: Specify agent name with commands, e.g., /memory Pattern system");
                 output.print("");
             }
 
@@ -134,7 +141,11 @@ pub async fn handle_slash_command(
         }
         "/status" => {
             // Parse optional agent name for group context
-            let agent_name = if parts.len() > 1 { Some(parts[1]) } else { None };
+            let agent_name = if parts.len() > 1 {
+                Some(parts[1])
+            } else {
+                None
+            };
 
             match context.get_agent(agent_name).await {
                 Ok(agent) => {
@@ -185,6 +196,8 @@ pub async fn handle_slash_command(
                             Ok(Some(block)) => {
                                 output.section(&format!("Memory Block: {}", block_name));
                                 output.kv("Label", &block.label.to_string());
+                                output.kv("Permissions", &block.permission.to_string());
+                                output.kv("Type", &block.memory_type.to_string());
                                 output.kv("Characters", &block.value.len().to_string());
                                 if let Some(desc) = &block.description {
                                     output.kv("Description", desc);
@@ -252,7 +265,10 @@ pub async fn handle_slash_command(
                                 if results.is_empty() {
                                     output.status("No matching archival memories found");
                                 } else {
-                                    output.section(&format!("Found {} archival memories", results.len()));
+                                    output.section(&format!(
+                                        "Found {} archival memories",
+                                        results.len()
+                                    ));
                                     for memory in results {
                                         output.list_item(&format!(
                                             "{}: {} ({})",
@@ -290,7 +306,11 @@ pub async fn handle_slash_command(
         }
         "/context" => {
             // Parse optional agent name for group context
-            let agent_name = if parts.len() > 1 { Some(parts[1]) } else { None };
+            let agent_name = if parts.len() > 1 {
+                Some(parts[1])
+            } else {
+                None
+            };
 
             match context.get_agent(agent_name).await {
                 Ok(agent) => {
@@ -300,18 +320,27 @@ pub async fn handle_slash_command(
                     let handle = agent.handle().await;
 
                     // Search recent messages without a query to get context
-                    match handle.search_conversations(None, None, None, None, 20).await {
+                    match handle
+                        .search_conversations(None, None, None, None, 20)
+                        .await
+                    {
                         Ok(messages) => {
                             if messages.is_empty() {
                                 output.status("No messages in context");
                             } else {
-                                output.status(&format!("Showing {} recent messages", messages.len()));
-                                output.status("");  // Empty line for spacing
+                                output
+                                    .status(&format!("Showing {} recent messages", messages.len()));
+                                output.status(""); // Empty line for spacing
 
                                 // Display messages in chronological order (reverse since they come newest first)
                                 for msg in messages.iter().rev() {
-                                    message_display::display_message(msg, &output, false, Some(200));
-                                    output.status("");  // Empty line between messages
+                                    message_display::display_message(
+                                        msg,
+                                        &output,
+                                        false,
+                                        Some(200),
+                                    );
+                                    output.status(""); // Empty line between messages
                                 }
                             }
                         }
@@ -349,18 +378,33 @@ pub async fn handle_slash_command(
 
             match context.get_agent(agent_name).await {
                 Ok(agent) => {
-                    output.status(&format!("Searching {} conversations for: {}", agent.name(), query));
+                    output.status(&format!(
+                        "Searching {} conversations for: {}",
+                        agent.name(),
+                        query
+                    ));
 
                     let handle = agent.handle().await;
-                    match handle.search_conversations(Some(&query), None, None, None, 10).await {
+                    match handle
+                        .search_conversations(Some(&query), None, None, None, 10)
+                        .await
+                    {
                         Ok(messages) => {
                             if messages.is_empty() {
                                 output.status("No matching conversations found");
                             } else {
-                                output.section(&format!("Found {} matching messages", messages.len()));
+                                output.section(&format!(
+                                    "Found {} matching messages",
+                                    messages.len()
+                                ));
                                 for msg in messages {
-                                    output.status(&message_display::display_message_summary(&msg, 100));
-                                    output.status(&format!("  {}", msg.created_at.to_string().dimmed()));
+                                    output.status(&message_display::display_message_summary(
+                                        &msg, 100,
+                                    ));
+                                    output.status(&format!(
+                                        "  {}",
+                                        msg.created_at.to_string().dimmed()
+                                    ));
                                     output.status("");
                                 }
                             }

@@ -18,11 +18,11 @@ fn default_limit() -> i64 {
 /// Tool for managing data sources that feed into agents
 #[derive(Debug, Clone)]
 pub struct DataSourceTool<E: EmbeddingProvider + Clone> {
-    coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<E>>>,
+    coordinator: Arc<DataIngestionCoordinator<E>>,
 }
 
 impl<E: EmbeddingProvider + Clone> DataSourceTool<E> {
-    pub fn new(coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<E>>>) -> Self {
+    pub fn new(coordinator: Arc<DataIngestionCoordinator<E>>) -> Self {
         Self { coordinator }
     }
 }
@@ -154,8 +154,10 @@ Sources must be configured separately before they can be used."#,
                 }
 
                 // Read from source
-                let coordinator = self.coordinator.read().await;
-                let items = coordinator.read_source(&source_id, limit, cursor).await?;
+                let items = self
+                    .coordinator
+                    .read_source(&source_id, limit, cursor)
+                    .await?;
 
                 // Apply offset if needed
                 let items = if offset > 0 {
@@ -195,8 +197,8 @@ Sources must be configured separately before they can be used."#,
                     })?;
 
                 // Search in source
-                let coordinator = self.coordinator.read().await;
-                let results = coordinator
+                let results = self
+                    .coordinator
                     .search_source(
                         &source_id,
                         &query,
@@ -228,8 +230,7 @@ Sources must be configured separately before they can be used."#,
                         })?;
 
                 // Start monitoring
-                let mut coordinator = self.coordinator.write().await;
-                coordinator.start_monitoring(&source_id).await?;
+                self.coordinator.start_monitoring(&source_id).await?;
 
                 Ok(DataSourceOutput {
                     success: true,
@@ -240,6 +241,7 @@ Sources must be configured separately before they can be used."#,
             }
 
             DataSourceOperation::Pause => {
+                tracing::debug!("DataSource pause operation starting");
                 let source_id =
                     input
                         .source_id
@@ -249,8 +251,9 @@ Sources must be configured separately before they can be used."#,
                             parameters: json!({}),
                         })?;
 
-                let coordinator = self.coordinator.read().await;
-                coordinator.pause_source(&source_id).await?;
+                tracing::debug!("Calling pause_source");
+                self.coordinator.pause_source(&source_id).await?;
+                tracing::debug!("pause_source completed successfully");
 
                 Ok(DataSourceOutput {
                     success: true,
@@ -270,8 +273,7 @@ Sources must be configured separately before they can be used."#,
                             parameters: json!({}),
                         })?;
 
-                let coordinator = self.coordinator.read().await;
-                coordinator.resume_source(&source_id).await?;
+                self.coordinator.resume_source(&source_id).await?;
 
                 Ok(DataSourceOutput {
                     success: true,
@@ -282,8 +284,7 @@ Sources must be configured separately before they can be used."#,
             }
 
             DataSourceOperation::List => {
-                let coordinator = self.coordinator.read().await;
-                let sources = coordinator.list_sources().await;
+                let sources = self.coordinator.list_sources().await;
                 let source_list: Vec<_> = sources
                     .into_iter()
                     .map(|(id, source_type)| {
@@ -308,7 +309,7 @@ Sources must be configured separately before they can be used."#,
 /// Register the data source tool with the registry
 pub fn register_data_source_tool<E: EmbeddingProvider + Clone + 'static>(
     registry: &mut ToolRegistry,
-    coordinator: Arc<tokio::sync::RwLock<DataIngestionCoordinator<E>>>,
+    coordinator: Arc<DataIngestionCoordinator<E>>,
 ) -> Result<()> {
     registry.register(DataSourceTool::new(coordinator));
     Ok(())

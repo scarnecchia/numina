@@ -17,17 +17,26 @@ pub use transport::{Transport, TransportType};
 
 // Client exports
 pub use client::{
-    AuthConfig, McpClientService, McpServerConfig, McpToolWrapper,
-    ToolRequest, ToolResponse, TransportConfig,
+    AuthConfig, McpClientService, McpServerConfig, McpToolWrapper, ToolRequest, ToolResponse,
+    TransportConfig,
 };
 
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
-        // Server types
-        McpServer, McpServerBuilder, ToolRegistry, ToolRegistryBuilder, Transport, TransportType,
         // Client types
-        AuthConfig, McpClientService, McpServerConfig, McpToolWrapper, TransportConfig,
+        AuthConfig,
+        McpClientService,
+        // Server types
+        McpServer,
+        McpServerBuilder,
+        McpServerConfig,
+        McpToolWrapper,
+        ToolRegistry,
+        ToolRegistryBuilder,
+        Transport,
+        TransportConfig,
+        TransportType,
         // Common types
         error::{McpError, Result},
     };

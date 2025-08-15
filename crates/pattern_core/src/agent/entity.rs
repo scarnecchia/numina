@@ -198,15 +198,15 @@ impl AgentRecord {
     > {
         let query = if include_archived {
             format!(
-                r#"SELECT * FROM agent_messages
+                r#"SELECT *, out.created_at as msg_created FROM agent_messages
                    WHERE in = $agent_id
-                   ORDER BY position ASC"#
+                   ORDER BY msg_created ASC"#
             )
         } else {
             format!(
-                r#"SELECT * FROM agent_messages
+                r#"SELECT *, out.created_at as msg_created FROM agent_messages
                    WHERE in = $agent_id AND message_type = "active"
-                   ORDER BY position ASC"#
+                   ORDER BY msg_created ASC"#
             )
         };
 
@@ -273,7 +273,7 @@ impl AgentRecord {
         }
 
         tracing::debug!(
-            "Total messages loaded for agent {}: {}",
+            "Total messages loaded for agent {}: {} (sorted by message created_at in query)",
             self.id,
             messages_with_relations.len()
         );

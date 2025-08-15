@@ -107,8 +107,8 @@ impl AgentSelector for SupervisorSelector {
             .await?;
 
         // Stream response while collecting just enough text to make decision
-        use tokio_stream::StreamExt;
         use tokio::sync::mpsc;
+        use tokio_stream::StreamExt;
 
         let (event_tx, event_rx) = mpsc::channel(100);
         let (decision_tx, mut decision_rx) = mpsc::channel(1);
@@ -132,40 +132,59 @@ impl AgentSelector for SupervisorSelector {
                                 let selected_names = parse_supervisor_response(&response_text);
 
                                 // Determine if this is a direct response or delegation
-                                let is_direct = if response_text.trim() == "." || response_text.trim().is_empty() {
+                                let is_direct = if response_text.trim() == "."
+                                    || response_text.trim().is_empty()
+                                {
                                     // Empty or just "." = no selection, supervisor handles
                                     true
                                 } else if selected_names.is_empty() {
                                     // No agent names found, check if it's substantive
-                                    response_text.len() > 50 || response_text.contains('.') || response_text.contains('?')
-                                } else if selected_names.len() == 1 && selected_names[0] == supervisor_name_clone {
+                                    response_text.len() > 50
+                                        || response_text.contains('.')
+                                        || response_text.contains('?')
+                                } else if selected_names.len() == 1
+                                    && selected_names[0] == supervisor_name_clone
+                                {
                                     // Self-selection
                                     true
                                 } else {
                                     // Check if all names are valid agents
-                                    let all_match_agents = selected_names.iter()
+                                    let all_match_agents = selected_names
+                                        .iter()
                                         .all(|name| agent_names.contains(name));
-                                    !all_match_agents  // If not all valid, treat as direct response
+                                    !all_match_agents // If not all valid, treat as direct response
                                 };
 
-                                tracing::debug!("Supervisor first text: '{}', is_direct: {}", response_text.trim(), is_direct);
-                                let _ = decision_tx.send((response_text.clone(), selected_names, is_direct)).await;
+                                tracing::debug!(
+                                    "Supervisor first text: '{}', is_direct: {}",
+                                    response_text.trim(),
+                                    is_direct
+                                );
+                                let _ = decision_tx
+                                    .send((response_text.clone(), selected_names, is_direct))
+                                    .await;
                                 decision_made = true;
                             }
                         }
                         crate::agent::ResponseEvent::ToolCalls { .. } => {
                             // Tool calls = supervisor is handling it themselves
                             tracing::debug!("Supervisor using tools, treating as self-selection");
-                            let _ = decision_tx.send((response_text.clone(), vec![], true)).await;
+                            let _ = decision_tx
+                                .send((response_text.clone(), vec![], true))
+                                .await;
                             decision_made = true;
                         }
                         crate::agent::ResponseEvent::Complete { .. } => {
                             // Complete without text or tools = empty response
                             if !decision_made {
                                 let selected_names = parse_supervisor_response(&response_text);
-                                let is_direct = true;  // Empty response = self-handling
-                                tracing::debug!("Supervisor completed with no text/tools, self-selecting");
-                                let _ = decision_tx.send((response_text.clone(), selected_names, is_direct)).await;
+                                let is_direct = true; // Empty response = self-handling
+                                tracing::debug!(
+                                    "Supervisor completed with no text/tools, self-selecting"
+                                );
+                                let _ = decision_tx
+                                    .send((response_text.clone(), selected_names, is_direct))
+                                    .await;
                                 decision_made = true;
                             }
                         }
@@ -183,12 +202,15 @@ impl AgentSelector for SupervisorSelector {
             if !decision_made {
                 let selected_names = parse_supervisor_response(&response_text);
                 let is_direct = response_text.is_empty() || selected_names.is_empty();
-                let _ = decision_tx.send((response_text, selected_names, is_direct)).await;
+                let _ = decision_tx
+                    .send((response_text, selected_names, is_direct))
+                    .await;
             }
         });
 
         // Wait for decision from the spawned task
-        let (response_text, selected_names, is_direct_response) = decision_rx.recv()
+        let (response_text, selected_names, is_direct_response) = decision_rx
+            .recv()
             .await
             .ok_or_else(|| crate::CoreError::AgentGroupError {
                 group_name: "supervisor".to_string(),

@@ -314,7 +314,7 @@ impl AgentHandle {
             let sql = format!(
                 "SELECT * FROM msg WHERE {} ORDER BY created_at DESC LIMIT {}",
                 conditions.join(" AND "),
-                limit * 10  // Get more results since we'll filter some out
+                limit * 10 // Get more results since we'll filter some out
             );
             (sql, false, true)
         } else {
@@ -366,26 +366,23 @@ impl AgentHandle {
         }
 
         // Execute the query
-        let mut result = query_builder
-            .await
-            .map_err(DatabaseError::from)?;
+        let mut result = query_builder.await.map_err(DatabaseError::from)?;
 
         // Extract messages based on query type
         let mut messages: Vec<Message> = if _needs_messages_extraction {
             // Graph traversal query - messages are nested under "messages" field
-            let db_messages: Vec<Vec<<Message as DbEntity>::DbModel>> = result
-                .take("messages")
-                .map_err(DatabaseError::from)?;
+            let db_messages: Vec<Vec<<Message as DbEntity>::DbModel>> =
+                result.take("messages").map_err(DatabaseError::from)?;
 
             db_messages
-                .into_iter().flatten()
+                .into_iter()
+                .flatten()
                 .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
                 .collect()
         } else {
             // Direct msg table query - messages are at the top level
-            let db_messages: Vec<<Message as DbEntity>::DbModel> = result
-                .take(0)
-                .map_err(DatabaseError::from)?;
+            let db_messages: Vec<<Message as DbEntity>::DbModel> =
+                result.take(0).map_err(DatabaseError::from)?;
 
             let mut converted_messages: Vec<Message> = db_messages
                 .into_iter()
@@ -401,7 +398,8 @@ impl AgentHandle {
                     agent_record_id
                 );
 
-                let mut agent_msg_result = db.query(&agent_msg_sql)
+                let mut agent_msg_result = db
+                    .query(&agent_msg_sql)
                     .await
                     .map_err(DatabaseError::from)?;
 
@@ -414,14 +412,10 @@ impl AgentHandle {
                     out: RecordId,
                 }
 
-                let out_records: Vec<OutRecord> = agent_msg_result
-                    .take(0)
-                    .map_err(DatabaseError::from)?;
+                let out_records: Vec<OutRecord> =
+                    agent_msg_result.take(0).map_err(DatabaseError::from)?;
 
-                let agent_msg_ids: Vec<RecordId> = out_records
-                    .into_iter()
-                    .map(|r| r.out)
-                    .collect();
+                let agent_msg_ids: Vec<RecordId> = out_records.into_iter().map(|r| r.out).collect();
 
                 let agent_msg_id_set: std::collections::HashSet<RecordId> =
                     agent_msg_ids.into_iter().collect();
@@ -435,7 +429,6 @@ impl AgentHandle {
 
             converted_messages
         };
-
 
         // Apply limit in application code since we may get more than limit from the query
         messages.truncate(limit);

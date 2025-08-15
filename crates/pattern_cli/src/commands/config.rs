@@ -22,7 +22,6 @@ pub async fn show(config: &PatternConfig, output: &Output) -> Result<()> {
 
 /// Save current configuration to file
 pub async fn save(config: &PatternConfig, path: &PathBuf, output: &Output) -> Result<()> {
-
     output.info(
         "💾",
         &format!("Saving configuration to: {}", path.display()),

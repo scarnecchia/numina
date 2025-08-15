@@ -3,7 +3,7 @@
 //! This module provides background monitoring and periodic activation
 //! for agent groups, particularly those using the sleeptime coordination pattern.
 
-use std::sync::Arc;
+use crate::{chat::print_group_response_event, output::Output};
 use miette::Result;
 use pattern_core::{
     agent::Agent,
@@ -13,7 +13,7 @@ use pattern_core::{
     },
     message::{Message, MessageContent},
 };
-use crate::{chat::print_group_response_event, output::Output};
+use std::sync::Arc;
 
 /// Start a background monitoring task for a sleeptime group
 ///
@@ -27,10 +27,7 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
 ) -> Result<tokio::task::JoinHandle<()>> {
     // Extract check interval from the group's coordination pattern
     let check_interval = match &group.coordination_pattern {
-        CoordinationPattern::Sleeptime {
-            check_interval,
-            ..
-        } => *check_interval,
+        CoordinationPattern::Sleeptime { check_interval, .. } => *check_interval,
         _ => {
             return Err(miette::miette!(
                 "Context sync monitoring requires a sleeptime coordination pattern"
@@ -62,11 +59,14 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
             // Create a generic trigger check message
             // The sleeptime manager will customize it for the specific agent being activated
             let trigger_message = Message::user(MessageContent::from_text(
-                "Context sync check: Review your domain and report any notable patterns or concerns. Provide brief status updates only if intervention is needed."
+                "Context sync check: Review your domain and report any notable patterns or concerns. Provide brief status updates only if intervention is needed.",
             ));
 
             // Route the message through the group manager
-            match manager.route_message(&group, &agents, trigger_message).await {
+            match manager
+                .route_message(&group, &agents, trigger_message)
+                .await
+            {
                 Ok(mut stream) => {
                     // Process the stream and capture state updates
                     let agents_clone = agents.clone();
@@ -86,7 +86,10 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
                             if let Some(new_state) = state_changes {
                                 // Update the group's state for next iteration
                                 group.state = new_state.clone();
-                                tracing::debug!("Updated group state for next iteration: {:?}", new_state);
+                                tracing::debug!(
+                                    "Updated group state for next iteration: {:?}",
+                                    new_state
+                                );
                             }
                         }
 
@@ -94,8 +97,9 @@ pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
                             event,
                             &output_clone,
                             &agents_clone,
-                            Some("Background")
-                        ).await;
+                            Some("Background"),
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {

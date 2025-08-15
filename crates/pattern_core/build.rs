@@ -24,7 +24,7 @@ fn main() {
         "src/db/schema.rs",
         "src/oauth.rs",
         "src/atproto_identity.rs",
-        "src/discord_identity.rs"
+        "src/discord_identity.rs",
     ];
 
     for file in &entity_files {

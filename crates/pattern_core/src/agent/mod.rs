@@ -86,7 +86,7 @@ pub trait Agent: Send + Sync + Debug {
 
     /// Get the agent's handle for controlled access to internals
     async fn handle(&self) -> crate::context::state::AgentHandle;
-    
+
     /// Get the agent's last active timestamp
     async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>>;
 

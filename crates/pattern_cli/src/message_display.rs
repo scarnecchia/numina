@@ -6,7 +6,12 @@ use pattern_core::message::{ChatRole, ContentBlock, ContentPart, Message, Messag
 use crate::output::Output;
 
 /// Display a message with proper formatting and role coloring
-pub fn display_message(msg: &Message, output: &Output, show_id: bool, preview_length: Option<usize>) {
+pub fn display_message(
+    msg: &Message,
+    output: &Output,
+    show_id: bool,
+    preview_length: Option<usize>,
+) {
     // Format role display
     let role_str = match msg.role {
         ChatRole::System => "system",
@@ -23,13 +28,19 @@ pub fn display_message(msg: &Message, output: &Output, show_id: bool, preview_le
     };
 
     if show_id {
-        output.kv("Role", &format!("{} ({})", role_display, msg.id.0.to_string().dimmed()));
+        output.kv(
+            "Role",
+            &format!("{} ({})", role_display, msg.id.0.to_string().dimmed()),
+        );
     } else {
         output.kv("Role", &role_display);
     }
 
     // Show timestamp
-    output.kv("Time", &msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+    output.kv(
+        "Time",
+        &msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    );
 
     // Display content based on type
     let text = msg.display_content();
@@ -52,7 +63,11 @@ pub fn display_message(msg: &Message, output: &Output, show_id: bool, preview_le
 }
 
 /// Display detailed message content for non-text messages
-pub fn display_message_content(content: &MessageContent, output: &Output, preview_length: Option<usize>) {
+pub fn display_message_content(
+    content: &MessageContent,
+    output: &Output,
+    preview_length: Option<usize>,
+) {
     let preview_len = preview_length.unwrap_or(100);
 
     match content {
@@ -80,17 +95,28 @@ pub fn display_message_content(content: &MessageContent, output: &Output, previe
         MessageContent::ToolCalls(calls) => {
             output.kv("Content", &format!("[Tool calls: {} calls]", calls.len()));
             for (j, call) in calls.iter().enumerate().take(3) {
-                output.list_item(&format!("Call {}: {} (id: {})", j + 1, call.fn_name, call.call_id));
+                output.list_item(&format!(
+                    "Call {}: {} (id: {})",
+                    j + 1,
+                    call.fn_name,
+                    call.call_id
+                ));
             }
             if calls.len() > 3 {
                 output.list_item(&format!("... and {} more calls", calls.len() - 3));
             }
         }
         MessageContent::ToolResponses(responses) => {
-            output.kv("Content", &format!("[Tool responses: {} responses]", responses.len()));
+            output.kv(
+                "Content",
+                &format!("[Tool responses: {} responses]", responses.len()),
+            );
             for (j, resp) in responses.iter().enumerate().take(3) {
                 let content_preview = if resp.content.len() > preview_len {
-                    format!("{}...", resp.content.chars().take(preview_len).collect::<String>())
+                    format!(
+                        "{}...",
+                        resp.content.chars().take(preview_len).collect::<String>()
+                    )
                 } else {
                     resp.content.clone()
                 };
@@ -123,17 +149,33 @@ pub fn display_message_content(content: &MessageContent, output: &Output, previe
                         } else {
                             text.clone()
                         };
-                        output.list_item(&format!("Block {}: Thinking - {}", j + 1, preview.dimmed()));
+                        output.list_item(&format!(
+                            "Block {}: Thinking - {}",
+                            j + 1,
+                            preview.dimmed()
+                        ));
                     }
                     ContentBlock::RedactedThinking { .. } => {
                         output.list_item(&format!("Block {}: [Redacted Thinking]", j + 1));
                     }
                     ContentBlock::ToolUse { name, id, .. } => {
-                        output.list_item(&format!("Block {}: Tool Use - {} (id: {})", j + 1, name, id));
+                        output.list_item(&format!(
+                            "Block {}: Tool Use - {} (id: {})",
+                            j + 1,
+                            name,
+                            id
+                        ));
                     }
-                    ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => {
                         let preview = if content.len() > preview_len {
-                            format!("{}...", content.chars().take(preview_len).collect::<String>())
+                            format!(
+                                "{}...",
+                                content.chars().take(preview_len).collect::<String>()
+                            )
                         } else {
                             content.clone()
                         };

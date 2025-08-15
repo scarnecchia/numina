@@ -114,7 +114,11 @@ impl GroupManager for SleeptimeManager {
                 .send(GroupResponseEvent::Started {
                     group_id: group_id.clone(),
                     pattern: "sleeptime".to_string(),
-                    agent_count: if intervention_agent_id.is_some() { 1 } else { active_count },
+                    agent_count: if intervention_agent_id.is_some() {
+                        1
+                    } else {
+                        active_count
+                    },
                 })
                 .await;
 
