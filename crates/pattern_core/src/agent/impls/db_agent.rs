@@ -1540,18 +1540,10 @@ where
             let (current_state, maybe_receiver) = self_clone.state().await;
             if current_state != AgentState::Ready {
                 if let Some(mut receiver) = maybe_receiver {
-                    let timeout = tokio::time::timeout(Duration::from_secs(200), async {
-                        loop {
-                            if *receiver.borrow() == AgentState::Ready {
-                                break;
-                            }
-                            // Wait for state change
-                            if receiver.changed().await.is_err() {
-                                // Channel closed
-                                break;
-                            }
-                        }
-                    });
+                    let timeout = tokio::time::timeout(
+                        Duration::from_secs(200),
+                        receiver.wait_for(|s| *s == AgentState::Ready),
+                    );
                     let _ = timeout.await;
                 }
             }

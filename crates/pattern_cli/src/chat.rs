@@ -7,7 +7,7 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     Agent, ToolRegistry,
-    agent::ResponseEvent,
+    agent::{AgentState, ResponseEvent},
     config::PatternConfig,
     context::heartbeat::{self, HeartbeatReceiver, HeartbeatSender},
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
@@ -17,6 +17,7 @@ use pattern_core::{
     tool::builtin::DataSourceTool,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_stream::StreamExt;
 
 use crate::{
@@ -82,10 +83,19 @@ pub async fn chat_with_agent(
             let output = output_clone.clone();
             // Spawn task to handle this heartbeat
             tokio::spawn(async move {
+                let (current_state, maybe_receiver) = agent.state().await;
+                if current_state != AgentState::Ready {
+                    if let Some(mut receiver) = maybe_receiver {
+                        let timeout = tokio::time::timeout(
+                            Duration::from_secs(200),
+                            receiver.wait_for(|s| *s == AgentState::Ready),
+                        );
+                        let _ = timeout.await;
+                    }
+                }
                 tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
-
                 // Create a system message to trigger another turn
-                let heartbeat_message = Message::system(format!(
+                let heartbeat_message = Message::user(format!(
                     "[Heartbeat continuation from tool: {}]",
                     heartbeat.tool_name
                 ));
@@ -756,6 +766,16 @@ pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
 
                 // Spawn task to handle this heartbeat
                 tokio::spawn(async move {
+                    let (current_state, maybe_receiver) = agent.state().await;
+                    if current_state != AgentState::Ready {
+                        if let Some(mut receiver) = maybe_receiver {
+                            let timeout = tokio::time::timeout(
+                                Duration::from_secs(200),
+                                receiver.wait_for(|s| *s == AgentState::Ready),
+                            );
+                            let _ = timeout.await;
+                        }
+                    }
                     tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
 
                     // Create a system message to trigger another turn

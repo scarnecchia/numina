@@ -1886,7 +1886,7 @@ impl DataSource for BlueskyFirehoseSource {
 
                         // Insert into agent's archival memory
                         if let Err(e) = agent_handle
-                            .insert_archival_memory(&memory_label, &memory_content)
+                            .insert_working_memory(&memory_label, &memory_content)
                             .await
                         {
                             tracing::warn!("Failed to create memory block for {}: {}", handle, e);
@@ -1917,7 +1917,7 @@ impl DataSource for BlueskyFirehoseSource {
             }
         }
         message
-            .push_str("If you choose to reply, your response must contain under 300 characters or it will be truncated.\nAlternatively, you can 'like' the post by submitting a reply with 'like' as the sole text");
+            .push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri of the post you want to reply to, from the above options), your response must contain under 300 characters or it will be truncated.\nAlternatively, you can 'like' the post by submitting a reply with 'like' as the sole text");
 
         Some((message, memory_blocks))
     }
