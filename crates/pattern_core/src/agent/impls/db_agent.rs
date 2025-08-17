@@ -1624,6 +1624,9 @@ where
 
             let _ = self.persist_memory_changes().await;
 
+            // Capture batch ID before moving message
+            let current_batch_id = message.batch;
+
             // Update state and persist message
             {
                 let mut ctx = context.write().await;
@@ -1649,8 +1652,8 @@ where
                 ctx.add_tool_rules(tool_rules);
             }
 
-            // Build memory context
-            let memory_context = match context.read().await.build_context().await {
+            // Build memory context with the current batch ID
+            let memory_context = match context.read().await.build_context(current_batch_id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
                     send_event(ResponseEvent::Error {
@@ -2144,7 +2147,9 @@ where
                     // IMPORTANT: Rebuild context to get fresh memory state after tool execution
                     // This ensures agents see updated memory blocks immediately
                     let context_lock = context.read().await;
-                    let memory_context = match context_lock.build_context().await {
+                    // For continuations, we should maintain the same batch
+                    // TODO: This needs the batch_id from the heartbeat request
+                    let memory_context = match context_lock.build_context(None).await {
                         Ok(ctx) => ctx,
                         Err(e) => {
                             send_event(ResponseEvent::Error {
@@ -2157,11 +2162,7 @@ where
                     };
                     drop(context_lock);
 
-                    let request_with_tools = Request {
-                        system: Some(vec![memory_context.system_prompt.clone()]),
-                        messages: memory_context.get_messages_for_request(),
-                        tools: Some(memory_context.tools),
-                    };
+                    let request_with_tools = memory_context.into_request();
 
                     current_response = {
                         let model = model.read().await;
@@ -2175,7 +2176,9 @@ where
                                     recoverable: false,
                                 })
                                 .await;
-                                crate::log_error!("offending request:\n", memory_context.messages);
+                                // Log the full context for debugging
+                                crate::log_error!("Model error during continuation", e);
+                                tracing::debug!("Full context on error: {:?}", &memory_context);
 
                                 // Clean up any unpaired tool calls from the context before breaking
                                 {
@@ -3245,7 +3248,7 @@ where
         }
 
         let context = self.context.read().await;
-        match context.build_context().await {
+        match context.build_context(None).await {
             Ok(memory_context) => {
                 // Split the built system prompt into logical sections
                 memory_context

@@ -846,7 +846,14 @@ impl AgentContext {
     }
 
     /// Build the current context for this agent
-    pub async fn build_context(&self) -> Result<MemoryContext> {
+    ///
+    /// # Arguments
+    /// * `current_batch_id` - The batch currently being processed (if any).
+    ///   This ensures incomplete batches that are actively being processed are included.
+    pub async fn build_context(
+        &self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+    ) -> Result<MemoryContext> {
         {
             let mut metadata = self.metadata.write().await;
             metadata.last_active = Utc::now();
@@ -879,15 +886,15 @@ impl AgentContext {
                 .with_memory_blocks(memory_blocks)
                 .with_tools_from_registry(&self.tools)
                 .with_messages(history.messages.clone())
-                .build()
+                .build(current_batch_id)
                 .await?;
 
         tracing::debug!(
             "Built context with {} messages, system_prompt length={} chars",
-            context.messages.len(),
+            context.len(),
             context.system_prompt.len()
         );
-        for msg in &context.messages {
+        for msg in &context.messages() {
             tracing::debug!("{:?}", msg);
         }
 

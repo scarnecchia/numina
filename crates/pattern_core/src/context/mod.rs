@@ -71,6 +71,25 @@ impl MemoryContext {
     pub fn messages(&self) -> Vec<Message> {
         self.get_messages_for_request()
     }
+
+    /// Get the total number of messages across all batches
+    pub fn len(&self) -> usize {
+        self.batches.iter().map(|b| b.len()).sum()
+    }
+
+    /// Check if there are any messages
+    pub fn is_empty(&self) -> bool {
+        self.batches.is_empty() || self.batches.iter().all(|b| b.is_empty())
+    }
+
+    /// Convert this context into a Request for the LLM
+    pub fn into_request(&self) -> crate::message::Request {
+        crate::message::Request {
+            system: Some(vec![self.system_prompt.clone()]),
+            messages: self.get_messages_for_request(),
+            tools: Some(self.tools.clone()),
+        }
+    }
 }
 
 /// Metadata about the context build
@@ -368,12 +387,10 @@ impl ContextBuilder {
             .max()
             .unwrap_or(self.current_time);
 
-        let recall_count = self
-            .messages
-            .len()
-            .saturating_sub(self.config.max_context_messages);
-
-        let active_message_count = self.messages.len();
+        // Count total messages across all batches
+        let total_message_count: usize = self.batches.iter().map(|b| b.len()).sum();
+        let recall_count = total_message_count.saturating_sub(self.config.max_context_messages);
+        let active_message_count = total_message_count.min(self.config.max_context_messages);
 
         if self.config.model_adjustments.use_xml_tags {
             format!(
@@ -692,10 +709,89 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
             .collect()
     }
 
+    /// Process batches, filtering incomplete and compressing if needed
+    async fn process_batches(
+        &self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+    ) -> Result<(Vec<MessageBatch>, usize)> {
+        let mut filtered_batches = Vec::new();
+
+        // Filter batches: include complete batches and current batch
+        for batch in &self.batches {
+            let should_include = batch.is_complete || current_batch_id.as_ref() == Some(&batch.id);
+
+            if should_include {
+                filtered_batches.push(batch.clone());
+            }
+        }
+
+        // Count total messages
+        let total_messages: usize = filtered_batches.iter().map(|b| b.len()).sum();
+
+        // Apply compression if needed
+        let (final_batches, compressed_count) =
+            if total_messages <= self.config.max_context_messages {
+                (filtered_batches, 0)
+            } else {
+                // For now, just take the most recent batches that fit
+                // TODO: implement smarter compression that respects batch boundaries
+                let mut kept_batches = Vec::new();
+                let mut message_count = 0;
+                let mut compressed = 0;
+
+                // Walk backwards through batches, keeping as many as fit
+                for batch in filtered_batches.iter().rev() {
+                    let batch_size = batch.len();
+                    if message_count + batch_size <= self.config.max_context_messages {
+                        kept_batches.push(batch.clone());
+                        message_count += batch_size;
+                    } else {
+                        compressed += batch_size;
+                    }
+                }
+
+                kept_batches.reverse();
+                (kept_batches, compressed)
+            };
+
+        // Add cache control to messages in batches
+        let mut result_batches = Vec::new();
+        for (batch_idx, mut batch) in final_batches.into_iter().enumerate() {
+            // Add cache control to first message of first batch
+            if batch_idx == 0 && !batch.messages.is_empty() {
+                batch.messages[0].options.cache_control = Some(CacheControl::Ephemeral);
+            }
+
+            // Add cache control periodically
+            const CACHE_INTERVAL: usize = 20;
+            let mut cumulative_count = batch_idx * CACHE_INTERVAL; // rough estimate
+
+            for (msg_idx, msg) in batch.messages.iter_mut().enumerate() {
+                if cumulative_count + msg_idx > 0
+                    && (cumulative_count + msg_idx) % CACHE_INTERVAL == 0
+                {
+                    msg.options.cache_control = Some(CacheControl::Ephemeral);
+                }
+            }
+
+            result_batches.push(batch);
+        }
+
+        Ok((result_batches, compressed_count))
+    }
+
     /// Process messages, compressing if needed and adding cache control
+    /// DEPRECATED: This method exists for backward compatibility only
     async fn process_messages(&self) -> Result<(Vec<Message>, usize)> {
+        // Convert batches to messages for legacy code
+        let all_messages: Vec<Message> = self
+            .batches
+            .iter()
+            .flat_map(|b| b.messages.clone())
+            .collect();
+
         // First clean up unpaired tool calls/responses
-        let cleaned_messages = self.clean_unpaired_tool_messages(self.messages.clone());
+        let cleaned_messages = self.clean_unpaired_tool_messages(all_messages);
 
         let (mut messages, compressed_count) =
             if cleaned_messages.len() <= self.config.max_context_messages {
