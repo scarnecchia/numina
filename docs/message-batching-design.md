@@ -7,84 +7,118 @@ Currently, Pattern's message history can become inconsistent when:
 2. Agents crash mid-execution leaving incomplete sequences
 3. Context rebuilding encounters interleaved tool calls/results
 4. Message compression breaks request/response boundaries
+5. Continuation heartbeats create messages before tool responses are persisted
+6. Backdated messages (like sleeptime interventions) disrupt ordering
 
-## Proposed Solution: Request Batching
+## Proposed Solution: Implicit Batching via Snowflake IDs
 
-Introduce a `MessageBatch` concept at the context level that groups related messages into atomic request/response cycles.
+Use snowflake IDs to create implicit batches without requiring a separate batch table. Messages track their batch membership and sequence directly.
 
 ## Design
 
-### Core Structure
+### Core Structure Updates
 
 ```rust
-// In pattern_core/src/context/batch.rs
-pub struct MessageBatch {
-    pub id: SnowflakeId,           // Batch identifier
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub messages: Vec<Message>,     // Ordered messages in this batch
-    pub is_complete: bool,
-    pub agent_id: AgentId,
-    pub batch_type: BatchType,
+// Add to Message struct
+pub struct Message {
+    pub id: MessageId,                      // Existing UUID-based ID
+    pub snowflake_id: Option<SnowflakeId>,  // Unique ordering ID
+    pub batch_id: Option<SnowflakeId>,      // ID of first message in batch
+    pub sequence_num: Option<u32>,          // Position within batch
+    pub batch_type: Option<BatchType>,      // Type of processing cycle
+    // ... existing fields
 }
 
 pub enum BatchType {
     UserRequest,      // User-initiated interaction
-    AgentToAgent,     // Inter-agent communication
+    AgentToAgent,     // Inter-agent communication  
     SystemTrigger,    // System-initiated (e.g., scheduled task)
-    Continuation,     // Continuation of previous batch (for long responses)
+    Continuation,     // Continuation of previous batch
 }
 ```
 
-### Message Updates
+### No Batch Table Required
 
-Add batch tracking to the Message struct:
-
-```rust
-pub struct Message {
-    pub id: MessageId,                    // Already a snowflake
-    pub batch_id: Option<SnowflakeId>,    // Which batch this belongs to
-    pub sequence_num: Option<u32>,        // Order within the batch
-    // ... existing fields
-}
-```
+Batches are reconstructed from messages at runtime:
+- Messages with the same `batch_id` form a batch
+- The batch is "complete" when we see a final assistant message without tool calls
+- Batch metadata (type, timing) is inferred from the messages themselves
 
 ### Context Builder Changes
 
 The context builder would:
-1. Query messages WITH their snowflake IDs for absolute ordering
-2. Group messages by `batch_id`
-3. Sort batches chronologically by batch ID
-4. Within each batch, sort by `sequence_num`
-5. **Only include complete batches** (where `is_complete = true`)
-6. Drop incomplete batches entirely from context
+1. Accept optional `current_batch_id` parameter to identify active processing
+2. Query messages ordered by `snowflake_id` (or `created_at` as fallback)
+3. Group consecutive messages by `batch_id`
+4. Detect batch completeness by checking for:
+   - Balanced tool calls/responses
+   - Final assistant message without pending tools
+   - No continuation markers
+5. Include all complete batches
+6. **Include the current active batch** (even if incomplete) - identified by matching `current_batch_id`
+7. Drop all OTHER incomplete/orphaned batches
 
-### Database Schema
+### Processing Flow
 
-```sql
--- New batch table
-DEFINE TABLE batch SCHEMAFULL;
-DEFINE FIELD id ON batch TYPE string;
-DEFINE FIELD started_at ON batch TYPE datetime;
-DEFINE FIELD completed_at ON batch TYPE option<datetime>;
-DEFINE FIELD is_complete ON batch TYPE bool DEFAULT false;
-DEFINE FIELD agent_id ON batch TYPE string;
-DEFINE FIELD batch_type ON batch TYPE string;
+#### New Request Flow
+1. User message arrives without `batch_id`
+2. `process_message_stream` generates new `batch_id` 
+3. All messages in processing cycle use this `batch_id`
+4. Sequence numbers increment for each message
+5. Context builder receives `current_batch_id` to include incomplete batch
 
--- Relation: batch contains messages
-DEFINE TABLE batch_messages SCHEMAFULL;
-DEFINE FIELD in ON batch_messages TYPE record(batch);
-DEFINE FIELD out ON batch_messages TYPE record(message);
-DEFINE FIELD sequence_num ON batch_messages TYPE int;
+#### Continuation Flow
+1. Heartbeat handler receives `HeartbeatRequest` with `batch_id`
+2. Creates continuation message with same `batch_id`
+3. Calls `process_message_stream(message)`
+4. `process_message_stream` preserves existing `batch_id` from message
+5. Continuation messages share batch with original request
+6. Batch remains cohesive across async boundaries
+
+#### Batch ID Propagation
+```rust
+// In process_message_stream
+let batch_id = message.batch_id.unwrap_or_else(|| SnowflakeId::generate());
+
+// In heartbeat handler
+let continuation_message = Message {
+    batch_id: Some(request.batch_id), // Preserve batch
+    // ... other fields
+};
+
+// In context builder
+pub fn build_context(&self, current_batch_id: Option<SnowflakeId>) -> Result<MemoryContext> {
+    // Include current_batch_id batch even if incomplete
+}
 ```
+
+### Database Changes
+
+```rust
+// In agent_messages relation, sync position with snowflake_id
+pub struct AgentMessageRelation {
+    pub position: String,  // Now uses message.snowflake_id.to_string()
+    // ... existing fields
+}
+```
+
+No new tables needed - batching is entirely reconstructed from message metadata.
 
 ## Implementation Plan
 
 ### Phase 1: Core Infrastructure
-1. Create `MessageBatch` struct and `BatchType` enum
-2. Add batch tracking fields to `Message`
-3. Create database migration for batch table and relations
-4. Add batch creation/completion methods to DatabaseAgent
+1. Add `BatchType` enum to message module
+2. Add batch tracking fields to `Message` struct:
+   - `snowflake_id: Option<SnowflakeId>`
+   - `batch_id: Option<SnowflakeId>`
+   - `sequence_num: Option<u32>`
+   - `batch_type: Option<BatchType>`
+3. Create migration function to:
+   - Generate snowflake_ids for existing messages (ordered by position)
+   - Detect batch boundaries and assign batch_ids
+   - Add sequence numbers within batches
+   - Sync agent_messages.position with snowflake_id
+4. Update message creation to generate snowflake_ids
 
 ### Phase 2: Message Handling
 1. Modify `process_message` to create a new batch for each request

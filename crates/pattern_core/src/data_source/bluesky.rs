@@ -435,7 +435,6 @@ impl Default for PatternHttpClient {
         Self {
             client: reqwest::Client::builder()
                 .user_agent(concat!("pattern/", env!("CARGO_PKG_VERSION")))
-                .cookie_store(true)
                 .build()
                 .unwrap(), // panics for the same reasons Client::new() would: https://docs.rs/reqwest/latest/reqwest/struct.Client.html#panics
         }
