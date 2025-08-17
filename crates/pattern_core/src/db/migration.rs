@@ -1,8 +1,10 @@
 //! Simplified database migration system for schema versioning
 
 use super::{DatabaseError, Result};
+use crate::agent::get_next_message_position_string;
 use crate::db::schema::Schema;
 use crate::id::{IdType, MemoryId, TaskId};
+use crate::message::BatchType;
 use surrealdb::{Connection, Surreal};
 
 /// Database migration runner
@@ -135,11 +137,13 @@ impl MigrationRunner {
         }
 
         // Add more migrations here as needed
-        // if current_version < 2 {
-        //     tracing::info!("Running migration v2: ...");
-        //     Self::migrate_v2(db).await?;
-        //     Self::update_schema_version(db, 2).await?;
-        // }
+        if current_version < 2 {
+            tracing::info!("Running migration v2: Message batching (snowflake IDs)");
+            let migration_start = std::time::Instant::now();
+            Self::migrate_v2_message_batching(db).await?;
+            Self::update_schema_version(db, 2).await?;
+            tracing::info!("Migration v2 completed in {:?}", migration_start.elapsed());
+        }
 
         // Store the new schema hash
         let compiled_hash = Self::get_compiled_schema_hash();
@@ -232,6 +236,153 @@ impl MigrationRunner {
         let versions: Vec<SchemaVersion> = result.take(0).unwrap_or_default();
 
         Ok(versions.first().map(|v| v.schema_version).unwrap_or(0))
+    }
+
+    /// Migration v2: Add snowflake IDs and batch tracking to messages
+    async fn migrate_v2_message_batching<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        use chrono::Duration;
+
+        tracing::info!("Starting message batch migration...");
+
+        // Query all messages ordered by created_at
+        let query = r#"
+            SELECT * FROM msg
+            ORDER BY created_at ASC
+        "#;
+
+        let mut result = db
+            .query(query)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let messages: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
+
+        tracing::info!("Found {} messages to migrate", messages.len());
+
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        // Process messages to detect batches
+        let mut batch_updates = Vec::new();
+        let mut current_batch_id: Option<String> = None;
+        let mut sequence_num = 0u32;
+        let mut last_timestamp = None;
+        let mut last_role = None;
+
+        for (idx, msg_value) in messages.iter().enumerate() {
+            // Extract fields we need
+            let msg_id = msg_value.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+            let role = msg_value
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+
+            let created_at = msg_value
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+
+            let has_tool_calls = msg_value
+                .get("has_tool_calls")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            // Check if this starts a new batch
+            let starts_new_batch = if let Some(last_ts) = last_timestamp {
+                if let Some(current_ts) = created_at {
+                    // New batch if:
+                    // 1. User message after non-user (new conversation turn)
+                    // 2. Time gap > 30 minutes (new conversation)
+                    // 3. First message
+                    let time_gap = current_ts.signed_duration_since(last_ts);
+                    let is_new_turn = role == "user" && last_role != Some("user");
+                    let is_time_gap = time_gap > Duration::minutes(30);
+
+                    is_new_turn || is_time_gap || idx == 0
+                } else {
+                    false
+                }
+            } else {
+                true // First message always starts a batch
+            };
+
+            // Generate snowflake ID for this message
+            let snowflake_id = get_next_message_position_string().await;
+
+            // Handle batch assignment
+            if starts_new_batch {
+                current_batch_id = Some(snowflake_id.clone());
+                sequence_num = 0;
+            } else {
+                sequence_num += 1;
+            }
+
+            // Determine batch type
+            let batch_type = if role == "user" {
+                BatchType::UserRequest
+            } else if role == "system" {
+                BatchType::SystemTrigger
+            } else {
+                // Could be more sophisticated here
+                BatchType::UserRequest
+            };
+
+            // Store update for this message
+            batch_updates.push((
+                msg_id.to_string(),
+                snowflake_id,
+                current_batch_id.clone().unwrap_or_default(),
+                sequence_num,
+                batch_type,
+            ));
+
+            // Update tracking variables
+            last_timestamp = created_at;
+            last_role = Some(role);
+        }
+
+        // Apply updates to all messages
+        tracing::info!("Applying batch updates to {} messages", batch_updates.len());
+
+        for (msg_id, snowflake_id, batch_id, seq_num, batch_type) in batch_updates {
+            let update_query = r#"
+                UPDATE $msg_id SET
+                    position = $snowflake_id,
+                    batch = $batch_id,
+                    sequence_num = $seq_num,
+                    batch_type = $batch_type
+            "#;
+
+            db.query(update_query)
+                .bind(("msg_id", msg_id))
+                .bind(("snowflake_id", snowflake_id))
+                .bind(("batch_id", batch_id))
+                .bind(("seq_num", seq_num))
+                .bind(("batch_type", format!("{:?}", batch_type).to_lowercase()))
+                .await
+                .map_err(|e| DatabaseError::QueryFailed(e))?;
+        }
+
+        // Update agent_messages relations to sync position field
+        tracing::info!("Syncing agent_messages relations...");
+
+        let sync_query = r#"
+            UPDATE agent_messages SET
+                position = out.position,
+                batch = out.batch,
+                sequence_num = out.sequence_num,
+                batch_type = out.batch_type
+            WHERE out.position IS NOT NULL
+        "#;
+
+        db.query(sync_query)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        tracing::info!("Message batch migration completed");
+        Ok(())
     }
 
     /// Update schema version

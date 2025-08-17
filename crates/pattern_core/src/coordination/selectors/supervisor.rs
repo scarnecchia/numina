@@ -95,6 +95,10 @@ impl AgentSelector for SupervisorSelector {
             has_tool_calls: false,
             word_count: 0,
             created_at: chrono::Utc::now(),
+            position: None,
+            batch: None,
+            sequence_num: None,
+            batch_type: None,
             embedding: None,
             embedding_model: None,
         };

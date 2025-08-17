@@ -863,7 +863,7 @@ async fn persist_agent_message_inner<C: Connection>(
     tracing::debug!("Stored message with id: {:?}", stored_message.id);
 
     // Then create the agent-message relation with position
-    let position = crate::agent::get_next_message_position().await;
+    let position = crate::agent::get_next_message_position_string().await;
 
     let relation = crate::message::AgentMessageRelation {
         id: RelationId::nil(),
@@ -872,6 +872,9 @@ async fn persist_agent_message_inner<C: Connection>(
         message_type,
         position: position.clone(),
         added_at: Utc::now(),
+        batch: message.batch.clone(),
+        sequence_num: message.sequence_num,
+        batch_type: message.batch_type,
     };
 
     tracing::debug!(

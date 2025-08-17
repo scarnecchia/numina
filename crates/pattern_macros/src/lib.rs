@@ -1283,8 +1283,18 @@ fn determine_storage_type(
         }
         "embedding" => quote! { Option<Vec<f32>> },
         _ => {
+            // Check if this is a SnowflakePosition field
+            let type_str = quote! { #field_type }.to_string();
+            if type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId") {
+                // SnowflakePosition is stored as String in the database
+                if is_option_type(field_type) {
+                    quote! { Option<String> }
+                } else {
+                    quote! { String }
+                }
+            }
             // Check if this is an ID field (ends with _id)
-            if is_id_type(field_type) {
+            else if is_id_type(field_type) {
                 // ID fields are stored as RecordId
                 if is_option_type(field_type) {
                     quote! { Option<::surrealdb::RecordId> }
@@ -1316,6 +1326,25 @@ fn generate_to_storage(
     needs_custom_conversion: bool,
 ) -> proc_macro2::TokenStream {
     let field_str = field_name.to_string();
+
+    // Check if this is a SnowflakePosition field
+    let type_str = quote! { #field_type }.to_string();
+    let storage_str = quote! { #storage_type }.to_string();
+
+    if (type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId"))
+        && storage_str.contains("String")
+    {
+        // SnowflakePosition -> String conversion using Display trait
+        if type_str.contains("Option") {
+            return quote! {
+                #field_name: self.#field_name.as_ref().map(|s| s.to_string())
+            };
+        } else {
+            return quote! {
+                #field_name: self.#field_name.to_string()
+            };
+        }
+    }
 
     // Handle custom conversions for db_type
     if needs_custom_conversion {
@@ -1420,6 +1449,26 @@ fn generate_from_storage(
     is_edge_entity: bool,
 ) -> proc_macro2::TokenStream {
     let field_str = field_name.to_string();
+
+    // Check if this is a SnowflakePosition field
+    let type_str = quote! { #field_type }.to_string();
+    let storage_str = quote! { #storage_type }.to_string();
+
+    if (type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId"))
+        && storage_str.contains("String")
+    {
+        // String -> SnowflakePosition conversion using FromStr
+        if type_str.contains("Option") {
+            return quote! {
+                #field_name: db_model.#field_name.as_ref().and_then(|s| s.parse().ok())
+            };
+        } else {
+            return quote! {
+                #field_name: db_model.#field_name.parse()
+                    .expect(&format!("Failed to parse SnowflakePosition from {}", db_model.#field_name))
+            };
+        }
+    }
 
     // Handle custom conversions for db_type
     if needs_custom_conversion {

@@ -1,5 +1,9 @@
 # CLAUDE.md - Pattern CLI
 
+⚠️ **CRITICAL WARNING**: DO NOT run ANY CLI commands during development!
+Production agents are running. Any CLI invocation will disrupt active agents.
+Testing must be done offline after stopping production agents.
+
 Command-line interface for testing and managing the Pattern ADHD support system.
 
 ## Purpose

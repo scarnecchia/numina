@@ -6,10 +6,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+use crate::agent::{SnowflakePosition, get_next_message_position_sync};
 use crate::{MessageId, UserId, id::RelationId};
 
 // Conversions to/from genai types
 mod conversions;
+
+/// Type of processing batch a message belongs to
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchType {
+    /// User-initiated interaction
+    UserRequest,
+    /// Inter-agent communication
+    AgentToAgent,
+    /// System-initiated (e.g., scheduled task, sleeptime)
+    SystemTrigger,
+    /// Continuation of previous batch (for long responses)
+    Continuation,
+}
 
 /// A message to be processed by an agent
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
@@ -40,6 +55,23 @@ pub struct Message {
     pub word_count: u32,
     pub created_at: DateTime<Utc>,
 
+    // Batch tracking fields (Option during migration, required after)
+    /// Unique snowflake ID for absolute ordering
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<SnowflakePosition>,
+
+    /// ID of the first message in this processing batch
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<SnowflakePosition>,
+
+    /// Position within the batch (0 for first message)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_num: Option<u32>,
+
+    /// Type of processing cycle this batch represents
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_type: Option<BatchType>,
+
     // Embeddings - loaded selectively via custom methods
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
@@ -50,6 +82,7 @@ pub struct Message {
 
 impl Default for Message {
     fn default() -> Self {
+        let position = get_next_message_position_sync();
         Self {
             id: MessageId::generate(),
             role: ChatRole::User,
@@ -60,6 +93,10 @@ impl Default for Message {
             has_tool_calls: false,
             word_count: 0,
             created_at: Utc::now(),
+            position: Some(position),
+            batch: Some(position), // First message in its own batch
+            sequence_num: Some(0),
+            batch_type: Some(BatchType::UserRequest),
             embedding: None,
             embedding_model: None,
         }
@@ -872,6 +909,7 @@ impl Message {
         let content = content.into();
         let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
         let word_count = Self::estimate_word_count(&content);
+        let position = get_next_message_position_sync();
 
         Self {
             id: MessageId::generate(),
@@ -883,6 +921,10 @@ impl Message {
             has_tool_calls,
             word_count,
             created_at: Utc::now(),
+            position: Some(position),
+            batch: Some(position), // User messages start new batches
+            sequence_num: Some(0),
+            batch_type: Some(BatchType::UserRequest),
             embedding: None,
             embedding_model: None,
         }
@@ -893,6 +935,7 @@ impl Message {
         let content = content.into();
         let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
         let word_count = Self::estimate_word_count(&content);
+        let position = get_next_message_position_sync();
 
         Self {
             id: MessageId::generate(),
@@ -904,6 +947,10 @@ impl Message {
             has_tool_calls,
             word_count,
             created_at: Utc::now(),
+            position: Some(position),
+            batch: Some(position), // System messages start new batches
+            sequence_num: Some(0),
+            batch_type: Some(BatchType::SystemTrigger),
             embedding: None,
             embedding_model: None,
         }
@@ -914,6 +961,7 @@ impl Message {
         let content = content.into();
         let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
         let word_count = Self::estimate_word_count(&content);
+        let position = get_next_message_position_sync();
 
         Self {
             id: MessageId::generate(),
@@ -925,6 +973,10 @@ impl Message {
             has_tool_calls,
             word_count,
             created_at: Utc::now(),
+            position: Some(position),
+            batch: None,        // Will be set by batch-aware constructor
+            sequence_num: None, // Will be set by batch-aware constructor
+            batch_type: None,   // Will be set by batch-aware constructor
             embedding: None,
             embedding_model: None,
         }
@@ -934,6 +986,7 @@ impl Message {
     pub fn tool(responses: Vec<ToolResponse>) -> Self {
         let content = MessageContent::ToolResponses(responses);
         let word_count = Self::estimate_word_count(&content);
+        let position = get_next_message_position_sync();
 
         Self {
             id: MessageId::generate(),
@@ -945,6 +998,10 @@ impl Message {
             has_tool_calls: false,
             word_count,
             created_at: Utc::now(),
+            position: Some(position),
+            batch: None,        // Will be set by batch-aware constructor
+            sequence_num: None, // Will be set by batch-aware constructor
+            batch_type: None,   // Will be set by batch-aware constructor
             embedding: None,
             embedding_model: None,
         }
@@ -987,6 +1044,10 @@ impl Message {
                             owner_id: None,
                             has_tool_calls,
                             word_count,
+                            position: None,
+                            batch: None,
+                            sequence_num: None,
+                            batch_type: None,
                             embedding: None,
                             embedding_model: None,
                         });
@@ -1007,6 +1068,10 @@ impl Message {
                         owner_id: None,
                         has_tool_calls: false,
                         word_count: Self::estimate_word_count(content),
+                        position: None,
+                        batch: None,
+                        sequence_num: None,
+                        batch_type: None,
                         embedding: None,
                         embedding_model: None,
                     });
@@ -1046,6 +1111,10 @@ impl Message {
                 owner_id: None,
                 has_tool_calls,
                 word_count,
+                position: None,
+                batch: None,
+                sequence_num: None,
+                batch_type: None,
                 embedding: None,
                 embedding_model: None,
             });
@@ -1460,6 +1529,19 @@ pub struct AgentMessageRelation {
 
     /// When this relationship was created
     pub added_at: DateTime<Utc>,
+
+    // Batch tracking fields (duplicated from Message for query efficiency)
+    /// ID of the batch this message belongs to
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<SnowflakePosition>,
+
+    /// Position within the batch
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_num: Option<u32>,
+
+    /// Type of processing cycle
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_type: Option<BatchType>,
 }
 
 impl Default for AgentMessageRelation {
@@ -1471,6 +1553,9 @@ impl Default for AgentMessageRelation {
             message_type: MessageRelationType::Active,
             position: "0".to_string(),
             added_at: Utc::now(),
+            batch: None,
+            sequence_num: None,
+            batch_type: None,
         }
     }
 }

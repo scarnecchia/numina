@@ -114,7 +114,12 @@ clap = { version = "4.5", features = ["derive"] }
 tracing-appender = "0.2"
 dotenvy = "0.15"
 schemars = { version = "1.0", features = ["chrono04"] }
-ferroid = { version = "0.5", features = ["snowflake", "async-tokio", "serde"] }
+ferroid = { version = "0.5", features = [
+    "snowflake",
+    "async-tokio",
+    "serde",
+    "base32",
+] }
 
 # Authentication
 jsonwebtoken = "9.3"

@@ -9,11 +9,64 @@ use crate::context::{CompressionStrategy, ContextConfig};
 use crate::id::{AgentId, EventId, MemoryId, RelationId, TaskId, UserId};
 use crate::memory::MemoryBlock;
 use chrono::{DateTime, Utc};
-use ferroid::{SnowflakeGeneratorAsyncTokioExt, SnowflakeMastodonId};
+use ferroid::{Base32SnowExt, SnowflakeGeneratorAsyncTokioExt, SnowflakeMastodonId};
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::OnceLock;
+
+/// Wrapper type for Snowflake IDs with proper serde support
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SnowflakePosition(pub SnowflakeMastodonId);
+
+impl SnowflakePosition {
+    /// Create a new snowflake position
+    pub fn new(id: SnowflakeMastodonId) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for SnowflakePosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use the efficient base32 encoding via Display
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for SnowflakePosition {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // SnowflakeMastodonId uses decode() for parsing from base32 strings
+        SnowflakeMastodonId::decode(s)
+            .map(Self)
+            .map_err(|e| format!("Failed to parse snowflake: {}", e))
+    }
+}
+
+impl Serialize for SnowflakePosition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Serialize as string using Display
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for SnowflakePosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize from string and parse
+        let s = String::deserialize(deserializer)?;
+        s.parse::<Self>().map_err(serde::de::Error::custom)
+    }
+}
 
 /// Type alias for the Snowflake generator we're using
 type SnowflakeGen = ferroid::AtomicSnowflakeGenerator<SnowflakeMastodonId, ferroid::MonotonicClock>;
@@ -30,13 +83,47 @@ pub fn get_position_generator() -> &'static SnowflakeGen {
     })
 }
 
-/// Get the next message position as a Snowflake ID
-pub async fn get_next_message_position() -> String {
-    get_position_generator()
+/// Get the next message position synchronously
+///
+/// This is designed for use in synchronous contexts like Default impls.
+/// In practice, we don't generate messages fast enough to hit the sequence
+/// limit (65536/ms), so Pending should never happen in our use case.
+///
+/// LIMITATION: Currently panics if we somehow exhaust the sequence within
+/// a millisecond. This is a known limitation that will be addressed if it
+/// ever becomes an issue in production (extremely unlikely given our throughput).
+pub fn get_next_message_position_sync() -> SnowflakePosition {
+    use ferroid::IdGenStatus;
+
+    let generator = get_position_generator();
+
+    // Try the generator - this will succeed unless we're generating 65k+ messages/ms
+    match generator.next_id() {
+        IdGenStatus::Ready { id } => SnowflakePosition::new(id),
+        IdGenStatus::Pending { yield_for } => {
+            // This should never happen in practice - we don't generate 65k messages/ms
+            panic!(
+                "Snowflake ID sequence exhausted, would need to wait {}ms. \
+                This indicates extreme message generation rate (>65k/ms) which shouldn't \
+                happen in Pattern. If you're seeing this, please report it as a bug.",
+                yield_for
+            );
+        }
+    }
+}
+
+/// Get the next message position as a Snowflake ID (async version)
+pub async fn get_next_message_position() -> SnowflakePosition {
+    let id = get_position_generator()
         .try_next_id_async()
         .await
-        .expect("for now we are assuming this succeeds")
-        .to_string()
+        .expect("for now we are assuming this succeeds");
+    SnowflakePosition::new(id)
+}
+
+/// Get the next message position as a String (for database storage)
+pub async fn get_next_message_position_string() -> String {
+    get_next_message_position().await.to_string()
 }
 
 /// Agent entity that persists to the database
@@ -304,6 +391,9 @@ impl AgentRecord {
             message_type,
             position: position.to_string(),
             added_at: chrono::Utc::now(),
+            batch: None, // Will be populated from message when available
+            sequence_num: None,
+            batch_type: None,
         };
 
         // Use create_relation_typed to store the edge entity

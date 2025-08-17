@@ -32,6 +32,7 @@ pub mod utils;
 
 // Macros are automatically available at crate root due to #[macro_export]
 
+pub use crate::agent::SnowflakePosition;
 pub use agent::{Agent, AgentState, AgentType};
 pub use context::{
     AgentContext, AgentContextBuilder, CompressionStrategy, ContextBuilder, ContextConfig,
@@ -48,7 +49,6 @@ pub use message_queue::{QueuedMessage, ScheduledWakeup};
 pub use model::ModelCapability;
 pub use model::ModelProvider;
 pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
-
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{

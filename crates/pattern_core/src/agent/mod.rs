@@ -9,7 +9,10 @@ mod tests;
 pub mod tool_rules;
 
 use compact_str::CompactString;
-pub use entity::{AgentMemoryRelation, AgentRecord, get_next_message_position};
+pub use entity::{
+    AgentMemoryRelation, AgentRecord, SnowflakePosition, get_next_message_position,
+    get_next_message_position_string, get_next_message_position_sync,
+};
 pub use impls::{AgentDbExt, DatabaseAgent};
 pub use tool_rules::{
     ExecutionPhase, ToolExecution, ToolExecutionState, ToolRule, ToolRuleEngine, ToolRuleType,

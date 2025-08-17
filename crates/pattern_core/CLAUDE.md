@@ -1,5 +1,8 @@
 # CLAUDE.md - Pattern Core
 
+⚠️ **CRITICAL WARNING**: DO NOT run `pattern-cli` or test agents during development!
+Production agents are running. CLI commands will disrupt active agents.
+
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
 ## Current Status
@@ -13,6 +16,14 @@ Core agent framework, memory management, and coordination system for Pattern's m
 - **Model Configuration**: Comprehensive registry with provider-specific optimizations
 
 ### 🚧 In Progress
+- **Message Batching**: Snowflake ID implementation partially complete
+  - ✅ Created SnowflakePosition wrapper type with serde/FromStr support
+  - ✅ Updated entity macro to handle SnowflakePosition<->String conversions
+  - ✅ Updated Message and AgentMessageRelation structs to use SnowflakePosition
+  - ✅ Created migration function for existing messages (needs testing)
+  - 🔲 Update message constructors to auto-generate snowflake IDs
+  - 🔲 Implement batch propagation in process_message_stream
+  - 🔲 Update context builder for batch awareness
 - **Memory Block Pass-through**: Router needs to create RELATE edges for attached blocks
 - **MCP Client Integration**: Consume external MCP tools (high priority)
 

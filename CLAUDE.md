@@ -1,5 +1,9 @@
 # CLAUDE.md - Pattern ADHD Cognitive Support System
 
+⚠️ **CRITICAL WARNING**: DO NOT run `pattern-cli` or any agent commands during development!
+Agents are currently running in production. Any CLI invocation will disrupt active agents.
+Migrations and testing must be done offline after stopping production agents.
+
 Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture to provide external executive function through specialized cognitive agents.
 
 ## Project Status
@@ -8,9 +12,41 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 ### 🚧 Current Development Priorities
 
-1. **Bug Fixes** - 🔴 IMMEDIATE
-   - Address any critical issues blocking usage
-   - See current issue tracker
+1. **Message Batching** - 🔴 IMMEDIATE - IN PROGRESS
+   - Fix message ordering issues causing tool call/response mismatches
+   - Add snowflake IDs for absolute ordering
+   - Implement batch tracking for atomic request/response cycles
+   - See `/home/booskie/pattern/docs/message-batching-design.md` for full design
+   
+   **Completed:**
+   - ✅ Added `BatchType` enum (UserRequest, AgentToAgent, SystemTrigger, Continuation)
+   - ✅ Created `SnowflakePosition` wrapper type with proper serde/FromStr support
+   - ✅ Updated entity macro to handle SnowflakePosition<->String database conversions
+   - ✅ Updated `get_next_message_position()` to return SnowflakePosition
+   - ✅ Added batch fields to Message struct (position, batch, sequence_num, batch_type)
+   - ✅ Added batch fields to AgentMessageRelation for query efficiency
+   - ✅ Updated all Message and AgentMessageRelation constructors
+   - ✅ Created migration function to populate snowflake_ids for existing messages
+   - ✅ Ensured persist_agent_message syncs all batch fields to AgentMessageRelation
+   
+   **Implementation Details:**
+   - SnowflakePosition is a newtype wrapper around SnowflakeMastodonId with `#[repr(transparent)]`
+   - Implements Display using ferroid's base32 encoding for efficient string conversion
+   - Implements FromStr using ferroid's decode() method from Base32SnowExt trait
+   - Entity macro automatically handles conversion between SnowflakePosition and String for DB storage
+   - Migration function (v2) generates snowflake IDs and detects batch boundaries based on:
+     - User messages starting new conversation turns
+     - Time gaps > 30 minutes between messages
+     - Tool call/response patterns
+   
+   **Remaining Tasks:**
+   - 🔲 Update default message constructors to generate snowflake_ids automatically
+   - 🔲 Create batch-aware message constructors that accept batch_id/sequence_num
+   - 🔲 Modify process_message_stream to propagate batch_id
+   - 🔲 Update context builder to accept current_batch_id parameter
+   - 🔲 Add batch_id to HeartbeatRequest for continuations
+   - 🔲 Implement batch completeness detection in context builder
+   - 🔲 Test with parallel tool execution scenarios
 
 2. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
    - Basic Axum server structure exists
@@ -18,7 +54,7 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
    - Most endpoints still need implementation
    - Required for multi-user hosting
 
-3. **MCP Client Refinement** - 🟡 NEEDS VERIFICATION
+3. **MCP Client Refinement** - 🟢 NEEDS VERIFICATION
    - All transports implemented (stdio, HTTP, SSE)
    - Tool discovery and wrapper system working
    - Needs testing with real MCP servers
@@ -136,6 +172,13 @@ pub struct User {
 
 ## Known Issues
 
+### Message Ordering Issues
+- **Tool call/response pairing**: Messages can appear out of order due to async processing
+- **Continuation timing**: Heartbeat messages sometimes created before tool responses
+- **Backdated messages**: Sleeptime interventions with past timestamps disrupt ordering
+- **Temporary fix**: Sorting by created_at, waiting for Ready state in heartbeat
+- **Permanent fix**: Message batching implementation in progress
+
 ### API Provider Issues
 - **Anthropic Thinking Mode**: Message compression can create invalid sequences with tool calls
 - **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations
@@ -149,6 +192,20 @@ pub struct User {
   - Lower priority but needs fixing for proper data portability
 
 ## Implementation Notes
+
+### 🔧 Message Batching Implementation
+**Branch**: Currently on feature branch for batching work
+**Status**: Core data structures complete, logic implementation pending
+
+Key decisions made:
+- Using String for snowflake_id/batch_id storage (serde compatibility)
+- Batch fields are Option<T> during migration, will be required after
+- AgentMessageRelation duplicates ALL batch fields from Message for query efficiency
+- No separate batch table - batches reconstructed at runtime from messages
+- Position field in agent_messages will sync with message.snowflake_id
+- persist_agent_message must sync batch_id, sequence_num, batch_type to relation
+- Default message constructors should auto-generate snowflake_ids
+- Need batch-aware constructors for messages within a processing cycle
 
 ### 🔧 Memory Block Pass-through
 Data sources can attach memory blocks to messages for agent context:
