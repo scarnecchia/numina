@@ -26,6 +26,155 @@ pub enum BatchType {
     Continuation,
 }
 
+/// A batch of messages representing a complete request/response cycle
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageBatch {
+    /// ID of this batch (same as first message's position)
+    pub id: SnowflakePosition,
+
+    /// Type of batch
+    pub batch_type: BatchType,
+
+    /// Messages in this batch, ordered by sequence_num
+    pub messages: Vec<Message>,
+
+    /// Whether this batch is complete (no pending tool calls, etc)
+    pub is_complete: bool,
+
+    /// Parent batch ID if this is a continuation
+    pub parent_batch_id: Option<SnowflakePosition>,
+}
+
+impl MessageBatch {
+    /// Create a new batch starting with a user message
+    pub fn new_user_request(content: impl Into<MessageContent>) -> Self {
+        let batch_id = get_next_message_position_sync();
+        let mut message = Message::user(content);
+
+        // Update message with batch info
+        message.position = Some(batch_id);
+        message.batch = Some(batch_id);
+        message.sequence_num = Some(0);
+        message.batch_type = Some(BatchType::UserRequest);
+
+        Self {
+            id: batch_id,
+            batch_type: BatchType::UserRequest,
+            messages: vec![message],
+            is_complete: false,
+            parent_batch_id: None,
+        }
+    }
+
+    /// Create a system-triggered batch
+    pub fn new_system_trigger(content: impl Into<MessageContent>) -> Self {
+        let batch_id = get_next_message_position_sync();
+        let mut message = Message::system(content);
+
+        message.position = Some(batch_id);
+        message.batch = Some(batch_id);
+        message.sequence_num = Some(0);
+        message.batch_type = Some(BatchType::SystemTrigger);
+
+        Self {
+            id: batch_id,
+            batch_type: BatchType::SystemTrigger,
+            messages: vec![message],
+            is_complete: false,
+            parent_batch_id: None,
+        }
+    }
+
+    /// Create a continuation batch
+    pub fn continuation(parent_batch_id: SnowflakePosition) -> Self {
+        let batch_id = get_next_message_position_sync();
+
+        Self {
+            id: batch_id,
+            batch_type: BatchType::Continuation,
+            messages: Vec::new(),
+            is_complete: false,
+            parent_batch_id: Some(parent_batch_id),
+        }
+    }
+
+    /// Add a message to this batch
+    pub fn add_message(&mut self, mut message: Message) {
+        let position = get_next_message_position_sync();
+        let sequence_num = self.messages.len() as u32;
+
+        message.position = Some(position);
+        message.batch = Some(self.id);
+        message.sequence_num = Some(sequence_num);
+        message.batch_type = Some(self.batch_type);
+
+        self.messages.push(message);
+    }
+
+    /// Add an agent response to this batch
+    pub fn add_agent_response(&mut self, content: impl Into<MessageContent>) {
+        let mut message = Message::agent(content);
+        self.add_message(message);
+    }
+
+    /// Add tool responses to this batch
+    pub fn add_tool_responses(&mut self, responses: Vec<ToolResponse>) {
+        let mut message = Message::tool(responses);
+        self.add_message(message);
+    }
+
+    /// Check if batch has unpaired tool calls
+    pub fn has_pending_tool_calls(&self) -> bool {
+        let mut pending_calls = std::collections::HashSet::new();
+
+        for msg in &self.messages {
+            match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        pending_calls.insert(call.call_id.clone());
+                    }
+                }
+                MessageContent::ToolResponses(responses) => {
+                    for response in responses {
+                        pending_calls.remove(&response.call_id);
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::ToolUse { id, .. } => {
+                                pending_calls.insert(id.clone());
+                            }
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                pending_calls.remove(tool_use_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        !pending_calls.is_empty()
+    }
+
+    /// Mark batch as complete
+    pub fn mark_complete(&mut self) {
+        self.is_complete = true;
+    }
+
+    /// Get the total number of messages in this batch
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Check if batch is empty
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
 /// A message to be processed by an agent
 #[derive(Debug, Clone, Entity, Serialize, Deserialize)]
 #[entity(entity_type = "message")]

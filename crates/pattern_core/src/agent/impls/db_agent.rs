@@ -1691,7 +1691,7 @@ where
             // Create request
             let request = Request {
                 system: Some(vec![memory_context.system_prompt.clone()]),
-                messages: memory_context.messages,
+                messages: memory_context.messages(),
                 tools: Some(memory_context.tools),
             };
 
@@ -2159,7 +2159,7 @@ where
 
                     let request_with_tools = Request {
                         system: Some(vec![memory_context.system_prompt.clone()]),
-                        messages: memory_context.messages.clone(),
+                        messages: memory_context.get_messages_for_request(),
                         tools: Some(memory_context.tools),
                     };
 

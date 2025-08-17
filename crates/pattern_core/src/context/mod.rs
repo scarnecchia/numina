@@ -10,7 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
-    message::{CacheControl, Message, MessageContent},
+    message::{BatchType, CacheControl, Message, MessageBatch, MessageContent},
     tool::{DynamicTool, ToolRegistry},
 };
 
@@ -38,11 +38,39 @@ pub struct MemoryContext {
     /// Tools available to the agent in genai format
     pub tools: Vec<genai::chat::Tool>,
 
-    /// Message history
-    pub messages: Vec<Message>,
+    /// Message batches (complete and current)
+    pub batches: Vec<MessageBatch>,
+
+    /// Current batch being processed (if any)
+    pub current_batch_id: Option<crate::agent::SnowflakePosition>,
 
     /// Metadata about the context (for debugging/logging)
     pub metadata: ContextMetadata,
+}
+
+impl MemoryContext {
+    /// Get all messages as a flat list for sending to LLM
+    /// Filters out incomplete batches except for the current one
+    pub fn get_messages_for_request(&self) -> Vec<Message> {
+        let mut messages = Vec::new();
+
+        for batch in &self.batches {
+            // Include batch if it's complete OR if it's the current batch being processed
+            let should_include =
+                batch.is_complete || self.current_batch_id.as_ref() == Some(&batch.id);
+
+            if should_include {
+                messages.extend(batch.messages.clone());
+            }
+        }
+
+        messages
+    }
+
+    /// Temporary compatibility method - returns all messages
+    pub fn messages(&self) -> Vec<Message> {
+        self.get_messages_for_request()
+    }
 }
 
 /// Metadata about the context build
@@ -138,7 +166,7 @@ pub struct ContextBuilder {
     config: ContextConfig,
     memory_blocks: Vec<MemoryBlock>,
     tools: Vec<Box<dyn DynamicTool>>,
-    messages: Vec<Message>,
+    batches: Vec<MessageBatch>,
     current_time: DateTime<Utc>,
     compression_strategy: CompressionStrategy,
 }
@@ -151,7 +179,7 @@ impl ContextBuilder {
             config,
             memory_blocks: Vec::new(),
             tools: Vec::new(),
-            messages: Vec::new(),
+            batches: Vec::new(),
             current_time: Utc::now(),
             compression_strategy: CompressionStrategy::default(),
         }
@@ -193,9 +221,55 @@ impl ContextBuilder {
         self
     }
 
-    /// Add message history
-    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
-        self.messages = messages;
+    /// Add message batches
+    pub fn with_batches(mut self, batches: Vec<MessageBatch>) -> Self {
+        self.batches = batches;
+        self
+    }
+
+    /// Add a single batch
+    pub fn add_batch(mut self, batch: MessageBatch) -> Self {
+        self.batches.push(batch);
+        self
+    }
+
+    /// Compatibility method - converts messages to batches based on batch_id
+    pub fn with_messages(mut self, mut messages: Vec<Message>) -> Self {
+        use std::collections::BTreeMap;
+
+        // Sort messages by position (snowflake ID)
+        messages.sort_by_key(|m| m.position);
+
+        // Group messages by batch_id
+        let mut batch_groups: BTreeMap<Option<crate::agent::SnowflakePosition>, Vec<Message>> =
+            BTreeMap::new();
+
+        for msg in messages {
+            batch_groups.entry(msg.batch).or_default().push(msg);
+        }
+
+        // Convert groups to MessageBatch
+        self.batches = batch_groups
+            .into_iter()
+            .filter_map(|(batch_id, msgs)| {
+                if msgs.is_empty() {
+                    return None;
+                }
+
+                // Use the batch_id from the first message, or generate if missing
+                let id = batch_id.or_else(|| msgs.first()?.position)?;
+                let batch_type = msgs.first()?.batch_type.unwrap_or(BatchType::UserRequest);
+
+                Some(MessageBatch {
+                    id,
+                    batch_type,
+                    messages: msgs,
+                    is_complete: true, // Assume existing messages form complete batches
+                    parent_batch_id: None,
+                })
+            })
+            .collect();
+
         self
     }
 
@@ -212,25 +286,32 @@ impl ContextBuilder {
     }
 
     /// Build the final context
-    pub async fn build(self) -> Result<MemoryContext> {
+    pub async fn build(
+        self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+    ) -> Result<MemoryContext> {
         // Build system prompt
         let system_prompt = self.build_system_prompt()?;
 
         // Convert tools to genai format
         let tools = self.tools.iter().map(|t| t.to_genai_tool()).collect();
 
-        // Process messages (compress if needed)
-        let (messages, compressed_count) = self.process_messages().await?;
+        // Process batches (compress if needed, filter incomplete)
+        let (batches, compressed_count) = self.process_batches(current_batch_id).await?;
+
+        // Count total messages for metadata
+        let total_message_count: usize = batches.iter().map(|b| b.len()).sum();
 
         // Estimate token count
-        let total_tokens_estimate = self.estimate_tokens(&system_prompt, &messages);
+        let all_messages: Vec<Message> = batches.iter().flat_map(|b| b.messages.clone()).collect();
+        let total_tokens_estimate = self.estimate_tokens(&system_prompt, &all_messages);
 
         // Build metadata
         let metadata = ContextMetadata {
             agent_id: self.agent_id,
             build_time: Utc::now(),
             total_tokens_estimate,
-            message_count: messages.len(),
+            message_count: total_message_count,
             compressed_message_count: compressed_count,
             memory_blocks_count: self.memory_blocks.len(),
             tools_count: self.tools.len(),
@@ -239,7 +320,8 @@ impl ContextBuilder {
         Ok(MemoryContext {
             system_prompt,
             tools,
-            messages,
+            batches,
+            current_batch_id,
             metadata,
         })
     }
