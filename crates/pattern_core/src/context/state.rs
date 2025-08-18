@@ -312,7 +312,7 @@ impl AgentHandle {
 
             // Query msg table directly with content search (we'll filter by agent after)
             let sql = format!(
-                "SELECT * FROM msg WHERE {} ORDER BY created_at DESC LIMIT {}",
+                "SELECT * FROM msg WHERE {} ORDER BY position DESC LIMIT {}",
                 conditions.join(" AND "),
                 limit * 10 // Get more results since we'll filter some out
             );

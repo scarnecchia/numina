@@ -599,7 +599,10 @@ async fn main() -> Result<()> {
     // Initialize groups from configuration (skip for auth/atproto/config commands to avoid API key issues)
     let skip_group_init = matches!(
         &cli.command,
-        Commands::Auth { .. } | Commands::Config { .. } | Commands::Atproto { .. }
+        Commands::Auth { .. }
+            | Commands::Config { .. }
+            | Commands::Atproto { .. }
+            | Commands::Db { .. }
     );
 
     if !config.groups.is_empty() && !skip_group_init {

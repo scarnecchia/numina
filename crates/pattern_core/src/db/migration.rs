@@ -28,6 +28,10 @@ impl MigrationRunner {
         force_update: bool,
     ) -> Result<()> {
         let start = std::time::Instant::now();
+        tracing::info!(
+            "MigrationRunner::run_with_options called with force_update={}",
+            force_update
+        );
 
         // Check if we can skip schema updates
         if !force_update {
@@ -138,9 +142,12 @@ impl MigrationRunner {
         if current_version < 2 {
             tracing::info!("Running migration v2: Message batching (snowflake IDs)");
             let migration_start = std::time::Instant::now();
-            Self::migrate_v2_message_batching(db).await?;
-            Self::update_schema_version(db, 2).await?;
-            tracing::info!("Migration v2 completed in {:?}", migration_start.elapsed());
+            let actually_ran = Self::migrate_v2_message_batching(db, force_update).await?;
+            // Only update version if we actually ran the migration
+            if actually_ran {
+                Self::update_schema_version(db, 2).await?;
+                tracing::info!("Migration v2 completed in {:?}", migration_start.elapsed());
+            }
         }
 
         // Store the new schema hash
@@ -179,10 +186,10 @@ impl MigrationRunner {
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let message_index = Schema::vector_index("message", "embedding", dimensions);
-        db.query(&message_index)
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(e))?;
+        // let message_index = Schema::vector_index("msg", "embedding", dimensions);
+        // db.query(&message_index)
+        //     .await
+        //     .map_err(|e| DatabaseError::QueryFailed(e))?;
 
         let task_index = Schema::vector_index(TaskId::PREFIX, "embedding", dimensions);
         db.query(&task_index)
@@ -237,14 +244,44 @@ impl MigrationRunner {
     }
 
     /// Migration v2: Add snowflake IDs and batch tracking to messages
-    async fn migrate_v2_message_batching<C: Connection>(db: &Surreal<C>) -> Result<()> {
+    /// Returns true if migration actually ran, false if skipped
+    async fn migrate_v2_message_batching<C: Connection>(
+        db: &Surreal<C>,
+        force: bool,
+    ) -> Result<bool> {
         use crate::agent::AgentRecord;
         use crate::context::state::MessageHistory;
         use crate::db::entity::DbEntity;
         use crate::message::{BatchType, ChatRole, Message, MessageBatch};
         use tokio::time::{Duration, sleep};
 
-        tracing::info!("Starting per-agent message batch migration...");
+        tracing::info!(
+            "Starting per-agent message batch migration (force={})",
+            force
+        );
+
+        // Only run this migration if forced - it's expensive and may not be needed
+        if !force {
+            tracing::info!("Skipping message batch migration (only runs with --force-migrate)");
+            return Ok(false);
+        }
+
+        tracing::info!("Force flag set, proceeding with migration");
+
+        // Drop search indexes before bulk updates to avoid corruption
+        tracing::info!("Dropping search indexes before migration...");
+
+        let drop_msg_index = "REMOVE INDEX IF EXISTS msg_content_search ON msg";
+        db.query(drop_msg_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        let drop_conv_index = "REMOVE INDEX IF EXISTS idx_agent_conversation_search ON agent";
+        db.query(drop_conv_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        tracing::info!("Search indexes dropped");
 
         // Query all agent records
         let query = "SELECT * FROM agent";
@@ -590,31 +627,50 @@ impl MigrationRunner {
             // Delete any messages that were removed due to unpaired tool calls
             if !all_removed_ids.is_empty() {
                 tracing::warn!(
-                    "  Deleting {} unpaired tool call messages from database",
+                    "  Found {} unpaired tool call messages that should be deleted",
                     all_removed_ids.len()
                 );
-                for msg_id in all_removed_ids {
-                    // Delete the message
-                    let delete_msg_query = "DELETE $msg_id";
-                    db.query(delete_msg_query)
-                        .bind(("msg_id", surrealdb::RecordId::from(&msg_id)))
-                        .await
-                        .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-                    // Delete any agent_messages relations pointing to this message
-                    let delete_relation_query = "DELETE agent_messages WHERE out = $msg_id";
-                    db.query(delete_relation_query)
-                        .bind(("msg_id", surrealdb::RecordId::from(&msg_id)))
-                        .await
-                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+                tracing::warn!("  Message IDs to delete manually:");
+                for msg_id in &all_removed_ids {
+                    tracing::warn!("    DELETE msg:{};", msg_id);
                 }
+                tracing::warn!("  Skipping deletion to avoid database corruption");
+                // TODO: Fix deletion during migration - currently causes corruption
+                // for msg_id in all_removed_ids {
+                //     let _: Option<<Message as DbEntity>::DbModel> = db
+                //         .delete(surrealdb::RecordId::from(msg_id.clone()))
+                //         .await
+                //         .map_err(|e| DatabaseError::QueryFailed(e))?;
+                // }
             }
 
             tracing::info!("  ✓ Agent {} migration complete", agent.name);
         }
 
         tracing::info!("\nMessage batch migration completed for all agents");
-        Ok(())
+
+        // Recreate message-related indexes after all the updates
+        tracing::info!("Recreating search indexes after migration...");
+
+        // Recreate the message content search index
+        let recreate_msg_index = "DEFINE INDEX IF NOT EXISTS msg_content_search ON msg FIELDS content SEARCH ANALYZER msg_content_analyzer BM25";
+        db.query(recreate_msg_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        // Recreate the agent conversation search index
+        let recreate_conv_index = "DEFINE INDEX IF NOT EXISTS idx_agent_conversation_search
+              ON TABLE agent
+              COLUMNS conversation_history.*.content
+              SEARCH ANALYZER msg_content_analyzer
+              BM25";
+        db.query(recreate_conv_index)
+            .await
+            .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+        tracing::info!("Search indexes recreated successfully");
+
+        Ok(true)
     }
 
     /// Update schema version

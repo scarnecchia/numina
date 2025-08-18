@@ -1707,7 +1707,7 @@ where
             // Get response from model with retry logic
             let response = {
                 let model = model.read().await;
-                match Self::complete_with_retry(&*model, &options, request, 3).await {
+                match Self::complete_with_retry(&*model, &options, request, 10).await {
                     Ok(resp) => resp,
                     Err(e) => {
                         send_event(ResponseEvent::Error {
@@ -2166,7 +2166,7 @@ where
 
                     current_response = {
                         let model = model.read().await;
-                        match Self::complete_with_retry(&*model, &options, request_with_tools, 3)
+                        match Self::complete_with_retry(&*model, &options, request_with_tools, 10)
                             .await
                         {
                             Ok(resp) => resp,

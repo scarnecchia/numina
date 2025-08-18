@@ -14,7 +14,7 @@ proc-macro2-diagnostics = "0.10"
 darling = "0.20"                                               # For better attribute parsing
 const_format = { version = "0.2.34", features = ["fmt"] }
 [dev-dependencies]
-surrealdb = { version = "2.1", default-features = false, features = [
+surrealdb = { version = "2.3", default-features = false, features = [
     "kv-mem",
     "protocol-ws",
     "rustls",
