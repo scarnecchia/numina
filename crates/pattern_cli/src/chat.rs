@@ -7,7 +7,7 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     Agent, ToolRegistry,
-    agent::{AgentState, ResponseEvent},
+    agent::ResponseEvent,
     config::PatternConfig,
     context::heartbeat::{self, HeartbeatReceiver, HeartbeatSender},
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
@@ -17,8 +17,6 @@ use pattern_core::{
     tool::builtin::DataSourceTool,
 };
 use std::sync::Arc;
-use std::time::Duration;
-use tokio_stream::StreamExt;
 
 use crate::{
     agent_ops::{
@@ -34,7 +32,7 @@ use crate::{
 /// Chat with an agent
 pub async fn chat_with_agent(
     agent: Arc<dyn Agent>,
-    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    heartbeat_receiver: heartbeat::HeartbeatReceiver,
 ) -> Result<()> {
     use rustyline_async::{Readline, ReadlineEvent};
     let output = Output::new();
@@ -66,57 +64,19 @@ pub async fn chat_with_agent(
         output.info("Default endpoint:", "CLI");
     }
 
-    // Spawn heartbeat monitor task
-    let agent_clone = agent.clone();
+    // Use generic heartbeat processor
     let output_clone = output.clone();
-    tokio::spawn(async move {
-        while let Some(heartbeat) = heartbeat_receiver.recv().await {
-            tracing::debug!(
-                "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
-                heartbeat.agent_id,
-                heartbeat.tool_name,
-                heartbeat.tool_call_id
-            );
-
-            // Clone for the task
-            let agent = agent_clone.clone();
+    tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
+        heartbeat_receiver,
+        vec![agent.clone()],
+        move |event, _agent_id, agent_name| {
             let output = output_clone.clone();
-            // Spawn task to handle this heartbeat
-            tokio::spawn(async move {
-                let (current_state, maybe_receiver) = agent.state().await;
-                if current_state != AgentState::Ready {
-                    if let Some(mut receiver) = maybe_receiver {
-                        let timeout = tokio::time::timeout(
-                            Duration::from_secs(200),
-                            receiver.wait_for(|s| *s == AgentState::Ready),
-                        );
-                        let _ = timeout.await;
-                    }
-                }
-                tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
-                // Create a system message to trigger another turn
-                let heartbeat_message = Message::user(format!(
-                    "[Heartbeat continuation from tool: {}]",
-                    heartbeat.tool_name
-                ));
-
-                match agent.process_message_stream(heartbeat_message).await {
-                    Ok(mut response_stream) => {
-                        while let Some(event) = response_stream.next().await {
-                            // Display heartbeat response
-                            output.status("💓 Heartbeat continuation:");
-
-                            print_response_event(event, &output);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Error processing heartbeat: {}", e);
-                    }
-                }
-            });
-        }
-        tracing::debug!("Heartbeat monitor task exiting");
-    });
+            async move {
+                output.status(&format!("💓 Heartbeat continuation from {}:", agent_name));
+                print_response_event(event, &output);
+            }
+        },
+    ));
 
     loop {
         // Handle user input
@@ -720,7 +680,7 @@ pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
     group: AgentGroup,
     agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
     pattern_manager: M,
-    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    heartbeat_receiver: heartbeat::HeartbeatReceiver,
     output: Output,
     mut rl: rustyline_async::Readline,
 ) -> Result<()> {
@@ -732,80 +692,19 @@ pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
         .map(|awm| awm.agent.clone())
         .collect();
 
-    // Spawn heartbeat monitor task
+    // Use generic heartbeat processor
     let output_clone = output.clone();
-    tokio::spawn(async move {
-        tracing::info!(
-            "💓 Heartbeat monitor task started with {} agents",
-            agents_for_heartbeat.len()
-        );
-        for agent in &agents_for_heartbeat {
-            tracing::info!(
-                "  - Agent available for heartbeat: {} ({})",
-                agent.name(),
-                agent.id()
-            );
-        }
-
-        while let Some(heartbeat) = heartbeat_receiver.recv().await {
-            tracing::info!(
-                "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
-                heartbeat.agent_id,
-                heartbeat.tool_name,
-                heartbeat.tool_call_id
-            );
-
-            // Find the agent that sent the heartbeat
-            if let Some(agent) = agents_for_heartbeat
-                .iter()
-                .find(|a| a.id() == heartbeat.agent_id)
-            {
-                tracing::info!("✅ Found agent {} for heartbeat", agent.name());
-                let agent = agent.clone();
-                let output = output_clone.clone();
-
-                // Spawn task to handle this heartbeat
-                tokio::spawn(async move {
-                    let (current_state, maybe_receiver) = agent.state().await;
-                    if current_state != AgentState::Ready {
-                        if let Some(mut receiver) = maybe_receiver {
-                            let timeout = tokio::time::timeout(
-                                Duration::from_secs(200),
-                                receiver.wait_for(|s| *s == AgentState::Ready),
-                            );
-                            let _ = timeout.await;
-                        }
-                    }
-                    tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
-
-                    // Create a system message to trigger another turn
-                    let heartbeat_message = Message::user(format!(
-                        "[System message: Heartbeat continuation from tool: {}]",
-                        heartbeat.tool_name
-                    ));
-
-                    match agent.process_message_stream(heartbeat_message).await {
-                        Ok(mut response_stream) => {
-                            while let Some(event) = response_stream.next().await {
-                                // Display heartbeat response
-                                output.status("💓 Heartbeat continuation:");
-                                print_response_event(event, &output);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Error processing heartbeat: {}", e);
-                        }
-                    }
-                });
-            } else {
-                tracing::warn!(
-                    "Received heartbeat from unknown agent {}",
-                    heartbeat.agent_id
-                );
+    tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
+        heartbeat_receiver,
+        agents_for_heartbeat,
+        move |event, _agent_id, agent_name| {
+            let output = output_clone.clone();
+            async move {
+                output.status(&format!("💓 Heartbeat continuation from {}:", agent_name));
+                print_response_event(event, &output);
             }
-        }
-        tracing::debug!("Heartbeat monitor task exiting");
-    });
+        },
+    ));
 
     loop {
         let event = rl.readline().await;

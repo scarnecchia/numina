@@ -27,7 +27,7 @@ pub use state::{AgentContext, AgentContextBuilder, AgentHandle, AgentStats, Stat
 const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 10000;
 
 /// Maximum messages to keep in immediate context before compression
-const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 50;
+const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 100;
 
 /// A complete context ready to be sent to an LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +43,9 @@ pub struct MemoryContext {
 
     /// Current batch being processed (if any)
     pub current_batch_id: Option<crate::agent::SnowflakePosition>,
+
+    /// Summary of archived/compressed batches (if any)
+    pub archive_summary: Option<String>,
 
     /// Metadata about the context (for debugging/logging)
     pub metadata: ContextMetadata,
@@ -84,9 +87,22 @@ impl MemoryContext {
 
     /// Convert this context into a Request for the LLM
     pub fn into_request(&self) -> crate::message::Request {
+        let mut messages = Vec::new();
+
+        // Add archive summary as initial system message if present
+        if let Some(summary) = &self.archive_summary {
+            messages.push(crate::message::Message::system(format!(
+                "Previous conversation summary:\n{}",
+                summary
+            )));
+        }
+
+        // Then add all the regular messages from batches
+        messages.extend(self.get_messages_for_request());
+
         crate::message::Request {
             system: Some(vec![self.system_prompt.clone()]),
-            messages: self.get_messages_for_request(),
+            messages,
             tools: Some(self.tools.clone()),
         }
     }
@@ -188,6 +204,7 @@ pub struct ContextBuilder {
     batches: Vec<MessageBatch>,
     current_time: DateTime<Utc>,
     compression_strategy: CompressionStrategy,
+    archive_summary: Option<String>,
 }
 
 impl ContextBuilder {
@@ -201,6 +218,7 @@ impl ContextBuilder {
             batches: Vec::new(),
             current_time: Utc::now(),
             compression_strategy: CompressionStrategy::default(),
+            archive_summary: None,
         }
     }
 
@@ -279,13 +297,7 @@ impl ContextBuilder {
                 let id = batch_id.or_else(|| msgs.first()?.position)?;
                 let batch_type = msgs.first()?.batch_type.unwrap_or(BatchType::UserRequest);
 
-                Some(MessageBatch {
-                    id,
-                    batch_type,
-                    messages: msgs,
-                    is_complete: true, // Assume existing messages form complete batches
-                    parent_batch_id: None,
-                })
+                Some(MessageBatch::from_messages(id, batch_type, msgs))
             })
             .collect();
 
@@ -301,6 +313,12 @@ impl ContextBuilder {
     /// Set the compression strategy
     pub fn with_compression_strategy(mut self, strategy: CompressionStrategy) -> Self {
         self.compression_strategy = strategy;
+        self
+    }
+
+    /// Set the archive summary for compressed/archived batches
+    pub fn with_archive_summary(mut self, summary: Option<String>) -> Self {
+        self.archive_summary = summary;
         self
     }
 
@@ -341,6 +359,7 @@ impl ContextBuilder {
             tools,
             batches,
             current_batch_id,
+            archive_summary: self.archive_summary.clone(),
             metadata,
         })
     }
@@ -602,6 +621,7 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
     }
 
     /// Clean up unpaired tool calls and responses
+    #[allow(dead_code)]
     fn clean_unpaired_tool_messages(&self, messages: Vec<Message>) -> Vec<Message> {
         use crate::message::ContentBlock;
         use std::collections::HashSet;
@@ -764,7 +784,7 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
 
             // Add cache control periodically
             const CACHE_INTERVAL: usize = 20;
-            let mut cumulative_count = batch_idx * CACHE_INTERVAL; // rough estimate
+            let cumulative_count = batch_idx * CACHE_INTERVAL; // rough estimate
 
             for (msg_idx, msg) in batch.messages.iter_mut().enumerate() {
                 if cumulative_count + msg_idx > 0
@@ -778,55 +798,6 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
         }
 
         Ok((result_batches, compressed_count))
-    }
-
-    /// Process messages, compressing if needed and adding cache control
-    /// DEPRECATED: This method exists for backward compatibility only
-    async fn process_messages(&self) -> Result<(Vec<Message>, usize)> {
-        // Convert batches to messages for legacy code
-        let all_messages: Vec<Message> = self
-            .batches
-            .iter()
-            .flat_map(|b| b.messages.clone())
-            .collect();
-
-        // First clean up unpaired tool calls/responses
-        let cleaned_messages = self.clean_unpaired_tool_messages(all_messages);
-
-        let (mut messages, compressed_count) =
-            if cleaned_messages.len() <= self.config.max_context_messages {
-                (cleaned_messages, 0)
-            } else {
-                // Use MessageCompressor with configured strategy
-                let compressor = MessageCompressor::new(self.compression_strategy.clone());
-
-                let compression_result = compressor
-                    .compress(cleaned_messages, self.config.max_context_messages)
-                    .await?;
-
-                // Return the active messages and the count of compressed messages
-                (
-                    compression_result.active_messages,
-                    compression_result.metadata.compressed_count,
-                )
-            };
-
-        // Add cache control to optimize token usage (especially for Anthropic)
-        // Cache the first message (system prompt will be cached separately)
-        if let Some(first_msg) = messages.first_mut() {
-            first_msg.options.cache_control = Some(CacheControl::Ephemeral);
-        }
-
-        // Add cache control periodically throughout the conversation
-        // Every 20 messages to create cache breakpoints
-        const CACHE_INTERVAL: usize = 20;
-        for (i, msg) in messages.iter_mut().enumerate() {
-            if i > 0 && i % CACHE_INTERVAL == 0 {
-                msg.options.cache_control = Some(CacheControl::Ephemeral);
-            }
-        }
-
-        Ok((messages, compressed_count))
     }
 
     /// Estimate token count for the context

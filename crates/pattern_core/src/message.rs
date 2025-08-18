@@ -43,9 +43,41 @@ pub struct MessageBatch {
 
     /// Parent batch ID if this is a continuation
     pub parent_batch_id: Option<SnowflakePosition>,
+
+    /// Tool calls we're waiting for responses to
+    #[serde(skip_serializing_if = "std::collections::HashSet::is_empty", default)]
+    pending_tool_calls: std::collections::HashSet<String>,
+
+    /// Notification for when all tool calls are paired (not serialized)
+    #[serde(skip)]
+    tool_pairing_notify: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl MessageBatch {
+    /// Get the next sequence number for this batch
+    pub fn next_sequence_num(&self) -> u32 {
+        self.messages.len() as u32
+    }
+
+    /// Sort messages by sequence_num, falling back to position, then created_at
+    fn sort_messages(&mut self) {
+        self.messages.sort_by(|a, b| {
+            // Try sequence_num first
+            match (&a.sequence_num, &b.sequence_num) {
+                (Some(a_seq), Some(b_seq)) => a_seq.cmp(&b_seq),
+                _ => {
+                    // Fall back to position if either is None
+                    match (&a.position, &b.position) {
+                        (Some(a_pos), Some(b_pos)) => a_pos.cmp(&b_pos),
+                        _ => {
+                            // Last resort: created_at (always present)
+                            a.created_at.cmp(&b.created_at)
+                        }
+                    }
+                }
+            }
+        });
+    }
     /// Create a new batch starting with a user message
     pub fn new_user_request(content: impl Into<MessageContent>) -> Self {
         let batch_id = get_next_message_position_sync();
@@ -57,32 +89,46 @@ impl MessageBatch {
         message.sequence_num = Some(0);
         message.batch_type = Some(BatchType::UserRequest);
 
-        Self {
+        let mut batch = Self {
             id: batch_id,
             batch_type: BatchType::UserRequest,
-            messages: vec![message],
+            messages: vec![],
             is_complete: false,
             parent_batch_id: None,
-        }
+            pending_tool_calls: std::collections::HashSet::new(),
+            tool_pairing_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        };
+
+        // Track any tool calls in the message
+        batch.track_message_tools(&message);
+        batch.messages.push(message);
+        batch
     }
 
     /// Create a system-triggered batch
     pub fn new_system_trigger(content: impl Into<MessageContent>) -> Self {
         let batch_id = get_next_message_position_sync();
-        let mut message = Message::system(content);
+        let mut message = Message::user(content); // compatibility with anthropic,
+        // consider more intelligent way to do this
 
         message.position = Some(batch_id);
         message.batch = Some(batch_id);
         message.sequence_num = Some(0);
         message.batch_type = Some(BatchType::SystemTrigger);
 
-        Self {
+        let mut batch = Self {
             id: batch_id,
             batch_type: BatchType::SystemTrigger,
-            messages: vec![message],
+            messages: vec![],
             is_complete: false,
             parent_batch_id: None,
-        }
+            pending_tool_calls: std::collections::HashSet::new(),
+            tool_pairing_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        };
+
+        batch.track_message_tools(&message);
+        batch.messages.push(message);
+        batch
     }
 
     /// Create a continuation batch
@@ -95,73 +141,326 @@ impl MessageBatch {
             messages: Vec::new(),
             is_complete: false,
             parent_batch_id: Some(parent_batch_id),
+            pending_tool_calls: std::collections::HashSet::new(),
+            tool_pairing_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     /// Add a message to this batch
     pub fn add_message(&mut self, mut message: Message) {
-        let position = get_next_message_position_sync();
-        let sequence_num = self.messages.len() as u32;
+        // Ensure batch is sorted
+        self.sort_messages();
 
-        message.position = Some(position);
-        message.batch = Some(self.id);
-        message.sequence_num = Some(sequence_num);
-        message.batch_type = Some(self.batch_type);
+        // Check if this message contains tool responses that should be sequenced
+        match &message.content {
+            MessageContent::ToolResponses(responses) => {
+                // Use sequencing logic for each tool response
+                for response in responses.clone() {
+                    self.add_tool_response_with_sequencing(response);
+                }
+                return;
+            }
+            MessageContent::Blocks(blocks) => {
+                // Check if blocks contain tool results that need sequencing
+                let tool_results: Vec<_> = blocks
+                    .iter()
+                    .filter_map(|block| {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                        } = block
+                        {
+                            Some(ToolResponse {
+                                call_id: tool_use_id.clone(),
+                                content: content.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !tool_results.is_empty() {
+                    // Use sequencing logic for tool results in blocks
+                    for response in tool_results {
+                        self.add_tool_response_with_sequencing(response);
+                    }
+
+                    // Also add any non-tool-result blocks as a regular message
+                    let non_tool_blocks: Vec<_> = blocks
+                        .iter()
+                        .filter_map(|block| {
+                            if !matches!(block, ContentBlock::ToolResult { .. }) {
+                                Some(block.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    if !non_tool_blocks.is_empty() {
+                        let mut new_msg = message.clone();
+                        new_msg.content = MessageContent::Blocks(non_tool_blocks);
+                        // Recursively add the non-tool blocks (will hit the default path below)
+                        self.add_message(new_msg);
+                    }
+
+                    return;
+                }
+            }
+            _ => {}
+        }
+
+        // Default path for regular messages and tool calls
+        // Only set batch fields if they're not already set
+        if message.position.is_none() {
+            message.position = Some(get_next_message_position_sync());
+        }
+        if message.batch.is_none() {
+            message.batch = Some(self.id);
+        }
+        if message.sequence_num.is_none() {
+            message.sequence_num = Some(self.messages.len() as u32);
+        }
+        if message.batch_type.is_none() {
+            message.batch_type = Some(self.batch_type);
+        }
+
+        // Track tool calls/responses
+        self.track_message_tools(&message);
 
         self.messages.push(message);
+
+        // Notify waiters if all tool calls are paired
+        if self.pending_tool_calls.is_empty() {
+            self.tool_pairing_notify.notify_waiters();
+        }
     }
 
     /// Add an agent response to this batch
     pub fn add_agent_response(&mut self, content: impl Into<MessageContent>) {
-        let mut message = Message::agent(content);
+        // Ensure batch is sorted
+        self.sort_messages();
+
+        let sequence_num = self.messages.len() as u32;
+        let mut message = Message::assistant_in_batch(self.id, sequence_num, content);
+        message.batch_type = Some(self.batch_type);
         self.add_message(message);
     }
 
     /// Add tool responses to this batch
     pub fn add_tool_responses(&mut self, responses: Vec<ToolResponse>) {
-        let mut message = Message::tool(responses);
+        // Ensure batch is sorted
+        self.sort_messages();
+
+        let sequence_num = self.messages.len() as u32;
+        let mut message = Message::tool_in_batch(self.id, sequence_num, responses);
+        message.batch_type = Some(self.batch_type);
         self.add_message(message);
     }
 
-    /// Check if batch has unpaired tool calls
-    pub fn has_pending_tool_calls(&self) -> bool {
-        let mut pending_calls = std::collections::HashSet::new();
+    /// Add multiple tool responses, inserting them after their corresponding calls
+    /// and resequencing subsequent messages
+    pub fn add_tool_responses_with_sequencing(&mut self, responses: Vec<ToolResponse>) {
+        // Ensure batch is sorted
+        self.sort_messages();
 
-        for msg in &self.messages {
+        // Sort responses by the position of their corresponding calls
+        // This ensures we process them in the right order to minimize resequencing
+        let mut responses_with_positions: Vec<(Option<usize>, ToolResponse)> = responses
+            .into_iter()
+            .map(|r| {
+                let pos = self.find_tool_call_position(&r.call_id);
+                (pos, r)
+            })
+            .collect();
+
+        // Sort by position (None goes last)
+        responses_with_positions.sort_by_key(|(pos, _)| pos.unwrap_or(usize::MAX));
+
+        // Process each response
+        for (call_pos, response) in responses_with_positions {
+            if let Some(pos) = call_pos {
+                self.insert_tool_response_at(pos, response);
+            } else {
+                tracing::warn!(
+                    "Received tool response with call_id {} but no matching tool call found in batch",
+                    response.call_id
+                );
+            }
+        }
+
+        // Renumber all messages after insertions
+        for (idx, msg) in self.messages.iter_mut().enumerate() {
+            msg.sequence_num = Some(idx as u32);
+        }
+
+        // Notify waiters if all tool calls are paired
+        if self.pending_tool_calls.is_empty() {
+            self.tool_pairing_notify.notify_waiters();
+        }
+    }
+
+    /// Helper to insert a tool response after its corresponding call
+    fn insert_tool_response_at(&mut self, call_pos: usize, response: ToolResponse) {
+        let insert_pos = call_pos + 1;
+
+        // Check if we can append to an existing ToolResponses message at insert_pos
+        if insert_pos < self.messages.len() {
+            if let MessageContent::ToolResponses(existing_responses) =
+                &mut self.messages[insert_pos].content
+            {
+                // Append to existing tool responses
+                if self.pending_tool_calls.contains(&response.call_id) {
+                    existing_responses.push(response.clone());
+                    self.pending_tool_calls.remove(&response.call_id);
+                }
+                return;
+            }
+        }
+
+        // Create a new tool response message
+        let mut response_msg = Message::tool(vec![response.clone()]);
+
+        // Set batch fields
+        let position = get_next_message_position_sync();
+        response_msg.position = Some(position);
+        response_msg.batch = Some(self.id);
+        response_msg.sequence_num = Some(insert_pos as u32);
+        response_msg.batch_type = Some(self.batch_type);
+
+        // Insert the response message
+        self.messages.insert(insert_pos, response_msg);
+
+        // Update tracking
+        self.pending_tool_calls.remove(&response.call_id);
+    }
+
+    /// Add a single tool response, inserting it immediately after the corresponding call
+    /// and resequencing subsequent messages
+    pub fn add_tool_response_with_sequencing(&mut self, response: ToolResponse) {
+        // Ensure batch is sorted
+        self.sort_messages();
+
+        // Find the message containing the matching tool call
+        let call_position = self.find_tool_call_position(&response.call_id);
+
+        if let Some(call_pos) = call_position {
+            self.insert_tool_response_at(call_pos, response);
+
+            // Renumber all messages after insertions
+            for (idx, msg) in self.messages.iter_mut().enumerate() {
+                msg.sequence_num = Some(idx as u32);
+            }
+
+            // Check if batch is now complete
+            if self.pending_tool_calls.is_empty() {
+                self.tool_pairing_notify.notify_waiters();
+            }
+        } else {
+            // No matching tool call found - this is an error condition
+            // Log it but don't add an unpaired response
+            tracing::warn!(
+                "Received tool response with call_id {} but no matching tool call found in batch",
+                response.call_id
+            );
+        }
+    }
+
+    /// Find the position of the message containing a specific tool call
+    fn find_tool_call_position(&self, call_id: &str) -> Option<usize> {
+        for (idx, msg) in self.messages.iter().enumerate() {
             match &msg.content {
                 MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        pending_calls.insert(call.call_id.clone());
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        pending_calls.remove(&response.call_id);
+                    if calls.iter().any(|c| c.call_id == call_id) {
+                        return Some(idx);
                     }
                 }
                 MessageContent::Blocks(blocks) => {
                     for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                pending_calls.insert(id.clone());
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            if id == call_id {
+                                return Some(idx);
                             }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                pending_calls.remove(tool_use_id);
-                            }
-                            _ => {}
                         }
                     }
                 }
                 _ => {}
             }
         }
+        None
+    }
 
-        !pending_calls.is_empty()
+    /// Check if batch has unpaired tool calls
+    pub fn has_pending_tool_calls(&self) -> bool {
+        !self.pending_tool_calls.is_empty()
+    }
+
+    /// Get the IDs of pending tool calls (for debugging/migration)
+    pub fn get_pending_tool_calls(&self) -> Vec<String> {
+        self.pending_tool_calls.iter().cloned().collect()
     }
 
     /// Mark batch as complete
     pub fn mark_complete(&mut self) {
         self.is_complete = true;
+    }
+
+    /// Finalize batch by removing unpaired tool calls
+    /// Returns the IDs of removed messages for cleanup
+    pub fn finalize(&mut self) -> Vec<crate::id::MessageId> {
+        let mut removed_ids = Vec::new();
+
+        if !self.pending_tool_calls.is_empty() {
+            // Remove any messages that are tool calls without responses
+            let pending = self.pending_tool_calls.clone();
+
+            // Track which messages to remove
+            let mut indices_to_remove = Vec::new();
+            for (idx, msg) in self.messages.iter().enumerate() {
+                let should_remove = match &msg.content {
+                    MessageContent::ToolCalls(calls) => {
+                        // Remove if all calls are unpaired
+                        calls.iter().all(|call| pending.contains(&call.call_id))
+                    }
+                    MessageContent::Blocks(blocks) => {
+                        // Check if this is purely unpaired tool calls
+                        let has_unpaired = blocks.iter().any(|block| {
+                            matches!(block, ContentBlock::ToolUse { id, .. } if pending.contains(id))
+                        });
+                        let has_other_content = blocks
+                            .iter()
+                            .any(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+                        // Remove if it only has unpaired tool calls
+                        has_unpaired && !has_other_content
+                    }
+                    _ => false, // Keep all other message types
+                };
+
+                if should_remove {
+                    indices_to_remove.push(idx);
+                    removed_ids.push(msg.id.clone());
+                }
+            }
+
+            // Remove messages by index in reverse order
+            for idx in indices_to_remove.into_iter().rev() {
+                self.messages.remove(idx);
+            }
+
+            // Clear pending tool calls and mark as complete
+            self.pending_tool_calls.clear();
+
+            // Renumber sequences after removal
+            for (i, msg) in self.messages.iter_mut().enumerate() {
+                msg.sequence_num = Some(i as u32);
+            }
+
+            // Mark complete
+            self.is_complete = true;
+        }
+
+        removed_ids
     }
 
     /// Get the total number of messages in this batch
@@ -172,6 +471,83 @@ impl MessageBatch {
     /// Check if batch is empty
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    /// Reconstruct a batch from existing messages (for migration/loading)
+    pub fn from_messages(
+        id: SnowflakePosition,
+        batch_type: BatchType,
+        messages: Vec<Message>,
+    ) -> Self {
+        let mut batch = Self {
+            id,
+            batch_type,
+            messages: vec![],
+            is_complete: false,
+            parent_batch_id: None,
+            pending_tool_calls: std::collections::HashSet::new(),
+            tool_pairing_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        };
+
+        // Add each message through add_message to ensure proper tool response sequencing
+        for msg in messages {
+            batch.add_message(msg);
+        }
+
+        // Check if complete: final message is tool responses or assistant message
+        let last_is_assistant = batch
+            .messages
+            .last()
+            .map(|m| m.role == ChatRole::Assistant || m.role == ChatRole::Tool)
+            .unwrap_or(false);
+
+        if batch.pending_tool_calls.is_empty() && last_is_assistant {
+            batch.is_complete = true;
+        }
+
+        batch
+    }
+
+    /// Track tool calls/responses in a message
+    fn track_message_tools(&mut self, message: &Message) {
+        match &message.content {
+            MessageContent::ToolCalls(calls) => {
+                for call in calls {
+                    self.pending_tool_calls.insert(call.call_id.clone());
+                }
+            }
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::ToolUse { id, .. } => {
+                            self.pending_tool_calls.insert(id.clone());
+                        }
+                        ContentBlock::ToolResult { tool_use_id, .. } => {
+                            self.pending_tool_calls.remove(tool_use_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            MessageContent::ToolResponses(responses) => {
+                for response in responses {
+                    self.pending_tool_calls.remove(&response.call_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Wait for all pending tool calls to be paired with responses
+    pub async fn wait_for_tool_pairing(&self) {
+        while !self.pending_tool_calls.is_empty() {
+            self.tool_pairing_notify.notified().await;
+        }
+    }
+
+    /// Check if a specific tool call is pending
+    pub fn is_waiting_for(&self, call_id: &str) -> bool {
+        self.pending_tool_calls.contains(call_id)
     }
 }
 
@@ -1154,6 +1530,58 @@ impl Message {
             embedding: None,
             embedding_model: None,
         }
+    }
+
+    /// Create a user message in a specific batch
+    pub fn user_in_batch(
+        batch_id: SnowflakePosition,
+        sequence_num: u32,
+        content: impl Into<MessageContent>,
+    ) -> Self {
+        let mut msg = Self::user(content);
+        msg.batch = Some(batch_id);
+        msg.sequence_num = Some(sequence_num);
+        msg.batch_type = Some(BatchType::UserRequest);
+        msg
+    }
+
+    /// Create an assistant message in a specific batch
+    pub fn assistant_in_batch(
+        batch_id: SnowflakePosition,
+        sequence_num: u32,
+        content: impl Into<MessageContent>,
+    ) -> Self {
+        let mut msg = Self::agent(content);
+        msg.batch = Some(batch_id);
+        msg.sequence_num = Some(sequence_num);
+        // Batch type could be anything, caller should set if not UserRequest
+        msg
+    }
+
+    /// Create a tool response message in a specific batch
+    pub fn tool_in_batch(
+        batch_id: SnowflakePosition,
+        sequence_num: u32,
+        responses: Vec<ToolResponse>,
+    ) -> Self {
+        let mut msg = Self::tool(responses);
+        msg.batch = Some(batch_id);
+        msg.sequence_num = Some(sequence_num);
+        // Batch type inherited from batch context
+        msg
+    }
+
+    /// Create a system message in a specific batch
+    pub fn system_in_batch(
+        batch_id: SnowflakePosition,
+        sequence_num: u32,
+        content: impl Into<MessageContent>,
+    ) -> Self {
+        let mut msg = Self::system(content);
+        msg.batch = Some(batch_id);
+        msg.sequence_num = Some(sequence_num);
+        msg.batch_type = Some(BatchType::Continuation);
+        msg
     }
 
     /// Create Messages from an agent Response

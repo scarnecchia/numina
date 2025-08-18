@@ -374,7 +374,7 @@ where
             let context = agent.context.read().await;
             let mut history = context.history.write().await;
             history.compression_strategy = record.compression_strategy.clone();
-            history.message_summary = record.message_summary.clone();
+            history.archive_summary = record.message_summary.clone();
 
             // Load active messages from relations (already ordered by position)
             let mut loaded_messages = 0;
@@ -403,7 +403,7 @@ where
                         message.role,
                         content_preview
                     );
-                    history.messages.push(message.clone());
+                    history.add_message(message.clone());
                     loaded_messages += 1;
                 }
             }
@@ -990,7 +990,7 @@ where
 
                         // Update compression events if the message summary changed
                         let history_read = history.read().await;
-                        if agent_record.message_summary != history_read.message_summary {
+                        if agent_record.message_summary != history_read.archive_summary {
                             meta.compression_events += 1;
                         }
                         drop(history_read);
@@ -998,7 +998,7 @@ where
                         // Update history if message summary changed
                         if agent_record.message_summary.is_some() {
                             let mut history_write = history.write().await;
-                            history_write.message_summary = agent_record.message_summary;
+                            history_write.archive_summary = agent_record.message_summary;
                         }
                     }
                     _ => {
@@ -1022,7 +1022,7 @@ where
         let needs_compression = {
             let context = self.context.read().await;
             let history = context.history.read().await;
-            history.messages.len() > context.context_config.max_context_messages
+            history.total_message_count() > context.context_config.max_context_messages
         };
 
         if !needs_compression {
@@ -1084,11 +1084,11 @@ where
         let compressor = crate::context::MessageCompressor::new(compression_strategy)
             .with_model_provider(Box::new(model_wrapper));
 
-        // Get messages to compress
-        let messages_to_compress = {
+        // Get batches to compress
+        let batches_to_compress = {
             let context = self.context.read().await;
             let history = context.history.read().await;
-            history.messages.clone()
+            history.batches.clone()
         };
 
         // Perform compression
@@ -1097,14 +1097,14 @@ where
             context.context_config.max_context_messages
         };
         let compression_result = compressor
-            .compress(messages_to_compress, max_context_messages)
+            .compress(batches_to_compress, max_context_messages)
             .await?;
 
-        // Collect archived message IDs
+        // Collect archived message IDs from archived batches
         let archived_ids: Vec<crate::MessageId> = compression_result
-            .archived_messages
+            .archived_batches
             .iter()
-            .map(|msg| msg.id.clone())
+            .flat_map(|batch| batch.messages.iter().map(|msg| msg.id.clone()))
             .collect();
 
         // Apply compression to state
@@ -1112,20 +1112,20 @@ where
             let context = self.context.read().await;
             let mut history = context.history.write().await;
 
-            // Move compressed messages to archive
+            // Move compressed batches to archive
             history
-                .archived_messages
-                .extend(compression_result.archived_messages);
+                .archived_batches
+                .extend(compression_result.archived_batches);
 
-            // Update active messages
-            history.messages = compression_result.active_messages;
+            // Update active batches
+            history.batches = compression_result.active_batches;
 
             // Update or append to summary
             if let Some(new_summary) = compression_result.summary {
-                if let Some(existing_summary) = &mut history.message_summary {
+                if let Some(existing_summary) = &mut history.archive_summary {
                     *existing_summary = format!("{}\n\n{}", existing_summary, new_summary);
                 } else {
-                    history.message_summary = Some(new_summary.clone());
+                    history.archive_summary = Some(new_summary.clone());
                 }
 
                 // Also update the agent record's message summary in background
@@ -2180,21 +2180,7 @@ where
                                 crate::log_error!("Model error during continuation", e);
                                 tracing::debug!("Full context on error: {:?}", &memory_context);
 
-                                // Clean up any unpaired tool calls from the context before breaking
-                                {
-                                    let ctx = context.write().await;
-                                    let mut history = ctx.history.write().await;
-                                    if let Some(last_msg) = history.messages.last() {
-                                        if matches!(&last_msg.content, MessageContent::ToolCalls(_))
-                                        {
-                                            tracing::warn!(
-                                                "Removing unpaired tool calls from context after model error"
-                                            );
-                                            history.messages.pop();
-                                        }
-                                    }
-                                }
-
+                                // TODO: Better error recovery with batch awareness
                                 break;
                             }
                         }
@@ -2374,12 +2360,36 @@ where
                     tracing::error!("Failed to persist memory before heartbeat: {:?}", e);
                 }
 
+                // Get next sequence number from current batch
+                let next_seq_num = {
+                    let ctx = context.read().await;
+                    let history = ctx.history.read().await;
+                    current_batch_id.and_then(|batch_id| {
+                        history
+                            .batches
+                            .iter()
+                            .find(|b| b.id == batch_id)
+                            .map(|b| b.next_sequence_num())
+                    })
+                };
+
+                // Get model vendor from options
+                let model_vendor = {
+                    let opts = chat_options.read().await;
+                    opts.as_ref().map(|o| {
+                        crate::model::ModelVendor::from_provider_string(&o.model_info.provider)
+                    })
+                };
+
                 // NOW send the single heartbeat for background processing
                 use crate::context::heartbeat::HeartbeatRequest;
                 let heartbeat_req = HeartbeatRequest {
                     agent_id: agent_id.clone(),
                     tool_name: "continuation".to_string(),
                     tool_call_id: format!("cont_{}", uuid::Uuid::new_v4().simple()),
+                    batch_id: current_batch_id,
+                    next_sequence_num: next_seq_num,
+                    model_vendor,
                 };
 
                 if let Err(e) = self_clone.heartbeat_sender.try_send(heartbeat_req) {

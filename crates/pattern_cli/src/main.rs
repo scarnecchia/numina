@@ -214,6 +214,12 @@ enum DbCommands {
     Stats,
     /// Run a query
     Query { sql: String },
+    /// Force run database migrations
+    Migrate {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1056,6 +1062,42 @@ async fn main() -> Result<()> {
             match cmd {
                 DbCommands::Stats => commands::db::stats(&config, &output).await?,
                 DbCommands::Query { sql } => commands::db::query(sql, &output).await?,
+                DbCommands::Migrate { yes } => {
+                    if !yes {
+                        output.warning("⚠️  This will run database migrations!");
+                        output.warning("Make sure you have a backup before proceeding.");
+                        output.info("", "Run with --yes to skip this prompt.");
+
+                        use std::io::{self, Write};
+                        print!("Continue? [y/N]: ");
+                        io::stdout().flush().into_diagnostic()?;
+
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input).into_diagnostic()?;
+
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            output.status("Migration cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    output.status("Running database migrations...");
+
+                    // Use the database config from PatternConfig
+                    let db_config = if let Some(path) = cli.db_path.clone() {
+                        DatabaseConfig::Embedded {
+                            path: path.to_string_lossy().to_string(),
+                            strict_mode: false,
+                        }
+                    } else {
+                        config.database.clone()
+                    };
+
+                    // Initialize database with force_schema_update = true
+                    client::init_db_with_options(db_config, true).await?;
+
+                    output.success("✓ Migrations completed successfully");
+                }
             }
         }
         Commands::Debug { cmd } => match cmd {

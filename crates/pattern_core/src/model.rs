@@ -123,6 +123,41 @@ impl ResponseOptions {
     }
 }
 
+/// Model provider/vendor
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ModelVendor {
+    Anthropic,
+    OpenAI,
+    Gemini, // Google's Gemini models
+    Cohere,
+    Groq,
+    Ollama,
+    Other,
+}
+
+impl ModelVendor {
+    /// Check if this vendor uses OpenAI-compatible API
+    pub fn is_openai_compatible(&self) -> bool {
+        match self {
+            Self::OpenAI | Self::Cohere | Self::Groq | Self::Ollama | Self::Other => true,
+            Self::Anthropic | Self::Gemini => false,
+        }
+    }
+
+    /// Parse from provider string
+    pub fn from_provider_string(provider: &str) -> Self {
+        match provider.to_lowercase().as_str() {
+            "anthropic" => Self::Anthropic,
+            "openai" => Self::OpenAI,
+            "gemini" | "google" => Self::Gemini,
+            "cohere" => Self::Cohere,
+            "groq" => Self::Groq,
+            "ollama" => Self::Ollama,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Capabilities that a model might support
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModelCapability {

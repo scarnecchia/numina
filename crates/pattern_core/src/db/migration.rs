@@ -1,10 +1,8 @@
 //! Simplified database migration system for schema versioning
 
 use super::{DatabaseError, Result};
-use crate::agent::get_next_message_position_string;
 use crate::db::schema::Schema;
 use crate::id::{IdType, MemoryId, TaskId};
-use crate::message::BatchType;
 use surrealdb::{Connection, Surreal};
 
 /// Database migration runner
@@ -240,148 +238,382 @@ impl MigrationRunner {
 
     /// Migration v2: Add snowflake IDs and batch tracking to messages
     async fn migrate_v2_message_batching<C: Connection>(db: &Surreal<C>) -> Result<()> {
-        use chrono::Duration;
+        use crate::agent::AgentRecord;
+        use crate::context::state::MessageHistory;
+        use crate::db::entity::DbEntity;
+        use crate::message::{BatchType, ChatRole, Message, MessageBatch};
+        use tokio::time::{Duration, sleep};
 
-        tracing::info!("Starting message batch migration...");
+        tracing::info!("Starting per-agent message batch migration...");
 
-        // Query all messages ordered by created_at
-        let query = r#"
-            SELECT * FROM msg
-            ORDER BY created_at ASC
-        "#;
-
+        // Query all agent records
+        let query = "SELECT * FROM agent";
         let mut result = db
             .query(query)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        let messages: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
+        let agent_records: Vec<<AgentRecord as DbEntity>::DbModel> =
+            result.take(0).unwrap_or_default();
 
-        tracing::info!("Found {} messages to migrate", messages.len());
+        let agents: Vec<AgentRecord> = agent_records
+            .into_iter()
+            .map(|model| AgentRecord::from_db_model(model).expect("should convert"))
+            .collect();
 
-        if messages.is_empty() {
-            return Ok(());
-        }
+        tracing::info!("Found {} agents to migrate", agents.len());
 
-        // Process messages to detect batches
-        let mut batch_updates = Vec::new();
-        let mut current_batch_id: Option<String> = None;
-        let mut sequence_num = 0u32;
-        let mut last_timestamp = None;
-        let mut last_role = None;
+        for agent in agents {
+            tracing::info!("\n=== Processing agent: {} ({})", agent.name, agent.id);
 
-        for (idx, msg_value) in messages.iter().enumerate() {
-            // Extract fields we need
-            let msg_id = msg_value.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            // Load all messages for this agent
+            let messages_with_relations = agent.load_message_history(db, true).await?;
 
-            let role = msg_value
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
-
-            let created_at = msg_value
-                .get("created_at")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-
-            let has_tool_calls = msg_value
-                .get("has_tool_calls")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            // Check if this starts a new batch
-            let starts_new_batch = if let Some(last_ts) = last_timestamp {
-                if let Some(current_ts) = created_at {
-                    // New batch if:
-                    // 1. User message after non-user (new conversation turn)
-                    // 2. Time gap > 30 minutes (new conversation)
-                    // 3. First message
-                    let time_gap = current_ts.signed_duration_since(last_ts);
-                    let is_new_turn = role == "user" && last_role != Some("user");
-                    let is_time_gap = time_gap > Duration::minutes(30);
-
-                    is_new_turn || is_time_gap || idx == 0
-                } else {
-                    false
-                }
-            } else {
-                true // First message always starts a batch
-            };
-
-            // Generate snowflake ID for this message
-            let snowflake_id = get_next_message_position_string().await;
-
-            // Handle batch assignment
-            if starts_new_batch {
-                current_batch_id = Some(snowflake_id.clone());
-                sequence_num = 0;
-            } else {
-                sequence_num += 1;
+            if messages_with_relations.is_empty() {
+                tracing::info!("  No messages for agent {}", agent.name);
+                continue;
             }
 
-            // Determine batch type
-            let batch_type = if role == "user" {
-                BatchType::UserRequest
-            } else if role == "system" {
-                BatchType::SystemTrigger
-            } else {
-                // Could be more sophisticated here
-                BatchType::UserRequest
-            };
+            tracing::info!("  Found {} messages", messages_with_relations.len());
 
-            // Store update for this message
-            batch_updates.push((
-                msg_id.to_string(),
-                snowflake_id,
-                current_batch_id.clone().unwrap_or_default(),
-                sequence_num,
-                batch_type,
-            ));
+            // Extract just the messages, preserving order
+            let mut messages: Vec<Message> = messages_with_relations
+                .iter()
+                .map(|(msg, _relation)| msg.clone())
+                .collect();
 
-            // Update tracking variables
-            last_timestamp = created_at;
-            last_role = Some(role);
+            // Create MessageHistory to hold our batches
+            let mut history =
+                MessageHistory::new(crate::context::compression::CompressionStrategy::Truncate {
+                    keep_recent: 100,
+                });
+            let mut accumulator: Vec<Message> = Vec::new();
+            let mut current_batch_id: Option<crate::agent::SnowflakePosition> = None;
+            let mut all_removed_ids: Vec<crate::id::MessageId> = Vec::new();
+
+            let mut last_role: Option<ChatRole> = None;
+
+            for (idx, message) in messages.iter_mut().enumerate() {
+                let is_user_message = message.role == ChatRole::User;
+                let is_system_message = message.role == ChatRole::System;
+                let is_first_message = idx == 0;
+
+                // Start new batch on:
+                // - First message
+                // - System message (always starts new batch)
+                // - User message AFTER a non-user message (not consecutive users)
+                let starts_new_batch = is_first_message
+                    || is_system_message
+                    || (is_user_message && last_role.as_ref() != Some(&ChatRole::User));
+
+                if starts_new_batch {
+                    // Create batch from accumulated messages if any
+                    if !accumulator.is_empty() {
+                        let batch_id = current_batch_id.expect("batch_id should be set");
+                        let batch_type =
+                            accumulator[0].batch_type.unwrap_or(BatchType::UserRequest);
+
+                        tracing::info!(
+                            "  Creating batch {} with {} messages",
+                            batch_id,
+                            accumulator.len()
+                        );
+                        for (seq, msg) in accumulator.iter().enumerate() {
+                            let content = msg.display_content();
+                            let preview = if content.len() > 200 {
+                                let start: String = content.chars().take(100).collect();
+                                let end: String = content
+                                    .chars()
+                                    .rev()
+                                    .take(100)
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect();
+                                format!("{}...{}", start, end)
+                            } else {
+                                content.clone()
+                            };
+                            tracing::info!("    [{:02}] {} - {}", seq, msg.role, preview);
+                        }
+
+                        let mut batch =
+                            MessageBatch::from_messages(batch_id, batch_type, accumulator.clone());
+                        let removed_ids = batch.finalize(); // Clean up any unpaired tool calls
+                        if !removed_ids.is_empty() {
+                            tracing::warn!(
+                                "  Removing {} unpaired tool call messages from batch",
+                                removed_ids.len()
+                            );
+                            all_removed_ids.extend(removed_ids);
+                        }
+                        history.add_batch(batch);
+                        accumulator.clear();
+                    }
+
+                    // Generate new snowflake for this batch
+                    let snowflake = crate::agent::get_next_message_position_sync();
+
+                    // Small delay to ensure snowflake uniqueness
+                    sleep(Duration::from_millis(10)).await;
+
+                    // Set both position and batch to same snowflake
+                    message.position = Some(snowflake);
+                    message.batch = Some(snowflake);
+                    current_batch_id = Some(snowflake);
+
+                    // Determine batch type
+                    message.batch_type = Some(if message.role == ChatRole::System {
+                        BatchType::SystemTrigger
+                    } else {
+                        BatchType::UserRequest
+                    });
+
+                    tracing::info!(
+                        "  Starting new batch {} at message {} ({})",
+                        snowflake,
+                        idx,
+                        message.role
+                    );
+                } else {
+                    // Continue current batch
+                    let snowflake = crate::agent::get_next_message_position_sync();
+
+                    // Small delay for uniqueness
+                    sleep(Duration::from_millis(5)).await;
+
+                    message.position = Some(snowflake);
+                    message.batch = current_batch_id;
+                    message.batch_type = Some(BatchType::UserRequest);
+                }
+
+                accumulator.push(message.clone());
+                last_role = Some(message.role.clone());
+            }
+
+            // Create final batch from remaining messages
+            if !accumulator.is_empty() {
+                let batch_id = current_batch_id.expect("batch_id should be set");
+                let batch_type = accumulator[0].batch_type.unwrap_or(BatchType::UserRequest);
+
+                tracing::info!(
+                    "  Creating final batch {} with {} messages",
+                    batch_id,
+                    accumulator.len()
+                );
+
+                let mut batch = MessageBatch::from_messages(batch_id, batch_type, accumulator);
+                let removed_ids = batch.finalize();
+                if !removed_ids.is_empty() {
+                    tracing::warn!(
+                        "  Removing {} unpaired tool call messages from final batch",
+                        removed_ids.len()
+                    );
+                    all_removed_ids.extend(removed_ids);
+                }
+                history.add_batch(batch);
+            }
+
+            // Now extract processed batches and update database
+            tracing::info!("  Created {} batches total", history.batches.len());
+
+            for batch in &history.batches {
+                let status = if batch.is_complete {
+                    "✓ complete".to_string()
+                } else {
+                    let pending = batch.get_pending_tool_calls();
+                    let last_role = batch.messages.last().map(|m| &m.role);
+                    if !pending.is_empty() {
+                        format!("⚠️ INCOMPLETE - {} pending tool calls", pending.len())
+                    } else if last_role != Some(&ChatRole::Assistant) {
+                        format!("⚠️ INCOMPLETE - ends with {:?}", last_role)
+                    } else {
+                        "⚠️ INCOMPLETE - unknown reason".to_string()
+                    }
+                };
+
+                tracing::info!(
+                    "  Batch {}: {} messages, {}",
+                    batch.id,
+                    batch.messages.len(),
+                    status
+                );
+
+                // For incomplete or unusually long batches, show details
+                if !batch.is_complete || batch.messages.len() > 20 {
+                    tracing::warn!("    Detailed view of batch {}:", batch.id);
+
+                    // For incomplete batches, show ALL messages to debug tool pairing
+                    if !batch.is_complete {
+                        for (i, msg) in batch.messages.iter().enumerate() {
+                            let content = msg.display_content();
+                            let preview: String = content.chars().take(100).collect();
+
+                            // Extract tool call/response IDs if present, also check Blocks
+                            let tool_info = match &msg.content {
+                                crate::message::MessageContent::ToolCalls(calls) => {
+                                    let ids: Vec<String> =
+                                        calls.iter().map(|c| c.call_id.clone()).collect();
+                                    format!(" [calls: {}]", ids.join(", "))
+                                }
+                                crate::message::MessageContent::ToolResponses(responses) => {
+                                    let ids: Vec<String> =
+                                        responses.iter().map(|r| r.call_id.clone()).collect();
+                                    format!(" [responses: {}]", ids.join(", "))
+                                }
+                                crate::message::MessageContent::Blocks(blocks) => {
+                                    let mut call_ids = Vec::new();
+                                    let mut response_ids = Vec::new();
+                                    for block in blocks {
+                                        match block {
+                                            crate::message::ContentBlock::ToolUse {
+                                                id, ..
+                                            } => {
+                                                call_ids.push(id.clone());
+                                            }
+                                            crate::message::ContentBlock::ToolResult {
+                                                tool_use_id,
+                                                ..
+                                            } => {
+                                                response_ids.push(tool_use_id.clone());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if !call_ids.is_empty() {
+                                        format!(" [block calls: {}]", call_ids.join(", "))
+                                    } else if !response_ids.is_empty() {
+                                        format!(" [block responses: {}]", response_ids.join(", "))
+                                    } else {
+                                        String::new()
+                                    }
+                                }
+                                _ => String::new(),
+                            };
+
+                            tracing::warn!(
+                                "      [{:02}] {} - {}{}",
+                                i,
+                                msg.role,
+                                preview,
+                                tool_info
+                            );
+                        }
+                    } else {
+                        // For long but complete batches, show abbreviated view
+                        for (i, msg) in batch.messages.iter().take(3).enumerate() {
+                            let content = msg.display_content();
+                            let preview: String = content.chars().take(80).collect();
+                            tracing::warn!("      [{:02}] {} - {}", i, msg.role, preview);
+                        }
+
+                        if batch.messages.len() > 6 {
+                            tracing::warn!(
+                                "      ... {} messages omitted ...",
+                                batch.messages.len() - 6
+                            );
+                        }
+
+                        let start_idx = batch.messages.len().saturating_sub(3);
+                        for (i, msg) in batch.messages.iter().skip(start_idx).enumerate() {
+                            let content = msg.display_content();
+                            let preview: String = content.chars().take(80).collect();
+                            tracing::warn!(
+                                "      [{:02}] {} - {}",
+                                start_idx + i,
+                                msg.role,
+                                preview
+                            );
+                        }
+                    }
+
+                    // Show details about why batch is incomplete
+                    if !batch.is_complete {
+                        let pending = batch.get_pending_tool_calls();
+                        if !pending.is_empty() {
+                            tracing::warn!("    ⚠️ Pending tool calls: {:?}", pending);
+                        } else {
+                            let last_role = batch.messages.last().map(|m| &m.role);
+                            tracing::warn!(
+                                "    ⚠️ Batch ends with {:?} (not Assistant)",
+                                last_role
+                            );
+                        }
+                    }
+                }
+
+                // Update each message in the database
+                for message in &batch.messages {
+                    // Update the message itself
+                    let update_query = r#"
+                        UPDATE $msg_id SET
+                            position = $position,
+                            batch = $batch,
+                            sequence_num = $seq_num,
+                            batch_type = $batch_type
+                    "#;
+
+                    db.query(update_query)
+                        .bind(("msg_id", surrealdb::RecordId::from(&message.id)))
+                        .bind(("position", message.position.as_ref().map(|p| p.to_string())))
+                        .bind(("batch", message.batch.as_ref().map(|b| b.to_string())))
+                        .bind(("seq_num", message.sequence_num))
+                        .bind((
+                            "batch_type",
+                            message.batch_type.as_ref().map(|bt| match bt {
+                                BatchType::UserRequest => "user_request",
+                                BatchType::AgentToAgent => "agent_to_agent",
+                                BatchType::SystemTrigger => "system_trigger",
+                                BatchType::Continuation => "continuation",
+                            }),
+                        ))
+                        .await
+                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+                    // Update the agent_messages relation that points to this message
+                    let sync_relation_query = r#"
+                        UPDATE agent_messages SET
+                            position = out.position,
+                            batch = out.batch,
+                            sequence_num = out.sequence_num,
+                            batch_type = out.batch_type
+                        WHERE out = $msg_id
+                    "#;
+
+                    db.query(sync_relation_query)
+                        .bind(("msg_id", surrealdb::RecordId::from(&message.id)))
+                        .await
+                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+                }
+            }
+
+            // Delete any messages that were removed due to unpaired tool calls
+            if !all_removed_ids.is_empty() {
+                tracing::warn!(
+                    "  Deleting {} unpaired tool call messages from database",
+                    all_removed_ids.len()
+                );
+                for msg_id in all_removed_ids {
+                    // Delete the message
+                    let delete_msg_query = "DELETE $msg_id";
+                    db.query(delete_msg_query)
+                        .bind(("msg_id", surrealdb::RecordId::from(&msg_id)))
+                        .await
+                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+                    // Delete any agent_messages relations pointing to this message
+                    let delete_relation_query = "DELETE agent_messages WHERE out = $msg_id";
+                    db.query(delete_relation_query)
+                        .bind(("msg_id", surrealdb::RecordId::from(&msg_id)))
+                        .await
+                        .map_err(|e| DatabaseError::QueryFailed(e))?;
+                }
+            }
+
+            tracing::info!("  ✓ Agent {} migration complete", agent.name);
         }
 
-        // Apply updates to all messages
-        tracing::info!("Applying batch updates to {} messages", batch_updates.len());
-
-        for (msg_id, snowflake_id, batch_id, seq_num, batch_type) in batch_updates {
-            let update_query = r#"
-                UPDATE $msg_id SET
-                    position = $snowflake_id,
-                    batch = $batch_id,
-                    sequence_num = $seq_num,
-                    batch_type = $batch_type
-            "#;
-
-            db.query(update_query)
-                .bind(("msg_id", msg_id))
-                .bind(("snowflake_id", snowflake_id))
-                .bind(("batch_id", batch_id))
-                .bind(("seq_num", seq_num))
-                .bind(("batch_type", format!("{:?}", batch_type).to_lowercase()))
-                .await
-                .map_err(|e| DatabaseError::QueryFailed(e))?;
-        }
-
-        // Update agent_messages relations to sync position field
-        tracing::info!("Syncing agent_messages relations...");
-
-        let sync_query = r#"
-            UPDATE agent_messages SET
-                position = out.position,
-                batch = out.batch,
-                sequence_num = out.sequence_num,
-                batch_type = out.batch_type
-            WHERE out.position IS NOT NULL
-        "#;
-
-        db.query(sync_query)
-            .await
-            .map_err(|e| DatabaseError::QueryFailed(e))?;
-
-        tracing::info!("Message batch migration completed");
+        tracing::info!("\nMessage batch migration completed for all agents");
         Ok(())
     }
 

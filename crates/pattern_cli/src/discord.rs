@@ -155,7 +155,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
         agent_tools,
         constellation_tracker: _,
         heartbeat_sender: _,
-        mut heartbeat_receiver,
+        heartbeat_receiver,
     } = group_setup;
 
     output.success("Starting Discord bot with group chat...");
@@ -351,22 +351,26 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
             // Run Discord bot in foreground (blocking)
             output.status("Discord bot starting... Press Ctrl+C to stop.");
 
-            // Spawn a simple heartbeat consumer for Discord-only mode
-            // The heartbeats are already processed internally by agents,
-            // we just need to consume them to prevent the channel from blocking
-            let heartbeat_handle = tokio::spawn(async move {
-                while let Some(heartbeat) = heartbeat_receiver.recv().await {
-                    tracing::debug!(
-                        "💓 Consumed heartbeat in Discord-only mode from agent {}: tool {} (call_id: {})",
-                        heartbeat.agent_id,
-                        heartbeat.tool_name,
-                        heartbeat.tool_call_id
-                    );
-                    // Heartbeats are processed internally by the agents during their tool execution
-                    // We just consume them here to keep the channel flowing
-                }
-                tracing::debug!("Heartbeat receiver closed in Discord-only mode");
-            });
+            // Use generic heartbeat processor for Discord-only mode
+            let agents_for_heartbeat: Vec<Arc<dyn Agent>> = agents_with_membership
+                .iter()
+                .map(|awm| awm.agent.clone())
+                .collect();
+
+            let output_clone = output.clone();
+            let heartbeat_handle =
+                tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
+                    heartbeat_receiver,
+                    agents_for_heartbeat,
+                    move |event, _agent_id, agent_name| {
+                        let output = output_clone.clone();
+                        async move {
+                            output
+                                .status(&format!("💓 Heartbeat continuation from {}:", agent_name));
+                            crate::chat::print_response_event(event, &output);
+                        }
+                    },
+                ));
 
             // Run Discord bot
             if let Err(why) = client.start().await {

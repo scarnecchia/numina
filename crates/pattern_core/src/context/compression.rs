@@ -77,14 +77,14 @@ impl Default for CompressionStrategy {
 /// Result of message compression
 #[derive(Debug, Clone)]
 pub struct CompressionResult {
-    /// Messages to keep in the active context
-    pub active_messages: Vec<Message>,
+    /// Batches to keep in the active context
+    pub active_batches: Vec<crate::message::MessageBatch>,
 
-    /// Summary of compressed messages (if applicable)
+    /// Summary of compressed batches (if applicable)
     pub summary: Option<String>,
 
-    /// Messages moved to recall storage
-    pub archived_messages: Vec<Message>,
+    /// Batches moved to recall storage
+    pub archived_batches: Vec<crate::message::MessageBatch>,
 
     /// Metadata about the compression
     pub metadata: CompressionMetadata,
@@ -178,20 +178,21 @@ impl MessageCompressor {
         self
     }
 
-    /// Compress messages according to the configured strategy
+    /// Compress batches according to the configured strategy
     pub async fn compress(
         &self,
-        messages: Vec<Message>,
+        batches: Vec<crate::message::MessageBatch>,
         max_messages: usize,
     ) -> Result<CompressionResult> {
-        let original_count = messages.len();
+        // Calculate total message count across all batches
+        let original_count: usize = batches.iter().map(|b| b.len()).sum();
 
         if original_count <= max_messages {
             // No compression needed
             return Ok(CompressionResult {
-                active_messages: messages,
+                active_batches: batches,
                 summary: None,
-                archived_messages: Vec::new(),
+                archived_batches: Vec::new(),
                 metadata: CompressionMetadata {
                     strategy_used: "none".to_string(),
                     original_count,
@@ -205,7 +206,7 @@ impl MessageCompressor {
 
         let result = match &self.strategy {
             CompressionStrategy::Truncate { keep_recent } => {
-                self.truncate_messages(messages, *keep_recent)
+                self.truncate_messages(batches, *keep_recent)
             }
 
             CompressionStrategy::RecursiveSummarization {
@@ -213,7 +214,7 @@ impl MessageCompressor {
                 summarization_model,
             } => {
                 self.recursive_summarization(
-                    messages,
+                    batches,
                     max_messages,
                     *chunk_size,
                     summarization_model,
@@ -225,14 +226,14 @@ impl MessageCompressor {
                 keep_recent,
                 keep_important,
             } => {
-                self.importance_based_compression(messages, *keep_recent, *keep_important)
+                self.importance_based_compression(batches, *keep_recent, *keep_important)
                     .await
             }
 
             CompressionStrategy::TimeDecay {
                 compress_after_hours,
                 min_keep_recent,
-            } => self.time_decay_compression(messages, *compress_after_hours, *min_keep_recent),
+            } => self.time_decay_compression(batches, *compress_after_hours, *min_keep_recent),
         }?;
 
         // Validate and fix message sequence for Gemini compatibility
@@ -263,6 +264,7 @@ impl MessageCompressor {
     }
 
     /// Check if a message contains thinking blocks
+    #[allow(dead_code)]
     fn has_thinking_blocks(&self, message: &Message) -> bool {
         match &message.content {
             MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
@@ -277,6 +279,7 @@ impl MessageCompressor {
 
     /// Validate and fix tool call/response ordering to ensure Anthropic compatibility
     /// Anthropic requires tool results to immediately follow tool uses
+    #[allow(dead_code)]
     fn validate_and_reorder_tool_calls(&self, messages: Vec<Message>) -> Vec<Message> {
         let mut fixed_messages = Vec::new();
         let mut pending_tool_calls = HashMap::new();
@@ -437,97 +440,45 @@ impl MessageCompressor {
     /// Simple truncation strategy
     fn truncate_messages(
         &self,
-        messages: Vec<Message>,
+        batches: Vec<crate::message::MessageBatch>,
         keep_recent: usize,
     ) -> Result<CompressionResult> {
-        let original_count = messages.len();
-        let archive_count = messages.len().saturating_sub(keep_recent);
+        let original_count: usize = batches.iter().map(|b| b.len()).sum();
 
-        let (archived, mut active): (Vec<_>, Vec<_>) = if messages.len() > keep_recent {
-            let mut split_point = messages.len() - keep_recent;
+        // Collect batches from newest to oldest until we have enough messages
+        let mut active_batches = Vec::new();
+        let mut archived_batches = Vec::new();
+        let mut message_count = 0;
 
-            // Adjust split point to preserve tool call/response pairs and thinking blocks
-            while split_point > 0 && split_point < messages.len() {
-                let current = &messages[split_point];
-                let prev = if split_point > 0 {
-                    Some(&messages[split_point - 1])
-                } else {
-                    None
-                };
-
-                // If current is a tool response, check if previous is its tool call
-                if current.role == ChatRole::Tool {
-                    if let Some(prev_msg) = prev {
-                        if prev_msg.tool_call_count() > 0 || self.has_tool_use_blocks(prev_msg) {
-                            // Move split point to include both the tool call and response
-                            split_point -= 1;
-                            continue;
-                        }
-                    }
-                }
-
-                // If current is assistant with tool calls, check if next is tool response
-                if split_point < messages.len() - 1
-                    && (current.tool_call_count() > 0 || self.has_tool_use_blocks(current))
-                {
-                    let next = &messages[split_point + 1];
-                    if next.role == ChatRole::Tool {
-                        // Move split point to before this tool call/response pair
-                        split_point -= 1;
-                        continue;
-                    }
-                }
-
-                // If current is assistant with thinking blocks, try to keep it
-                // This is especially important for the final assistant message
-                if current.role == ChatRole::Assistant && self.has_thinking_blocks(current) {
-                    // If we're near the end, try to include this message
-                    if split_point >= messages.len() - 3 {
-                        split_point -= 1;
-                        continue;
-                    }
-                }
-
-                break;
-            }
-
-            (
-                messages[..split_point].to_vec(),
-                messages[split_point..].to_vec(),
-            )
-        } else {
-            (Vec::new(), messages)
-        };
-
-        // Ensure we start with a valid message after truncation
-        // If we start with an assistant message with tool calls, we need a user message before it
-        if let Some(first) = active.first() {
-            if first.role == ChatRole::Assistant
-                && (first.tool_call_count() > 0 || self.has_tool_use_blocks(first))
-            {
-                // Insert a context message to make it valid
-                active.insert(
-                    0,
-                    Message::user("[Previous conversation context was compressed]"),
-                );
+        // Iterate from the end (most recent batches)
+        for batch in batches.into_iter().rev() {
+            if message_count < keep_recent {
+                message_count += batch.len();
+                active_batches.push(batch);
+            } else {
+                archived_batches.push(batch);
             }
         }
 
-        // Validate and fix tool call/result ordering in active messages
-        // Anthropic requires tool results to immediately follow tool uses
-        active = self.validate_and_reorder_tool_calls(active);
+        // Reverse to maintain chronological order
+        active_batches.reverse();
+        archived_batches.reverse();
+
+        let archived_count: usize = archived_batches.iter().map(|b| b.len()).sum();
+
+        // No need to validate tool call/response ordering since batches maintain integrity
 
         Ok(CompressionResult {
-            active_messages: active,
+            active_batches,
             summary: None,
-            archived_messages: archived.clone(),
+            archived_batches: archived_batches.clone(),
             metadata: CompressionMetadata {
                 strategy_used: "truncate".to_string(),
                 original_count,
-                compressed_count: archive_count,
-                archived_count: archive_count,
+                compressed_count: archived_count,
+                archived_count,
                 compression_time: Utc::now(),
-                estimated_tokens_saved: self.estimate_tokens(&archived),
+                estimated_tokens_saved: self.estimate_tokens_from_batches(&archived_batches),
             },
         })
     }
@@ -535,7 +486,7 @@ impl MessageCompressor {
     /// Recursive summarization following MemGPT approach
     async fn recursive_summarization(
         &self,
-        messages: Vec<Message>,
+        mut batches: Vec<crate::message::MessageBatch>,
         max_messages: usize,
         chunk_size: usize,
         summarization_model: &str,
@@ -549,20 +500,66 @@ impl MessageCompressor {
             });
         }
 
-        let original_count = messages.len();
-        let messages_to_compress = messages.len().saturating_sub(max_messages);
+        // Sort batches by batch_id (oldest first)
+        batches.sort_by_key(|b| b.id);
 
-        if messages_to_compress == 0 {
-            return self.truncate_messages(messages, max_messages);
+        let original_count: usize = batches.iter().map(|b| b.len()).sum();
+
+        if original_count <= max_messages {
+            return self.truncate_messages(batches, max_messages);
         }
 
-        // Split messages into chunks for summarization
-        let compress_until = messages_to_compress;
-        let to_summarize = &messages[..compress_until];
-        let to_keep = messages[compress_until..].to_vec();
+        // Accumulate batches from oldest until we're under max_messages
+        let mut active_batches = Vec::new();
+        let mut archived_batches = Vec::new();
+        let mut current_count = 0;
+
+        // Iterate from newest to oldest (reverse), keeping recent batches
+        for batch in batches.into_iter().rev() {
+            if current_count + batch.len() <= max_messages {
+                current_count += batch.len();
+                active_batches.push(batch);
+            } else {
+                // Only include complete batches in archives
+                if batch.is_complete {
+                    archived_batches.push(batch);
+                } else {
+                    // If batch is incomplete, keep it in active
+                    current_count += batch.len();
+                    active_batches.push(batch);
+                }
+            }
+        }
+
+        // Restore chronological order (oldest to newest)
+        active_batches.reverse();
+        archived_batches.reverse();
+
+        // Flatten archived batches to messages for summarization
+        let messages_to_summarize: Vec<Message> = archived_batches
+            .iter()
+            .flat_map(|b| b.messages.clone())
+            .collect();
+
+        if messages_to_summarize.is_empty() {
+            // Nothing to summarize
+            return Ok(CompressionResult {
+                active_batches,
+                summary: None,
+                archived_batches: Vec::new(),
+                metadata: CompressionMetadata {
+                    strategy_used: "recursive_summarization".to_string(),
+                    original_count,
+                    compressed_count: 0,
+                    archived_count: 0,
+                    compression_time: Utc::now(),
+                    estimated_tokens_saved: 0,
+                },
+            });
+        }
 
         // Create summary prompt
-        let summary_prompt = self.create_summary_prompt(to_summarize, chunk_size)?;
+        let summary_prompt = self.create_summary_prompt(&messages_to_summarize, chunk_size)?;
 
         // Generate summary using the model
         let summary = if let Some(provider) = &self.model_provider {
@@ -609,28 +606,20 @@ impl MessageCompressor {
             "[No model provider for summarization]".to_string()
         };
 
-        // Create a summary message
-        let summary_message =
-            Message::system(format!("Previous conversation summary: {}", summary));
-
-        // Combine summary with kept messages
-        let mut active_messages = vec![summary_message];
-        active_messages.extend(to_keep);
-
-        // Validate and fix tool call/result ordering
-        active_messages = self.validate_and_reorder_tool_calls(active_messages);
+        // No need to validate tool ordering - batches maintain integrity
+        let archived_count: usize = archived_batches.iter().map(|b| b.len()).sum();
 
         Ok(CompressionResult {
-            active_messages,
+            active_batches,
             summary: Some(summary),
-            archived_messages: to_summarize.to_vec(),
+            archived_batches,
             metadata: CompressionMetadata {
                 strategy_used: "recursive_summarization".to_string(),
                 original_count,
-                compressed_count: messages_to_compress,
-                archived_count: messages_to_compress,
+                compressed_count: archived_count,
+                archived_count,
                 compression_time: Utc::now(),
-                estimated_tokens_saved: self.estimate_tokens(to_summarize),
+                estimated_tokens_saved: self.estimate_tokens(&messages_to_summarize),
             },
         })
     }
@@ -638,86 +627,122 @@ impl MessageCompressor {
     /// Importance-based compression using heuristics or LLM
     async fn importance_based_compression(
         &self,
-        messages: Vec<Message>,
+        mut batches: Vec<crate::message::MessageBatch>,
         keep_recent: usize,
         keep_important: usize,
     ) -> Result<CompressionResult> {
-        let original_count = messages.len();
+        // Sort batches by batch_id (oldest first)
+        batches.sort_by_key(|b| b.id);
 
-        // Always keep the most recent messages
-        let (older, recent): (Vec<_>, Vec<_>) = if messages.len() > keep_recent {
-            let split_point = messages.len() - keep_recent;
-            (
-                messages[..split_point].to_vec(),
-                messages[split_point..].to_vec(),
-            )
-        } else {
-            let len = messages.len();
-            return self.truncate_messages(messages, len);
-        };
+        let original_count: usize = batches.iter().map(|b| b.len()).sum();
 
-        // Score older messages
-        let mut scored_messages: Vec<(f32, Message)> = Vec::new();
+        // For importance scoring, we need to work with individual messages
+        // But we'll try to keep batches intact where possible
 
-        for (idx, msg) in older.iter().enumerate() {
-            let score = if self.model_provider.is_some() {
-                // Use LLM to score importance
-                self.score_message_with_llm(msg).await.unwrap_or_else(|_| {
-                    // Fall back to heuristic if LLM fails
-                    self.score_message_heuristic(msg, idx, older.len())
-                })
+        // First, separate recent batches we always keep
+        let mut active_batches = Vec::new();
+        let mut older_batches = Vec::new();
+        let mut recent_message_count = 0;
+
+        // Keep recent batches (from newest)
+        for batch in batches.into_iter().rev() {
+            if recent_message_count < keep_recent {
+                recent_message_count += batch.len();
+                active_batches.push(batch);
             } else {
-                // Use heuristic scoring
-                self.score_message_heuristic(msg, idx, older.len())
-            };
-
-            scored_messages.push((score, msg.clone()));
-        }
-
-        // Sort by score (highest first)
-        scored_messages.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Keep the most important messages
-        let important_messages: Vec<Message> = scored_messages
-            .iter()
-            .take(keep_important)
-            .map(|(_, msg)| msg.clone())
-            .collect();
-
-        // Archive the rest
-        let archived_messages: Vec<Message> = scored_messages
-            .iter()
-            .skip(keep_important)
-            .map(|(_, msg)| msg.clone())
-            .collect();
-
-        // Combine important and recent messages, maintaining chronological order
-        let mut active_messages = Vec::new();
-
-        // Add important messages in their original order
-        for msg in &messages {
-            if important_messages.iter().any(|im| im.id == msg.id) {
-                active_messages.push(msg.clone());
+                older_batches.push(batch);
             }
         }
 
-        // Add recent messages
-        active_messages.extend(recent);
+        // Restore chronological order
+        active_batches.reverse();
+        older_batches.reverse();
 
-        // Validate and fix tool call/result ordering
-        active_messages = self.validate_and_reorder_tool_calls(active_messages);
+        if older_batches.is_empty() {
+            // Nothing to compress
+            return Ok(CompressionResult {
+                active_batches,
+                summary: None,
+                archived_batches: Vec::new(),
+                metadata: CompressionMetadata {
+                    strategy_used: "importance_based".to_string(),
+                    original_count,
+                    compressed_count: 0,
+                    archived_count: 0,
+                    compression_time: Utc::now(),
+                    estimated_tokens_saved: 0,
+                },
+            });
+        };
 
-        let compressed_count = archived_messages.len();
-        let archived_count = archived_messages.len();
-        let tokens_saved = self.estimate_tokens(&archived_messages);
+        // Score older batches based on their messages
+        let mut scored_batches: Vec<(f32, crate::message::MessageBatch)> = Vec::new();
+
+        for batch in older_batches.iter() {
+            // Calculate batch score as average of message scores
+            let mut total_score = 0.0;
+            let mut count = 0;
+
+            for (idx, msg) in batch.messages.iter().enumerate() {
+                let score = if self.model_provider.is_some() {
+                    // Use LLM to score importance
+                    self.score_message_with_llm(msg).await.unwrap_or_else(|_| {
+                        // Fall back to heuristic if LLM fails
+                        self.score_message_heuristic(msg, idx, batch.messages.len())
+                    })
+                } else {
+                    // Use heuristic scoring
+                    self.score_message_heuristic(msg, idx, batch.messages.len())
+                };
+
+                total_score += score;
+                count += 1;
+            }
+
+            let batch_score = if count > 0 {
+                total_score / count as f32
+            } else {
+                0.0
+            };
+            scored_batches.push((batch_score, batch.clone()));
+        }
+
+        // Sort by score (highest first)
+        scored_batches.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Keep the most important batches up to keep_important message count
+        let mut important_message_count = 0;
+        let mut important_batches = Vec::new();
+        let mut archived_batches = Vec::new();
+
+        for (_, batch) in scored_batches {
+            if important_message_count < keep_important {
+                important_message_count += batch.len();
+                important_batches.push(batch);
+            } else {
+                archived_batches.push(batch);
+            }
+        }
+
+        // Sort important batches back to chronological order
+        important_batches.sort_by_key(|b| b.id);
+
+        // Combine important and recent batches
+        important_batches.extend(active_batches);
+        let active_batches = important_batches;
+
+        // No need to validate tool ordering - batches maintain integrity
+        let archived_count: usize = archived_batches.iter().map(|b| b.len()).sum();
+        let tokens_saved = self.estimate_tokens_from_batches(&archived_batches);
+
         Ok(CompressionResult {
-            active_messages,
+            active_batches,
             summary: None,
-            archived_messages,
+            archived_batches,
             metadata: CompressionMetadata {
                 strategy_used: "importance_based".to_string(),
                 original_count,
-                compressed_count,
+                compressed_count: archived_count,
                 archived_count,
                 compression_time: Utc::now(),
                 estimated_tokens_saved: tokens_saved,
@@ -824,43 +849,72 @@ impl MessageCompressor {
     /// Time-decay based compression
     fn time_decay_compression(
         &self,
-        messages: Vec<Message>,
+        mut batches: Vec<crate::message::MessageBatch>,
         compress_after_hours: f64,
         min_keep_recent: usize,
     ) -> Result<CompressionResult> {
-        let original_count = messages.len();
+        // Sort batches by batch_id (oldest first)
+        batches.sort_by_key(|b| b.id);
+
+        let original_count: usize = batches.iter().map(|b| b.len()).sum();
         let now = Utc::now();
         let cutoff_time =
             now - chrono::Duration::milliseconds((compress_after_hours * 3600.0 * 1000.0) as i64);
 
-        // Always keep minimum recent messages
-        let guaranteed_keep = messages.len().saturating_sub(min_keep_recent);
+        // Keep recent batches and batches created after cutoff
+        let mut active_batches = Vec::new();
+        let mut archived_batches = Vec::new();
+        let mut recent_message_count = 0;
 
-        let mut active_messages = Vec::new();
-        let mut archived_messages = Vec::new();
-
-        for (idx, msg) in messages.into_iter().enumerate() {
-            if idx >= guaranteed_keep || msg.created_at > cutoff_time {
-                active_messages.push(msg);
-            } else {
-                archived_messages.push(msg);
+        // First pass: keep minimum recent batches (from newest)
+        for batch in batches.iter().rev() {
+            if recent_message_count < min_keep_recent {
+                recent_message_count += batch.len();
+                active_batches.push(batch.clone());
             }
         }
 
-        // Validate and fix tool call/result ordering
-        active_messages = self.validate_and_reorder_tool_calls(active_messages);
+        // Second pass: check time cutoff for older batches
+        for batch in batches.iter() {
+            // Skip if already in active
+            if active_batches.iter().any(|b| b.id == batch.id) {
+                continue;
+            }
+
+            // Check if batch is recent enough (using first message's timestamp as proxy)
+            let is_recent = batch
+                .messages
+                .first()
+                .map(|msg| msg.created_at > cutoff_time)
+                .unwrap_or(false);
+
+            if is_recent {
+                active_batches.push(batch.clone());
+            } else if batch.is_complete {
+                archived_batches.push(batch.clone());
+            } else {
+                // Keep incomplete batches active
+                active_batches.push(batch.clone());
+            }
+        }
+
+        // Sort to maintain chronological order
+        active_batches.sort_by_key(|b| b.id);
+        archived_batches.sort_by_key(|b| b.id);
+
+        let archived_count: usize = archived_batches.iter().map(|b| b.len()).sum();
 
         Ok(CompressionResult {
-            active_messages,
+            active_batches,
             summary: None,
-            archived_messages: archived_messages.clone(),
+            archived_batches: archived_batches.clone(),
             metadata: CompressionMetadata {
                 strategy_used: "time_decay".to_string(),
                 original_count,
-                compressed_count: archived_messages.len(),
-                archived_count: archived_messages.len(),
+                compressed_count: archived_count,
+                archived_count,
                 compression_time: now,
-                estimated_tokens_saved: self.estimate_tokens(&archived_messages),
+                estimated_tokens_saved: self.estimate_tokens_from_batches(&archived_batches),
             },
         })
     }
@@ -891,6 +945,32 @@ impl MessageCompressor {
     /// Estimate tokens saved by archiving messages
     fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages.iter().map(|m| m.estimate_tokens()).sum()
+    }
+
+    /// Estimate tokens for batches
+    fn estimate_tokens_from_batches(&self, batches: &[crate::message::MessageBatch]) -> usize {
+        batches
+            .iter()
+            .flat_map(|b| &b.messages)
+            .map(|m| m.estimate_tokens())
+            .sum()
+    }
+
+    /// Helper to convert messages back to batches (temporary during refactor)
+    /// Creates a single batch containing all messages
+    #[allow(dead_code)]
+    fn messages_to_single_batch(&self, messages: Vec<Message>) -> crate::message::MessageBatch {
+        use crate::agent::get_next_message_position_sync;
+        use crate::message::{BatchType, MessageBatch};
+
+        let batch_id = get_next_message_position_sync();
+        let mut batch = MessageBatch::from_messages(
+            batch_id,
+            BatchType::UserRequest, // Default type
+            messages,
+        );
+        batch.is_complete = true; // Mark as complete since it's archived
+        batch
     }
 
     /// Parse importance scores from LLM response
