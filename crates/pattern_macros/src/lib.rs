@@ -1329,11 +1329,8 @@ fn generate_to_storage(
 
     // Check if this is a SnowflakePosition field
     let type_str = quote! { #field_type }.to_string();
-    let storage_str = quote! { #storage_type }.to_string();
 
-    if (type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId"))
-        && storage_str.contains("String")
-    {
+    if type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId") {
         // SnowflakePosition -> String conversion using Display trait
         if type_str.contains("Option") {
             return quote! {
@@ -1452,20 +1449,19 @@ fn generate_from_storage(
 
     // Check if this is a SnowflakePosition field
     let type_str = quote! { #field_type }.to_string();
-    let storage_str = quote! { #storage_type }.to_string();
 
-    if (type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId"))
-        && storage_str.contains("String")
-    {
+    if type_str.contains("SnowflakePosition") || type_str.contains("SnowflakeMastodonId") {
         // String -> SnowflakePosition conversion using FromStr
         if type_str.contains("Option") {
             return quote! {
-                #field_name: db_model.#field_name.as_ref().and_then(|s| s.parse().ok())
+                #field_name: db_model.#field_name.as_ref().map(|s|
+                    s.parse().expect(&format!("Failed to parse SnowflakePosition from '{}'", s))
+                )
             };
         } else {
             return quote! {
                 #field_name: db_model.#field_name.parse()
-                    .expect(&format!("Failed to parse SnowflakePosition from {}", db_model.#field_name))
+                    .expect(&format!("Failed to parse SnowflakePosition from '{}'", db_model.#field_name))
             };
         }
     }
@@ -1822,6 +1818,8 @@ fn generate_field_definition(
         "Vec<f32>" | "Option<Vec<f32>>" => "TYPE option<array<float>>",
         "Vec<String>" => "TYPE array<string>",
         "CompactString" => "TYPE string",
+        "Option<SnowflakePosition>" => "TYPE option<string>",
+        "SnowflakePosition" => "TYPE string",
         _ => {
             // Check for special types
             if normalized_type.contains("serde_json") && normalized_type.contains("Value") {

@@ -649,6 +649,10 @@ impl MigrationRunner {
 
         tracing::info!("\nMessage batch migration completed for all agents");
 
+        // Repair orphaned tool messages that didn't get batch info
+        tracing::info!("Repairing orphaned tool messages...");
+        Self::repair_orphaned_tool_messages(db).await?;
+
         // Recreate message-related indexes after all the updates
         tracing::info!("Recreating search indexes after migration...");
 
@@ -671,6 +675,612 @@ impl MigrationRunner {
         tracing::info!("Search indexes recreated successfully");
 
         Ok(true)
+    }
+
+    /// Public standalone version of repair_orphaned_tool_messages
+    pub async fn repair_orphaned_tool_messages_standalone<C: Connection>(
+        db: &Surreal<C>,
+    ) -> Result<()> {
+        // Clean up any artificial batches first
+        Self::cleanup_artificial_batches(db).await?;
+
+        // Try the simple repair first
+        Self::repair_orphaned_tool_messages(db).await?;
+
+        // Then try the enhanced repair for orphaned pairs
+        Self::repair_orphaned_message_pairs(db).await
+    }
+
+    /// Clean up specific artificial batch IDs that were created
+    pub async fn cleanup_specific_artificial_batches<C: Connection>(
+        db: &Surreal<C>,
+        batch_ids: &[&str],
+    ) -> Result<()> {
+        tracing::info!(
+            "Cleaning up {} specific artificial batches",
+            batch_ids.len()
+        );
+
+        // Null out batch fields in messages with these batch IDs
+        for batch_id in batch_ids {
+            let query = "UPDATE msg SET batch = NULL, position = NULL, sequence_num = NULL, batch_type = NULL 
+                        WHERE batch = $batch_id";
+
+            let mut result = db
+                .query(query)
+                .bind(("batch_id", batch_id.to_string()))
+                .await
+                .map_err(DatabaseError::QueryFailed)?;
+
+            let updated: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
+            tracing::debug!(
+                "Nulled batch fields for {} messages with batch {}",
+                updated.len(),
+                batch_id
+            );
+        }
+
+        // Also null out batch fields in agent_messages relations
+        for batch_id in batch_ids {
+            let query = "UPDATE agent_messages SET batch = NULL, position = NULL, sequence_num = NULL, batch_type = NULL 
+                        WHERE batch = $batch_id";
+
+            let mut result = db
+                .query(query)
+                .bind(("batch_id", batch_id.to_string()))
+                .await
+                .map_err(DatabaseError::QueryFailed)?;
+
+            let updated: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
+            tracing::debug!(
+                "Nulled batch fields for {} relations with batch {}",
+                updated.len(),
+                batch_id
+            );
+        }
+
+        tracing::info!("Cleanup of specific artificial batches completed");
+        Ok(())
+    }
+
+    /// Clean up artificial batches that were created with recent snowflake IDs
+    async fn cleanup_artificial_batches<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        tracing::info!("Cleaning up artificial batches...");
+
+        // Clear all batches >= the first artificial batch we created
+        const ARTIFICIAL_BATCH_START: &str = "30586500127457280";
+
+        // Count how many messages we're about to clear
+        // Use type::number to cast for numeric comparison
+        let count_query = r#"
+            SELECT COUNT() as count FROM msg
+            WHERE type::number(batch) >= type::number($threshold)
+        "#;
+
+        let mut count_result = db
+            .query(count_query)
+            .bind(("threshold", ARTIFICIAL_BATCH_START))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: Option<i64>,
+        }
+
+        let counts: Vec<CountResult> = count_result.take(0).unwrap_or_default();
+        let message_count = counts.get(0).and_then(|c| c.count).unwrap_or(0);
+
+        if message_count == 0 {
+            tracing::info!("  No artificial batches found to clean up");
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "  Found {} messages with artificial batches to clear",
+            message_count
+        );
+
+        // Clear batch info from all messages with artificial batches
+        let clear_query = r#"
+            UPDATE msg SET
+                batch = NULL,
+                position = NULL,
+                sequence_num = NULL,
+                batch_type = NULL
+            WHERE type::number(batch) >= type::number($threshold)
+        "#;
+
+        db.query(clear_query)
+            .bind(("threshold", ARTIFICIAL_BATCH_START))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        // Also clear from agent_messages relations
+        let clear_relation_query = r#"
+            UPDATE agent_messages SET
+                batch = NULL,
+                position = NULL,
+                sequence_num = NULL,
+                batch_type = NULL
+            WHERE type::number(batch) >= type::number($threshold)
+        "#;
+
+        db.query(clear_relation_query)
+            .bind(("threshold", ARTIFICIAL_BATCH_START))
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        tracing::info!("  Cleanup complete, cleared {} messages", message_count);
+
+        Ok(())
+    }
+
+    /// Repair orphaned tool messages that didn't get batch info during migration
+    async fn repair_orphaned_tool_messages<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        use crate::db::entity::DbEntity;
+        use crate::message::{ContentBlock, Message, MessageContent};
+        use std::collections::HashMap;
+
+        // Find all tool messages without batch info
+        let orphaned_query = r#"
+            SELECT * FROM msg
+            WHERE role = "tool"
+            AND (batch IS NULL OR batch IS NONE)
+        "#;
+
+        let mut result = db
+            .query(orphaned_query)
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        // Get the messages as DB models first
+        let orphaned_db_models: Vec<<Message as DbEntity>::DbModel> =
+            result.take(0).unwrap_or_default();
+
+        // Convert DB models to Message structs
+        let orphaned_messages: Vec<Message> = orphaned_db_models
+            .into_iter()
+            .filter_map(|db_model| Message::from_db_model(db_model).ok())
+            .collect();
+
+        if orphaned_messages.is_empty() {
+            tracing::info!("  No orphaned tool messages found");
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "  Found {} orphaned tool messages to repair",
+            orphaned_messages.len()
+        );
+
+        // Load all assistant messages that have batch info
+        let assistant_query = r#"
+            SELECT * FROM msg
+            WHERE (role = "assistant" OR role = "tool")
+            AND batch IS NOT NULL
+        "#;
+
+        let mut assistant_result = db
+            .query(assistant_query)
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        let assistant_db_models: Vec<<Message as DbEntity>::DbModel> =
+            assistant_result.take(0).unwrap_or_default();
+
+        let assistant_messages: Vec<Message> = assistant_db_models
+            .into_iter()
+            .filter_map(|db_model| Message::from_db_model(db_model).ok())
+            .collect();
+
+        // Build a map of tool_call_id -> Message for quick lookups
+        let mut tool_call_map: HashMap<String, &Message> = HashMap::new();
+
+        for msg in &assistant_messages {
+            match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        tool_call_map.insert(call.call_id.clone(), msg);
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            tool_call_map.insert(id.clone(), msg);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        tracing::info!("  Found {} tool calls with batch info", tool_call_map.len());
+
+        let mut repaired_count = 0;
+
+        for message in orphaned_messages {
+            let msg_id = message.id.clone();
+
+            // Extract tool_use_ids from the message content
+            let mut tool_use_ids = Vec::new();
+            match &message.content {
+                MessageContent::ToolResponses(responses) => {
+                    for response in responses {
+                        tool_use_ids.push(response.call_id.clone());
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            tool_use_ids.push(tool_use_id.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if tool_use_ids.is_empty() {
+                tracing::warn!("    Message {} has no tool_use_ids, skipping", msg_id);
+                continue;
+            }
+
+            // Try to find a matching tool call for any of the tool_use_ids
+            let mut found_match = false;
+            for tool_use_id in &tool_use_ids {
+                if let Some(call_msg) = tool_call_map.get(tool_use_id) {
+                    // Found a matching tool call, copy its batch info
+                    let batch = call_msg.batch.as_ref().map(|b| b.to_string());
+                    let batch_type = call_msg.batch_type.as_ref().map(|bt| match bt {
+                        crate::message::BatchType::UserRequest => "user_request".to_string(),
+                        crate::message::BatchType::AgentToAgent => "agent_to_agent".to_string(),
+                        crate::message::BatchType::SystemTrigger => "system_trigger".to_string(),
+                        crate::message::BatchType::Continuation => "continuation".to_string(),
+                    });
+                    let call_seq = call_msg.sequence_num;
+
+                    if let Some(batch_id) = batch {
+                        // Generate new position for the tool response
+                        let position = crate::agent::get_next_message_position_sync();
+
+                        // Set sequence number to be after the tool call
+                        let seq_num = call_seq.map(|s| s + 1).unwrap_or(1);
+
+                        // Update the orphaned message
+                        let update_query = r#"
+                            UPDATE $msg_id SET
+                                position = $position,
+                                batch = $batch,
+                                sequence_num = $seq_num,
+                                batch_type = $batch_type
+                        "#;
+
+                        db.query(update_query)
+                            .bind(("msg_id", surrealdb::RecordId::from(&msg_id)))
+                            .bind(("position", position.to_string()))
+                            .bind(("batch", batch_id.clone()))
+                            .bind(("seq_num", seq_num))
+                            .bind(("batch_type", batch_type))
+                            .await
+                            .map_err(DatabaseError::QueryFailed)?;
+
+                        // Also update the agent_messages relation
+                        let sync_relation_query = r#"
+                            UPDATE agent_messages SET
+                                position = out.position,
+                                batch = out.batch,
+                                sequence_num = out.sequence_num,
+                                batch_type = out.batch_type
+                            WHERE out = $msg_id
+                        "#;
+
+                        db.query(sync_relation_query)
+                            .bind(("msg_id", msg_id.clone()))
+                            .await
+                            .map_err(DatabaseError::QueryFailed)?;
+
+                        tracing::info!("    Repaired message {} with batch {}", msg_id, batch_id);
+                        repaired_count += 1;
+                        found_match = true;
+                        break; // Found a match, move to next orphaned message
+                    }
+                }
+            }
+
+            if !found_match {
+                tracing::warn!("    No matching tool call found for message {}", msg_id);
+            }
+        }
+
+        tracing::info!("  Repaired {} orphaned tool messages", repaired_count);
+
+        Ok(())
+    }
+
+    /// Enhanced repair for orphaned message pairs/groups
+    async fn repair_orphaned_message_pairs<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        use crate::db::entity::DbEntity;
+        use crate::message::Message;
+        use chrono::Duration;
+        use std::collections::HashMap;
+
+        tracing::info!("Starting enhanced repair for orphaned message pairs...");
+
+        // First, get all agents to process them one by one
+        let agents_query = "SELECT * FROM agent";
+        let mut agents_result = db
+            .query(agents_query)
+            .await
+            .map_err(DatabaseError::QueryFailed)?;
+
+        let agent_db_models: Vec<<crate::agent::AgentRecord as DbEntity>::DbModel> =
+            agents_result.take(0).unwrap_or_default();
+
+        let agents: Vec<crate::agent::AgentRecord> = agent_db_models
+            .into_iter()
+            .filter_map(|db_model| crate::agent::AgentRecord::from_db_model(db_model).ok())
+            .collect();
+
+        tracing::info!(
+            "Processing {} agents for orphaned message repair",
+            agents.len()
+        );
+
+        let mut total_repaired = 0;
+
+        // Process each agent separately
+        for agent in agents {
+            tracing::info!("  Processing agent: {}", agent.name);
+
+            // Load orphaned messages for this specific agent
+            let orphaned_query = r#"
+                SELECT * FROM agent_messages
+                WHERE in = $agent_id
+                AND (out.batch IS NULL OR out.batch IS NONE)
+                AND (out.role = "tool" OR out.role = "assistant")
+                ORDER BY out.created_at ASC
+            "#;
+
+            let mut result = db
+                .query(orphaned_query)
+                .bind(("agent_id", surrealdb::RecordId::from(&agent.id)))
+                .await
+                .map_err(DatabaseError::QueryFailed)?;
+
+            // Get the relation records which include the message IDs
+            use crate::message::AgentMessageRelation;
+            let relation_db_models: Vec<<AgentMessageRelation as DbEntity>::DbModel> =
+                result.take(0).unwrap_or_default();
+
+            if relation_db_models.is_empty() {
+                continue;
+            }
+
+            // Load the actual messages
+            let mut orphaned_messages = Vec::new();
+            for rel_db in relation_db_models {
+                if let Ok(relation) = AgentMessageRelation::from_db_model(rel_db) {
+                    if let Some(msg) = Message::load_with_relations(db, &relation.out_id).await? {
+                        orphaned_messages.push(msg);
+                    }
+                }
+            }
+
+            if orphaned_messages.is_empty() {
+                continue;
+            }
+
+            tracing::info!(
+                "    Found {} orphaned messages for agent {}",
+                orphaned_messages.len(),
+                agent.name
+            );
+
+            // Group messages by time proximity (within 10 seconds)
+            let mut groups: Vec<Vec<Message>> = Vec::new();
+            let mut current_group: Vec<Message> = Vec::new();
+
+            for msg in orphaned_messages {
+                if current_group.is_empty() {
+                    current_group.push(msg);
+                } else {
+                    // Check if this message is within 5 minutes of the last one in the group
+                    let last_time = current_group.last().unwrap().created_at;
+                    let time_diff = msg.created_at.signed_duration_since(last_time);
+
+                    if time_diff < Duration::seconds(300) {
+                        current_group.push(msg);
+                    } else {
+                        // Start a new group
+                        if !current_group.is_empty() {
+                            groups.push(current_group);
+                        }
+                        current_group = vec![msg];
+                    }
+                }
+            }
+
+            // Don't forget the last group
+            if !current_group.is_empty() {
+                groups.push(current_group);
+            }
+
+            tracing::info!("    Grouped into {} time-based groups", groups.len());
+
+            // Load messages with batch info FOR THIS AGENT
+            // The batch field is duplicated in agent_messages relation
+            let batch_query = r#"
+            SELECT out as id, batch, out.created_at as added_at, sequence_num
+            FROM agent_messages
+            WHERE in = $agent_id
+            AND batch IS NOT NULL
+            ORDER BY added_at ASC
+        "#;
+
+            let mut batch_result = db
+                .query(batch_query)
+                .bind(("agent_id", surrealdb::RecordId::from(&agent.id)))
+                .await
+                .map_err(DatabaseError::QueryFailed)?;
+
+            #[derive(Debug, serde::Deserialize)]
+            struct BatchInfo {
+                id: surrealdb::RecordId,
+                batch: String,
+                created_at: chrono::DateTime<chrono::Utc>,
+                sequence_num: Option<u32>,
+            }
+
+            let messages_with_batch: Vec<BatchInfo> = batch_result.take(0).unwrap_or_default();
+
+            tracing::info!(
+                "    Found {} messages with batch info for agent {}",
+                messages_with_batch.len(),
+                agent.name
+            );
+
+            let mut repaired_count = 0;
+
+            // Process each group
+            for (group_idx, group) in groups.iter().enumerate() {
+                if group.len() == 1 && !Self::has_tool_content(&group[0]) {
+                    // Skip true orphans with no tool content
+                    tracing::debug!("    Skipping orphan without tool content: {}", group[0].id);
+                    continue;
+                }
+
+                // Find the nearest message with batch info
+                let group_time = group[0].created_at; // Use first message time as reference
+                let mut nearest_batch: Option<&BatchInfo> = None;
+                let mut smallest_diff = i64::MAX;
+
+                for batch_msg in &messages_with_batch {
+                    let diff = (batch_msg.created_at - group_time).num_seconds().abs();
+                    if diff < smallest_diff {
+                        smallest_diff = diff;
+                        nearest_batch = Some(batch_msg);
+                    }
+                }
+
+                let (batch_id, next_seq) = if let Some(batch_info) = nearest_batch {
+                    // Found a nearby batch, get its max sequence number
+                    let batch_id_str = batch_info.batch.clone();
+                    let max_seq_query = r#"
+                    SELECT MAX(sequence_num) as max_seq FROM msg
+                    WHERE batch = $batch
+                "#;
+
+                    let mut seq_result = db
+                        .query(max_seq_query)
+                        .bind(("batch", batch_id_str.clone()))
+                        .await
+                        .map_err(DatabaseError::QueryFailed)?;
+
+                    #[derive(serde::Deserialize)]
+                    struct MaxSeq {
+                        max_seq: Option<u32>,
+                    }
+
+                    let max_seq: Vec<MaxSeq> = seq_result.take(0).unwrap_or_default();
+                    let next_seq = max_seq
+                        .get(0)
+                        .and_then(|m| m.max_seq)
+                        .map(|s| s + 1)
+                        .unwrap_or(100); // Start at 100 to clearly mark as appended
+
+                    tracing::info!(
+                        "    Group {} will be appended to batch {} starting at seq {}",
+                        group_idx,
+                        batch_info.batch,
+                        next_seq
+                    );
+
+                    (batch_info.batch.clone(), next_seq)
+                } else {
+                    // No nearby batch found, create artificial batch
+                    let artificial_batch = crate::agent::get_next_message_position_sync();
+                    tracing::warn!(
+                        "    Group {} has no nearby batch, creating artificial batch {}",
+                        group_idx,
+                        artificial_batch
+                    );
+
+                    (artificial_batch.to_string(), 0)
+                };
+
+                // Update all messages in the group
+                for (idx, msg) in group.iter().enumerate() {
+                    let position = crate::agent::get_next_message_position_sync();
+                    let seq_num = next_seq + idx as u32;
+
+                    // Update the message
+                    let update_query = r#"
+                    UPDATE $msg_id SET
+                        position = $position,
+                        batch = $batch,
+                        sequence_num = $seq_num,
+                        batch_type = $batch_type
+                "#;
+
+                    db.query(update_query)
+                        .bind(("msg_id", surrealdb::RecordId::from(&msg.id)))
+                        .bind(("position", position.to_string()))
+                        .bind(("batch", batch_id.clone()))
+                        .bind(("seq_num", seq_num))
+                        .bind(("batch_type", "user_request")) // Default to user_request
+                        .await
+                        .map_err(DatabaseError::QueryFailed)?;
+
+                    // Also update agent_messages relation
+                    let sync_relation_query = r#"
+                    UPDATE agent_messages SET
+                        position = out.position,
+                        batch = out.batch,
+                        sequence_num = out.sequence_num,
+                        batch_type = out.batch_type
+                    WHERE out = $msg_id
+                "#;
+
+                    db.query(sync_relation_query)
+                        .bind(("msg_id", surrealdb::RecordId::from(&msg.id)))
+                        .await
+                        .map_err(DatabaseError::QueryFailed)?;
+
+                    repaired_count += 1;
+                }
+
+                tracing::info!(
+                    "      Repaired group {} with {} messages",
+                    group_idx,
+                    group.len()
+                );
+            }
+
+            total_repaired += repaired_count;
+        } // End of agent loop
+
+        tracing::info!(
+            "Enhanced repair completed: {} total messages repaired",
+            total_repaired
+        );
+
+        Ok(())
+    }
+
+    /// Helper to check if a message has tool-related content
+    fn has_tool_content(msg: &crate::message::Message) -> bool {
+        use crate::message::{ContentBlock, MessageContent};
+
+        match &msg.content {
+            MessageContent::ToolCalls(_) | MessageContent::ToolResponses(_) => true,
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                )
+            }),
+            _ => false,
+        }
     }
 
     /// Update schema version

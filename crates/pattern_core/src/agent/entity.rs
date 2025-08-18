@@ -40,10 +40,15 @@ impl FromStr for SnowflakePosition {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // SnowflakeMastodonId uses decode() for parsing from base32 strings
-        SnowflakeMastodonId::decode(s)
-            .map(Self)
-            .map_err(|e| format!("Failed to parse snowflake: {}", e))
+        // Try parsing as base32 first
+        if let Ok(id) = SnowflakeMastodonId::decode(s) {
+            return Ok(Self(id));
+        }
+
+        // Fall back to parsing as raw u64
+        s.parse::<u64>()
+            .map(|raw| Self(SnowflakeMastodonId::from_raw(raw)))
+            .map_err(|e| format!("Failed to parse snowflake as base32 or u64: {}", e))
     }
 }
 
@@ -285,15 +290,15 @@ impl AgentRecord {
     > {
         let query = if include_archived {
             format!(
-                r#"SELECT *, out.created_at as msg_created FROM agent_messages
+                r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
                    WHERE in = $agent_id
-                   ORDER BY msg_created ASC"#
+                   ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         } else {
             format!(
-                r#"SELECT *, out.created_at as msg_created FROM agent_messages
+                r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
                    WHERE in = $agent_id AND message_type = "active"
-                   ORDER BY msg_created ASC"#
+                   ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         };
 

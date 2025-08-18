@@ -154,11 +154,48 @@ impl MessageBatch {
         // Check if this message contains tool responses that should be sequenced
         match &message.content {
             MessageContent::ToolResponses(responses) => {
-                // Use sequencing logic for each tool response
-                for response in responses.clone() {
-                    self.add_tool_response_with_sequencing(response);
+                // Check if all responses match tool calls at the end of current messages
+                // This handles the 99% case where tool responses immediately follow their calls
+                let all_match_at_end = self.check_responses_match_end(responses);
+
+                if all_match_at_end {
+                    // Simple case: tool responses are already in order, just append the message
+                    // This preserves the original message ID and all fields
+                    if message.position.is_none() {
+                        message.position = Some(get_next_message_position_sync());
+                    }
+                    if message.batch.is_none() {
+                        message.batch = Some(self.id);
+                    }
+                    if message.sequence_num.is_none() {
+                        message.sequence_num = Some(self.messages.len() as u32);
+                    }
+                    if message.batch_type.is_none() {
+                        message.batch_type = Some(self.batch_type);
+                    }
+
+                    // Update pending tool calls
+                    for response in responses {
+                        self.pending_tool_calls.remove(&response.call_id);
+                    }
+
+                    // Track and add the message
+                    self.track_message_tools(&message);
+                    self.messages.push(message);
+
+                    // Check if batch is complete
+                    if self.pending_tool_calls.is_empty() {
+                        self.tool_pairing_notify.notify_waiters();
+                    }
+
+                    return;
+                } else {
+                    // Complex case: responses need reordering, use existing logic
+                    for response in responses.clone() {
+                        self.add_tool_response_with_sequencing(response);
+                    }
+                    return;
                 }
-                return;
             }
             MessageContent::Blocks(blocks) => {
                 // Check if blocks contain tool results that need sequencing
@@ -181,31 +218,71 @@ impl MessageBatch {
                     .collect();
 
                 if !tool_results.is_empty() {
-                    // Use sequencing logic for tool results in blocks
-                    for response in tool_results {
-                        self.add_tool_response_with_sequencing(response);
+                    // Check if tool results match calls at the end
+                    let all_match_at_end = self.check_responses_match_end(&tool_results);
+
+                    if all_match_at_end
+                        && !blocks
+                            .iter()
+                            .any(|b| !matches!(b, ContentBlock::ToolResult { .. }))
+                    {
+                        // Simple case: only tool results and they're in order
+                        // Just append the whole message as-is
+                        if message.position.is_none() {
+                            message.position = Some(get_next_message_position_sync());
+                        }
+                        if message.batch.is_none() {
+                            message.batch = Some(self.id);
+                        }
+                        if message.sequence_num.is_none() {
+                            message.sequence_num = Some(self.messages.len() as u32);
+                        }
+                        if message.batch_type.is_none() {
+                            message.batch_type = Some(self.batch_type);
+                        }
+
+                        // Update pending tool calls
+                        for response in &tool_results {
+                            self.pending_tool_calls.remove(&response.call_id);
+                        }
+
+                        // Track and add the message
+                        self.track_message_tools(&message);
+                        self.messages.push(message);
+
+                        // Check if batch is complete
+                        if self.pending_tool_calls.is_empty() {
+                            self.tool_pairing_notify.notify_waiters();
+                        }
+
+                        return;
+                    } else {
+                        // Complex case: mixed content or needs reordering
+                        for response in tool_results {
+                            self.add_tool_response_with_sequencing(response);
+                        }
+
+                        // Also add any non-tool-result blocks as a regular message
+                        let non_tool_blocks: Vec<_> = blocks
+                            .iter()
+                            .filter_map(|block| {
+                                if !matches!(block, ContentBlock::ToolResult { .. }) {
+                                    Some(block.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        if !non_tool_blocks.is_empty() {
+                            let mut new_msg = message.clone();
+                            new_msg.content = MessageContent::Blocks(non_tool_blocks);
+                            // Recursively add the non-tool blocks (will hit the default path below)
+                            self.add_message(new_msg);
+                        }
+
+                        return;
                     }
-
-                    // Also add any non-tool-result blocks as a regular message
-                    let non_tool_blocks: Vec<_> = blocks
-                        .iter()
-                        .filter_map(|block| {
-                            if !matches!(block, ContentBlock::ToolResult { .. }) {
-                                Some(block.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    if !non_tool_blocks.is_empty() {
-                        let mut new_msg = message.clone();
-                        new_msg.content = MessageContent::Blocks(non_tool_blocks);
-                        // Recursively add the non-tool blocks (will hit the default path below)
-                        self.add_message(new_msg);
-                    }
-
-                    return;
                 }
             }
             _ => {}
@@ -506,6 +583,46 @@ impl MessageBatch {
         }
 
         batch
+    }
+
+    /// Check if tool responses match tool calls at the end of the batch
+    /// Returns true if all responses have matching calls and they're at the end
+    fn check_responses_match_end(&self, responses: &[ToolResponse]) -> bool {
+        if responses.is_empty() || self.messages.is_empty() {
+            return false;
+        }
+
+        // Get all tool call IDs from the last few messages
+        let mut recent_calls = std::collections::HashSet::new();
+
+        // Look backwards through messages to find recent tool calls
+        for msg in self.messages.iter().rev().take(5) {
+            match &msg.content {
+                MessageContent::ToolCalls(calls) => {
+                    for call in calls {
+                        recent_calls.insert(call.call_id.clone());
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            recent_calls.insert(id.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // If we found calls, stop looking
+            if !recent_calls.is_empty() {
+                break;
+            }
+        }
+
+        // Check if all responses have matching calls
+        responses
+            .iter()
+            .all(|resp| recent_calls.contains(&resp.call_id))
     }
 
     /// Track tool calls/responses in a message

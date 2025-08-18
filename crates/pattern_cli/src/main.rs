@@ -220,6 +220,13 @@ enum DbCommands {
         #[arg(long)]
         yes: bool,
     },
+    /// Repair orphaned tool messages (one-time fix)
+    RepairTools,
+    /// Clean up specific artificial batch IDs
+    CleanupBatches {
+        /// Comma-separated list of batch IDs to clean up
+        batch_ids: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1100,6 +1107,61 @@ async fn main() -> Result<()> {
                     client::init_db_with_options(db_config, true).await?;
 
                     output.success("✓ Migrations completed successfully");
+                }
+                DbCommands::RepairTools => {
+                    output.status("Repairing orphaned tool messages...");
+
+                    // Use the database config from PatternConfig
+                    let db_config = if let Some(path) = cli.db_path.clone() {
+                        DatabaseConfig::Embedded {
+                            path: path.to_string_lossy().to_string(),
+                            strict_mode: false,
+                        }
+                    } else {
+                        config.database.clone()
+                    };
+
+                    // Initialize database connection
+                    client::init_db(db_config).await?;
+
+                    // Use the static DB client
+                    use pattern_core::db::client::DB;
+                    use pattern_core::db::migration::MigrationRunner;
+
+                    // Call the repair function directly
+                    MigrationRunner::repair_orphaned_tool_messages_standalone(&*DB).await?;
+
+                    output.success("✓ Tool message repair completed");
+                }
+                DbCommands::CleanupBatches { batch_ids } => {
+                    output.status("Cleaning up specific batch IDs...");
+
+                    // Use the database config from PatternConfig
+                    let db_config = if let Some(path) = cli.db_path.clone() {
+                        DatabaseConfig::Embedded {
+                            path: path.to_string_lossy().to_string(),
+                            strict_mode: false,
+                        }
+                    } else {
+                        config.database.clone()
+                    };
+
+                    // Initialize database connection
+                    client::init_db(db_config).await?;
+
+                    // Parse the batch IDs
+                    let ids: Vec<&str> = batch_ids.split(',').map(|s| s.trim()).collect();
+
+                    output.status(&format!("Cleaning up {} batch IDs", ids.len()));
+
+                    // Use the static DB client
+                    use pattern_core::db::client::DB;
+                    use pattern_core::db::migration::MigrationRunner;
+
+                    // Call the cleanup function
+                    MigrationRunner::cleanup_specific_artificial_batches(&*DB, &ids).await?;
+
+                    output.success("✓ Batch cleanup completed");
                 }
             }
         }

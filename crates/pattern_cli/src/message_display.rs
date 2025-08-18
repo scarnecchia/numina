@@ -42,6 +42,23 @@ pub fn display_message(
         &msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
     );
 
+    // Show batch/position/sequence info
+    let batch_info = format!(
+        "batch: {}, pos: {}, seq: {}",
+        msg.batch
+            .as_ref()
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        msg.position
+            .as_ref()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        msg.sequence_num
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    output.kv("Batch Info", &batch_info.dimmed().to_string());
+
     // Display content based on type
     let text = msg.display_content();
     if !text.is_empty() {

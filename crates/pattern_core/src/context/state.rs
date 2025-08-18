@@ -312,7 +312,7 @@ impl AgentHandle {
 
             // Query msg table directly with content search (we'll filter by agent after)
             let sql = format!(
-                "SELECT * FROM msg WHERE {} ORDER BY position DESC LIMIT {}",
+                "SELECT * FROM msg WHERE {} ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC, created_at DESC LIMIT {}",
                 conditions.join(" AND "),
                 limit * 10 // Get more results since we'll filter some out
             );
@@ -338,7 +338,7 @@ impl AgentHandle {
 
             // Query the agent_messages relation table directly
             let sql = format!(
-                "SELECT position, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY position DESC LIMIT $limit FETCH messages",
+                "SELECT position, batch, sequence_num, out.created_at as msg_created, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC, created_at DESC LIMIT $limit FETCH messages",
                 where_clause,
                 self.agent_id.to_key()
             );

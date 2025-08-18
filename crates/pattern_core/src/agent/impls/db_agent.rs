@@ -407,6 +407,12 @@ where
                     loaded_messages += 1;
                 }
             }
+            for batch in history.batches.iter_mut() {
+                batch.finalize();
+            }
+            for batch in history.archived_batches.iter_mut() {
+                batch.finalize();
+            }
             tracing::debug!("Loaded {} active messages into history", loaded_messages);
         }
 
@@ -2147,9 +2153,7 @@ where
                     // IMPORTANT: Rebuild context to get fresh memory state after tool execution
                     // This ensures agents see updated memory blocks immediately
                     let context_lock = context.read().await;
-                    // For continuations, we should maintain the same batch
-                    // TODO: This needs the batch_id from the heartbeat request
-                    let memory_context = match context_lock.build_context(None).await {
+                    let memory_context = match context_lock.build_context(current_batch_id).await {
                         Ok(ctx) => ctx,
                         Err(e) => {
                             send_event(ResponseEvent::Error {

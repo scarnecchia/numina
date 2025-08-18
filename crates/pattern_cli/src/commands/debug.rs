@@ -152,6 +152,24 @@ pub async fn search_conversations(
                         (i + 1).to_string().bright_white(),
                         format!("({})", msg.id.0).dimmed()
                     );
+
+                    // Show batch/position/sequence info
+                    let batch_info = format!(
+                        "batch: {}, pos: {}, seq: {}",
+                        msg.batch
+                            .as_ref()
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        msg.position
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        msg.sequence_num
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "none".to_string())
+                    );
+                    output.kv("Batch Info", &batch_info.dimmed().to_string());
+
                     output.kv(
                         "Role",
                         &format!("{:?}", msg.role).bright_yellow().to_string(),
