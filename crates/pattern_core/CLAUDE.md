@@ -55,6 +55,9 @@ Core agent framework, memory management, and coordination system for Pattern's m
 - **Memory Block Pass-through**: Router needs to create RELATE edges for attached blocks
 - **MCP Client Integration**: Consume external MCP tools (high priority)
 
+### Future Simplifications
+- **Model Provider Refactoring**: Move model provider from DatabaseAgent into AgentContext entirely and remove the RwLock wrapper since ModelProvider methods only need `&self`. This would simplify DatabaseAgent and make the model provider more directly accessible for compression strategies.
+
 ## Critical Implementation Notes
 
 ### Entity System Sacred Patterns ⚠️

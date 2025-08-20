@@ -12,7 +12,7 @@ use tokio::io::AsyncWrite;
 use crate::{
     AgentId, CoreError, Result,
     agent::AgentRecord,
-    coordination::groups::{AgentGroup, Constellation, ConstellationMembership, GroupMembership},
+    coordination::groups::{AgentGroup, Constellation, GroupMembership},
     db::entity::DbEntity,
     export::{
         DEFAULT_CHUNK_SIZE, EXPORT_VERSION,
@@ -250,8 +250,22 @@ where
 
                     let message_chunk = MessageChunk {
                         chunk_id: chunk_id as u32,
-                        start_position: chunk.first().unwrap().1.position.clone(),
-                        end_position: chunk.last().unwrap().1.position.clone(),
+                        start_position: chunk
+                            .first()
+                            .unwrap()
+                            .1
+                            .position
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                        end_position: chunk
+                            .last()
+                            .unwrap()
+                            .1
+                            .position
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
                         messages: messages_with_relations,
                         next_chunk: None, // We'll fix this up later if needed
                     };
@@ -413,10 +427,9 @@ where
         options: ExportOptions,
     ) -> Result<ExportManifest> {
         let start_time = Utc::now();
-        // Load the constellation - load_with_relations might not work properly
-        let constellation = self
-            .load_constellation_with_members(&constellation_id)
-            .await?;
+        // Load the constellation with all its data (direct agents + groups with their agents)
+        let (constellation, _all_groups, all_agents) =
+            self.load_constellation_complete(&constellation_id).await?;
 
         // We'll use the constellation as the root of our CAR file
         let mut agent_export_cids = Vec::new();
@@ -430,8 +443,8 @@ where
             compressed_size: None,
         };
 
-        // First, export all agents in the constellation and collect their blocks
-        for (agent, _membership) in &constellation.agents {
+        // Export all agents (from direct membership + groups)
+        for agent in &all_agents {
             let (agent_export, agent_blocks, stats) =
                 self.export_agent_to_blocks(agent, &options).await?;
 
@@ -574,108 +587,178 @@ where
     }
 
     /// Load constellation with all members and relations
-    async fn load_constellation_with_members(
+    /// Load constellation with complete data: direct agents + all groups with their agents
+    async fn load_constellation_complete(
         &self,
         constellation_id: &ConstellationId,
-    ) -> Result<Constellation> {
+    ) -> Result<(Constellation, Vec<AgentGroup>, Vec<AgentRecord>)> {
         use crate::db::ops::get_entity;
 
-        // First get the constellation entity
+        // First get the basic constellation
         let constellation = get_entity::<Constellation, _>(&self.db, constellation_id)
             .await?
             .ok_or_else(|| CoreError::agent_not_found(constellation_id.to_string()))?;
 
-        // Load the agents via constellation_agents edge
-        let agent_query = r#"
-            SELECT * FROM constellation_agents
-            WHERE in = $constellation_id
-            ORDER BY joined_at ASC
+        let mut all_agents = Vec::new();
+        let mut all_groups = Vec::new();
+
+        // Load direct constellation agents
+        let direct_agents_query = r#"
+            SELECT * FROM agent WHERE id IN (
+                SELECT out FROM constellation_agents WHERE in = $constellation_id
+            )
         "#;
 
         let mut result = self
             .db
-            .query(agent_query)
+            .query(direct_agents_query)
             .bind((
                 "constellation_id",
                 surrealdb::RecordId::from(constellation_id),
             ))
             .await
             .map_err(|e| CoreError::DatabaseQueryFailed {
-                query: agent_query.to_string(),
-                table: "constellation_agents".to_string(),
+                query: direct_agents_query.to_string(),
+                table: "agent".to_string(),
                 cause: e.into(),
             })?;
 
-        let membership_db_models: Vec<<ConstellationMembership as DbEntity>::DbModel> =
+        let mut direct_agents: Vec<AgentRecord> =
             result.take(0).map_err(|e| CoreError::DatabaseQueryFailed {
-                query: agent_query.to_string(),
-                table: "constellation_agents".to_string(),
+                query: direct_agents_query.to_string(),
+                table: "agent".to_string(),
                 cause: e.into(),
             })?;
 
-        let memberships: Vec<ConstellationMembership> = membership_db_models
-            .into_iter()
-            .map(|db_model| {
-                ConstellationMembership::from_db_model(db_model)
-                    .map_err(|e| CoreError::from(crate::db::DatabaseError::from(e)))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Load memories and messages for direct agents too
+        for agent in &mut direct_agents {
+            let (messages_result, memories_result) = tokio::join!(
+                agent.load_message_history(&self.db, false),
+                crate::db::ops::get_agent_memories(&self.db, &agent.id)
+            );
 
-        // Load the agents for each membership
-        let mut agents = Vec::new();
-        for membership in memberships {
-            if let Some(agent) = AgentRecord::load_with_relations(&self.db, &membership.out_id)
-                .await
-                .map_err(|e| CoreError::from(e))?
-            {
-                agents.push((agent, membership));
+            // Handle results
+            if let Ok(messages) = messages_result {
+                agent.messages = messages;
+            }
+
+            if let Ok(memory_tuples) = memories_result {
+                agent.memories = memory_tuples
+                    .into_iter()
+                    .map(|(memory_block, access_level)| {
+                        use crate::id::RelationId;
+                        let relation = crate::agent::AgentMemoryRelation {
+                            id: RelationId::nil(),
+                            in_id: agent.id.clone(),
+                            out_id: memory_block.id.clone(),
+                            access_level,
+                            created_at: chrono::Utc::now(),
+                        };
+                        (memory_block, relation)
+                    })
+                    .collect();
             }
         }
 
-        // Load the group IDs via composed_of relation
-        let groups_query = r#"
-            SELECT out FROM $constellation_id->composed_of
-        "#;
+        all_agents.extend(direct_agents);
 
-        let mut result = self
-            .db
-            .query(groups_query)
-            .bind((
-                "constellation_id",
-                surrealdb::RecordId::from(constellation_id),
-            ))
-            .await
-            .map_err(|e| CoreError::DatabaseQueryFailed {
-                query: groups_query.to_string(),
-                table: "composed_of".to_string(),
-                cause: e.into(),
-            })?;
+        // Load all groups and their agents
+        for group_id in &constellation.groups {
+            // Load the group with all its agent members using ops function (load_with_relations doesn't work properly)
+            if let Some(group) = crate::db::ops::get_entity::<
+                crate::coordination::groups::AgentGroup,
+                _,
+            >(&self.db, group_id)
+            .await?
+            {
+                // Manually load group members like get_group_by_name does
+                let mut group = group;
+                let query = r#"
+                    SELECT * FROM group_members
+                    WHERE out = $group_id
+                    ORDER BY joined_at ASC
+                "#;
+                let mut result = self
+                    .db
+                    .query(query)
+                    .bind(("group_id", surrealdb::RecordId::from(group_id)))
+                    .await
+                    .map_err(|e| CoreError::DatabaseQueryFailed {
+                        query: query.to_string(),
+                        table: "group_members".to_string(),
+                        cause: e.into(),
+                    })?;
 
-        let group_record_ids: Vec<surrealdb::RecordId> =
-            result
-                .take("out")
-                .map_err(|e| CoreError::DatabaseQueryFailed {
-                    query: groups_query.to_string(),
-                    table: "composed_of".to_string(),
-                    cause: e.into(),
-                })?;
+                let membership_db_models: Vec<crate::coordination::groups::GroupMembershipDbModel> =
+                    result.take(0).map_err(|e| CoreError::DatabaseQueryFailed {
+                        query: query.to_string(),
+                        table: "group_members".to_string(),
+                        cause: e.into(),
+                    })?;
 
-        let group_ids: Vec<GroupId> = group_record_ids
-            .into_iter()
-            .map(|rid| GroupId::from_record(rid))
-            .collect();
+                // Convert membership models and load agents
+                let mut members = Vec::new();
+                for membership_model in membership_db_models {
+                    let membership = crate::coordination::groups::GroupMembership::from_db_model(
+                        membership_model,
+                    )?;
+                    // Load the agent (in_id is the AgentId in group membership)
+                    if let Some(agent) = crate::db::ops::get_entity::<crate::agent::AgentRecord, _>(
+                        &self.db,
+                        &membership.in_id,
+                    )
+                    .await?
+                    {
+                        members.push((agent, membership));
+                    }
+                }
+                group.members = members;
+                // Add all agents from this group
+                for (agent, _membership) in &group.members {
+                    // Load full agent with memories and messages manually (like CLI does)
+                    if let Some(mut full_agent) =
+                        AgentRecord::load_with_relations(&self.db, &agent.id).await?
+                    {
+                        // Load message history and memory blocks like the CLI
+                        let (messages_result, memories_result) = tokio::join!(
+                            full_agent.load_message_history(&self.db, false),
+                            crate::db::ops::get_agent_memories(&self.db, &full_agent.id)
+                        );
 
-        Ok(Constellation {
-            id: constellation.id,
-            owner_id: constellation.owner_id,
-            name: constellation.name,
-            description: constellation.description,
-            created_at: constellation.created_at,
-            updated_at: constellation.updated_at,
-            is_active: constellation.is_active,
-            agents,
-            groups: group_ids,
-        })
+                        // Handle results
+                        if let Ok(messages) = messages_result {
+                            full_agent.messages = messages;
+                        }
+
+                        if let Ok(memory_tuples) = memories_result {
+                            full_agent.memories = memory_tuples
+                                .into_iter()
+                                .map(|(memory_block, access_level)| {
+                                    use crate::id::RelationId;
+                                    let relation = crate::agent::AgentMemoryRelation {
+                                        id: RelationId::nil(),
+                                        in_id: full_agent.id.clone(),
+                                        out_id: memory_block.id.clone(),
+                                        access_level,
+                                        created_at: chrono::Utc::now(),
+                                    };
+                                    (memory_block, relation)
+                                })
+                                .collect();
+                        }
+
+                        all_agents.push(full_agent);
+                    }
+                }
+                all_groups.push(group);
+            }
+        }
+
+        // Deduplicate agents (in case same agent is in multiple groups)
+        all_agents.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        all_agents.dedup_by(|a, b| a.id == b.id);
+
+        Ok((constellation, all_groups, all_agents))
     }
 
     /// Load group with all members

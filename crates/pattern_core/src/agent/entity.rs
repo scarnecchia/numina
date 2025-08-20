@@ -4,7 +4,7 @@
 //! of a DatabaseAgent. It includes all fields that need to be stored in the
 //! database and can be used to reconstruct a DatabaseAgent instance.
 
-use crate::agent::{AgentState, AgentType};
+use crate::agent::AgentType;
 use crate::context::{CompressionStrategy, ContextConfig};
 use crate::id::{AgentId, EventId, MemoryId, RelationId, TaskId, UserId};
 use crate::memory::MemoryBlock;
@@ -142,7 +142,6 @@ pub struct AgentRecord {
     pub id: AgentId,
     pub name: String,
     pub agent_type: AgentType,
-    pub state: AgentState,
 
     // Model configuration
     pub model_id: Option<String>,
@@ -208,7 +207,6 @@ impl Default for AgentRecord {
             id: AgentId::generate(),
             name: String::new(),
             agent_type: AgentType::Generic,
-            state: AgentState::Ready,
             model_id: None,
             model_config: HashMap::new(),
             base_instructions: String::new(),
@@ -217,7 +215,7 @@ impl Default for AgentRecord {
             compression_threshold: 30,
             memory_char_limit: 5000,
             enable_thinking: true,
-            compression_strategy: CompressionStrategy::Truncate { keep_recent: 20 },
+            compression_strategy: CompressionStrategy::Truncate { keep_recent: 100 },
             tool_rules: Vec::new(),
             total_messages: 0,
             total_tool_calls: 0,
@@ -250,6 +248,7 @@ impl AgentRecord {
             base_instructions: self.base_instructions.clone(),
             memory_char_limit: self.memory_char_limit,
             max_context_messages: self.max_messages,
+            max_context_tokens: None,
             enable_thinking: self.enable_thinking,
             tool_usage_rules: vec![],
             tool_workflow_rules: vec![],
@@ -343,7 +342,7 @@ impl AgentRecord {
 
         for relation in relations {
             tracing::trace!(
-                "Loading message for relation: message_id={:?}, type={:?}, position={}",
+                "Loading message for relation: message_id={:?}, type={:?}, position={:?}",
                 relation.out_id,
                 relation.message_type,
                 relation.position
@@ -394,7 +393,7 @@ impl AgentRecord {
             in_id: self.id.clone(),
             out_id: message_id.clone(),
             message_type,
-            position: position.to_string(),
+            position: Some(SnowflakePosition(position)),
             added_at: chrono::Utc::now(),
             batch: None, // Will be populated from message when available
             sequence_num: None,
@@ -449,7 +448,6 @@ mod tests {
         };
         assert_eq!(agent.name, "Test Agent");
         assert!(matches!(agent.agent_type, AgentType::Custom(ref s) if s == "test"));
-        assert_eq!(agent.state, AgentState::Ready);
     }
 
     #[tokio::test]

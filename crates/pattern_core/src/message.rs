@@ -147,7 +147,7 @@ impl MessageBatch {
     }
 
     /// Add a message to this batch
-    pub fn add_message(&mut self, mut message: Message) {
+    pub fn add_message(&mut self, mut message: Message) -> Message {
         // Ensure batch is sorted
         self.sort_messages();
 
@@ -181,20 +181,24 @@ impl MessageBatch {
 
                     // Track and add the message
                     self.track_message_tools(&message);
-                    self.messages.push(message);
+                    self.messages.push(message.clone());
 
                     // Check if batch is complete
                     if self.pending_tool_calls.is_empty() {
                         self.tool_pairing_notify.notify_waiters();
                     }
 
-                    return;
+                    return message;
                 } else {
                     // Complex case: responses need reordering, use existing logic
+                    let mut last_message = None;
                     for response in responses.clone() {
-                        self.add_tool_response_with_sequencing(response);
+                        if let Some(msg) = self.add_tool_response_with_sequencing(response) {
+                            last_message = Some(msg);
+                        }
                     }
-                    return;
+                    // Return the last inserted message or the original if none were inserted
+                    return last_message.unwrap_or(message);
                 }
             }
             MessageContent::Blocks(blocks) => {
@@ -248,18 +252,21 @@ impl MessageBatch {
 
                         // Track and add the message
                         self.track_message_tools(&message);
-                        self.messages.push(message);
+                        self.messages.push(message.clone());
 
                         // Check if batch is complete
                         if self.pending_tool_calls.is_empty() {
                             self.tool_pairing_notify.notify_waiters();
                         }
 
-                        return;
+                        return message;
                     } else {
                         // Complex case: mixed content or needs reordering
+                        let mut last_response_msg = None;
                         for response in tool_results {
-                            self.add_tool_response_with_sequencing(response);
+                            if let Some(msg) = self.add_tool_response_with_sequencing(response) {
+                                last_response_msg = Some(msg);
+                            }
                         }
 
                         // Also add any non-tool-result blocks as a regular message
@@ -278,10 +285,12 @@ impl MessageBatch {
                             let mut new_msg = message.clone();
                             new_msg.content = MessageContent::Blocks(non_tool_blocks);
                             // Recursively add the non-tool blocks (will hit the default path below)
-                            self.add_message(new_msg);
+                            let updated_msg = self.add_message(new_msg);
+                            return updated_msg;
                         }
 
-                        return;
+                        // Tool results were processed separately - return the last message added to batch
+                        return last_response_msg.unwrap_or(message);
                     }
                 }
             }
@@ -306,39 +315,41 @@ impl MessageBatch {
         // Track tool calls/responses
         self.track_message_tools(&message);
 
-        self.messages.push(message);
+        self.messages.push(message.clone());
 
         // Notify waiters if all tool calls are paired
         if self.pending_tool_calls.is_empty() {
             self.tool_pairing_notify.notify_waiters();
         }
+
+        message
     }
 
     /// Add an agent response to this batch
-    pub fn add_agent_response(&mut self, content: impl Into<MessageContent>) {
+    pub fn add_agent_response(&mut self, content: impl Into<MessageContent>) -> Message {
         // Ensure batch is sorted
         self.sort_messages();
 
         let sequence_num = self.messages.len() as u32;
         let mut message = Message::assistant_in_batch(self.id, sequence_num, content);
         message.batch_type = Some(self.batch_type);
-        self.add_message(message);
+        self.add_message(message)
     }
 
     /// Add tool responses to this batch
-    pub fn add_tool_responses(&mut self, responses: Vec<ToolResponse>) {
+    pub fn add_tool_responses(&mut self, responses: Vec<ToolResponse>) -> Message {
         // Ensure batch is sorted
         self.sort_messages();
 
         let sequence_num = self.messages.len() as u32;
         let mut message = Message::tool_in_batch(self.id, sequence_num, responses);
         message.batch_type = Some(self.batch_type);
-        self.add_message(message);
+        self.add_message(message)
     }
 
     /// Add multiple tool responses, inserting them after their corresponding calls
     /// and resequencing subsequent messages
-    pub fn add_tool_responses_with_sequencing(&mut self, responses: Vec<ToolResponse>) {
+    pub fn add_tool_responses_with_sequencing(&mut self, responses: Vec<ToolResponse>) -> Message {
         // Ensure batch is sorted
         self.sort_messages();
 
@@ -355,10 +366,13 @@ impl MessageBatch {
         // Sort by position (None goes last)
         responses_with_positions.sort_by_key(|(pos, _)| pos.unwrap_or(usize::MAX));
 
+        let mut msg = None;
+        let mut resp_pos = self.messages.len();
         // Process each response
         for (call_pos, response) in responses_with_positions {
             if let Some(pos) = call_pos {
-                self.insert_tool_response_at(pos, response);
+                msg = Some(self.insert_tool_response_at(pos, response));
+                resp_pos = pos + 1;
             } else {
                 tracing::warn!(
                     "Received tool response with call_id {} but no matching tool call found in batch",
@@ -372,14 +386,19 @@ impl MessageBatch {
             msg.sequence_num = Some(idx as u32);
         }
 
+        if let Some(ref mut msg) = msg {
+            msg.sequence_num = Some(resp_pos as u32);
+        }
+
         // Notify waiters if all tool calls are paired
         if self.pending_tool_calls.is_empty() {
             self.tool_pairing_notify.notify_waiters();
         }
+        msg.unwrap_or_else(|| Message::system("Tool responses processed"))
     }
 
     /// Helper to insert a tool response after its corresponding call
-    fn insert_tool_response_at(&mut self, call_pos: usize, response: ToolResponse) {
+    fn insert_tool_response_at(&mut self, call_pos: usize, response: ToolResponse) -> Message {
         let insert_pos = call_pos + 1;
 
         // Check if we can append to an existing ToolResponses message at insert_pos
@@ -392,7 +411,7 @@ impl MessageBatch {
                     existing_responses.push(response.clone());
                     self.pending_tool_calls.remove(&response.call_id);
                 }
-                return;
+                return self.messages[insert_pos].clone();
             }
         }
 
@@ -407,15 +426,17 @@ impl MessageBatch {
         response_msg.batch_type = Some(self.batch_type);
 
         // Insert the response message
-        self.messages.insert(insert_pos, response_msg);
+        self.messages.insert(insert_pos, response_msg.clone());
 
         // Update tracking
         self.pending_tool_calls.remove(&response.call_id);
+
+        response_msg
     }
 
     /// Add a single tool response, inserting it immediately after the corresponding call
     /// and resequencing subsequent messages
-    pub fn add_tool_response_with_sequencing(&mut self, response: ToolResponse) {
+    pub fn add_tool_response_with_sequencing(&mut self, response: ToolResponse) -> Option<Message> {
         // Ensure batch is sorted
         self.sort_messages();
 
@@ -423,17 +444,23 @@ impl MessageBatch {
         let call_position = self.find_tool_call_position(&response.call_id);
 
         if let Some(call_pos) = call_position {
-            self.insert_tool_response_at(call_pos, response);
+            let mut inserted_message = self.insert_tool_response_at(call_pos, response);
+            let insert_pos = call_pos + 1;
 
             // Renumber all messages after insertions
             for (idx, msg) in self.messages.iter_mut().enumerate() {
                 msg.sequence_num = Some(idx as u32);
             }
 
+            // Update the returned message's sequence number to match what it got renumbered to
+            inserted_message.sequence_num = Some(insert_pos as u32);
+
             // Check if batch is now complete
             if self.pending_tool_calls.is_empty() {
                 self.tool_pairing_notify.notify_waiters();
             }
+
+            Some(inserted_message)
         } else {
             // No matching tool call found - this is an error condition
             // Log it but don't add an unpaired response
@@ -441,7 +468,13 @@ impl MessageBatch {
                 "Received tool response with call_id {} but no matching tool call found in batch",
                 response.call_id
             );
+            None
         }
+    }
+
+    /// Get a clone of the tool pairing notifier for async waiting
+    pub fn get_tool_pairing_notifier(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.tool_pairing_notify.clone()
     }
 
     /// Find the position of the message containing a specific tool call
@@ -483,59 +516,154 @@ impl MessageBatch {
         self.is_complete = true;
     }
 
-    /// Finalize batch by removing unpaired tool calls
+    /// Finalize batch by removing unpaired tool calls and orphaned tool responses
     /// Returns the IDs of removed messages for cleanup
     pub fn finalize(&mut self) -> Vec<crate::id::MessageId> {
         let mut removed_ids = Vec::new();
 
+        // First, collect all tool call IDs that have responses
+        let mut responded_tool_calls = std::collections::HashSet::new();
+        for msg in &self.messages {
+            match &msg.content {
+                MessageContent::ToolResponses(responses) => {
+                    for resp in responses {
+                        responded_tool_calls.insert(resp.call_id.clone());
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            responded_tool_calls.insert(tool_use_id.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Track which messages to remove
+        let mut indices_to_remove = Vec::new();
+
+        // Remove unpaired tool calls
         if !self.pending_tool_calls.is_empty() {
-            // Remove any messages that are tool calls without responses
             let pending = self.pending_tool_calls.clone();
 
-            // Track which messages to remove
-            let mut indices_to_remove = Vec::new();
-            for (idx, msg) in self.messages.iter().enumerate() {
-                let should_remove = match &msg.content {
+            for (idx, msg) in self.messages.iter_mut().enumerate() {
+                let should_remove_message = match &mut msg.content {
                     MessageContent::ToolCalls(calls) => {
-                        // Remove if all calls are unpaired
+                        // Remove entire message if all calls are unpaired
                         calls.iter().all(|call| pending.contains(&call.call_id))
                     }
                     MessageContent::Blocks(blocks) => {
-                        // Check if this is purely unpaired tool calls
-                        let has_unpaired = blocks.iter().any(|block| {
-                            matches!(block, ContentBlock::ToolUse { id, .. } if pending.contains(id))
+                        // Filter out unpaired tool calls from blocks
+                        let original_len = blocks.len();
+                        blocks.retain(|block| {
+                            !matches!(block, ContentBlock::ToolUse { id, .. } if pending.contains(id))
                         });
-                        let has_other_content = blocks
-                            .iter()
-                            .any(|block| !matches!(block, ContentBlock::ToolUse { .. }));
-                        // Remove if it only has unpaired tool calls
-                        has_unpaired && !has_other_content
+
+                        // If we removed tool calls and now the last block is Thinking,
+                        // replace the entire content with a simple text message
+                        if blocks.len() < original_len {
+                            if let Some(ContentBlock::Thinking { .. }) = blocks.last() {
+                                // Replace with empty assistant text to maintain message flow
+                                msg.content = MessageContent::Text(String::new());
+                                false // Don't remove the message
+                            } else if blocks.is_empty() {
+                                // If all blocks were removed, mark for deletion
+                                true
+                            } else {
+                                false // Keep the message with filtered blocks
+                            }
+                        } else {
+                            false // No changes needed
+                        }
                     }
-                    _ => false, // Keep all other message types
+                    _ => false,
                 };
 
-                if should_remove {
+                if should_remove_message {
                     indices_to_remove.push(idx);
                     removed_ids.push(msg.id.clone());
                 }
             }
-
-            // Remove messages by index in reverse order
-            for idx in indices_to_remove.into_iter().rev() {
-                self.messages.remove(idx);
-            }
-
-            // Clear pending tool calls and mark as complete
-            self.pending_tool_calls.clear();
-
-            // Renumber sequences after removal
-            for (i, msg) in self.messages.iter_mut().enumerate() {
-                msg.sequence_num = Some(i as u32);
-            }
-
-            // Mark complete
-            self.is_complete = true;
         }
+
+        // Also remove orphaned tool responses (responses without matching calls)
+        for (idx, msg) in self.messages.iter().enumerate() {
+            if indices_to_remove.contains(&idx) {
+                continue; // Already marked for removal
+            }
+
+            let should_remove = match &msg.content {
+                MessageContent::ToolResponses(responses) => {
+                    // Remove if all responses are orphaned
+                    responses.iter().all(|resp| {
+                        // A response is orphaned if there's no matching tool call in this batch
+                        !self.messages.iter().any(|m| match &m.content {
+                            MessageContent::ToolCalls(calls) => {
+                                calls.iter().any(|call| call.call_id == resp.call_id)
+                            }
+                            MessageContent::Blocks(blocks) => {
+                                blocks.iter().any(|block| {
+                                    matches!(block, ContentBlock::ToolUse { id, .. } if id == &resp.call_id)
+                                })
+                            }
+                            _ => false,
+                        })
+                    })
+                }
+                MessageContent::Blocks(blocks) => {
+                    // Check if this is purely orphaned tool responses
+                    let has_orphaned = blocks.iter().any(|block| {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            // Check if there's a matching tool call
+                            !self.messages.iter().any(|m| match &m.content {
+                                MessageContent::ToolCalls(calls) => {
+                                    calls.iter().any(|call| &call.call_id == tool_use_id)
+                                }
+                                MessageContent::Blocks(inner_blocks) => {
+                                    inner_blocks.iter().any(|b| {
+                                        matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id)
+                                    })
+                                }
+                                _ => false,
+                            })
+                        } else {
+                            false
+                        }
+                    });
+                    let has_other_content = blocks
+                        .iter()
+                        .any(|block| !matches!(block, ContentBlock::ToolResult { .. }));
+                    // Remove if it only has orphaned tool responses
+                    has_orphaned && !has_other_content
+                }
+                _ => false,
+            };
+
+            if should_remove {
+                indices_to_remove.push(idx);
+                removed_ids.push(msg.id.clone());
+            }
+        }
+
+        // Remove messages by index in reverse order
+        indices_to_remove.sort_unstable();
+        indices_to_remove.dedup();
+        for idx in indices_to_remove.into_iter().rev() {
+            self.messages.remove(idx);
+        }
+
+        // Clear pending tool calls (but don't mark complete - caller should do that)
+        self.pending_tool_calls.clear();
+
+        // Renumber sequences after removal
+        for (i, msg) in self.messages.iter_mut().enumerate() {
+            msg.sequence_num = Some(i as u32);
+        }
+
+        // NOTE: Caller must explicitly call mark_complete() if desired
+        // This allows cleanup without forcing completion
 
         removed_ids
     }
@@ -658,6 +786,7 @@ impl MessageBatch {
     /// Wait for all pending tool calls to be paired with responses
     pub async fn wait_for_tool_pairing(&self) {
         while !self.pending_tool_calls.is_empty() {
+            tracing::info!("batch {} has no more pending tool calls", self.id);
             self.tool_pairing_notify.notified().await;
         }
     }
@@ -1702,7 +1831,12 @@ impl Message {
     }
 
     /// Create Messages from an agent Response
-    pub fn from_response(response: &Response, agent_id: &crate::AgentId) -> Vec<Self> {
+    pub fn from_response(
+        response: &Response,
+        agent_id: &crate::AgentId,
+        batch_id: Option<SnowflakePosition>,
+        batch_type: Option<BatchType>,
+    ) -> Vec<Self> {
         let mut messages = Vec::new();
 
         // Group assistant content together, but keep tool responses separate
@@ -1725,6 +1859,8 @@ impl Message {
                             matches!(&combined_content, MessageContent::ToolCalls(_));
                         let word_count = Self::estimate_word_count(&combined_content);
 
+                        let position = crate::agent::get_next_message_position_sync();
+
                         messages.push(Self {
                             id: MessageId::generate(),
                             role: ChatRole::Assistant,
@@ -1738,10 +1874,10 @@ impl Message {
                             owner_id: None,
                             has_tool_calls,
                             word_count,
-                            position: None,
-                            batch: None,
-                            sequence_num: None,
-                            batch_type: None,
+                            position: Some(position),
+                            batch: batch_id,
+                            sequence_num: None, // Will be set by batch
+                            batch_type,
                             embedding: None,
                             embedding_model: None,
                         });
@@ -1749,6 +1885,8 @@ impl Message {
                     }
 
                     // Then add the tool response as a separate message
+                    let position = crate::agent::get_next_message_position_sync();
+
                     messages.push(Self {
                         id: MessageId::generate(),
                         role: ChatRole::Tool,
@@ -1762,10 +1900,10 @@ impl Message {
                         owner_id: None,
                         has_tool_calls: false,
                         word_count: Self::estimate_word_count(content),
-                        position: None,
-                        batch: None,
-                        sequence_num: None,
-                        batch_type: None,
+                        position: Some(position),
+                        batch: batch_id,
+                        sequence_num: None, // Will be set by batch
+                        batch_type,
                         embedding: None,
                         embedding_model: None,
                     });
@@ -2219,7 +2357,7 @@ pub struct AgentMessageRelation {
 
     /// Position in the agent's message history (for ordering)
     /// Stores a Snowflake ID as a string for distributed monotonic ordering
-    pub position: String,
+    pub position: Option<SnowflakePosition>,
 
     /// When this relationship was created
     pub added_at: DateTime<Utc>,
@@ -2245,7 +2383,7 @@ impl Default for AgentMessageRelation {
             in_id: crate::AgentId::generate(),
             out_id: MessageId::generate(),
             message_type: MessageRelationType::Active,
-            position: "0".to_string(),
+            position: None,
             added_at: Utc::now(),
             batch: None,
             sequence_num: None,

@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     CoreError, ModelProvider, Result,
@@ -49,6 +50,9 @@ pub enum CompressionStrategy {
         chunk_size: usize,
         /// Model to use for summarization
         summarization_model: String,
+        /// Optional custom summarization prompt (can include {persona} placeholder)
+        #[serde(default)]
+        summarization_prompt: Option<String>,
     },
 
     /// Importance-based selection
@@ -74,7 +78,6 @@ impl Default for CompressionStrategy {
     }
 }
 
-/// Result of message compression
 #[derive(Debug, Clone)]
 pub struct CompressionResult {
     /// Batches to keep in the active context
@@ -152,7 +155,7 @@ impl Default for ImportanceScoringConfig {
 /// Compresses messages using various strategies
 pub struct MessageCompressor {
     strategy: CompressionStrategy,
-    model_provider: Option<Box<dyn ModelProvider>>,
+    model_provider: Option<Arc<dyn ModelProvider>>,
     scoring_config: ImportanceScoringConfig,
 }
 
@@ -167,7 +170,7 @@ impl MessageCompressor {
     }
 
     /// Set the model provider for strategies that need it
-    pub fn with_model_provider(mut self, provider: Box<dyn ModelProvider>) -> Self {
+    pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
         self.model_provider = Some(provider);
         self
     }
@@ -183,11 +186,23 @@ impl MessageCompressor {
         &self,
         batches: Vec<crate::message::MessageBatch>,
         max_messages: usize,
+        max_tokens: Option<usize>,
     ) -> Result<CompressionResult> {
         // Calculate total message count across all batches
         let original_count: usize = batches.iter().map(|b| b.len()).sum();
 
-        if original_count <= max_messages {
+        // Calculate total token count if we have a limit
+        let original_tokens = if max_tokens.is_some() {
+            self.estimate_tokens_from_batches(&batches)
+        } else {
+            0
+        };
+
+        // Check if we're within both limits
+        let within_message_limit = original_count <= max_messages;
+        let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
+
+        if within_message_limit && within_token_limit {
             // No compression needed
             return Ok(CompressionResult {
                 active_batches: batches,
@@ -206,18 +221,21 @@ impl MessageCompressor {
 
         let result = match &self.strategy {
             CompressionStrategy::Truncate { keep_recent } => {
-                self.truncate_messages(batches, *keep_recent)
+                self.truncate_messages(batches, *keep_recent, max_messages, max_tokens)
             }
 
             CompressionStrategy::RecursiveSummarization {
                 chunk_size,
                 summarization_model,
+                summarization_prompt,
             } => {
                 self.recursive_summarization(
                     batches,
                     max_messages,
+                    max_tokens,
                     *chunk_size,
                     summarization_model,
+                    summarization_prompt.as_deref(),
                 )
                 .await
             }
@@ -226,14 +244,26 @@ impl MessageCompressor {
                 keep_recent,
                 keep_important,
             } => {
-                self.importance_based_compression(batches, *keep_recent, *keep_important)
-                    .await
+                self.importance_based_compression(
+                    batches,
+                    *keep_recent,
+                    *keep_important,
+                    max_messages,
+                    max_tokens,
+                )
+                .await
             }
 
             CompressionStrategy::TimeDecay {
                 compress_after_hours,
                 min_keep_recent,
-            } => self.time_decay_compression(batches, *compress_after_hours, *min_keep_recent),
+            } => self.time_decay_compression(
+                batches,
+                *compress_after_hours,
+                *min_keep_recent,
+                max_messages,
+                max_tokens,
+            ),
         }?;
 
         // Validate and fix message sequence for Gemini compatibility
@@ -437,20 +467,48 @@ impl MessageCompressor {
         fixed_messages
     }
 
-    /// Simple truncation strategy
+    /// Simple truncation strategy with chunk-based compression
     fn truncate_messages(
         &self,
         batches: Vec<crate::message::MessageBatch>,
         keep_recent: usize,
+        max_messages: usize,
+        max_tokens: Option<usize>,
     ) -> Result<CompressionResult> {
         let original_count: usize = batches.iter().map(|b| b.len()).sum();
+        let original_tokens = if max_tokens.is_some() {
+            self.estimate_tokens_from_batches(&batches)
+        } else {
+            0
+        };
 
-        // Collect batches from newest to oldest until we have enough messages
+        // Check if we're within both limits
+        let within_message_limit = original_count <= max_messages;
+        let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
+
+        // If we're within limits, no compression needed
+        if within_message_limit && within_token_limit {
+            return Ok(CompressionResult {
+                active_batches: batches,
+                summary: None,
+                archived_batches: Vec::new(),
+                metadata: CompressionMetadata {
+                    strategy_used: "truncate_no_compression".to_string(),
+                    original_count,
+                    compressed_count: 0,
+                    archived_count: 0,
+                    compression_time: Utc::now(),
+                    estimated_tokens_saved: 0,
+                },
+            });
+        }
+
+        // We're over limits - keep only keep_recent messages from the most recent batches
         let mut active_batches = Vec::new();
         let mut archived_batches = Vec::new();
         let mut message_count = 0;
 
-        // Iterate from the end (most recent batches)
+        // Iterate from the end (most recent batches) and keep up to keep_recent messages
         for batch in batches.into_iter().rev() {
             if message_count < keep_recent {
                 message_count += batch.len();
@@ -488,8 +546,10 @@ impl MessageCompressor {
         &self,
         mut batches: Vec<crate::message::MessageBatch>,
         max_messages: usize,
+        max_tokens: Option<usize>,
         chunk_size: usize,
         summarization_model: &str,
+        summarization_prompt: Option<&str>,
     ) -> Result<CompressionResult> {
         if self.model_provider.is_none() {
             return Err(CoreError::ConfigurationError {
@@ -504,19 +564,43 @@ impl MessageCompressor {
         batches.sort_by_key(|b| b.id);
 
         let original_count: usize = batches.iter().map(|b| b.len()).sum();
+        let original_tokens = if max_tokens.is_some() {
+            self.estimate_tokens_from_batches(&batches)
+        } else {
+            0
+        };
 
-        if original_count <= max_messages {
-            return self.truncate_messages(batches, max_messages);
+        // Check if we're within both limits
+        let within_message_limit = original_count <= max_messages;
+        let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
+
+        if within_message_limit && within_token_limit {
+            // No compression needed
+            return Ok(CompressionResult {
+                active_batches: batches,
+                summary: None,
+                archived_batches: Vec::new(),
+                metadata: CompressionMetadata {
+                    strategy_used: "recursive_summarization_no_compression".to_string(),
+                    original_count,
+                    compressed_count: 0,
+                    archived_count: 0,
+                    compression_time: Utc::now(),
+                    estimated_tokens_saved: 0,
+                },
+            });
         }
 
-        // Accumulate batches from oldest until we're under max_messages
+        // Calculate target: keep max_messages - chunk_size messages
+        let target_messages = max_messages.saturating_sub(chunk_size);
+
         let mut active_batches = Vec::new();
         let mut archived_batches = Vec::new();
         let mut current_count = 0;
 
-        // Iterate from newest to oldest (reverse), keeping recent batches
+        // Iterate from newest to oldest (reverse), keeping recent batches up to target
         for batch in batches.into_iter().rev() {
-            if current_count + batch.len() <= max_messages {
+            if current_count < target_messages {
                 current_count += batch.len();
                 active_batches.push(batch);
             } else {
@@ -558,52 +642,92 @@ impl MessageCompressor {
             });
         }
 
-        // Create summary prompt
-        let summary_prompt = self.create_summary_prompt(&messages_to_summarize, chunk_size)?;
+        // Process messages in batches if needed to stay under token limits
+        const MAX_TOKENS_PER_REQUEST: usize = 150_000; // Conservative limit for safety
+        const MESSAGES_PER_BATCH: usize = 100; // Process up to 100 messages at a time
 
-        // Generate summary using the model
-        let summary = if let Some(provider) = &self.model_provider {
-            let request = crate::message::Request {
-                system: Some(vec![
-                    "You are a helpful assistant that creates concise summaries of conversations. \
-                     Focus on key information, decisions made, and important context. Maintain the style of the messages as much as possible."
-                        .to_string(),
-                ]),
-                messages: vec![Message::user(summary_prompt)],
-                tools: None,
+        let mut all_summaries = Vec::new();
+
+        // Process messages in manageable chunks
+        for batch_chunk in messages_to_summarize.chunks(MESSAGES_PER_BATCH) {
+            // Estimate tokens for this chunk
+            let chunk_tokens = self.estimate_tokens(batch_chunk);
+
+            // If even this chunk is too big, need to make it smaller
+            let actual_chunk = if chunk_tokens > MAX_TOKENS_PER_REQUEST {
+                // Take fewer messages to stay under limit
+                let safe_count = (MESSAGES_PER_BATCH * MAX_TOKENS_PER_REQUEST) / chunk_tokens;
+                &batch_chunk[..safe_count.min(batch_chunk.len()).max(1)]
+            } else {
+                batch_chunk
             };
 
-            // Create options for summarization
-            // Detect provider from model string
-            let provider_name = detect_provider_from_model(summarization_model);
+            // Create summary prompt for this chunk
+            let summary_prompt = self.create_summary_prompt(actual_chunk, chunk_size)?;
 
-            let model_info = crate::model::ModelInfo {
-                id: summarization_model.to_string(),
-                name: summarization_model.to_string(),
-                provider: provider_name,
-                capabilities: vec![],
-                context_window: 128000, // Default to a large context
-                max_output_tokens: Some(4096),
-                cost_per_1k_prompt_tokens: None,
-                cost_per_1k_completion_tokens: None,
-            };
+            // Generate summary using the model
+            let chunk_summary = if let Some(provider) = &self.model_provider {
+                let request = crate::message::Request {
+                    system: Some(vec![
+                        "You are a helpful assistant that creates concise summaries of conversations. \
+                         Focus on key information, decisions made, and important context. Maintain the style of the messages as much as possible."
+                            .to_string(),
+                    ]),
+                    messages: vec![Message::user(summary_prompt)],
+                    tools: None,
+                };
 
-            // Enhance with proper defaults
-            let model_info = crate::model::defaults::enhance_model_info(model_info);
+                // Create options for summarization
+                // Detect provider from model string
+                let provider_name = detect_provider_from_model(summarization_model);
 
-            let mut options = crate::model::ResponseOptions::new(model_info);
-            options.max_tokens = Some(1000);
-            options.temperature = Some(0.5);
+                let model_info = crate::model::ModelInfo {
+                    id: summarization_model.to_string(),
+                    name: summarization_model.to_string(),
+                    provider: provider_name,
+                    capabilities: vec![],
+                    context_window: 128000, // Default to a large context
+                    max_output_tokens: Some(4096),
+                    cost_per_1k_prompt_tokens: None,
+                    cost_per_1k_completion_tokens: None,
+                };
 
-            match provider.complete(&options, request).await {
-                Ok(response) => response.only_text(),
-                Err(e) => {
-                    tracing::warn!("Failed to generate summary: {}", e);
-                    format!("[Summary generation failed: {}]", e)
+                // Enhance with proper defaults
+                let model_info = crate::model::defaults::enhance_model_info(model_info);
+
+                let mut options = crate::model::ResponseOptions::new(model_info);
+                options.max_tokens = Some(1000);
+                options.temperature = Some(0.5);
+
+                match provider.complete(&options, request).await {
+                    Ok(response) => response.only_text(),
+                    Err(e) => {
+                        tracing::warn!("Failed to generate summary: {}", e);
+                        format!("[Summary generation failed: {}]", e)
+                    }
                 }
-            }
+            } else {
+                "[No model provider for summarization]".to_string()
+            };
+
+            tracing::debug!(
+                "Chunk summary ({} chars): {:.200}...",
+                chunk_summary.len(),
+                &chunk_summary
+            );
+            all_summaries.push(chunk_summary);
+        }
+
+        // Combine all summaries
+        let final_summary = if all_summaries.is_empty() {
+            "[No messages to summarize]".to_string()
+        } else if all_summaries.len() == 1 {
+            // Single chunk, use as-is
+            all_summaries.into_iter().next().unwrap()
         } else {
-            "[No model provider for summarization]".to_string()
+            // Multiple chunks, just concatenate with separator
+            tracing::debug!("Combining {} chunk summaries", all_summaries.len());
+            all_summaries.join("\n\n----\n\n")
         };
 
         // No need to validate tool ordering - batches maintain integrity
@@ -611,7 +735,7 @@ impl MessageCompressor {
 
         Ok(CompressionResult {
             active_batches,
-            summary: Some(summary),
+            summary: Some(final_summary),
             archived_batches,
             metadata: CompressionMetadata {
                 strategy_used: "recursive_summarization".to_string(),
@@ -630,11 +754,39 @@ impl MessageCompressor {
         mut batches: Vec<crate::message::MessageBatch>,
         keep_recent: usize,
         keep_important: usize,
+        max_messages: usize,
+        max_tokens: Option<usize>,
     ) -> Result<CompressionResult> {
         // Sort batches by batch_id (oldest first)
         batches.sort_by_key(|b| b.id);
 
         let original_count: usize = batches.iter().map(|b| b.len()).sum();
+        let original_tokens = if max_tokens.is_some() {
+            self.estimate_tokens_from_batches(&batches)
+        } else {
+            0
+        };
+
+        // Check if we're within both limits
+        let within_message_limit = original_count <= max_messages;
+        let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
+
+        if within_message_limit && within_token_limit {
+            // No compression needed
+            return Ok(CompressionResult {
+                active_batches: batches,
+                summary: None,
+                archived_batches: Vec::new(),
+                metadata: CompressionMetadata {
+                    strategy_used: "importance_based_no_compression".to_string(),
+                    original_count,
+                    compressed_count: 0,
+                    archived_count: 0,
+                    compression_time: Utc::now(),
+                    estimated_tokens_saved: 0,
+                },
+            });
+        }
 
         // For importance scoring, we need to work with individual messages
         // But we'll try to keep batches intact where possible
@@ -852,11 +1004,39 @@ impl MessageCompressor {
         mut batches: Vec<crate::message::MessageBatch>,
         compress_after_hours: f64,
         min_keep_recent: usize,
+        max_messages: usize,
+        max_tokens: Option<usize>,
     ) -> Result<CompressionResult> {
         // Sort batches by batch_id (oldest first)
         batches.sort_by_key(|b| b.id);
 
         let original_count: usize = batches.iter().map(|b| b.len()).sum();
+        let original_tokens = if max_tokens.is_some() {
+            self.estimate_tokens_from_batches(&batches)
+        } else {
+            0
+        };
+
+        // Check if we're within both limits
+        let within_message_limit = original_count <= max_messages;
+        let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
+
+        if within_message_limit && within_token_limit {
+            // No compression needed
+            return Ok(CompressionResult {
+                active_batches: batches,
+                summary: None,
+                archived_batches: Vec::new(),
+                metadata: CompressionMetadata {
+                    strategy_used: "time_decay_no_compression".to_string(),
+                    original_count,
+                    compressed_count: 0,
+                    archived_count: 0,
+                    compression_time: Utc::now(),
+                    estimated_tokens_saved: 0,
+                },
+            });
+        }
         let now = Utc::now();
         let cutoff_time =
             now - chrono::Duration::milliseconds((compress_after_hours * 3600.0 * 1000.0) as i64);
@@ -1023,14 +1203,34 @@ mod tests {
             Message::agent("You're welcome!"),
         ];
 
-        let result = tokio_test::block_on(compressor.compress(messages, 5)).unwrap();
+        // Create batches from messages (simple approach: each user-assistant pair is a batch)
+        let mut batches = Vec::new();
+        let mut i = 0;
+        while i < messages.len() {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            let mut batch_messages = vec![messages[i].clone()];
+            i += 1;
+            // Add assistant response if available
+            if i < messages.len() && messages[i].role == ChatRole::Assistant {
+                batch_messages.push(messages[i].clone());
+                i += 1;
+            }
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                batch_messages,
+            ));
+        }
 
-        assert_eq!(result.active_messages.len(), 5);
-        assert_eq!(result.archived_messages.len(), 5);
-        assert_eq!(
-            result.active_messages[0].text_content().unwrap(),
-            "Let me check that for you"
-        );
+        let result = tokio_test::block_on(compressor.compress(batches, 5, None)).unwrap();
+
+        // Result now has active_batches not active_messages
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        let archived_message_count: usize = result.archived_batches.iter().map(|b| b.len()).sum();
+
+        assert_eq!(active_message_count, 5);
+        // We should have archived some messages
+        assert!(archived_message_count > 0);
     }
 
     #[test]
@@ -1066,20 +1266,45 @@ mod tests {
             ..Message::default()
         });
 
-        let result = tokio_test::block_on(compressor.compress(messages, 5)).unwrap();
+        // Create batches from messages
+        let mut batches = Vec::new();
+        let mut i = 0;
+        while i < messages.len() {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            let mut batch_messages = vec![messages[i].clone()];
+            i += 1;
+            // Add responses until we hit another user message
+            while i < messages.len() && messages[i].role != ChatRole::User {
+                batch_messages.push(messages[i].clone());
+                i += 1;
+            }
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                batch_messages,
+            ));
+        }
 
-        // Should keep the last 5 messages
-        assert_eq!(result.active_messages.len(), 5);
-        assert_eq!(result.archived_messages.len(), 10);
+        let result = tokio_test::block_on(compressor.compress(batches, 5, None)).unwrap();
 
-        // The tool call and response should be in the active messages
+        // Count messages in active batches
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        let archived_message_count: usize = result.archived_batches.iter().map(|b| b.len()).sum();
+
+        // Should keep approximately 5 messages
+        assert!(active_message_count >= 5);
+        assert!(archived_message_count > 0);
+
+        // The tool call and response should be in the active batches
         let has_tool_call = result
-            .active_messages
+            .active_batches
             .iter()
+            .flat_map(|b| &b.messages)
             .any(|m| m.tool_call_count() > 0);
         let has_tool_response = result
-            .active_messages
+            .active_batches
             .iter()
+            .flat_map(|b| &b.messages)
             .any(|m| m.role == ChatRole::Tool);
 
         assert!(has_tool_call);
@@ -1146,17 +1371,41 @@ mod tests {
             });
         }
 
-        let result = tokio_test::block_on(compressor.compress(messages, 15)).unwrap();
+        // Create batches from messages
+        let mut batches = Vec::new();
+        let mut i = 0;
+        while i < messages.len() {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            let mut batch_messages = vec![messages[i].clone()];
+            i += 1;
+            // Add responses until we hit another user message
+            while i < messages.len() && messages[i].role != ChatRole::User {
+                batch_messages.push(messages[i].clone());
+                i += 1;
+            }
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                batch_messages,
+            ));
+        }
+
+        let result = tokio_test::block_on(compressor.compress(batches, 15, None)).unwrap();
 
         // Should keep at least 10 recent messages (min_keep_recent)
         // Plus the 10 messages that are within the 1 hour cutoff
-        assert_eq!(result.active_messages.len(), 10);
-        assert_eq!(result.archived_messages.len(), 20);
+        // Count messages in batches
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        let archived_message_count: usize = result.archived_batches.iter().map(|b| b.len()).sum();
+
+        assert!(active_message_count >= 10);
+        assert!(archived_message_count > 0);
         assert!(
-            result.archived_messages[0]
-                .text_content()
-                .unwrap()
-                .contains("Old message")
+            result
+                .archived_batches
+                .iter()
+                .flat_map(|b| &b.messages)
+                .any(|m| m.text_content().unwrap_or_default().contains("Old message"))
         );
     }
 
@@ -1170,7 +1419,18 @@ mod tests {
             Message::user("Message 3"),
         ];
 
-        let result = tokio_test::block_on(compressor.compress(messages, 1)).unwrap();
+        // Create batches from messages
+        let mut batches = Vec::new();
+        for msg in messages {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                vec![msg],
+            ));
+        }
+
+        let result = tokio_test::block_on(compressor.compress(batches, 1, None)).unwrap();
 
         assert_eq!(result.metadata.original_count, 3);
         assert_eq!(result.metadata.compressed_count, 2);
@@ -1271,21 +1531,47 @@ mod tests {
             Message::agent("Let me check that for you"),
         ];
 
-        let result = compressor.compress(messages, 4).await.unwrap();
+        // Create batches from messages
+        let mut batches = Vec::new();
+        let mut i = 0;
+        while i < messages.len() {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            let mut batch_messages = vec![messages[i].clone()];
+            i += 1;
+            // Add responses until we hit another user message or system message
+            while i < messages.len()
+                && messages[i].role != ChatRole::User
+                && messages[i].role != ChatRole::System
+            {
+                batch_messages.push(messages[i].clone());
+                i += 1;
+            }
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                batch_messages,
+            ));
+        }
 
-        // Should keep 2 recent + 2 important messages
-        assert_eq!(result.active_messages.len(), 4);
+        let result = compressor.compress(batches, 4, None).await.unwrap();
+
+        // Count messages
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        assert!(active_message_count >= 4);
 
         // System message and important user message should be kept
+        let all_active_messages: Vec<_> = result
+            .active_batches
+            .iter()
+            .flat_map(|b| &b.messages)
+            .collect();
         assert!(
-            result
-                .active_messages
+            all_active_messages
                 .iter()
                 .any(|m| m.role == ChatRole::System)
         );
         assert!(
-            result
-                .active_messages
+            all_active_messages
                 .iter()
                 .any(|m| m.text_content().unwrap_or_default().contains("password"))
         );
@@ -1308,7 +1594,18 @@ mod tests {
             Message::user("Message 3"),
         ];
 
-        let result = compressor.compress(messages, 2).await;
+        // Create batches from messages
+        let mut batches = Vec::new();
+        for msg in messages {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                vec![msg],
+            ));
+        }
+
+        let result = compressor.compress(batches, 2, None).await;
 
         // Should fail without model provider
         assert!(result.is_err());
@@ -1329,9 +1626,19 @@ mod tests {
             Message::user("What's 2+2?"),
         ];
 
-        let result = compressor.compress(messages, 2).await.unwrap();
+        // Create batches from messages
+        let batch_id = crate::agent::get_next_message_position_sync();
+        let batch = crate::message::MessageBatch::from_messages(
+            batch_id,
+            crate::message::BatchType::UserRequest,
+            messages,
+        );
+        let batches = vec![batch];
 
-        // Should work with heuristic fallback
-        assert_eq!(result.active_messages.len(), 2);
+        let result = compressor.compress(batches, 2, None).await.unwrap();
+
+        // Count active messages
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        assert_eq!(active_message_count, 2);
     }
 }

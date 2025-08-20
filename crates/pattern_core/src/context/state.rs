@@ -11,7 +11,7 @@ use tokio::sync::{RwLock, watch};
 use std::sync::Arc;
 
 use crate::{
-    AgentId, AgentState, AgentType, CoreError, IdType, Result,
+    AgentId, AgentState, AgentType, CoreError, IdType, ModelProvider, Result,
     db::{DatabaseError, DbEntity},
     id::MessageId,
     memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
@@ -60,7 +60,7 @@ impl AgentHandle {
 
     /// Update the state and notify watchers
     pub(crate) fn update_state(&mut self, new_state: AgentState) {
-        self.state = new_state;
+        self.state = new_state.clone();
         if let Some(arc) = &self.state_watch {
             let _ = arc.0.send(new_state);
         }
@@ -243,6 +243,72 @@ impl AgentHandle {
         Ok(())
     }
 
+    /// Archive messages in the database and store the summary
+    pub async fn archive_messages(
+        &self,
+        message_ids: Vec<crate::MessageId>,
+        summary: Option<String>,
+    ) -> Result<()> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for archiving messages".into(),
+                ),
+            ))
+        })?;
+
+        if !message_ids.is_empty() {
+            // Update the agent_messages relations to mark messages as archived
+            // We need to update the edge records, not the messages themselves
+            let sql = r#"
+                UPDATE agent_messages
+                SET message_type = 'archived'
+                WHERE in = $agent_id
+                AND out IN $message_ids
+            "#;
+
+            db.query(sql)
+                .bind(("agent_id", surrealdb::RecordId::from(self.agent_id.clone())))
+                .bind((
+                    "message_ids",
+                    message_ids
+                        .iter()
+                        .map(|id| surrealdb::RecordId::from(id))
+                        .collect::<Vec<_>>(),
+                ))
+                .await
+                .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+            tracing::info!(
+                "Archived {} messages for agent {} in database",
+                message_ids.len(),
+                self.agent_id
+            );
+        }
+
+        // Store the summary if provided
+        if let Some(summary_text) = summary {
+            // Update agent record with the archive summary
+            // The field is called message_summary in AgentRecord
+            let sql = r#"
+                UPDATE agent
+                SET message_summary = $summary,
+                    updated_at = time::now()
+                WHERE id = $id
+            "#;
+
+            db.query(sql)
+                .bind(("id", surrealdb::RecordId::from(self.agent_id.clone())))
+                .bind(("summary", summary_text))
+                .await
+                .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+            tracing::info!("Stored archive summary for agent {}", self.agent_id);
+        }
+
+        Ok(())
+    }
+
     /// Count archival memories for this agent
     pub async fn count_archival_memories(&self) -> Result<usize> {
         let db = self.db.as_ref().ok_or_else(|| {
@@ -338,7 +404,7 @@ impl AgentHandle {
 
             // Query the agent_messages relation table directly
             let sql = format!(
-                "SELECT position, batch, sequence_num, out.created_at as msg_created, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC, created_at DESC LIMIT $limit FETCH messages",
+                "SELECT position, batch, sequence_num, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC LIMIT $limit FETCH messages",
                 where_clause,
                 self.agent_id.to_key()
             );
@@ -676,7 +742,7 @@ impl AgentHandle {
 impl Default for AgentHandle {
     fn default() -> Self {
         let state = AgentState::Ready;
-        let (tx, rx) = watch::channel(state);
+        let (tx, rx) = watch::channel(state.clone());
         Self {
             name: "".to_string(),
             agent_id: AgentId::generate(),
@@ -741,11 +807,11 @@ impl MessageHistory {
     }
 
     /// Add a message to its batch (uses message.batch if present)
-    pub fn add_message(&mut self, message: Message) {
+    pub fn add_message(&mut self, message: Message) -> Message {
         let batch_id = message
             .batch
             .unwrap_or_else(crate::agent::get_next_message_position_sync);
-        self.add_message_to_batch(batch_id, message);
+        self.add_message_to_batch(batch_id, message)
     }
 
     /// Add a message to a specific batch
@@ -753,7 +819,7 @@ impl MessageHistory {
         &mut self,
         batch_id: crate::agent::SnowflakePosition,
         mut message: Message,
-    ) {
+    ) -> Message {
         use crate::message::{BatchType, MessageBatch};
 
         // Validate/set batch_id
@@ -765,7 +831,7 @@ impl MessageHistory {
 
         // Find or create batch
         if let Some(batch) = self.batches.iter_mut().find(|b| b.id == batch_id) {
-            batch.add_message(message);
+            batch.add_message(message)
         } else {
             // Create new batch - infer type from message role
             let batch_type = message.batch_type.unwrap_or_else(|| {
@@ -775,8 +841,12 @@ impl MessageHistory {
                     _ => BatchType::UserRequest, // Default
                 }
             });
+
+            // Clone the message since from_messages consumes it
+            let message_clone = message.clone();
             let batch = MessageBatch::from_messages(batch_id, batch_type, vec![message]);
             self.batches.push(batch);
+            message_clone
         }
     }
 
@@ -808,6 +878,9 @@ pub struct AgentContext {
     /// Optional constellation activity tracker for shared context
     pub constellation_tracker:
         Option<Arc<crate::constellation_memory::ConstellationActivityTracker>>,
+
+    /// Model provider for compression strategies that need it
+    pub(crate) model_provider: Option<Arc<dyn ModelProvider>>,
 }
 
 /// Metadata about the agent state
@@ -845,7 +918,7 @@ impl AgentContext {
         context_config: ContextConfig,
     ) -> Self {
         let state = AgentState::Ready;
-        let (tx, rx) = watch::channel(state);
+        let (tx, rx) = watch::channel(state.clone());
         let handle = AgentHandle {
             agent_id,
             memory,
@@ -866,6 +939,7 @@ impl AgentContext {
                 CompressionStrategy::default(),
             ))),
             constellation_tracker: None,
+            model_provider: None,
         }
     }
 
@@ -928,11 +1002,28 @@ impl AgentContext {
             self.context_config.max_context_messages
         );
 
+        // Count complete vs incomplete batches
+        let complete_count = history.batches.iter().filter(|b| b.is_complete).count();
+        let incomplete_count = history.batches.len() - complete_count;
+
+        tracing::debug!(
+            "Context state for agent {}: {} batches ({} complete, {} incomplete), current_batch_id={:?}",
+            self.handle.agent_id,
+            history.batches.len(),
+            complete_count,
+            incomplete_count,
+            current_batch_id
+        );
+
+        // Sort batches by ID (oldest to newest) before building context
+        let mut sorted_batches = history.batches.clone();
+        sorted_batches.sort_by_key(|b| b.id);
+
         let context =
             ContextBuilder::new(self.handle.agent_id.clone(), self.context_config.clone())
                 .with_memory_blocks(memory_blocks)
                 .with_tools_from_registry(&self.tools)
-                .with_batches(history.batches.clone())
+                .with_batches(sorted_batches)
                 .with_archive_summary(history.archive_summary.clone())
                 .build(current_batch_id)
                 .await?;
@@ -950,7 +1041,7 @@ impl AgentContext {
     }
 
     /// Add a new message to the state
-    pub async fn add_message(&self, message: Message) {
+    pub async fn add_message(&self, message: Message) -> Message {
         // Count tool calls for metadata
         if message.role.is_assistant() {
             if let MessageContent::ToolCalls(calls) = &message.content {
@@ -968,12 +1059,14 @@ impl AgentContext {
 
         // Add message to history - batches handle duplicate detection and sequencing
         let mut history = self.history.write().await;
-        history.add_message(message);
+        let updated_message = history.add_message(message);
 
         // Update metadata
         let mut metadata = self.metadata.write().await;
         metadata.total_messages += 1;
         metadata.last_active = Utc::now();
+
+        updated_message
     }
 
     /// Add a message to a specific batch
@@ -999,6 +1092,74 @@ impl AgentContext {
         let mut metadata = self.metadata.write().await;
         metadata.total_messages += message_count;
         metadata.last_active = Utc::now();
+    }
+
+    /// Clean up errors in batches - adds failure responses then runs finalize without marking complete
+    /// This is used when exiting process_message_stream early due to errors
+    pub async fn cleanup_errors(
+        &self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+        error_message: &str,
+    ) {
+        let mut history = self.history.write().await;
+
+        // Find and clean up the current batch if specified
+        if let Some(batch_id) = current_batch_id {
+            if let Some(batch) = history.batches.iter_mut().find(|b| b.id == batch_id) {
+                // First, add failure responses for any pending tool calls
+                let pending_calls = batch.get_pending_tool_calls();
+                if !pending_calls.is_empty() {
+                    tracing::info!(
+                        "Adding {} failure responses for pending tool calls in batch {}",
+                        pending_calls.len(),
+                        batch_id
+                    );
+                    for call_id in pending_calls {
+                        let error_response = crate::message::ToolResponse {
+                            call_id: call_id.clone(),
+                            content: format!("Error: {}", error_message),
+                        };
+                        batch.add_tool_response_with_sequencing(error_response);
+                    }
+                }
+
+                // Then finalize to clean up any remaining issues
+                let removed = batch.finalize();
+                if !removed.is_empty() {
+                    tracing::warn!(
+                        "Cleaned up {} unpaired tool calls in current batch {} during error handling",
+                        removed.len(),
+                        batch_id
+                    );
+                }
+                // Don't mark complete - leave that decision to the caller
+            }
+        }
+
+        // Also clean up any other incomplete batches (defensive)
+        for batch in history.batches.iter_mut() {
+            if !batch.is_complete && batch.has_pending_tool_calls() {
+                // Add failure responses for pending calls
+                let pending_calls = batch.get_pending_tool_calls();
+                for call_id in pending_calls {
+                    let error_response = crate::message::ToolResponse {
+                        call_id: call_id.clone(),
+                        content: format!("Error: {}", error_message),
+                    };
+                    batch.add_tool_response_with_sequencing(error_response);
+                }
+
+                let removed = batch.finalize();
+                if !removed.is_empty() {
+                    tracing::warn!(
+                        "Cleaned up {} unpaired tool calls in incomplete batch {} during error handling",
+                        removed.len(),
+                        batch.id
+                    );
+                }
+                // Don't mark complete - these may be resumed later
+            }
+        }
     }
 
     /// Process a single tool call and return the response
@@ -1084,27 +1245,64 @@ impl AgentContext {
     /// Compress messages using the configured strategy
     async fn compress_messages(&self) -> Result<()> {
         let mut history = self.history.write().await;
-        let compressor = MessageCompressor::new(history.compression_strategy.clone());
+        let mut compressor = MessageCompressor::new(history.compression_strategy.clone());
+
+        // Add model provider if available
+        if let Some(ref provider) = self.model_provider {
+            compressor = compressor.with_model_provider(provider.clone());
+        }
+
+        // Sort batches by ID (oldest to newest) before compression
+        history.batches.sort_by_key(|b| b.id);
+
+        let batch_count_before = history.batches.len();
+        let message_count_before: usize = history.batches.iter().map(|b| b.len()).sum();
+
+        tracing::debug!(
+            "Starting compression: {} batches with {} total messages",
+            batch_count_before,
+            message_count_before
+        );
 
         let result = compressor
             .compress(
                 history.batches.clone(),
                 self.context_config.max_context_messages,
+                self.context_config.max_context_tokens,
             )
             .await?;
 
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        let archived_message_count: usize = result.archived_batches.iter().map(|b| b.len()).sum();
+
+        tracing::info!(
+            "Compression result: {} active batches ({} msgs), {} archived batches ({} msgs)",
+            result.active_batches.len(),
+            active_message_count,
+            result.archived_batches.len(),
+            archived_message_count
+        );
+
         let archived_ids = self.apply_compression_result(&mut history, result)?;
+        let archive_summary = history.archive_summary.clone();
         history.last_compression = Utc::now();
         self.metadata.write().await.compression_events += 1;
 
-        // Return the archived IDs so the caller can persist them to the database
-        // For now, just log that compression happened
-        if !archived_ids.is_empty() {
-            tracing::info!(
-                "Compressed {} messages for agent {}, ready to archive in database",
-                archived_ids.len(),
-                self.handle.agent_id
-            );
+        // Archive the messages in the database and store the summary
+        if !archived_ids.is_empty() || archive_summary.is_some() {
+            if let Err(e) = self
+                .handle
+                .archive_messages(archived_ids.clone(), archive_summary)
+                .await
+            {
+                tracing::error!("Failed to archive messages in database: {:?}", e);
+            } else {
+                tracing::info!(
+                    "Successfully archived {} messages for agent {}",
+                    archived_ids.len(),
+                    self.handle.agent_id
+                );
+            }
         }
 
         Ok(())

@@ -259,7 +259,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_tool_execution() {
-        use pattern_core::tool::DynamicTool;
         use serde_json::json;
         use tokio::time::{Duration, timeout};
 

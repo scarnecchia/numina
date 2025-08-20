@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Orual <orual@nonbinary.computer>"]
 license = "AGPL-3.0"
@@ -145,3 +145,7 @@ bsky-sdk = { version = "0.1.20", features = ["default-client"] }
 [workspace.lints.clippy]
 mod_module_files = "warn"
 manual_range_contains = "allow"
+
+
+[profile.dev.package."surrealdb"]
+opt-level = 2

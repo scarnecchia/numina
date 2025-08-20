@@ -6,11 +6,10 @@ use pattern_core::{
     id::{AgentId, GroupId, MessageId, UserId},
     message::{ChatRole, MessageContent},
 };
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Authentication response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthResponse {
     /// Access token for API requests
     pub access_token: String,
@@ -25,7 +24,7 @@ pub struct AuthResponse {
 }
 
 /// User response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserResponse {
     pub id: UserId,
     pub username: String,
@@ -37,7 +36,7 @@ pub struct UserResponse {
 }
 
 /// Agent response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {
     pub id: AgentId,
     pub name: String,
@@ -57,7 +56,7 @@ pub struct AgentResponse {
 }
 
 /// Group response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupResponse {
     pub id: GroupId,
     pub name: String,
@@ -72,7 +71,7 @@ pub struct GroupResponse {
 }
 
 /// Group member response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMemberResponse {
     pub agent_id: AgentId,
     pub agent_name: String,
@@ -84,7 +83,7 @@ pub struct GroupMemberResponse {
 }
 
 /// Group with members response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupWithMembersResponse {
     #[serde(flatten)]
     pub group: GroupResponse,
@@ -92,7 +91,7 @@ pub struct GroupWithMembersResponse {
 }
 
 /// Message response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageResponse {
     pub id: MessageId,
     pub agent_id: AgentId,
@@ -105,15 +104,15 @@ pub struct MessageResponse {
 }
 
 /// Tool call response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResponse {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
 }
 
-/// Tool result response  
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Tool result response
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultResponse {
     pub tool_call_id: String,
     pub result: serde_json::Value,
@@ -121,14 +120,14 @@ pub struct ToolResultResponse {
 }
 
 /// Chat response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub messages: Vec<MessageResponse>,
     pub usage: Option<UsageInfo>,
 }
 
 /// Usage information for model calls
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageInfo {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -137,7 +136,7 @@ pub struct UsageInfo {
 }
 
 /// Memory response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResponse {
     pub agent_id: AgentId,
     pub memory_type: String,
@@ -147,7 +146,7 @@ pub struct MemoryResponse {
 }
 
 /// Archival memory item
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivalMemoryItem {
     pub id: String,
     pub label: String,
@@ -157,7 +156,7 @@ pub struct ArchivalMemoryItem {
 }
 
 /// Stats response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsResponse {
     pub total_users: u64,
     pub active_users: u64,
@@ -171,7 +170,7 @@ pub struct StatsResponse {
 }
 
 /// Health check response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: HealthStatus,
     pub version: String,
@@ -180,7 +179,7 @@ pub struct HealthResponse {
     pub services: Vec<ServiceStatus>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     Healthy,
@@ -188,7 +187,7 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComponentStatus {
     Ok,
@@ -196,7 +195,7 @@ pub enum ComponentStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStatus {
     pub name: String,
     pub status: ComponentStatus,
@@ -204,7 +203,7 @@ pub struct ServiceStatus {
 }
 
 /// Batch operation response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResponse<T> {
     pub successful: Vec<BatchResult<T>>,
     pub failed: Vec<BatchError>,
@@ -213,13 +212,13 @@ pub struct BatchResponse<T> {
     pub failed_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResult<T> {
     pub index: u32,
     pub result: T,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchError {
     pub index: u32,
     pub error: String,
@@ -228,7 +227,7 @@ pub struct BatchError {
 // ============ MCP Server Management ============
 
 /// MCP server info
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerResponse {
     pub id: String,
     pub name: String,
@@ -242,7 +241,7 @@ pub struct McpServerResponse {
 }
 
 /// MCP server connection status
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpServerStatus {
     Connected,
@@ -252,7 +251,7 @@ pub enum McpServerStatus {
 }
 
 /// MCP tool information
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolInfo {
     pub name: String,
     pub description: Option<String>,
@@ -262,7 +261,7 @@ pub struct McpToolInfo {
 // ============ Model Provider Configuration ============
 
 /// Model provider info
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProviderResponse {
     pub id: String,
     pub provider: String,
@@ -274,7 +273,7 @@ pub struct ModelProviderResponse {
 }
 
 /// Model provider status
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProviderStatus {
     Active,
@@ -284,7 +283,7 @@ pub enum ModelProviderStatus {
 }
 
 /// Model information
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
@@ -296,7 +295,7 @@ pub struct ModelInfo {
 // ============ API Key Management ============
 
 /// API key response (only returned on creation)
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyResponse {
     pub id: String,
     pub name: String,
@@ -308,7 +307,7 @@ pub struct ApiKeyResponse {
 }
 
 /// API key info (for listing)
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyInfo {
     pub id: String,
     pub name: String,

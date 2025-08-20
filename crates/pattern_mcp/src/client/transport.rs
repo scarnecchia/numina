@@ -84,7 +84,7 @@ impl ClientTransport {
     pub async fn http(url: String, auth: AuthConfig) -> Result<Self> {
         match auth {
             AuthConfig::None => {
-                let transport = StreamableHttpClientTransport::from_uri(url.clone());
+                let transport = StreamableHttpClientTransport::from(url.clone());
                 let service =
                     ().into_dyn()
                         .serve(transport)
@@ -98,7 +98,7 @@ impl ClientTransport {
                 let auth_header = auth_config_to_header(&auth);
                 if auth_header.is_some() {
                     // The rmcp transport should support auth headers via the auth_header parameter
-                    let transport = StreamableHttpClientTransport::from_uri(url.clone());
+                    let transport = StreamableHttpClientTransport::from(url.clone());
                     let service =
                         ().into_dyn()
                             .serve(transport)
@@ -131,9 +131,7 @@ impl ClientTransport {
     pub async fn sse(url: String, auth: AuthConfig) -> Result<Self> {
         match auth {
             AuthConfig::None => {
-                let transport = SseClientTransport::start(url.clone())
-                    .await
-                    .map_err(|e| McpError::transport_init("sse", &url, e))?;
+                let transport = SseClientTransport::from(url.clone());
                 let service =
                     ().into_dyn()
                         .serve(transport)
@@ -147,9 +145,7 @@ impl ClientTransport {
                 let auth_header = auth_config_to_header(&auth);
                 if auth_header.is_some() {
                     // The rmcp SSE transport should support auth headers
-                    let transport = SseClientTransport::start(url.clone())
-                        .await
-                        .map_err(|e| McpError::transport_init("sse", &url, e))?;
+                    let transport = SseClientTransport::from(url.clone());
                     let service =
                         ().into_dyn()
                             .serve(transport)

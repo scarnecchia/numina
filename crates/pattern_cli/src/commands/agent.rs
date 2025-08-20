@@ -1,7 +1,7 @@
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
-    agent::{AgentRecord, AgentState, AgentType, tool_rules::ToolRule},
+    agent::{AgentRecord, AgentType, tool_rules::ToolRule},
     config::{self, AgentConfig, MemoryBlockConfig, PatternConfig, ToolRuleConfig},
     db::{DbEntity, client::DB, ops},
     id::AgentId,
@@ -16,7 +16,7 @@ use surrealdb::RecordId;
 
 use crate::{
     agent_ops::load_agent_memories_and_messages,
-    output::{Output, format_agent_state, format_relative_time},
+    output::{Output, format_relative_time},
 };
 
 /// List all agents in the database
@@ -43,7 +43,8 @@ pub async fn list() -> Result<()> {
                     .bright_yellow()
                     .to_string(),
             );
-            output.kv("State", &format_agent_state(&agent.state));
+            // State is runtime-only, not persisted
+            output.kv("State", &"Ready".bright_green().to_string());
             output.kv(
                 "Stats",
                 &format!(
@@ -115,7 +116,6 @@ pub async fn create(name: &str, agent_type: Option<&str>, config: &PatternConfig
         id: agent_id.clone(),
         name: name.to_string(),
         agent_type: parsed_type.clone(),
-        state: AgentState::Ready,
         base_instructions,
         owner_id: user_id.clone(),
         created_at: now,
@@ -217,7 +217,8 @@ pub async fn status(name: &str) -> Result<()> {
                 .bright_yellow()
                 .to_string(),
         );
-        output.kv("State", &format_agent_state(&agent.state));
+        // State is runtime-only, not persisted
+        output.kv("State", &"Ready".bright_green().to_string());
         println!();
 
         // Instructions

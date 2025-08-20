@@ -931,19 +931,20 @@ impl DataSource for BlueskyFirehoseSource {
         };
 
         // Build options with all settings
-        let options = if let Some(ref cursor) = effective_cursor {
+        let _options = if let Some(ref cursor) = effective_cursor {
             JetstreamOptions::builder()
                 .cursor(cursor.time_us.to_string())
-                .wanted_collections(collections)
+                .wanted_collections(collections.clone())
                 .build()
         } else {
             JetstreamOptions::builder()
-                .wanted_collections(collections)
+                .wanted_collections(collections.clone())
                 .build()
         };
 
-        // Create connection - new() is sync
-        let connection = JetstreamConnection::new(options);
+        // Keep track of cursor across reconnections
+        let cursor: Arc<Mutex<Option<u64>>> =
+            Arc::new(Mutex::new(effective_cursor.map(|c| c.time_us)));
 
         // Create channel for processed events
         let (tx, rx) = tokio::sync::mpsc::channel(5000);
@@ -987,72 +988,185 @@ impl DataSource for BlueskyFirehoseSource {
             });
         }
 
-        // Create our ingestor that sends posts to our channel
-        let post_ingestor = PostIngestor {
-            tx: tx.clone(),
-            filter,
-            buffer,
-            resolver: atproto_identity_resolver(),
-            last_send_time: self.last_send_time.clone(),
-            min_interval: std::time::Duration::from_secs_f64(1.0 / self.posts_per_second),
-            // Cursor persistence
-            cursor_file_path: self.cursor_file_path.clone(),
-            cursor_save_interval: self.cursor_save_interval,
-            cursor_save_threshold: self.cursor_save_threshold,
-            events_since_save: self.events_since_save.clone(),
-            last_cursor_save: self.last_cursor_save.clone(),
-        };
+        // Spawn the connection manager task that handles recreating connections
+        let manager_source_id = source_id;
+        let manager_tx = tx.clone();
+        let manager_filter = filter;
+        let manager_buffer = buffer;
+        let manager_collections = collections;
+        let manager_last_send_time = self.last_send_time.clone();
+        let manager_cursor_file = self.cursor_file_path.clone();
+        let manager_cursor_save_interval = self.cursor_save_interval;
+        let manager_cursor_save_threshold = self.cursor_save_threshold;
+        let manager_events_since_save = self.events_since_save.clone();
+        let manager_last_cursor_save = self.last_cursor_save.clone();
+        let manager_posts_per_second = self.posts_per_second;
 
-        let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> = HashMap::new();
-        ingestors.insert("app.bsky.feed.post".to_string(), Box::new(post_ingestor));
-
-        // tracks the last message we've processed
-        let cursor: Arc<Mutex<Option<u64>>> =
-            Arc::new(Mutex::new(effective_cursor.map(|c| c.time_us)));
-
-        let msg_rx = connection.get_msg_rx();
-        let reconnect_tx = connection.get_reconnect_tx();
-
-        let c_cursor = cursor.clone();
-        let c_source_id = source_id.clone();
-        let ingestor_tx = tx.clone();
-        // Spawn task to consume events
-        let handle = tokio::spawn(async move {
-            // Process messages from jetstream
-            while let Ok(message) = msg_rx.recv_async().await {
-                if let Err(e) = handler::handle_message(
-                    message,
-                    &ingestors,
-                    reconnect_tx.clone(),
-                    c_cursor.clone(),
-                )
-                .await
-                {
-                    tracing::warn!("Error processing message: {}", e);
-                    let _ = ingestor_tx.send(Err(crate::CoreError::DataSourceError {
-                        source_name: c_source_id.clone(),
-                        operation: "process".to_string(),
-                        cause: e.to_string(),
-                    }));
-                };
-            }
-        });
-
-        // Spawn connect in its own task so it doesn't block
-        let connect_source_id = source_id.clone();
-        let connect_tx = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = connection.connect(cursor.clone()).await {
-                let error_msg = e.to_string();
-                tracing::error!("Jetstream connection error: {}", error_msg);
-                // Use try_send to avoid await point while holding non-Send error
-                let _ = connect_tx.try_send(Err(crate::CoreError::DataSourceError {
-                    source_name: connect_source_id,
-                    operation: "connect".to_string(),
-                    cause: error_msg,
-                }));
+            let mut connection_count = 0;
+            let mut consecutive_failures: u32 = 0;
+            const BASE_DELAY_SECS: u64 = 5;
+            const MAX_DELAY_SECS: u64 = 300; // 5 minutes max
+
+            // Outer loop that recreates the connection when it dies
+            loop {
+                connection_count += 1;
+                tracing::info!("Creating jetstream connection #{}", connection_count);
+
+                // Build options based on current cursor
+                let current_cursor = {
+                    let cursor_lock = cursor.lock();
+                    if let Ok(guard) = cursor_lock {
+                        guard.clone()
+                    } else {
+                        None
+                    }
+                };
+
+                let options = if let Some(cursor_us) = current_cursor {
+                    JetstreamOptions::builder()
+                        .cursor(cursor_us.to_string())
+                        .wanted_collections(manager_collections.clone())
+                        .build()
+                } else {
+                    JetstreamOptions::builder()
+                        .wanted_collections(manager_collections.clone())
+                        .build()
+                };
+
+                // Create new connection
+                let connection = JetstreamConnection::new(options);
+
+                // Create our ingestor that sends posts to our channel
+                let post_ingestor = PostIngestor {
+                    tx: manager_tx.clone(),
+                    filter: manager_filter.clone(),
+                    buffer: manager_buffer.clone(),
+                    resolver: atproto_identity_resolver(),
+                    last_send_time: manager_last_send_time.clone(),
+                    min_interval: std::time::Duration::from_secs_f64(
+                        1.0 / manager_posts_per_second,
+                    ),
+                    // Cursor persistence
+                    cursor_file_path: manager_cursor_file.clone(),
+                    cursor_save_interval: manager_cursor_save_interval,
+                    cursor_save_threshold: manager_cursor_save_threshold,
+                    events_since_save: manager_events_since_save.clone(),
+                    last_cursor_save: manager_last_cursor_save.clone(),
+                };
+
+                let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> =
+                    HashMap::new();
+                ingestors.insert("app.bsky.feed.post".to_string(), Box::new(post_ingestor));
+
+                let msg_rx = connection.get_msg_rx();
+                let reconnect_tx = connection.get_reconnect_tx();
+
+                let c_cursor = cursor.clone();
+                let c_source_id = manager_source_id.clone();
+                let ingestor_tx = manager_tx.clone();
+
+                // Spawn task to consume events from this connection
+                let handle = tokio::spawn(async move {
+                    // Process messages from jetstream with a timeout
+                    // If we don't receive any message for 60 seconds, assume connection is dead
+                    const MESSAGE_TIMEOUT_SECS: u64 = 60;
+
+                    loop {
+                        match tokio::time::timeout(
+                            Duration::from_secs(MESSAGE_TIMEOUT_SECS),
+                            msg_rx.recv_async(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(message)) => {
+                                // Got a message, process it
+                                if let Err(e) = handler::handle_message(
+                                    message,
+                                    &ingestors,
+                                    reconnect_tx.clone(),
+                                    c_cursor.clone(),
+                                )
+                                .await
+                                {
+                                    tracing::warn!("Error processing message: {}", e);
+                                    let _ =
+                                        ingestor_tx.send(Err(crate::CoreError::DataSourceError {
+                                            source_name: c_source_id.clone(),
+                                            operation: "process".to_string(),
+                                            cause: e.to_string(),
+                                        }));
+                                }
+                            }
+                            Ok(Err(_)) => {
+                                // Channel closed
+                                tracing::info!("Message channel closed, connection terminated");
+                                break;
+                            }
+                            Err(_) => {
+                                // Timeout - no messages for 60 seconds
+                                tracing::warn!(
+                                    "No messages received for {} seconds, assuming connection is dead",
+                                    MESSAGE_TIMEOUT_SECS
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    tracing::info!("Message handler exiting");
+                });
+
+                // Try to connect (simplified - let rocketman handle retries)
+                if connection
+                    .connect(cursor.clone())
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!(
+                            "Failed to establish connection #{}: {}",
+                            connection_count,
+                            e
+                        );
+                    })
+                    .is_ok()
+                {
+                    tracing::info!("Jetstream connection #{} established", connection_count);
+                    consecutive_failures = 0; // Reset on successful connection
+
+                    // Wait for the handler to exit (connection died)
+                    let _ = handle.await;
+
+                    tracing::warn!(
+                        "Jetstream connection #{} died, will recreate",
+                        connection_count
+                    );
+                } else {
+                    consecutive_failures += 1;
+                    // Abort the handler since we never connected
+                    handle.abort();
+                }
+
+                // Calculate exponential backoff delay
+                let delay_secs = if consecutive_failures == 0 {
+                    BASE_DELAY_SECS
+                } else {
+                    let exponential_delay = BASE_DELAY_SECS.saturating_mul(
+                        2_u64.saturating_pow(consecutive_failures.saturating_sub(1) as u32),
+                    );
+                    exponential_delay.min(MAX_DELAY_SECS)
+                };
+
+                tracing::info!(
+                    "Waiting {} seconds before recreating connection (failure count: {})",
+                    delay_secs,
+                    consecutive_failures
+                );
+
+                // Wait before recreating the connection
+                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+
+                // Continue loop to recreate connection
+                tracing::info!("Recreating jetstream connection after delay...");
             }
-            handle.abort();
         });
         Ok(Box::new(ReceiverStream::new(rx))
             as Box<

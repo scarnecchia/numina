@@ -358,15 +358,120 @@ impl FromStr for AgentType {
     }
 }
 
+/// Types of recoverable errors that agents can encounter
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[non_exhaustive]
+pub enum RecoverableErrorKind {
+    /// Anthropic thinking mode message ordering error
+    /// Note that anthropic often gives the index of the problematic message,
+    /// TODO: Pass along and make use of this
+    AnthropicThinkingOrder,
+
+    /// Gemini empty contents error
+    GeminiEmptyContents,
+
+    /// Unpaired tool calls
+    UnpairedToolCalls,
+
+    /// Unpaired tool responses
+    UnpairedToolResponses,
+
+    /// Message compression failed
+    MessageCompressionFailed,
+
+    /// Context building failed
+    ContextBuildFailed,
+
+    /// Model API error
+    ModelApiError,
+
+    /// Unknown error type
+    Unknown,
+}
+
+impl RecoverableErrorKind {
+    /// Parse an error message to determine the appropriate recovery kind
+    pub fn from_error_str(error_str: &str) -> Self {
+        let lower = error_str.to_lowercase();
+
+        // Anthropic thinking mode errors
+        if lower.contains("messages: roles must alternate")
+            || lower.contains("messages does not match")
+        {
+            return Self::AnthropicThinkingOrder;
+        }
+
+        // Gemini empty contents errors
+        if lower.contains("contents is not specified") || lower.contains("empty contents") {
+            return Self::GeminiEmptyContents;
+        }
+
+        // Tool-related errors
+        if (lower.contains("tool_use") && lower.contains("unpaired"))
+            || (lower.contains("tool_use")
+                && lower.contains("without")
+                && lower.contains("tool_result"))
+        {
+            return Self::UnpairedToolCalls;
+        }
+        if (lower.contains("tool_result") && lower.contains("unpaired"))
+            || (lower.contains("tool_result")
+                && lower.contains("without")
+                && lower.contains("tool_use"))
+        {
+            return Self::UnpairedToolResponses;
+        }
+
+        // Compression errors
+        if lower.contains("compression") {
+            return Self::MessageCompressionFailed;
+        }
+
+        // Context errors
+        if lower.contains("context") || lower.contains("token") {
+            return Self::ContextBuildFailed;
+        }
+
+        // Generic model API errors
+        if lower.contains("api") || lower.contains("model") {
+            return Self::ModelApiError;
+        }
+
+        Self::Unknown
+    }
+
+    /// Extract additional context from error messages (like Anthropic's index)
+    pub fn extract_error_context(error_str: &str) -> Option<serde_json::Value> {
+        // Try to extract index from Anthropic errors
+        if error_str.contains("messages[") {
+            // Look for pattern like "messages[5]" or "at index 5"
+            let re = regex::Regex::new(r"messages\[(\d+)\]|at index (\d+)").ok()?;
+            if let Some(captures) = re.captures(error_str) {
+                let index = captures
+                    .get(1)
+                    .or_else(|| captures.get(2))
+                    .and_then(|m| m.as_str().parse::<usize>().ok())?;
+                return Some(serde_json::json!({
+                    "problematic_index": index
+                }));
+            }
+        }
+        None
+    }
+}
+
 /// The current state of an agent
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentState {
     /// Agent is ready to process messages
     Ready,
 
     /// Agent is currently processing a message
-    Processing,
+    Processing {
+        /// Batches currently being processed
+        active_batches: std::collections::HashSet<SnowflakePosition>,
+    },
 
     /// Agent is in a cooldown period
     Cooldown { until: chrono::DateTime<Utc> },
@@ -375,7 +480,12 @@ pub enum AgentState {
     Suspended,
 
     /// Agent has encountered an error
-    Error,
+    Error {
+        /// Type of error for recovery logic
+        kind: RecoverableErrorKind,
+        /// Error message for logging
+        message: String,
+    },
 }
 
 impl Default for AgentState {
@@ -390,9 +500,14 @@ impl FromStr for AgentState {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "ready" => Ok(Self::Ready),
-            "processing" => Ok(Self::Processing),
+            "processing" => Ok(Self::Processing {
+                active_batches: std::collections::HashSet::new(),
+            }),
             "suspended" => Ok(Self::Suspended),
-            "error" => Ok(Self::Error),
+            "error" => Ok(Self::Error {
+                kind: RecoverableErrorKind::Unknown,
+                message: String::new(),
+            }),
             other => {
                 // Try to parse as cooldown with timestamp
                 if other.starts_with("cooldown:") {

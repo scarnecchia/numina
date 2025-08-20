@@ -469,8 +469,10 @@ default_filter = { nsids = [
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
     "did:plc:vw4e7blkwzdokanwp24k3igr", # hoopy
     "did:plc:7757w723nk675bqziinitoif", # alice (avengingfemme)
+    "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # alice (__justplaying)
     "did:plc:ouylf4wfd75rdqupddfmeerk", # nutty.land (kris nuttycombe)
     "did:plc:dzvxvsiy3maw4iarpvizsj67", # dollspace.gay
+    "did:plc:bnqkww7bjxaacajzvu5gswdf", # shreyan
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
 ], exclude_keywords = [

@@ -214,17 +214,29 @@ impl Default for Output {
 }
 
 /// Format agent state for display
+#[allow(dead_code)]
 pub fn format_agent_state(state: &pattern_core::agent::AgentState) -> String {
     use pattern_core::agent::AgentState;
 
     match state {
         AgentState::Ready => "Ready".bright_green().to_string(),
-        AgentState::Processing => "Processing".bright_yellow().to_string(),
+        AgentState::Processing { active_batches } => {
+            if active_batches.is_empty() {
+                "Processing".bright_yellow().to_string()
+            } else {
+                format!("Processing ({} batches)", active_batches.len())
+                    .bright_yellow()
+                    .to_string()
+            }
+        }
         AgentState::Cooldown { until } => format!("Cooldown until {}", until.format("%H:%M:%S"))
             .yellow()
             .to_string(),
         AgentState::Suspended => "Suspended".bright_red().to_string(),
-        AgentState::Error => "Error".red().bold().to_string(),
+        AgentState::Error { kind, message } => format!("Error ({:?}): {}", kind, message)
+            .red()
+            .bold()
+            .to_string(),
     }
 }
 

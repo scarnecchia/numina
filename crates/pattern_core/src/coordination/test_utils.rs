@@ -148,6 +148,10 @@ pub(crate) mod test {
             created_at: Utc::now(),
             embedding: None,
             embedding_model: None,
+            position: None,
+            batch: None,
+            sequence_num: None,
+            batch_type: None,
         }
     }
 

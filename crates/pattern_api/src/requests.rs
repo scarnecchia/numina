@@ -7,15 +7,14 @@ use pattern_core::{
     id::{AgentId, GroupId, UserId},
     message::{ChatRole, MessageContent},
 };
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Health check request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckRequest {}
 
 /// Authentication request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AuthRequest {
     /// Login with username/password
@@ -25,7 +24,7 @@ pub enum AuthRequest {
 }
 
 /// Refresh token request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshTokenRequest {
     /// The refresh token - will be sent via Authorization: Bearer header
     #[serde(skip)]
@@ -33,7 +32,7 @@ pub struct RefreshTokenRequest {
 }
 
 /// User creation request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateUserRequest {
     pub username: String,
     pub password: String, // Server will hash this on receipt
@@ -44,7 +43,7 @@ pub struct CreateUserRequest {
 }
 
 /// User update request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateUserRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -55,7 +54,7 @@ pub struct UpdateUserRequest {
 }
 
 /// Agent creation request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAgentRequest {
     pub name: String,
     pub agent_type: AgentType,
@@ -74,7 +73,7 @@ pub struct CreateAgentRequest {
 }
 
 /// Agent update request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -95,7 +94,7 @@ pub struct UpdateAgentRequest {
 }
 
 /// Group creation request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateGroupRequest {
     pub name: String,
     pub description: String,
@@ -105,7 +104,7 @@ pub struct CreateGroupRequest {
 }
 
 /// Group member addition request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMemberRequest {
     pub agent_id: AgentId,
     pub role: GroupMemberRole,
@@ -116,7 +115,7 @@ pub struct GroupMemberRequest {
 }
 
 /// Group update request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateGroupRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -129,7 +128,7 @@ pub struct UpdateGroupRequest {
 }
 
 /// Chat target specification
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ChatTarget {
     /// Direct agent ID
@@ -141,7 +140,7 @@ pub enum ChatTarget {
 }
 
 /// Chat message request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageRequest {
     /// Target for the message
     pub target: ChatTarget,
@@ -150,7 +149,7 @@ pub struct SendMessageRequest {
 }
 
 /// Message search request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchMessagesRequest {
     /// Text to search for
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,14 +172,14 @@ pub struct SearchMessagesRequest {
 }
 
 /// Agent memory update request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateMemoryRequest {
     pub memory_key: String,
     pub operation: MemoryOperation,
 }
 
 /// Memory operation types
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MemoryOperation {
     /// Append content to memory
@@ -205,7 +204,7 @@ pub enum MemoryOperation {
 }
 
 /// Batch operation request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchRequest<T> {
     pub operations: Vec<T>,
     /// Whether to stop on first error
@@ -214,7 +213,7 @@ pub struct BatchRequest<T> {
 }
 
 /// Sort fields for different resource types
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortField {
     // Common fields
@@ -231,7 +230,7 @@ pub enum SortField {
 }
 
 /// List query parameters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListQueryParams {
     /// Filter by active/inactive status
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -250,7 +249,7 @@ pub struct ListQueryParams {
 // ============ MCP Server Management ============
 
 /// MCP server connection request
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectMcpServerRequest {
     /// Display name for this MCP server
     pub name: String,
@@ -269,7 +268,7 @@ fn default_true() -> bool {
 }
 
 /// MCP transport configuration
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpTransportConfig {
     /// Standard I/O transport (for local processes)
@@ -288,7 +287,7 @@ pub enum McpTransportConfig {
 }
 
 /// Update MCP server connection
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateMcpServerRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -303,7 +302,7 @@ pub struct UpdateMcpServerRequest {
 // ============ Model Provider Configuration ============
 
 /// Configure a model provider
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigureModelProviderRequest {
     /// Provider type (anthropic, openai, google, etc.)
     pub provider: String,
@@ -315,7 +314,7 @@ pub struct ConfigureModelProviderRequest {
 }
 
 /// Model provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelProviderConfig {
     /// API key based providers (OpenAI, Anthropic, etc.)
@@ -342,7 +341,7 @@ pub enum ModelProviderConfig {
 }
 
 /// Update model provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateModelProviderRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<ModelProviderConfig>,
@@ -355,7 +354,7 @@ pub struct UpdateModelProviderRequest {
 // ============ API Key Management ============
 
 /// Create a new API key
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateApiKeyRequest {
     /// Name/description for this API key
     pub name: String,
@@ -370,7 +369,7 @@ pub struct CreateApiKeyRequest {
 }
 
 /// API permissions
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiPermission {
     // Read permissions
@@ -393,7 +392,7 @@ pub enum ApiPermission {
 }
 
 /// Update API key
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateApiKeyRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -410,26 +409,26 @@ pub struct UpdateApiKeyRequest {
 // ============ GET Request Types ============
 
 /// Get a single user by ID
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetUserRequest {
     pub id: UserId,
 }
 
 /// List users with optional filters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListUsersRequest {
     #[serde(flatten)]
     pub query: ListQueryParams,
 }
 
 /// Get a single agent by ID
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetAgentRequest {
     pub id: AgentId,
 }
 
 /// List agents with optional filters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAgentsRequest {
     /// Filter by owner
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -439,13 +438,13 @@ pub struct ListAgentsRequest {
 }
 
 /// Get a single group by ID
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetGroupRequest {
     pub id: GroupId,
 }
 
 /// List groups with optional filters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListGroupsRequest {
     /// Filter by owner
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -455,7 +454,7 @@ pub struct ListGroupsRequest {
 }
 
 /// Get messages for an agent or group
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetMessagesRequest {
     /// Agent or group ID
     pub target: ChatTarget,
@@ -472,7 +471,7 @@ fn default_message_limit() -> u32 {
 }
 
 /// List MCP servers
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListMcpServersRequest {
     /// Filter by status
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -482,13 +481,13 @@ pub struct ListMcpServersRequest {
 }
 
 /// Get a single MCP server
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetMcpServerRequest {
     pub id: String,
 }
 
 /// List model providers
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListModelProvidersRequest {
     /// Filter by enabled status
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -498,26 +497,26 @@ pub struct ListModelProvidersRequest {
 }
 
 /// Get a single model provider
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetModelProviderRequest {
     pub id: String,
 }
 
 /// List API keys
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListApiKeysRequest {
     #[serde(flatten)]
     pub query: ListQueryParams,
 }
 
 /// Get a single API key
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetApiKeyRequest {
     pub id: String,
 }
 
 /// Get memory blocks for an agent
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetMemoryRequest {
     pub agent_id: AgentId,
     /// Optional memory type filter (core, recall, archival)
@@ -526,7 +525,7 @@ pub struct GetMemoryRequest {
 }
 
 /// List archival memory for an agent
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListArchivalMemoryRequest {
     pub agent_id: AgentId,
     /// Search query for semantic search

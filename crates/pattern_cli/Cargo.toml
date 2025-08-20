@@ -12,9 +12,10 @@ name = "pattern-cli"
 path = "src/main.rs"
 
 [features]
-default = ["oauth", "discord"]
+default = ["oauth", "discord", "surreal-remote"]
 oauth = ["pattern-core/oauth"]
 discord = ["pattern-discord"]
+surreal-remote = ["pattern-core/surreal-remote"]
 
 [dependencies]
 # Workspace dependencies

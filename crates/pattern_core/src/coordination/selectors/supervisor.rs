@@ -71,19 +71,20 @@ impl AgentSelector for SupervisorSelector {
         let prompt = build_selection_prompt(&context.message, agents, config);
 
         // Create a message for the supervisor, preserving original metadata
-        let mut metadata = context.message.metadata.clone();
+        let metadata = context.message.metadata.clone();
 
         // Add coordination flag to the custom metadata
-        if let Some(custom) = metadata.custom.as_object_mut() {
-            custom.insert("coordination_message".to_string(), serde_json::json!(true));
-        } else {
-            // If custom was not an object, preserve the original value and add our flag
-            let original_custom = metadata.custom.clone();
-            metadata.custom = serde_json::json!({
-                "coordination_message": true,
-                "original_custom": original_custom
-            });
-        }
+        // if let Some(custom) = metadata.custom.as_object_mut() {
+        //     custom.insert("coordination_message".to_string(), serde_json::json!(true));
+        // } else {
+        //     // If custom was not an object, preserve the original value and add our flag
+        //     let original_custom = metadata.custom.clone();
+        //     metadata.custom = serde_json::json!({
+        //         "coordination_message": true,
+        //         "original_custom": original_custom
+        //     });
+        // }
+        // temporarily removing to see if persisting these is fine now
 
         let supervisor_message = Message {
             id: crate::MessageId::generate(),

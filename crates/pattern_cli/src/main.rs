@@ -593,6 +593,27 @@ async fn main() -> Result<()> {
         };
     }
 
+    // Apply environment variable overrides for Remote database config
+    #[cfg(feature = "surreal-remote")]
+    if let DatabaseConfig::Remote {
+        username, password, ..
+    } = &mut config.database
+    {
+        // Only override if not already set in config
+        if username.is_none() {
+            if let Ok(user) = std::env::var("SURREAL_USER") {
+                info!("Using SURREAL_USER from environment");
+                *username = Some(user);
+            }
+        }
+        if password.is_none() {
+            if let Ok(pass) = std::env::var("SURREAL_PASS") {
+                info!("Using SURREAL_PASS from environment");
+                *password = Some(pass);
+            }
+        }
+    }
+
     tracing::info!("Using database config: {:?}", config.database);
 
     // Initialize database
@@ -612,11 +633,11 @@ async fn main() -> Result<()> {
             | Commands::Db { .. }
     );
 
-    if !config.groups.is_empty() && !skip_group_init {
-        // Create a heartbeat channel for group initialization
-        let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
-        commands::group::initialize_from_config(&config, heartbeat_sender).await?;
-    }
+    // if !config.groups.is_empty() && !skip_group_init {
+    //     // Create a heartbeat channel for group initialization
+    //     let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
+    //     commands::group::initialize_from_config(&config, heartbeat_sender).await?;
+    // }
 
     match &cli.command {
         Commands::Chat {
@@ -641,7 +662,7 @@ async fn main() -> Result<()> {
                 let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
                 let group = match group {
                     Some(g) => g,
-                    None => {
+                    _ => {
                         output.error(&format!("Group '{}' not found", group_name));
                         return Ok(());
                     }

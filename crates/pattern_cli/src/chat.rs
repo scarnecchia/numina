@@ -294,7 +294,7 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
     let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
     let group = match group {
         Some(g) => g,
-        None => {
+        _ => {
             output.error(&format!("Group '{}' not found", group_name));
             return Err(miette::miette!("Group not found"));
         }
@@ -419,7 +419,7 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
             PatternConfig {
                 user: config.user.clone(),
                 agent: agent_cfg,
-                model: config.model.clone(),
+                model: agent_cfg.model.clone(),
                 database: config.database.clone(),
                 groups: config.groups.clone(),
                 bluesky: config.bluesky.clone(),

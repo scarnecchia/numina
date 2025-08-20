@@ -377,6 +377,7 @@ impl MigrationRunner {
                         let mut batch =
                             MessageBatch::from_messages(batch_id, batch_type, accumulator.clone());
                         let removed_ids = batch.finalize(); // Clean up any unpaired tool calls
+                        batch.mark_complete(); // Mark as complete since it's historical
                         if !removed_ids.is_empty() {
                             tracing::warn!(
                                 "  Removing {} unpaired tool call messages from batch",
@@ -441,6 +442,7 @@ impl MigrationRunner {
 
                 let mut batch = MessageBatch::from_messages(batch_id, batch_type, accumulator);
                 let removed_ids = batch.finalize();
+                batch.mark_complete(); // Mark as complete since it's historical
                 if !removed_ids.is_empty() {
                     tracing::warn!(
                         "  Removing {} unpaired tool call messages from final batch",
@@ -681,14 +683,11 @@ impl MigrationRunner {
     pub async fn repair_orphaned_tool_messages_standalone<C: Connection>(
         db: &Surreal<C>,
     ) -> Result<()> {
-        // Clean up any artificial batches first
-        Self::cleanup_artificial_batches(db).await?;
-
         // Try the simple repair first
         Self::repair_orphaned_tool_messages(db).await?;
 
-        // Then try the enhanced repair for orphaned pairs
-        Self::repair_orphaned_message_pairs(db).await
+        // Then try the enhanced repair but without creating artificial batches
+        Self::repair_orphaned_message_pairs_no_artificial(db).await
     }
 
     /// Clean up specific artificial batch IDs that were created
@@ -703,7 +702,7 @@ impl MigrationRunner {
 
         // Null out batch fields in messages with these batch IDs
         for batch_id in batch_ids {
-            let query = "UPDATE msg SET batch = NULL, position = NULL, sequence_num = NULL, batch_type = NULL 
+            let query = "UPDATE msg SET batch = NULL, position = NULL, sequence_num = NULL, batch_type = NULL
                         WHERE batch = $batch_id";
 
             let mut result = db
@@ -722,7 +721,7 @@ impl MigrationRunner {
 
         // Also null out batch fields in agent_messages relations
         for batch_id in batch_ids {
-            let query = "UPDATE agent_messages SET batch = NULL, position = NULL, sequence_num = NULL, batch_type = NULL 
+            let query = "UPDATE agent_messages SET batch = NULL, position = NULL, sequence_num = NULL, batch_type = NULL
                         WHERE batch = $batch_id";
 
             let mut result = db
@@ -740,79 +739,6 @@ impl MigrationRunner {
         }
 
         tracing::info!("Cleanup of specific artificial batches completed");
-        Ok(())
-    }
-
-    /// Clean up artificial batches that were created with recent snowflake IDs
-    async fn cleanup_artificial_batches<C: Connection>(db: &Surreal<C>) -> Result<()> {
-        tracing::info!("Cleaning up artificial batches...");
-
-        // Clear all batches >= the first artificial batch we created
-        const ARTIFICIAL_BATCH_START: &str = "30586500127457280";
-
-        // Count how many messages we're about to clear
-        // Use type::number to cast for numeric comparison
-        let count_query = r#"
-            SELECT COUNT() as count FROM msg
-            WHERE type::number(batch) >= type::number($threshold)
-        "#;
-
-        let mut count_result = db
-            .query(count_query)
-            .bind(("threshold", ARTIFICIAL_BATCH_START))
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
-
-        #[derive(serde::Deserialize)]
-        struct CountResult {
-            count: Option<i64>,
-        }
-
-        let counts: Vec<CountResult> = count_result.take(0).unwrap_or_default();
-        let message_count = counts.get(0).and_then(|c| c.count).unwrap_or(0);
-
-        if message_count == 0 {
-            tracing::info!("  No artificial batches found to clean up");
-            return Ok(());
-        }
-
-        tracing::warn!(
-            "  Found {} messages with artificial batches to clear",
-            message_count
-        );
-
-        // Clear batch info from all messages with artificial batches
-        let clear_query = r#"
-            UPDATE msg SET
-                batch = NULL,
-                position = NULL,
-                sequence_num = NULL,
-                batch_type = NULL
-            WHERE type::number(batch) >= type::number($threshold)
-        "#;
-
-        db.query(clear_query)
-            .bind(("threshold", ARTIFICIAL_BATCH_START))
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
-
-        // Also clear from agent_messages relations
-        let clear_relation_query = r#"
-            UPDATE agent_messages SET
-                batch = NULL,
-                position = NULL,
-                sequence_num = NULL,
-                batch_type = NULL
-            WHERE type::number(batch) >= type::number($threshold)
-        "#;
-
-        db.query(clear_relation_query)
-            .bind(("threshold", ARTIFICIAL_BATCH_START))
-            .await
-            .map_err(DatabaseError::QueryFailed)?;
-
-        tracing::info!("  Cleanup complete, cleared {} messages", message_count);
-
         Ok(())
     }
 
@@ -997,14 +923,17 @@ impl MigrationRunner {
         Ok(())
     }
 
-    /// Enhanced repair for orphaned message pairs/groups
-    async fn repair_orphaned_message_pairs<C: Connection>(db: &Surreal<C>) -> Result<()> {
+    /// Enhanced repair for orphaned message pairs without creating artificial batches
+    async fn repair_orphaned_message_pairs_no_artificial<C: Connection>(
+        db: &Surreal<C>,
+    ) -> Result<()> {
         use crate::db::entity::DbEntity;
         use crate::message::Message;
         use chrono::Duration;
-        use std::collections::HashMap;
 
-        tracing::info!("Starting enhanced repair for orphaned message pairs...");
+        tracing::info!(
+            "Starting enhanced repair for orphaned message pairs (no artificial batches)..."
+        );
 
         // First, get all agents to process them one by one
         let agents_query = "SELECT * FROM agent";
@@ -1076,7 +1005,7 @@ impl MigrationRunner {
                 agent.name
             );
 
-            // Group messages by time proximity (within 10 seconds)
+            // Group messages by time proximity (within 5 minutes)
             let mut groups: Vec<Vec<Message>> = Vec::new();
             let mut current_group: Vec<Message> = Vec::new();
 
@@ -1108,14 +1037,13 @@ impl MigrationRunner {
             tracing::info!("    Grouped into {} time-based groups", groups.len());
 
             // Load messages with batch info FOR THIS AGENT
-            // The batch field is duplicated in agent_messages relation
             let batch_query = r#"
-            SELECT out as id, batch, out.created_at as added_at, sequence_num
-            FROM agent_messages
-            WHERE in = $agent_id
-            AND batch IS NOT NULL
-            ORDER BY added_at ASC
-        "#;
+                SELECT out as id, batch, out.created_at as added_at, sequence_num
+                FROM agent_messages
+                WHERE in = $agent_id
+                AND batch IS NOT NULL
+                ORDER BY added_at ASC
+            "#;
 
             let mut batch_result = db
                 .query(batch_query)
@@ -1124,19 +1052,19 @@ impl MigrationRunner {
                 .map_err(DatabaseError::QueryFailed)?;
 
             #[derive(Debug, serde::Deserialize)]
+            #[allow(dead_code)]
             struct BatchInfo {
                 id: surrealdb::RecordId,
                 batch: String,
-                created_at: chrono::DateTime<chrono::Utc>,
+                added_at: chrono::DateTime<chrono::Utc>,
                 sequence_num: Option<u32>,
             }
 
             let messages_with_batch: Vec<BatchInfo> = batch_result.take(0).unwrap_or_default();
 
             tracing::info!(
-                "    Found {} messages with batch info for agent {}",
-                messages_with_batch.len(),
-                agent.name
+                "    Found {} messages with batch info for reference",
+                messages_with_batch.len()
             );
 
             let mut repaired_count = 0;
@@ -1149,26 +1077,29 @@ impl MigrationRunner {
                     continue;
                 }
 
-                // Find the nearest message with batch info
-                let group_time = group[0].created_at; // Use first message time as reference
+                // Find the nearest message with batch info within 5 minutes
+                let group_time = group[0].created_at;
                 let mut nearest_batch: Option<&BatchInfo> = None;
                 let mut smallest_diff = i64::MAX;
 
                 for batch_msg in &messages_with_batch {
-                    let diff = (batch_msg.created_at - group_time).num_seconds().abs();
-                    if diff < smallest_diff {
+                    let diff = (batch_msg.added_at - group_time).num_seconds().abs();
+                    // Only consider batches within 5 minutes
+                    if diff < 300 && diff < smallest_diff {
                         smallest_diff = diff;
                         nearest_batch = Some(batch_msg);
                     }
                 }
 
-                let (batch_id, next_seq) = if let Some(batch_info) = nearest_batch {
-                    // Found a nearby batch, get its max sequence number
+                if let Some(batch_info) = nearest_batch {
+                    // Found a nearby batch, append to it
                     let batch_id_str = batch_info.batch.clone();
+
+                    // Get max sequence number for this batch
                     let max_seq_query = r#"
-                    SELECT MAX(sequence_num) as max_seq FROM msg
-                    WHERE batch = $batch
-                "#;
+                        SELECT MAX(sequence_num) as max_seq FROM msg
+                        WHERE batch = $batch
+                    "#;
 
                     let mut seq_result = db
                         .query(max_seq_query)
@@ -1195,69 +1126,67 @@ impl MigrationRunner {
                         next_seq
                     );
 
-                    (batch_info.batch.clone(), next_seq)
-                } else {
-                    // No nearby batch found, create artificial batch
-                    let artificial_batch = crate::agent::get_next_message_position_sync();
-                    tracing::warn!(
-                        "    Group {} has no nearby batch, creating artificial batch {}",
+                    // Update all messages in the group
+                    for (idx, msg) in group.iter().enumerate() {
+                        let position = crate::agent::get_next_message_position_sync();
+                        let seq_num = next_seq + idx as u32;
+
+                        // Update the message
+                        let update_query = r#"
+                            UPDATE $msg_id SET
+                                position = $position,
+                                batch = $batch,
+                                sequence_num = $seq_num,
+                                batch_type = "UserRequest"
+                        "#;
+
+                        db.query(update_query)
+                            .bind(("msg_id", surrealdb::RecordId::from(&msg.id)))
+                            .bind(("position", position.to_string()))
+                            .bind(("batch", batch_id_str.clone()))
+                            .bind(("seq_num", seq_num))
+                            .await
+                            .map_err(DatabaseError::QueryFailed)?;
+
+                        // Also update the agent_messages relation
+                        let update_relation = r#"
+                            UPDATE agent_messages SET
+                                position = $position,
+                                batch = $batch,
+                                sequence_num = $seq_num,
+                                batch_type = "UserRequest"
+                            WHERE in = $agent_id AND out = $msg_id
+                        "#;
+
+                        db.query(update_relation)
+                            .bind(("agent_id", surrealdb::RecordId::from(&agent.id)))
+                            .bind(("msg_id", surrealdb::RecordId::from(&msg.id)))
+                            .bind(("position", position.to_string()))
+                            .bind(("batch", batch_id_str.clone()))
+                            .bind(("seq_num", seq_num))
+                            .await
+                            .map_err(DatabaseError::QueryFailed)?;
+
+                        repaired_count += 1;
+                    }
+
+                    tracing::info!(
+                        "      Repaired group {} with {} messages",
                         group_idx,
-                        artificial_batch
+                        group.len()
                     );
-
-                    (artificial_batch.to_string(), 0)
-                };
-
-                // Update all messages in the group
-                for (idx, msg) in group.iter().enumerate() {
-                    let position = crate::agent::get_next_message_position_sync();
-                    let seq_num = next_seq + idx as u32;
-
-                    // Update the message
-                    let update_query = r#"
-                    UPDATE $msg_id SET
-                        position = $position,
-                        batch = $batch,
-                        sequence_num = $seq_num,
-                        batch_type = $batch_type
-                "#;
-
-                    db.query(update_query)
-                        .bind(("msg_id", surrealdb::RecordId::from(&msg.id)))
-                        .bind(("position", position.to_string()))
-                        .bind(("batch", batch_id.clone()))
-                        .bind(("seq_num", seq_num))
-                        .bind(("batch_type", "user_request")) // Default to user_request
-                        .await
-                        .map_err(DatabaseError::QueryFailed)?;
-
-                    // Also update agent_messages relation
-                    let sync_relation_query = r#"
-                    UPDATE agent_messages SET
-                        position = out.position,
-                        batch = out.batch,
-                        sequence_num = out.sequence_num,
-                        batch_type = out.batch_type
-                    WHERE out = $msg_id
-                "#;
-
-                    db.query(sync_relation_query)
-                        .bind(("msg_id", surrealdb::RecordId::from(&msg.id)))
-                        .await
-                        .map_err(DatabaseError::QueryFailed)?;
-
-                    repaired_count += 1;
+                } else {
+                    // No nearby batch found - skip this group
+                    tracing::warn!(
+                        "    Group {} has no nearby batch (within 5 minutes), skipping {} messages",
+                        group_idx,
+                        group.len()
+                    );
                 }
-
-                tracing::info!(
-                    "      Repaired group {} with {} messages",
-                    group_idx,
-                    group.len()
-                );
             }
 
             total_repaired += repaired_count;
-        } // End of agent loop
+        }
 
         tracing::info!(
             "Enhanced repair completed: {} total messages repaired",

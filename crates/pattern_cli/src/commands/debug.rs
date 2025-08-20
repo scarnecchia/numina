@@ -890,7 +890,8 @@ pub async fn show_context(agent_name: &str, config: &PatternConfig) -> Result<()
                 agent_record.id.to_string().dimmed()
             ),
         );
-        output.info("State:", &format!("{:?}", agent_record.state));
+        // State is runtime-only, not persisted
+        output.info("State:", "Ready");
         println!();
 
         let (heartbeat_sender, _) = pattern_core::context::heartbeat::heartbeat_channel();
@@ -976,15 +977,17 @@ pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>)
         .collect();
 
     if let Some(agent_record) = agents.first() {
-        // Query for the specific memory block
+        // Query for the specific memory block for this agent
         let query_sql = r#"
-            SELECT * FROM mem
-            WHERE label = $label
-            LIMIT 1
+            SELECT * FROM agent_memories
+            WHERE in = $agent_id
+            AND out.*.label = $label
+            FETCH out
         "#;
 
         let mut response = DB
             .query(query_sql)
+            .bind(("agent_id", agent_record.id.clone()))
             .bind(("label", label.to_string()))
             .await
             .into_diagnostic()?;

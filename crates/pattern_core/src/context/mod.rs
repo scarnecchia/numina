@@ -10,7 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
-    message::{BatchType, CacheControl, Message, MessageBatch, MessageContent},
+    message::{CacheControl, Message, MessageBatch, MessageContent},
     tool::{DynamicTool, ToolRegistry},
 };
 
@@ -27,7 +27,7 @@ pub use state::{AgentContext, AgentContextBuilder, AgentHandle, AgentStats, Stat
 const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 10000;
 
 /// Maximum messages to keep in immediate context before compression
-const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 100;
+const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 200;
 
 /// A complete context ready to be sent to an LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +133,10 @@ pub struct ContextConfig {
     /// Maximum messages before compression
     pub max_context_messages: usize,
 
+    /// Maximum tokens before compression (if set, overrides model defaults)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
+
     /// Whether to include thinking/reasoning in responses
     pub enable_thinking: bool,
 
@@ -152,6 +156,7 @@ impl Default for ContextConfig {
             base_instructions: DEFAULT_BASE_INSTRUCTIONS.to_string(),
             memory_char_limit: DEFAULT_CORE_MEMORY_CHAR_LIMIT,
             max_context_messages: DEFAULT_MAX_CONTEXT_MESSAGES,
+            max_context_tokens: Some(128000),
             enable_thinking: true,
             tool_usage_rules: Vec::new(),
             tool_workflow_rules: Vec::new(),
@@ -183,7 +188,7 @@ impl Default for ModelAdjustments {
             native_thinking: false,
             use_xml_tags: true,
             max_context_tokens: Some(128_000),
-            token_multiplier: 1.3, // Rough estimate: 1 token ≈ 0.75 words
+            token_multiplier: 3.0, // Rough estimate: 1 token ≈ 0.75 words
         }
     }
 }
@@ -261,46 +266,13 @@ impl ContextBuilder {
     /// Add message batches
     pub fn with_batches(mut self, batches: Vec<MessageBatch>) -> Self {
         self.batches = batches;
+        self.batches.sort_by_key(|b| b.id.0);
         self
     }
 
     /// Add a single batch
     pub fn add_batch(mut self, batch: MessageBatch) -> Self {
         self.batches.push(batch);
-        self
-    }
-
-    /// Compatibility method - converts messages to batches based on batch_id
-    pub fn with_messages(mut self, mut messages: Vec<Message>) -> Self {
-        use std::collections::BTreeMap;
-
-        // Sort messages by position (snowflake ID)
-        messages.sort_by_key(|m| m.position);
-
-        // Group messages by batch_id
-        let mut batch_groups: BTreeMap<Option<crate::agent::SnowflakePosition>, Vec<Message>> =
-            BTreeMap::new();
-
-        for msg in messages {
-            batch_groups.entry(msg.batch).or_default().push(msg);
-        }
-
-        // Convert groups to MessageBatch
-        self.batches = batch_groups
-            .into_iter()
-            .filter_map(|(batch_id, msgs)| {
-                if msgs.is_empty() {
-                    return None;
-                }
-
-                // Use the batch_id from the first message, or generate if missing
-                let id = batch_id.or_else(|| msgs.first()?.position)?;
-                let batch_type = msgs.first()?.batch_type.unwrap_or(BatchType::UserRequest);
-
-                Some(MessageBatch::from_messages(id, batch_type, msgs))
-            })
-            .collect();
-
         self
     }
 
@@ -736,6 +708,12 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
     ) -> Result<(Vec<MessageBatch>, usize)> {
         let mut filtered_batches = Vec::new();
 
+        tracing::debug!(
+            "Processing {} batches for context. Current batch ID: {:?}",
+            self.batches.len(),
+            current_batch_id
+        );
+
         // Filter batches: include complete batches and current batch
         for batch in &self.batches {
             let should_include = batch.is_complete || current_batch_id.as_ref() == Some(&batch.id);
@@ -743,6 +721,22 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
             if should_include {
                 filtered_batches.push(batch.clone());
             }
+        }
+
+        tracing::debug!(
+            "After filtering: {} batches included (from {} total)",
+            filtered_batches.len(),
+            self.batches.len()
+        );
+
+        // Log the included batch IDs and message counts
+        if !filtered_batches.is_empty() {
+            let batch_info: Vec<String> = filtered_batches
+                .iter()
+                .take(10) // First 10 for brevity
+                .map(|b| format!("{} ({} msgs)", b.id, b.len()))
+                .collect();
+            tracing::debug!("Included batches (first 10): {:?}", batch_info);
         }
 
         // Count total messages
@@ -774,28 +768,60 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
                 (kept_batches, compressed)
             };
 
-        // Add cache control to messages in batches
+        // Log final batches after compression
+        if compressed_count > 0 {
+            tracing::debug!(
+                "After compression: {} batches kept with {} messages (compressed {} messages)",
+                final_batches.len(),
+                final_batches.iter().map(|b| b.len()).sum::<usize>(),
+                compressed_count
+            );
+
+            let batch_info: Vec<String> = final_batches
+                .iter()
+                .take(10)
+                .map(|b| format!("{} ({} msgs)", b.id, b.len()))
+                .collect();
+            tracing::debug!(
+                "Final batches after compression (first 10): {:?}",
+                batch_info
+            );
+        }
+
+        // Add cache control to messages in batches - max 4 cache points total
         let mut result_batches = Vec::new();
+        let total_batches = final_batches.len();
+        let mut cache_points_used = 0;
+        const MAX_CACHE_POINTS: usize = 4;
+
+        // Calculate which batches should get cache points
+        // Strategy: cache early context and recent context
+        let cache_positions: Vec<usize> = if total_batches <= MAX_CACHE_POINTS {
+            // If we have 4 or fewer batches, cache the first message of each
+            (0..total_batches).collect()
+        } else {
+            // Otherwise, distribute cache points strategically:
+            // 1. First batch (early context)
+            // 2. 25% through
+            // 3. 50% through
+            // 4. Most recent batch
+            vec![0, total_batches / 4, total_batches / 2, total_batches - 1]
+        };
+
         for (batch_idx, mut batch) in final_batches.into_iter().enumerate() {
-            // Add cache control to first message of first batch
-            if batch_idx == 0 && !batch.messages.is_empty() {
+            // Only add cache control if this batch is in our cache positions
+            // and we haven't exceeded the limit
+            if cache_positions.contains(&batch_idx)
+                && cache_points_used < MAX_CACHE_POINTS
+                && !batch.messages.is_empty()
+            {
                 batch.messages[0].options.cache_control = Some(CacheControl::Ephemeral);
-            }
-
-            // Add cache control periodically
-            const CACHE_INTERVAL: usize = 20;
-            let cumulative_count = batch_idx * CACHE_INTERVAL; // rough estimate
-
-            for (msg_idx, msg) in batch.messages.iter_mut().enumerate() {
-                if cumulative_count + msg_idx > 0
-                    && (cumulative_count + msg_idx) % CACHE_INTERVAL == 0
-                {
-                    msg.options.cache_control = Some(CacheControl::Ephemeral);
-                }
+                cache_points_used += 1;
             }
 
             result_batches.push(batch);
         }
+        result_batches.sort_by_key(|b| b.id.0);
 
         Ok((result_batches, compressed_count))
     }
@@ -900,7 +926,7 @@ mod tests {
                 is_active: true,
                 ..Default::default()
             })
-            .build()
+            .build(None)
             .await
             .unwrap();
 
@@ -936,7 +962,7 @@ mod tests {
                 is_active: true,
                 ..Default::default()
             })
-            .build()
+            .build(None)
             .await
             .unwrap();
 
@@ -968,7 +994,7 @@ mod tests {
         let builder =
             ContextBuilder::new(AgentId::generate(), config).with_tools_from_registry(&registry);
 
-        let context = builder.build().await.unwrap();
+        let context = builder.build(None).await.unwrap();
 
         // Check that tool behaviors were loaded from the registry
         assert!(
