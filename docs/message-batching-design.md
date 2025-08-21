@@ -22,19 +22,18 @@ Use snowflake IDs to create implicit batches without requiring a separate batch 
 // Add to Message struct
 pub struct Message {
     pub id: MessageId,                      // Existing UUID-based ID
-    
     // NOTE: These fields are Option during migration but should become required:
     // After migration completes, remove Option wrapper and make these fields mandatory
-    pub snowflake_id: Option<SnowflakeId>,  // Unique ordering ID (REQUIRED after migration)
-    pub batch_id: Option<SnowflakeId>,      // ID of first message in batch (REQUIRED after migration)
-    pub sequence_num: Option<u32>,          // Position within batch (REQUIRED after migration)
-    pub batch_type: Option<BatchType>,      // Type of processing cycle (REQUIRED after migration)
+    pub position: Option<SnowflakeId>,  // Unique ordering ID
+    pub batch: Option<SnowflakeId>,      // ID of first message in batch
+    pub sequence_num: Option<u32>,          // Position within batch
+    pub batch_type: Option<BatchType>,      // Type of processing cycle
     // ... existing fields
 }
 
 pub enum BatchType {
     UserRequest,      // User-initiated interaction
-    AgentToAgent,     // Inter-agent communication
+    AgentToAgent,     // Inter-agent communication  
     SystemTrigger,    // System-initiated (e.g., scheduled task)
     Continuation,     // Continuation of previous batch
 }
@@ -64,9 +63,9 @@ The context builder would:
 ### Processing Flow
 
 #### New Request Flow
-1. User message arrives without `batch_id`
-2. `process_message_stream` generates new `batch_id`
-3. All messages in processing cycle use this `batch_id`
+1. User message arrives without `batch id`
+2. `process_message_stream` generates new `batch id`
+3. All messages in processing cycle use this `batch id`
 4. Sequence numbers increment for each message
 5. Context builder receives `current_batch_id` to include incomplete batch
 
@@ -100,10 +99,11 @@ pub fn build_context(&self, current_batch_id: Option<SnowflakeId>) -> Result<Mem
 ```rust
 // In agent_messages relation, add batch tracking alongside position
 pub struct AgentMessageRelation {
-    pub position: String,                   // Now uses message.snowflake_id.to_string()
-    pub batch_id: Option<SnowflakePosition>, // Same as message.batch_id
+    pub position: Option<SnowflakePosition>,
+    pub batch: Option<SnowflakePosition>, // Same as message.batch_id
     pub sequence_num: Option<u32>,          // Same as message.sequence_num
     pub batch_type: Option<BatchType>,      // Same as message.batch_type
+
     // ... existing fields
 }
 ```
