@@ -89,9 +89,47 @@ where
         let start_time = Utc::now();
 
         // Load the agent record
-        let agent = AgentRecord::load_with_relations(&self.db, &agent_id)
+        let mut agent = AgentRecord::load_with_relations(&self.db, &agent_id)
             .await?
             .ok_or_else(|| CoreError::agent_not_found(agent_id.to_string()))?;
+
+        // Load message history and memory blocks (like CLI does)
+        let (messages_result, memories_result) = tokio::join!(
+            agent.load_message_history(&self.db, true),
+            crate::db::ops::get_agent_memories(&self.db, &agent.id)
+        );
+
+        // Handle results
+        if let Ok(messages) = messages_result {
+            tracing::info!(
+                "Loaded {} messages for agent {}",
+                messages.len(),
+                agent.name
+            );
+            agent.messages = messages;
+        }
+
+        if let Ok(memory_tuples) = memories_result {
+            tracing::info!(
+                "Loaded {} memory blocks for agent {}",
+                memory_tuples.len(),
+                agent.name
+            );
+            agent.memories = memory_tuples
+                .into_iter()
+                .map(|(memory_block, access_level)| {
+                    use crate::id::RelationId;
+                    let relation = crate::agent::AgentMemoryRelation {
+                        id: RelationId::nil(),
+                        in_id: agent.id.clone(),
+                        out_id: memory_block.id.clone(),
+                        access_level,
+                        created_at: chrono::Utc::now(),
+                    };
+                    (memory_block, relation)
+                })
+                .collect();
+        }
 
         // First export the agent and collect all blocks
         let (agent_export, agent_blocks, mut stats) =
@@ -806,10 +844,48 @@ where
         // Load the agents for each membership
         let mut members = Vec::new();
         for membership in memberships {
-            if let Some(agent) = AgentRecord::load_with_relations(&self.db, &membership.in_id)
+            if let Some(mut agent) = AgentRecord::load_with_relations(&self.db, &membership.in_id)
                 .await
                 .map_err(|e| CoreError::from(e))?
             {
+                // Load message history and memory blocks (like CLI does)
+                let (messages_result, memories_result) = tokio::join!(
+                    agent.load_message_history(&self.db, true),
+                    crate::db::ops::get_agent_memories(&self.db, &agent.id)
+                );
+
+                // Handle results
+                if let Ok(messages) = messages_result {
+                    tracing::info!(
+                        "Loaded {} messages for agent {}",
+                        messages.len(),
+                        agent.name
+                    );
+                    agent.messages = messages;
+                }
+
+                if let Ok(memory_tuples) = memories_result {
+                    tracing::info!(
+                        "Loaded {} memory blocks for agent {}",
+                        memory_tuples.len(),
+                        agent.name
+                    );
+                    agent.memories = memory_tuples
+                        .into_iter()
+                        .map(|(memory_block, access_level)| {
+                            use crate::id::RelationId;
+                            let relation = crate::agent::AgentMemoryRelation {
+                                id: RelationId::nil(),
+                                in_id: agent.id.clone(),
+                                out_id: memory_block.id.clone(),
+                                access_level,
+                                created_at: chrono::Utc::now(),
+                            };
+                            (memory_block, relation)
+                        })
+                        .collect();
+                }
+
                 members.push((agent, membership));
             }
         }
