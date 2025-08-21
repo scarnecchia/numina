@@ -1,6 +1,6 @@
 [package]
 name = "pattern-mcp"
-version = "0.1.0"
+version = "0.3.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 
 # MCP SDK
-rmcp = { workspace = true, features = ["transport-child-process", "client"] }
+rmcp = { workspace = true, features = ["transport-child-process", "client", "transport-streamable-http-client-reqwest", "transport-sse-client", "transport-sse-client-reqwest"] }
 
 # HTTP Server
 axum = { workspace = true }

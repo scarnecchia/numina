@@ -76,6 +76,8 @@ pub struct ResponseOptions {
     pub normalize_reasoning_content: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<genai::chat::ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_headers: Option<Vec<(String, String)>>,
 }
 
 impl ResponseOptions {
@@ -97,10 +99,41 @@ impl ResponseOptions {
             response_format: None,
             normalize_reasoning_content: None,
             reasoning_effort: None,
+            custom_headers: None,
         }
     }
     /// Convert ResponseOptions to a tuple of (ModelInfo, ChatOptions) for use with genai
     pub fn to_chat_options_tuple(&self) -> (ModelInfo, ChatOptions) {
+        // Build headers, adding Anthropic beta headers if using Claude
+        let mut headers = self.custom_headers.clone().unwrap_or_default();
+
+        // Add Anthropic beta headers for Claude models
+        if self
+            .model_info
+            .provider
+            .to_lowercase()
+            .contains("anthropic")
+            || self.model_info.id.to_lowercase().contains("claude")
+        {
+            // Add beta headers for features like prompt caching
+            headers.push((
+                "anthropic-beta".to_string(),
+                "prompt-caching-2024-07-31".to_string(),
+            ));
+            headers.push((
+                "anthropic-beta".to_string(),
+                "computer-use-2025-01-24".to_string(),
+            ));
+            headers.push((
+                "anthropic-beta".to_string(),
+                "context-1m-2025-08-07".to_string(),
+            ));
+            headers.push((
+                "anthropic-beta".to_string(),
+                "code-execution-2025-05-22".to_string(),
+            ));
+        }
+
         (
             self.model_info.clone(),
             ChatOptions {
@@ -116,10 +149,49 @@ impl ResponseOptions {
                 response_format: self.response_format.clone(),
                 capture_usage: self.capture_usage,
                 capture_tool_calls: self.capture_tool_calls,
-                extra_headers: None,
+                extra_headers: if headers.is_empty() {
+                    None
+                } else {
+                    Some(headers.into())
+                },
                 seed: None,
             },
         )
+    }
+}
+
+/// Model provider/vendor
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ModelVendor {
+    Anthropic,
+    OpenAI,
+    Gemini, // Google's Gemini models
+    Cohere,
+    Groq,
+    Ollama,
+    Other,
+}
+
+impl ModelVendor {
+    /// Check if this vendor uses OpenAI-compatible API
+    pub fn is_openai_compatible(&self) -> bool {
+        match self {
+            Self::OpenAI | Self::Cohere | Self::Groq | Self::Ollama | Self::Other => true,
+            Self::Anthropic | Self::Gemini => false,
+        }
+    }
+
+    /// Parse from provider string
+    pub fn from_provider_string(provider: &str) -> Self {
+        match provider.to_lowercase().as_str() {
+            "anthropic" => Self::Anthropic,
+            "openai" => Self::OpenAI,
+            "gemini" | "google" => Self::Gemini,
+            "cohere" => Self::Cohere,
+            "groq" => Self::Groq,
+            "ollama" => Self::Ollama,
+            _ => Self::Other,
+        }
     }
 }
 

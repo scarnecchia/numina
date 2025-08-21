@@ -91,7 +91,7 @@ pub async fn load_or_create_agent(
                 tracing::trace!("Full AgentRecord: {:#?}", agent);
                 agent
             }
-            Ok(None) => return Err(miette::miette!("Agent not found after query")),
+            Ok(_) => return Err(miette::miette!("Agent not found after query")),
             Err(e) => return Err(miette::miette!("Failed to load agent: {}", e)),
         };
 
@@ -249,13 +249,8 @@ pub async fn load_model_embedding_providers(
                         || m.name.to_lowercase().contains(&model_lower)
                 })
                 .cloned()
-        } else if let Some(record) = record
-            && let Some(stored_model) = &record.model_id
-        {
-            // Try to use the agent's stored model preference
-            models.iter().find(|m| &m.id == stored_model).cloned()
         } else if let Some(config_model) = &config.model.model {
-            // Use model from config
+            // Try config file model first (so it can override database)
             models
                 .iter()
                 .find(|m| {
@@ -264,6 +259,11 @@ pub async fn load_model_embedding_providers(
                         || m.name.to_lowercase().contains(&model_lower)
                 })
                 .cloned()
+        } else if let Some(record) = record
+            && let Some(stored_model) = &record.model_id
+        {
+            // Fall back to the agent's stored model preference
+            models.iter().find(|m| &m.id == stored_model).cloned()
         } else {
             // Default to Gemini models with free tier
             models
@@ -337,6 +337,7 @@ pub async fn load_model_embedding_providers(
         response_format: None,
         normalize_reasoning_content: Some(true),
         reasoning_effort: Some(genai::chat::ReasoningEffort::Medium),
+        custom_headers: None,
     };
 
     // Enable reasoning mode if the model supports it
@@ -434,6 +435,45 @@ pub async fn create_agent_from_record_with_tracker(
         heartbeat_sender,
     )
     .await?;
+
+    // Apply context config from the passed PatternConfig
+    let (context_config, compression_strategy) = build_context_config(&config.agent);
+
+    // Log the config being applied
+    output.info(
+        "Context",
+        &format!(
+            "max_messages={}, compression={:?}",
+            config
+                .agent
+                .context
+                .as_ref()
+                .and_then(|c| c.max_messages)
+                .unwrap_or(50),
+            compression_strategy
+                .as_ref()
+                .map(|s| format!("{:?}", s))
+                .unwrap_or_else(|| "default".to_string())
+        ),
+    );
+
+    // Update the agent with config values
+    agent
+        .update_context_config(context_config, compression_strategy)
+        .await?;
+
+    // Store the updated config back to the database
+    if let Err(e) = agent.store().await {
+        output.warning(&format!(
+            "Failed to persist config updates to database: {:?}",
+            e
+        ));
+    } else {
+        output.success(&format!(
+            "Updated {} with config from file and saved to database",
+            record.name
+        ));
+    }
 
     // Set the chat options with our selected model
     {
@@ -792,7 +832,7 @@ pub async fn create_agent(
     agent.clone().start_memory_sync().await?;
     agent.clone().start_message_monitoring().await?;
 
-    // Update memory blocks from config only if they don't exist or have changed
+    // Update memory blocks from config only if they don't exist
     // First check persona
     if let Some(persona) = &config.agent.persona {
         output.info(
@@ -800,22 +840,13 @@ pub async fn create_agent(
             &format!("Found persona in config: {} chars", persona.len()),
         );
         match agent.get_memory("persona").await {
-            Ok(Some(mut existing)) => {
-                // Update existing block preserving its ID
-                if existing.value != *persona {
-                    output.status("Updating persona in agent's core memory...");
-                    existing.value = persona.clone();
-                    existing.description = Some("Agent's persona and identity".to_string());
-                    existing.permission = pattern_core::memory::MemoryPermission::Append;
-
-                    if let Err(e) = agent.update_memory("persona", existing).await {
-                        output.warning(&format!("Failed to update persona memory: {}", e));
-                    } else {
-                        output.success("✅ Persona updated in memory");
-                    }
-                } else {
-                    output.info("✓", "Persona already up to date in memory");
-                }
+            Ok(Some(_existing)) => {
+                // Persona already exists - DO NOT overwrite from config
+                // Config values are only for initial setup, not updates
+                output.info(
+                    "✓",
+                    "Persona already exists in memory, preserving database values",
+                );
             }
             Ok(None) | Err(_) => {
                 // Create new block
@@ -852,20 +883,46 @@ pub async fn create_agent(
 
         match agent.get_memory(label).await {
             Ok(Some(mut existing)) => {
-                // Update existing block preserving its ID
-                if existing.value != content {
-                    output.info("Updating memory block", &label.bright_yellow().to_string());
-                    existing.value = content;
-                    existing.memory_type = block_config.memory_type;
-                    existing.permission = block_config.permission;
-                    if let Some(desc) = &block_config.description {
-                        existing.description = Some(desc.clone());
-                    }
+                // Memory already exists - preserve content but update permissions/type from config
+                let mut needs_update = false;
 
+                if existing.memory_type != block_config.memory_type {
+                    output.info(
+                        "Updating memory type",
+                        &format!(
+                            "{:?} -> {:?}",
+                            existing.memory_type, block_config.memory_type
+                        ),
+                    );
+                    existing.memory_type = block_config.memory_type;
+                    needs_update = true;
+                }
+
+                if existing.permission != block_config.permission {
+                    output.info(
+                        "Updating permission",
+                        &format!("{:?} -> {:?}", existing.permission, block_config.permission),
+                    );
+                    existing.permission = block_config.permission;
+                    needs_update = true;
+                }
+
+                if let Some(desc) = &block_config.description {
+                    if existing.description.as_ref() != Some(desc) {
+                        existing.description = Some(desc.clone());
+                        needs_update = true;
+                    }
+                }
+
+                if needs_update {
                     if let Err(e) = agent.update_memory(label, existing).await {
                         output
                             .warning(&format!("Failed to update memory block '{}': {}", label, e));
+                    } else {
+                        output.success(&format!("✅ Updated permissions/type for '{}'", label));
                     }
+                } else {
+                    output.info("✓", &format!("Memory block '{}' is up to date", label));
                 }
             }
             Ok(None) | Err(_) => {
@@ -885,8 +942,23 @@ pub async fn create_agent(
                                 &label.bright_yellow().to_string(),
                             );
 
-                            // Check if we need to update the permission to be more permissive
-                            if block_config.permission > existing_memory.permission {
+                            // Update permission and type but preserve content
+                            let mut needs_update = false;
+                            let mut updated_memory = existing_memory.clone();
+
+                            if existing_memory.memory_type != block_config.memory_type {
+                                output.info(
+                                    "Updating shared memory type",
+                                    &format!(
+                                        "{:?} -> {:?}",
+                                        existing_memory.memory_type, block_config.memory_type
+                                    ),
+                                );
+                                updated_memory.memory_type = block_config.memory_type;
+                                needs_update = true;
+                            }
+
+                            if existing_memory.permission != block_config.permission {
                                 output.info(
                                     "Updating shared memory permission",
                                     &format!(
@@ -894,19 +966,24 @@ pub async fn create_agent(
                                         existing_memory.permission, block_config.permission
                                     ),
                                 );
-                                // Update the memory's permission
-                                let mut updated_memory = existing_memory.clone();
                                 updated_memory.permission = block_config.permission;
-                                updated_memory.value = content; // Also update content if different
-                                if let Some(desc) = &block_config.description {
-                                    updated_memory.description = Some(desc.clone());
-                                }
+                                needs_update = true;
+                            }
 
-                                // Update the memory block itself
+                            if let Some(desc) = &block_config.description {
+                                if updated_memory.description.as_ref() != Some(desc) {
+                                    updated_memory.description = Some(desc.clone());
+                                    needs_update = true;
+                                }
+                            }
+
+                            // Update the memory block itself if needed (preserving content)
+                            if needs_update {
+                                // Preserve existing content, don't overwrite with config content
                                 if let Err(e) = pattern_core::db::ops::update_memory_content(
                                     &DB,
                                     updated_memory.id.clone(),
-                                    updated_memory.value.clone(),
+                                    updated_memory.value.clone(), // Keep existing content
                                     embedding_provider.as_ref().map(|p| p.as_ref()),
                                 )
                                 .await
@@ -914,6 +991,11 @@ pub async fn create_agent(
                                     output.warning(&format!(
                                         "Failed to update shared memory '{}': {}",
                                         label, e
+                                    ));
+                                } else {
+                                    output.success(&format!(
+                                        "✅ Updated permissions/type for shared '{}'",
+                                        label
                                     ));
                                 }
                             }

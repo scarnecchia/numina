@@ -20,7 +20,6 @@ use owo_colors::OwoColorize;
 use pattern_core::{
     Agent,
     config::PatternConfig,
-    coordination::groups::GroupManager,
     data_source::{BlueskyFilter, DataSourceBuilder},
     db::client::DB,
     tool::builtin::DataSourceTool,
@@ -100,9 +99,8 @@ pub async fn setup_discord_endpoint(agent: &Arc<dyn Agent>, output: &Output) -> 
 
 /// Run a Discord bot for group chat with optional concurrent CLI interface
 #[cfg(feature = "discord")]
-pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
+pub async fn run_discord_bot_with_group(
     group_name: &str,
-    pattern_manager: M,
     model: Option<String>,
     no_tools: bool,
     config: &PatternConfig,
@@ -138,24 +136,17 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
     };
 
     // Use shared setup function
-    let group_setup = setup_group(
-        group_name,
-        &pattern_manager,
-        model,
-        no_tools,
-        config,
-        &output,
-    )
-    .await?;
+    let group_setup = setup_group(group_name, model, no_tools, config, &output).await?;
 
     let GroupSetup {
         group,
         agents_with_membership,
         pattern_agent,
         agent_tools,
+        pattern_manager,
         constellation_tracker: _,
         heartbeat_sender: _,
-        mut heartbeat_receiver,
+        heartbeat_receiver,
     } = group_setup;
 
     output.success("Starting Discord bot with group chat...");
@@ -231,7 +222,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                 let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
                     group: group.clone(),
                     agents: agents_with_membership.clone(),
-                    manager: Arc::new(pattern_manager.clone()),
+                    manager: pattern_manager.clone(),
                     output: output.clone(),
                 });
                 data_sources_router
@@ -279,7 +270,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
         let bot = Arc::new(DiscordBot::new_cli_mode(
             agents_with_membership.clone(),
             group.clone(),
-            Arc::new(pattern_manager.clone()),
+            pattern_manager.clone(),
         ));
 
         // Connect the bot to the Discord endpoint for timing context
@@ -337,7 +328,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                 run_group_chat_loop(
                     group.clone(),
                     agents_with_membership,
-                    pattern_manager.clone(),
+                    pattern_manager,
                     heartbeat_receiver,
                     output.clone(),
                     rl,
@@ -351,22 +342,26 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
             // Run Discord bot in foreground (blocking)
             output.status("Discord bot starting... Press Ctrl+C to stop.");
 
-            // Spawn a simple heartbeat consumer for Discord-only mode
-            // The heartbeats are already processed internally by agents,
-            // we just need to consume them to prevent the channel from blocking
-            let heartbeat_handle = tokio::spawn(async move {
-                while let Some(heartbeat) = heartbeat_receiver.recv().await {
-                    tracing::debug!(
-                        "💓 Consumed heartbeat in Discord-only mode from agent {}: tool {} (call_id: {})",
-                        heartbeat.agent_id,
-                        heartbeat.tool_name,
-                        heartbeat.tool_call_id
-                    );
-                    // Heartbeats are processed internally by the agents during their tool execution
-                    // We just consume them here to keep the channel flowing
-                }
-                tracing::debug!("Heartbeat receiver closed in Discord-only mode");
-            });
+            // Use generic heartbeat processor for Discord-only mode
+            let agents_for_heartbeat: Vec<Arc<dyn Agent>> = agents_with_membership
+                .iter()
+                .map(|awm| awm.agent.clone())
+                .collect();
+
+            let output_clone = output.clone();
+            let heartbeat_handle =
+                tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
+                    heartbeat_receiver,
+                    agents_for_heartbeat,
+                    move |event, _agent_id, agent_name| {
+                        let output = output_clone.clone();
+                        async move {
+                            output
+                                .status(&format!("💓 Heartbeat continuation from {}:", agent_name));
+                            crate::chat::print_response_event(event, &output);
+                        }
+                    },
+                ));
 
             // Run Discord bot
             if let Err(why) = client.start().await {

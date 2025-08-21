@@ -4,16 +4,74 @@
 //! of a DatabaseAgent. It includes all fields that need to be stored in the
 //! database and can be used to reconstruct a DatabaseAgent instance.
 
-use crate::agent::{AgentState, AgentType};
+use crate::agent::AgentType;
 use crate::context::{CompressionStrategy, ContextConfig};
 use crate::id::{AgentId, EventId, MemoryId, RelationId, TaskId, UserId};
 use crate::memory::MemoryBlock;
 use chrono::{DateTime, Utc};
-use ferroid::{SnowflakeGeneratorAsyncTokioExt, SnowflakeMastodonId};
+use ferroid::{Base32SnowExt, SnowflakeGeneratorAsyncTokioExt, SnowflakeMastodonId};
 use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::OnceLock;
+
+/// Wrapper type for Snowflake IDs with proper serde support
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SnowflakePosition(pub SnowflakeMastodonId);
+
+impl SnowflakePosition {
+    /// Create a new snowflake position
+    pub fn new(id: SnowflakeMastodonId) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for SnowflakePosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use the efficient base32 encoding via Display
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for SnowflakePosition {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Try parsing as base32 first
+        if let Ok(id) = SnowflakeMastodonId::decode(s) {
+            return Ok(Self(id));
+        }
+
+        // Fall back to parsing as raw u64
+        s.parse::<u64>()
+            .map(|raw| Self(SnowflakeMastodonId::from_raw(raw)))
+            .map_err(|e| format!("Failed to parse snowflake as base32 or u64: {}", e))
+    }
+}
+
+impl Serialize for SnowflakePosition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Serialize as string using Display
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for SnowflakePosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize from string and parse
+        let s = String::deserialize(deserializer)?;
+        s.parse::<Self>().map_err(serde::de::Error::custom)
+    }
+}
 
 /// Type alias for the Snowflake generator we're using
 type SnowflakeGen = ferroid::AtomicSnowflakeGenerator<SnowflakeMastodonId, ferroid::MonotonicClock>;
@@ -30,13 +88,47 @@ pub fn get_position_generator() -> &'static SnowflakeGen {
     })
 }
 
-/// Get the next message position as a Snowflake ID
-pub async fn get_next_message_position() -> String {
-    get_position_generator()
+/// Get the next message position synchronously
+///
+/// This is designed for use in synchronous contexts like Default impls.
+/// In practice, we don't generate messages fast enough to hit the sequence
+/// limit (65536/ms), so Pending should never happen in our use case.
+///
+/// LIMITATION: Currently panics if we somehow exhaust the sequence within
+/// a millisecond. This is a known limitation that will be addressed if it
+/// ever becomes an issue in production (extremely unlikely given our throughput).
+pub fn get_next_message_position_sync() -> SnowflakePosition {
+    use ferroid::IdGenStatus;
+
+    let generator = get_position_generator();
+
+    // Try the generator - this will succeed unless we're generating 65k+ messages/ms
+    match generator.next_id() {
+        IdGenStatus::Ready { id } => SnowflakePosition::new(id),
+        IdGenStatus::Pending { yield_for } => {
+            // This should never happen in practice - we don't generate 65k messages/ms
+            panic!(
+                "Snowflake ID sequence exhausted, would need to wait {}ms. \
+                This indicates extreme message generation rate (>65k/ms) which shouldn't \
+                happen in Pattern. If you're seeing this, please report it as a bug.",
+                yield_for
+            );
+        }
+    }
+}
+
+/// Get the next message position as a Snowflake ID (async version)
+pub async fn get_next_message_position() -> SnowflakePosition {
+    let id = get_position_generator()
         .try_next_id_async()
         .await
-        .expect("for now we are assuming this succeeds")
-        .to_string()
+        .expect("for now we are assuming this succeeds");
+    SnowflakePosition::new(id)
+}
+
+/// Get the next message position as a String (for database storage)
+pub async fn get_next_message_position_string() -> String {
+    get_next_message_position().await.to_string()
 }
 
 /// Agent entity that persists to the database
@@ -50,7 +142,6 @@ pub struct AgentRecord {
     pub id: AgentId,
     pub name: String,
     pub agent_type: AgentType,
-    pub state: AgentState,
 
     // Model configuration
     pub model_id: Option<String>,
@@ -116,7 +207,6 @@ impl Default for AgentRecord {
             id: AgentId::generate(),
             name: String::new(),
             agent_type: AgentType::Generic,
-            state: AgentState::Ready,
             model_id: None,
             model_config: HashMap::new(),
             base_instructions: String::new(),
@@ -125,7 +215,7 @@ impl Default for AgentRecord {
             compression_threshold: 30,
             memory_char_limit: 5000,
             enable_thinking: true,
-            compression_strategy: CompressionStrategy::Truncate { keep_recent: 20 },
+            compression_strategy: CompressionStrategy::Truncate { keep_recent: 100 },
             tool_rules: Vec::new(),
             total_messages: 0,
             total_tool_calls: 0,
@@ -158,6 +248,7 @@ impl AgentRecord {
             base_instructions: self.base_instructions.clone(),
             memory_char_limit: self.memory_char_limit,
             max_context_messages: self.max_messages,
+            max_context_tokens: None,
             enable_thinking: self.enable_thinking,
             tool_usage_rules: vec![],
             tool_workflow_rules: vec![],
@@ -198,15 +289,15 @@ impl AgentRecord {
     > {
         let query = if include_archived {
             format!(
-                r#"SELECT *, out.created_at as msg_created FROM agent_messages
+                r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
                    WHERE in = $agent_id
-                   ORDER BY msg_created ASC"#
+                   ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         } else {
             format!(
-                r#"SELECT *, out.created_at as msg_created FROM agent_messages
+                r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
                    WHERE in = $agent_id AND message_type = "active"
-                   ORDER BY msg_created ASC"#
+                   ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         };
 
@@ -251,7 +342,7 @@ impl AgentRecord {
 
         for relation in relations {
             tracing::trace!(
-                "Loading message for relation: message_id={:?}, type={:?}, position={}",
+                "Loading message for relation: message_id={:?}, type={:?}, position={:?}",
                 relation.out_id,
                 relation.message_type,
                 relation.position
@@ -302,8 +393,11 @@ impl AgentRecord {
             in_id: self.id.clone(),
             out_id: message_id.clone(),
             message_type,
-            position: position.to_string(),
+            position: Some(SnowflakePosition(position)),
             added_at: chrono::Utc::now(),
+            batch: None, // Will be populated from message when available
+            sequence_num: None,
+            batch_type: None,
         };
 
         // Use create_relation_typed to store the edge entity
@@ -354,7 +448,6 @@ mod tests {
         };
         assert_eq!(agent.name, "Test Agent");
         assert!(matches!(agent.agent_type, AgentType::Custom(ref s) if s == "test"));
-        assert_eq!(agent.state, AgentState::Ready);
     }
 
     #[tokio::test]

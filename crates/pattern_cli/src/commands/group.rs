@@ -11,11 +11,11 @@ use pattern_core::{
         types::{CoordinationPattern, GroupMemberRole, GroupState},
     },
     db::{DatabaseConfig, client::DB, ops, ops::get_group_by_name},
-    id::{AgentId, GroupId, RelationId},
+    id::{AgentId, GroupId, RelationId, UserId},
 };
 use std::{collections::HashMap, path::Path};
 
-use crate::{agent_ops, output::Output};
+use crate::{agent_ops, commands::export::get_agent_by_name, output::Output};
 
 /// List all groups for the current user
 pub async fn list(config: &PatternConfig) -> Result<()> {
@@ -322,6 +322,7 @@ fn format_role(role: &GroupMemberRole) -> &str {
 }
 
 /// Initialize groups from configuration
+#[allow(dead_code)]
 pub async fn initialize_from_config(
     config: &PatternConfig,
     heartbeat_sender: pattern_core::context::heartbeat::HeartbeatSender,
@@ -349,7 +350,12 @@ pub async fn initialize_from_config(
             existing_group
         } else {
             // Convert pattern from config to coordination pattern
-            let coordination_pattern = convert_pattern_config(&group_config.pattern)?;
+            let coordination_pattern = convert_pattern_config(
+                &group_config.pattern,
+                &config.user.id,
+                &group_config.members,
+            )
+            .await?;
 
             // Create the group
             let group = AgentGroup {
@@ -464,16 +470,42 @@ pub async fn initialize_from_config(
     Ok(())
 }
 
-fn convert_pattern_config(pattern: &GroupPatternConfig) -> Result<CoordinationPattern> {
+pub async fn convert_pattern_config(
+    pattern: &GroupPatternConfig,
+    user_id: &UserId,
+    members: &[GroupMemberConfig],
+) -> Result<CoordinationPattern> {
     use pattern_core::coordination::types::{
         DelegationRules, DelegationStrategy, FallbackBehavior, PipelineStage, StageFailureAction,
     };
 
     Ok(match pattern {
-        GroupPatternConfig::Supervisor { leader: _ } => {
-            // For now, using the leader name as ID - in production should look up actual agent ID
+        GroupPatternConfig::Supervisor { leader } => {
+            // Look up the leader agent ID
+            let leader_id = if let Some(member) = members.iter().find(|m| &m.name == leader) {
+                if let Some(agent_id) = &member.agent_id {
+                    agent_id.clone()
+                } else {
+                    // Try to find agent by name in database
+                    match get_agent_by_name(&DB, user_id, leader).await? {
+                        Some(agent) => agent.id,
+                        None => {
+                            return Err(miette::miette!(
+                                "Supervisor leader '{}' not found",
+                                leader
+                            ));
+                        }
+                    }
+                }
+            } else {
+                return Err(miette::miette!(
+                    "Supervisor leader '{}' not in group members",
+                    leader
+                ));
+            };
+
             CoordinationPattern::Supervisor {
-                leader_id: AgentId::generate(), // TODO: Look up actual agent ID by name
+                leader_id,
                 delegation_rules: DelegationRules {
                     max_delegations_per_agent: None,
                     delegation_strategy: DelegationStrategy::RoundRobin,
@@ -487,17 +519,49 @@ fn convert_pattern_config(pattern: &GroupPatternConfig) -> Result<CoordinationPa
         },
         GroupPatternConfig::Pipeline { stages } => {
             // Convert stage names to PipelineStage structs
-            let pipeline_stages = stages
-                .iter()
-                .map(|stage_name| {
-                    PipelineStage {
-                        name: stage_name.clone(),
-                        agent_ids: vec![AgentId::generate()], // TODO: Look up actual IDs by stage name
-                        timeout: std::time::Duration::from_secs(300), // 5 minute default
-                        on_failure: StageFailureAction::Skip,
+            let mut pipeline_stages = Vec::new();
+            for stage_name in stages {
+                // Find the member with this stage name
+                let agent_ids = if let Some(member) = members.iter().find(|m| &m.name == stage_name)
+                {
+                    if let Some(agent_id) = &member.agent_id {
+                        vec![agent_id.clone()]
+                    } else {
+                        // Try to find agent by name in database
+                        match get_agent_by_name(&DB, user_id, stage_name).await? {
+                            Some(agent) => vec![agent.id],
+                            None => {
+                                return Err(miette::miette!(
+                                    "Pipeline stage agent '{}' not found",
+                                    stage_name
+                                ));
+                            }
+                        }
                     }
-                })
-                .collect();
+                } else {
+                    // Stage name might be a role or capability, find all matching agents
+                    let matching: Vec<AgentId> = members
+                        .iter()
+                        .filter(|m| m.capabilities.contains(stage_name))
+                        .filter_map(|m| m.agent_id.clone())
+                        .collect();
+
+                    if matching.is_empty() {
+                        return Err(miette::miette!(
+                            "No agents found for pipeline stage '{}'",
+                            stage_name
+                        ));
+                    }
+                    matching
+                };
+
+                pipeline_stages.push(PipelineStage {
+                    name: stage_name.clone(),
+                    agent_ids,
+                    timeout: std::time::Duration::from_secs(300), // 5 minute default
+                    on_failure: StageFailureAction::Skip,
+                });
+            }
 
             CoordinationPattern::Pipeline {
                 stages: pipeline_stages,
@@ -564,16 +628,36 @@ fn convert_pattern_config(pattern: &GroupPatternConfig) -> Result<CoordinationPa
                 })
                 .collect();
 
+            // Look up intervention agent ID if specified
+            let intervention_agent_id = if let Some(agent_name) = intervention_agent {
+                if let Some(member) = members.iter().find(|m| &m.name == agent_name) {
+                    member.agent_id.clone()
+                } else {
+                    // Try to find agent by name in database
+                    match get_agent_by_name(&DB, user_id, agent_name).await? {
+                        Some(agent) => Some(agent.id),
+                        None => {
+                            return Err(miette::miette!(
+                                "Intervention agent '{}' not found",
+                                agent_name
+                            ));
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+
             CoordinationPattern::Sleeptime {
                 check_interval: std::time::Duration::from_secs(*check_interval),
                 triggers: coord_triggers,
-                intervention_agent_id: intervention_agent.as_ref().map(|_| AgentId::generate()), // TODO: Look up actual ID
+                intervention_agent_id,
             }
         }
     })
 }
 
-fn convert_role_config(role: &GroupMemberRoleConfig) -> GroupMemberRole {
+pub fn convert_role_config(role: &GroupMemberRoleConfig) -> GroupMemberRole {
     match role {
         GroupMemberRoleConfig::Regular => GroupMemberRole::Regular,
         GroupMemberRoleConfig::Supervisor => GroupMemberRole::Supervisor,

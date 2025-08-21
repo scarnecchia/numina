@@ -17,3 +17,5 @@ mcp-wrapper.sh
 **.car
 **.log.**
 **.json
+**.sql
+**.surql

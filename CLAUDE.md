@@ -1,5 +1,9 @@
 # CLAUDE.md - Pattern ADHD Cognitive Support System
 
+⚠️ **CRITICAL WARNING**: DO NOT run `pattern-cli` or any agent commands during development!
+Agents are currently running in production. Any CLI invocation will disrupt active agents.
+Migrations and testing must be done offline after stopping production agents.
+
 Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture to provide external executive function through specialized cognitive agents.
 
 ## Project Status
@@ -8,17 +12,13 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 ### 🚧 Current Development Priorities
 
-1. **Bug Fixes** - 🔴 IMMEDIATE
-   - Address any critical issues blocking usage
-   - See current issue tracker
-
-2. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
+1. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
    - Basic Axum server structure exists
    - Auth handlers partially implemented
    - Most endpoints still need implementation
    - Required for multi-user hosting
 
-3. **MCP Client Refinement** - 🟡 NEEDS VERIFICATION
+3. **MCP Client Refinement** - 🟢 NEEDS VERIFICATION
    - All transports implemented (stdio, HTTP, SSE)
    - Tool discovery and wrapper system working
    - Needs testing with real MCP servers
@@ -34,6 +34,16 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
    - Expose Pattern tools to external clients
 
 ## Completed Features
+
+### ✅ Message Batching
+- Snowflake IDs for absolute ordering across all messages
+- Batch tracking for atomic request/response cycles
+- Tool call/response pairing maintained within batches
+- Heartbeat continuations stay in same batch as original request
+- Compression preserves batch boundaries (no splitting tool pairs)
+- Generic heartbeat processor for all consumer crates
+- Archive summaries as metadata, not fake messages
+- See `/home/booskie/pattern/docs/message-batching-design.md` for architecture
 
 ### ✅ Agent Groups
 - Full CLI support with create/add-member/status/list commands

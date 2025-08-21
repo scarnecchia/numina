@@ -33,7 +33,6 @@ mod tests {
             id: AgentId::generate(),
             name: "Test Agent".to_string(),
             agent_type: AgentType::Generic,
-            state: AgentState::Ready,
             owner_id: UserId::generate(),
             ..Default::default()
         };
@@ -91,7 +90,6 @@ mod tests {
             id: AgentId::generate(),
             name: "Pattern".to_string(),
             agent_type: AgentType::Custom("pattern".to_string()),
-            state: AgentState::default(),
             model_id: None,
             owner_id: user.id.clone(),
             ..Default::default()
@@ -109,7 +107,6 @@ mod tests {
             id: AgentId::generate(),
             name: "Entropy".to_string(),
             agent_type: AgentType::Custom("entropy".to_string()),
-            state: AgentState::default(),
             model_id: None,
             owner_id: user.id.clone(),
             ..Default::default()
@@ -239,7 +236,6 @@ mod tests {
             id: AgentId::generate(),
             name: "TestAgent".to_string(),
             agent_type: AgentType::Generic,
-            state: AgentState::default(),
             model_id: None,
             owner_id: user.id.clone(),
             ..Default::default()
@@ -370,7 +366,6 @@ mod tests {
             id: AgentId::generate(),
             name: "TestAgent".to_string(),
             agent_type: AgentType::Generic,
-            state: AgentState::default(),
             model_id: None,
             owner_id: user.id.clone(),
             ..Default::default()
@@ -434,7 +429,6 @@ mod tests {
             id: AgentId::generate(),
             name: "TestAgent".to_string(),
             agent_type: AgentType::Generic,
-            state: AgentState::Ready,
             model_id: None,
             owner_id: user.id.clone(),
             ..Default::default()

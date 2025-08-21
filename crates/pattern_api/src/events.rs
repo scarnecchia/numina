@@ -5,11 +5,10 @@ use pattern_core::{
     id::{AgentId, GroupId, MessageId, UserId},
     message::{ChatRole, MessageContent},
 };
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// WebSocket event types
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSocketEvent {
     /// New message received
@@ -97,7 +96,7 @@ pub enum WebSocketEvent {
 }
 
 /// WebSocket command types (client to server)
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSocketCommand {
     /// Subscribe to agent events
@@ -123,10 +122,9 @@ pub enum WebSocketCommand {
 }
 
 /// WebSocket message wrapper
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketMessage<T> {
     /// Message ID for tracking
-    #[schemars(with = "String")]
     pub id: uuid::Uuid,
     /// Message payload
     pub payload: T,
@@ -145,7 +143,7 @@ impl<T> WebSocketMessage<T> {
 }
 
 /// Subscription confirmation
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionConfirmation {
     pub subscription_type: String,
     pub resource_id: String,

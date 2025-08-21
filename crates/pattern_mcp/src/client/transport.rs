@@ -127,7 +127,7 @@ impl ClientTransport {
         }
     }
 
-    /// Create SSE transport for MCP server  
+    /// Create SSE transport for MCP server
     pub async fn sse(url: String, auth: AuthConfig) -> Result<Self> {
         match auth {
             AuthConfig::None => {

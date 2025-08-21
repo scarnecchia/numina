@@ -15,14 +15,12 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     config::{self},
-    coordination::selectors::DefaultSelectorRegistry,
     db::{
         DatabaseConfig,
-        client::{self, DB},
-        ops,
+        client::{self},
     },
 };
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use tracing::info;
 
 #[derive(Parser)]
@@ -214,6 +212,19 @@ enum DbCommands {
     Stats,
     /// Run a query
     Query { sql: String },
+    /// Force run database migrations
+    Migrate {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Repair orphaned tool messages (one-time fix)
+    RepairTools,
+    /// Clean up specific artificial batch IDs
+    CleanupBatches {
+        /// Comma-separated list of batch IDs to clean up
+        batch_ids: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -580,6 +591,27 @@ async fn main() -> Result<()> {
         };
     }
 
+    // Apply environment variable overrides for Remote database config
+    #[cfg(feature = "surreal-remote")]
+    if let DatabaseConfig::Remote {
+        username, password, ..
+    } = &mut config.database
+    {
+        // Only override if not already set in config
+        if username.is_none() {
+            if let Ok(user) = std::env::var("SURREAL_USER") {
+                info!("Using SURREAL_USER from environment");
+                *username = Some(user);
+            }
+        }
+        if password.is_none() {
+            if let Ok(pass) = std::env::var("SURREAL_PASS") {
+                info!("Using SURREAL_PASS from environment");
+                *password = Some(pass);
+            }
+        }
+    }
+
     tracing::info!("Using database config: {:?}", config.database);
 
     // Initialize database
@@ -591,16 +623,19 @@ async fn main() -> Result<()> {
     }
 
     // Initialize groups from configuration (skip for auth/atproto/config commands to avoid API key issues)
-    let skip_group_init = matches!(
+    let _skip_group_init = matches!(
         &cli.command,
-        Commands::Auth { .. } | Commands::Config { .. } | Commands::Atproto { .. }
+        Commands::Auth { .. }
+            | Commands::Config { .. }
+            | Commands::Atproto { .. }
+            | Commands::Db { .. }
     );
 
-    if !config.groups.is_empty() && !skip_group_init {
-        // Create a heartbeat channel for group initialization
-        let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
-        commands::group::initialize_from_config(&config, heartbeat_sender).await?;
-    }
+    // if !config.groups.is_empty() && !skip_group_init {
+    //     // Create a heartbeat channel for group initialization
+    //     let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
+    //     commands::group::initialize_from_config(&config, heartbeat_sender).await?;
+    // }
 
     match &cli.command {
         Commands::Chat {
@@ -621,77 +656,6 @@ async fn main() -> Result<()> {
                 output.success("Starting group chat mode...");
                 output.info("Group:", &group_name.bright_cyan().to_string());
 
-                // Load the group from database
-                let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
-                let group = match group {
-                    Some(g) => g,
-                    None => {
-                        output.error(&format!("Group '{}' not found", group_name));
-                        return Ok(());
-                    }
-                };
-
-                // Group was already loaded with relations in get_group_by_name
-
-                // Check if this is a Context Sync group that needs background monitoring
-                let is_context_sync = group.name == "Context Sync";
-                if is_context_sync {
-                    output.info(
-                        "Context Sync group detected",
-                        "Will start background monitoring after setup",
-                    );
-                }
-
-                // Create a shared constellation activity tracker for the group
-                // Use the group ID directly as the memory ID - they're in different namespaces
-                // GroupId is GroupId(String), so extract the inner UUID string
-                let group_id_str = group.id.to_string();
-                let tracker_memory_id = pattern_core::MemoryId(group_id_str);
-                let constellation_tracker = Arc::new(
-                    pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
-                        tracker_memory_id,
-                        50,
-                    ),
-                );
-
-                // Load all agents in the group
-                tracing::info!("Group has {} members to load", group.members.len());
-                let mut agents = Vec::new();
-                for (mut agent_record, _membership) in group.members.clone() {
-                    // Load memories and messages for the agent
-                    agent_ops::load_agent_memories_and_messages(&mut agent_record, &output).await?;
-
-                    // Create runtime agent from record with constellation tracker
-                    let agent = agent_ops::create_agent_from_record_with_tracker(
-                        agent_record,
-                        model.clone(),
-                        !*no_tools,
-                        &config,
-                        heartbeat_sender.clone(),
-                        Some(constellation_tracker.clone()),
-                        &output,
-                        None, // No shared tools for single agent chat
-                    )
-                    .await?;
-                    agents.push(agent);
-                }
-
-                if agents.is_empty() {
-                    output.error("No agents in group");
-                    output.info(
-                        "Hint:",
-                        "Add agents with: pattern-cli group add-member <group> <agent>",
-                    );
-                    return Ok(());
-                }
-
-                // Create the appropriate pattern manager
-                use pattern_core::coordination::types::CoordinationPattern;
-                use pattern_core::coordination::{
-                    DynamicManager, PipelineManager, RoundRobinManager, SleeptimeManager,
-                    SupervisorManager, VotingManager,
-                };
-
                 // Check if we have a Bluesky configuration block
                 let has_bluesky_config = config.bluesky.is_some();
 
@@ -699,291 +663,34 @@ async fn main() -> Result<()> {
                     output.info("Bluesky:", "Jetstream routing enabled");
                 }
 
-                match &group.coordination_pattern {
-                    CoordinationPattern::RoundRobin { .. } => {
-                        let manager = RoundRobinManager;
-                        if *discord {
-                            #[cfg(feature = "discord")]
-                            {
-                                discord::run_discord_bot_with_group(
-                                    group_name,
-                                    manager,
-                                    model.clone(),
-                                    *no_tools,
-                                    &config,
-                                    true, // enable_cli
-                                )
-                                .await?;
-                            }
-                            #[cfg(not(feature = "discord"))]
-                            {
-                                output
-                                    .error("Discord support not compiled. Add --features discord");
-                                return Ok(());
-                            }
-                        } else if has_bluesky_config {
-                            chat::chat_with_group_and_jetstream(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        } else {
-                            chat::chat_with_group(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        }
+                // Just route to the appropriate chat function based on mode
+                if *discord {
+                    #[cfg(feature = "discord")]
+                    {
+                        discord::run_discord_bot_with_group(
+                            group_name,
+                            model.clone(),
+                            *no_tools,
+                            &config,
+                            true, // enable_cli
+                        )
+                        .await?;
                     }
-                    CoordinationPattern::Dynamic { .. } => {
-                        let manager = DynamicManager::new(Arc::new(DefaultSelectorRegistry::new()));
-                        if *discord {
-                            #[cfg(feature = "discord")]
-                            {
-                                discord::run_discord_bot_with_group(
-                                    group_name,
-                                    manager,
-                                    model.clone(),
-                                    *no_tools,
-                                    &config,
-                                    true, // enable_cli
-                                )
-                                .await?;
-                            }
-                            #[cfg(not(feature = "discord"))]
-                            {
-                                output
-                                    .error("Discord support not compiled. Add --features discord");
-                                return Ok(());
-                            }
-                        } else if has_bluesky_config {
-                            chat::chat_with_group_and_jetstream(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        } else {
-                            chat::chat_with_group(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        }
+                    #[cfg(not(feature = "discord"))]
+                    {
+                        output.error("Discord support not compiled. Add --features discord");
+                        return Ok(());
                     }
-                    CoordinationPattern::Pipeline { .. } => {
-                        let manager = PipelineManager;
-                        if *discord {
-                            #[cfg(feature = "discord")]
-                            {
-                                discord::run_discord_bot_with_group(
-                                    group_name,
-                                    manager,
-                                    model.clone(),
-                                    *no_tools,
-                                    &config,
-                                    true, // enable_cli
-                                )
-                                .await?;
-                            }
-                            #[cfg(not(feature = "discord"))]
-                            {
-                                output
-                                    .error("Discord support not compiled. Add --features discord");
-                                return Ok(());
-                            }
-                        } else if has_bluesky_config {
-                            chat::chat_with_group_and_jetstream(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        } else {
-                            chat::chat_with_group(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        }
-                    }
-                    CoordinationPattern::Supervisor { .. } => {
-                        let manager = SupervisorManager;
-                        if *discord {
-                            #[cfg(feature = "discord")]
-                            {
-                                discord::run_discord_bot_with_group(
-                                    group_name,
-                                    manager,
-                                    model.clone(),
-                                    *no_tools,
-                                    &config,
-                                    true, // enable_cli
-                                )
-                                .await?;
-                            }
-                            #[cfg(not(feature = "discord"))]
-                            {
-                                output
-                                    .error("Discord support not compiled. Add --features discord");
-                                return Ok(());
-                            }
-                        } else if has_bluesky_config {
-                            chat::chat_with_group_and_jetstream(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        } else {
-                            chat::chat_with_group(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        }
-                    }
-                    CoordinationPattern::Voting { .. } => {
-                        let manager = VotingManager;
-                        if *discord {
-                            #[cfg(feature = "discord")]
-                            {
-                                discord::run_discord_bot_with_group(
-                                    group_name,
-                                    manager,
-                                    model.clone(),
-                                    *no_tools,
-                                    &config,
-                                    true, // enable_cli
-                                )
-                                .await?;
-                            }
-                            #[cfg(not(feature = "discord"))]
-                            {
-                                output
-                                    .error("Discord support not compiled. Add --features discord");
-                                return Ok(());
-                            }
-                        } else if has_bluesky_config {
-                            chat::chat_with_group_and_jetstream(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        } else {
-                            chat::chat_with_group(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        }
-                    }
-                    CoordinationPattern::Sleeptime { .. } => {
-                        let manager = SleeptimeManager;
-
-                        // Start background monitoring if this is the Context Sync group
-                        if is_context_sync {
-                            output.success("Starting Context Sync background monitoring...");
-
-                            // Create agents with membership for the monitoring task
-                            let agents_with_membership: Vec<_> = agents
-                                .iter()
-                                .zip(group.members.iter())
-                                .map(|(agent, (_, membership))| {
-                                    pattern_core::coordination::groups::AgentWithMembership {
-                                        agent: Arc::clone(agent),
-                                        membership: membership.clone(),
-                                    }
-                                })
-                                .collect();
-
-                            // Start the background monitoring task
-                            let monitoring_handle =
-                                background_tasks::start_context_sync_monitoring(
-                                    group.clone(),
-                                    agents_with_membership.clone(),
-                                    manager.clone(),
-                                    output.clone(),
-                                )
-                                .await?;
-
-                            output.info(
-                                "Background task started",
-                                "Context sync will run periodically in the background",
-                            );
-
-                            // Don't enter interactive chat for Context Sync, just let it run
-                            output.status("Context Sync group is now running in background mode");
-                            output.status("Press Ctrl+C to stop monitoring");
-
-                            // Wait for the monitoring task to complete (or be cancelled)
-                            monitoring_handle.await.into_diagnostic()?;
-                        } else if *discord {
-                            #[cfg(feature = "discord")]
-                            {
-                                discord::run_discord_bot_with_group(
-                                    group_name,
-                                    manager,
-                                    model.clone(),
-                                    *no_tools,
-                                    &config,
-                                    true, // enable_cli
-                                )
-                                .await?;
-                            }
-                            #[cfg(not(feature = "discord"))]
-                            {
-                                output
-                                    .error("Discord support not compiled. Add --features discord");
-                                return Ok(());
-                            }
-                        } else if has_bluesky_config {
-                            chat::chat_with_group_and_jetstream(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        } else {
-                            chat::chat_with_group(
-                                group_name,
-                                manager,
-                                model.clone(),
-                                *no_tools,
-                                &config,
-                            )
-                            .await?;
-                        }
-                    }
+                } else if has_bluesky_config {
+                    chat::chat_with_group_and_jetstream(
+                        group_name,
+                        model.clone(),
+                        *no_tools,
+                        &config,
+                    )
+                    .await?;
+                } else {
+                    chat::chat_with_group(group_name, model.clone(), *no_tools, &config).await?;
                 }
             } else {
                 // Chat with a single agent
@@ -1056,6 +763,97 @@ async fn main() -> Result<()> {
             match cmd {
                 DbCommands::Stats => commands::db::stats(&config, &output).await?,
                 DbCommands::Query { sql } => commands::db::query(sql, &output).await?,
+                DbCommands::Migrate { yes } => {
+                    if !yes {
+                        output.warning("⚠️  This will run database migrations!");
+                        output.warning("Make sure you have a backup before proceeding.");
+                        output.info("", "Run with --yes to skip this prompt.");
+
+                        use std::io::{self, Write};
+                        print!("Continue? [y/N]: ");
+                        io::stdout().flush().into_diagnostic()?;
+
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input).into_diagnostic()?;
+
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            output.status("Migration cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    output.status("Running database migrations...");
+
+                    // Use the database config from PatternConfig
+                    let db_config = if let Some(path) = cli.db_path.clone() {
+                        DatabaseConfig::Embedded {
+                            path: path.to_string_lossy().to_string(),
+                            strict_mode: false,
+                        }
+                    } else {
+                        config.database.clone()
+                    };
+
+                    // Initialize database with force_schema_update = true
+                    client::init_db_with_options(db_config, true).await?;
+
+                    output.success("✓ Migrations completed successfully");
+                }
+                DbCommands::RepairTools => {
+                    output.status("Repairing orphaned tool messages...");
+
+                    // Use the database config from PatternConfig
+                    let db_config = if let Some(path) = cli.db_path.clone() {
+                        DatabaseConfig::Embedded {
+                            path: path.to_string_lossy().to_string(),
+                            strict_mode: false,
+                        }
+                    } else {
+                        config.database.clone()
+                    };
+
+                    // Initialize database connection
+                    client::init_db(db_config).await?;
+
+                    // Use the static DB client
+                    use pattern_core::db::client::DB;
+                    use pattern_core::db::migration::MigrationRunner;
+
+                    // Call the repair function directly
+                    MigrationRunner::repair_orphaned_tool_messages_standalone(&*DB).await?;
+
+                    output.success("✓ Tool message repair completed");
+                }
+                DbCommands::CleanupBatches { batch_ids } => {
+                    output.status("Cleaning up specific batch IDs...");
+
+                    // Use the database config from PatternConfig
+                    let db_config = if let Some(path) = cli.db_path.clone() {
+                        DatabaseConfig::Embedded {
+                            path: path.to_string_lossy().to_string(),
+                            strict_mode: false,
+                        }
+                    } else {
+                        config.database.clone()
+                    };
+
+                    // Initialize database connection
+                    client::init_db(db_config).await?;
+
+                    // Parse the batch IDs
+                    let ids: Vec<&str> = batch_ids.split(',').map(|s| s.trim()).collect();
+
+                    output.status(&format!("Cleaning up {} batch IDs", ids.len()));
+
+                    // Use the static DB client
+                    use pattern_core::db::client::DB;
+                    use pattern_core::db::migration::MigrationRunner;
+
+                    // Call the cleanup function
+                    MigrationRunner::cleanup_specific_artificial_batches(&*DB, &ids).await?;
+
+                    output.success("✓ Batch cleanup completed");
+                }
             }
         }
         Commands::Debug { cmd } => match cmd {

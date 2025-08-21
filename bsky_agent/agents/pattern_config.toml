@@ -5,6 +5,7 @@ bluesky_handle = "pattern.atproto.systems"
 system_prompt_path = "../pattern-system-prompt.md"
 persona_path = "../pattern-persona-block.md"
 
+
 # Pattern's memory blocks
 [memory.current_human]
 content_path = "../pattern-current-human-block.md"
@@ -110,7 +111,7 @@ priority = 4
 
 [context.compression_strategy]
 type = "recursive_summarization"
-chunk_size = 20
+chunk_size = 30
 summarization_model = "claude-3-5-haiku-20241022"
 
 [context]

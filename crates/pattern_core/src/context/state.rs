@@ -11,11 +11,11 @@ use tokio::sync::{RwLock, watch};
 use std::sync::Arc;
 
 use crate::{
-    AgentId, AgentState, AgentType, CoreError, IdType, Result,
+    AgentId, AgentState, AgentType, CoreError, IdType, ModelProvider, Result,
     db::{DatabaseError, DbEntity},
     id::MessageId,
     memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
-    message::{Message, MessageContent, Response, ToolCall, ToolResponse},
+    message::{Message, MessageContent, ToolCall, ToolResponse},
     tool::ToolRegistry,
 };
 
@@ -60,7 +60,7 @@ impl AgentHandle {
 
     /// Update the state and notify watchers
     pub(crate) fn update_state(&mut self, new_state: AgentState) {
-        self.state = new_state;
+        self.state = new_state.clone();
         if let Some(arc) = &self.state_watch {
             let _ = arc.0.send(new_state);
         }
@@ -243,6 +243,72 @@ impl AgentHandle {
         Ok(())
     }
 
+    /// Archive messages in the database and store the summary
+    pub async fn archive_messages(
+        &self,
+        message_ids: Vec<crate::MessageId>,
+        summary: Option<String>,
+    ) -> Result<()> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for archiving messages".into(),
+                ),
+            ))
+        })?;
+
+        if !message_ids.is_empty() {
+            // Update the agent_messages relations to mark messages as archived
+            // We need to update the edge records, not the messages themselves
+            let sql = r#"
+                UPDATE agent_messages
+                SET message_type = 'archived'
+                WHERE in = $agent_id
+                AND out IN $message_ids
+            "#;
+
+            db.query(sql)
+                .bind(("agent_id", surrealdb::RecordId::from(self.agent_id.clone())))
+                .bind((
+                    "message_ids",
+                    message_ids
+                        .iter()
+                        .map(|id| surrealdb::RecordId::from(id))
+                        .collect::<Vec<_>>(),
+                ))
+                .await
+                .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+            tracing::info!(
+                "Archived {} messages for agent {} in database",
+                message_ids.len(),
+                self.agent_id
+            );
+        }
+
+        // Store the summary if provided
+        if let Some(summary_text) = summary {
+            // Update agent record with the archive summary
+            // The field is called message_summary in AgentRecord
+            let sql = r#"
+                UPDATE agent
+                SET message_summary = $summary,
+                    updated_at = time::now()
+                WHERE id = $id
+            "#;
+
+            db.query(sql)
+                .bind(("id", surrealdb::RecordId::from(self.agent_id.clone())))
+                .bind(("summary", summary_text))
+                .await
+                .map_err(|e| crate::db::DatabaseError::QueryFailed(e))?;
+
+            tracing::info!("Stored archive summary for agent {}", self.agent_id);
+        }
+
+        Ok(())
+    }
+
     /// Count archival memories for this agent
     pub async fn count_archival_memories(&self) -> Result<usize> {
         let db = self.db.as_ref().ok_or_else(|| {
@@ -312,7 +378,7 @@ impl AgentHandle {
 
             // Query msg table directly with content search (we'll filter by agent after)
             let sql = format!(
-                "SELECT * FROM msg WHERE {} ORDER BY created_at DESC LIMIT {}",
+                "SELECT * FROM msg WHERE {} ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC, created_at DESC LIMIT {}",
                 conditions.join(" AND "),
                 limit * 10 // Get more results since we'll filter some out
             );
@@ -338,7 +404,7 @@ impl AgentHandle {
 
             // Query the agent_messages relation table directly
             let sql = format!(
-                "SELECT position, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY position DESC LIMIT $limit FETCH messages",
+                "SELECT position, batch, sequence_num, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC LIMIT $limit FETCH messages",
                 where_clause,
                 self.agent_id.to_key()
             );
@@ -676,7 +742,7 @@ impl AgentHandle {
 impl Default for AgentHandle {
     fn default() -> Self {
         let state = AgentState::Ready;
-        let (tx, rx) = watch::channel(state);
+        let (tx, rx) = watch::channel(state.clone());
         Self {
             name: "".to_string(),
             agent_id: AgentId::generate(),
@@ -710,13 +776,13 @@ impl AgentHandle {
 /// Message history that needs locking
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MessageHistory {
-    /// Active messages in the current context window
-    pub messages: Vec<Message>,
-    /// Messages that have been compressed/archived to save context space
-    pub archived_messages: Vec<Message>,
-    /// Optional summary of archived messages
+    /// Active batches in the current context window
+    pub batches: Vec<crate::message::MessageBatch>,
+    /// Batches that have been compressed/archived to save context space
+    pub archived_batches: Vec<crate::message::MessageBatch>,
+    /// Optional summary of archived batches
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_summary: Option<String>,
+    pub archive_summary: Option<String>,
     /// Strategy used for compressing messages when context is full
     pub compression_strategy: CompressionStrategy,
     /// When compression was last performed
@@ -724,15 +790,70 @@ pub struct MessageHistory {
 }
 
 impl MessageHistory {
+    /// Get the total count of messages across all batches
+    pub fn total_message_count(&self) -> usize {
+        self.batches.iter().map(|b| b.messages.len()).sum()
+    }
+
     /// Create a new message history with the specified compression strategy
     pub fn new(compression_strategy: CompressionStrategy) -> Self {
         Self {
-            messages: Vec::new(),
-            archived_messages: Vec::new(),
-            message_summary: None,
+            batches: Vec::new(),
+            archived_batches: Vec::new(),
+            archive_summary: None,
             compression_strategy,
             last_compression: Utc::now(),
         }
+    }
+
+    /// Add a message to its batch (uses message.batch if present)
+    pub fn add_message(&mut self, message: Message) -> Message {
+        let batch_id = message
+            .batch
+            .unwrap_or_else(crate::agent::get_next_message_position_sync);
+        self.add_message_to_batch(batch_id, message)
+    }
+
+    /// Add a message to a specific batch
+    pub fn add_message_to_batch(
+        &mut self,
+        batch_id: crate::agent::SnowflakePosition,
+        mut message: Message,
+    ) -> Message {
+        use crate::message::{BatchType, MessageBatch};
+
+        // Validate/set batch_id
+        if let Some(msg_batch_id) = message.batch {
+            assert_eq!(msg_batch_id, batch_id, "Message batch_id doesn't match");
+        } else {
+            message.batch = Some(batch_id);
+        }
+
+        // Find or create batch
+        if let Some(batch) = self.batches.iter_mut().find(|b| b.id == batch_id) {
+            batch.add_message(message)
+        } else {
+            // Create new batch - infer type from message role
+            let batch_type = message.batch_type.unwrap_or_else(|| {
+                match message.role {
+                    crate::message::ChatRole::User => BatchType::UserRequest,
+                    crate::message::ChatRole::System => BatchType::SystemTrigger,
+                    _ => BatchType::UserRequest, // Default
+                }
+            });
+
+            // Clone the message since from_messages consumes it
+            let message_clone = message.clone();
+            let batch = MessageBatch::from_messages(batch_id, batch_type, vec![message]);
+            self.batches.push(batch);
+            message_clone
+        }
+    }
+
+    /// Add an entire batch
+    pub fn add_batch(&mut self, batch: crate::message::MessageBatch) {
+        // Could check if batch.id already exists and merge, or just add
+        self.batches.push(batch);
     }
 }
 
@@ -757,6 +878,9 @@ pub struct AgentContext {
     /// Optional constellation activity tracker for shared context
     pub constellation_tracker:
         Option<Arc<crate::constellation_memory::ConstellationActivityTracker>>,
+
+    /// Model provider for compression strategies that need it
+    pub(crate) model_provider: Option<Arc<dyn ModelProvider>>,
 }
 
 /// Metadata about the agent state
@@ -768,11 +892,6 @@ pub struct AgentContextMetadata {
     pub total_tool_calls: usize,
     pub context_rebuilds: usize,
     pub compression_events: usize,
-    #[serde(skip)]
-    pub tool_call_ids: std::collections::HashSet<String>,
-
-    #[serde(skip)]
-    pub tool_response_ids: std::collections::HashSet<String>,
 }
 
 impl Default for AgentContextMetadata {
@@ -784,8 +903,6 @@ impl Default for AgentContextMetadata {
             total_tool_calls: 0,
             context_rebuilds: 0,
             compression_events: 0,
-            tool_call_ids: std::collections::HashSet::new(),
-            tool_response_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -801,7 +918,7 @@ impl AgentContext {
         context_config: ContextConfig,
     ) -> Self {
         let state = AgentState::Ready;
-        let (tx, rx) = watch::channel(state);
+        let (tx, rx) = watch::channel(state.clone());
         let handle = AgentHandle {
             agent_id,
             memory,
@@ -822,6 +939,7 @@ impl AgentContext {
                 CompressionStrategy::default(),
             ))),
             constellation_tracker: None,
+            model_provider: None,
         }
     }
 
@@ -846,18 +964,57 @@ impl AgentContext {
     }
 
     /// Build the current context for this agent
-    pub async fn build_context(&self) -> Result<MemoryContext> {
+    ///
+    /// # Arguments
+    /// * `current_batch_id` - The batch currently being processed (if any).
+    ///   This ensures incomplete batches that are actively being processed are included.
+    pub async fn build_context(
+        &self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+    ) -> Result<MemoryContext> {
         {
             let mut metadata = self.metadata.write().await;
             metadata.last_active = Utc::now();
             metadata.context_rebuilds += 1;
         }
 
-        // Check if we need to compress messages
+        // Check if we need to compress batches (by message count OR token count)
         {
             let history = self.history.read().await;
-            if history.messages.len() > self.context_config.max_context_messages {
+            let total_messages: usize = history.batches.iter().map(|b| b.len()).sum();
+
+            // Check message count
+            let needs_message_compression =
+                total_messages > self.context_config.max_context_messages;
+
+            // Check token count if we have a limit
+            let needs_token_compression =
+                if let Some(max_tokens) = self.context_config.max_context_tokens {
+                    // Estimate current token usage
+                    let memory_blocks = self.handle.memory.get_all_blocks();
+                    let system_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+                    let message_tokens: usize = history
+                        .batches
+                        .iter()
+                        .flat_map(|b| &b.messages)
+                        .map(|m| m.estimate_tokens())
+                        .sum();
+                    let total_tokens = system_tokens + message_tokens;
+
+                    // Leave some buffer (use 80% of limit to trigger compression)
+                    total_tokens > (max_tokens * 4 / 5)
+                } else {
+                    false
+                };
+
+            if needs_message_compression || needs_token_compression {
                 drop(history); // release read lock
+                tracing::info!(
+                    "Triggering compression: messages={} (limit={}), tokens_exceeded={}",
+                    total_messages,
+                    self.context_config.max_context_messages,
+                    needs_token_compression
+                );
                 self.compress_messages().await?;
             }
         }
@@ -867,27 +1024,47 @@ impl AgentContext {
 
         // Build context with read lock
         let history = self.history.read().await;
+        let total_messages: usize = history.batches.iter().map(|b| b.len()).sum();
         tracing::debug!(
-            "Building context for agent {}: {} messages in history, max_context_messages={}",
+            "Building context for agent {}: {} messages across {} batches, max_context_messages={}",
             self.handle.agent_id,
-            history.messages.len(),
+            total_messages,
+            history.batches.len(),
             self.context_config.max_context_messages
         );
+
+        // Count complete vs incomplete batches
+        let complete_count = history.batches.iter().filter(|b| b.is_complete).count();
+        let incomplete_count = history.batches.len() - complete_count;
+
+        tracing::debug!(
+            "Context state for agent {}: {} batches ({} complete, {} incomplete), current_batch_id={:?}",
+            self.handle.agent_id,
+            history.batches.len(),
+            complete_count,
+            incomplete_count,
+            current_batch_id
+        );
+
+        // Sort batches by ID (oldest to newest) before building context
+        let mut sorted_batches = history.batches.clone();
+        sorted_batches.sort_by_key(|b| b.id);
 
         let context =
             ContextBuilder::new(self.handle.agent_id.clone(), self.context_config.clone())
                 .with_memory_blocks(memory_blocks)
                 .with_tools_from_registry(&self.tools)
-                .with_messages(history.messages.clone())
-                .build()
+                .with_batches(sorted_batches)
+                .with_archive_summary(history.archive_summary.clone())
+                .build(current_batch_id)
                 .await?;
 
         tracing::debug!(
             "Built context with {} messages, system_prompt length={} chars",
-            context.messages.len(),
+            context.len(),
             context.system_prompt.len()
         );
-        for msg in &context.messages {
+        for msg in &context.messages() {
             tracing::debug!("{:?}", msg);
         }
 
@@ -895,158 +1072,137 @@ impl AgentContext {
     }
 
     /// Add a new message to the state
-    pub async fn add_message(&self, mut message: Message) {
-        // Filter duplicate tool calls to prevent API errors
+    pub async fn add_message(&self, message: Message) -> Message {
+        // Count tool calls for metadata
         if message.role.is_assistant() {
-            if let MessageContent::ToolCalls(calls) = &mut message.content {
+            if let MessageContent::ToolCalls(calls) = &message.content {
                 let mut metadata = self.metadata.write().await;
-
-                // Filter out any duplicate tool calls
-                let original_count = calls.len();
-                calls.retain(|call| {
-                    if metadata.tool_call_ids.contains(&call.call_id) {
-                        tracing::debug!(
-                            "Filtering out duplicate tool call with ID: {}",
-                            call.call_id
-                        );
-                        false
-                    } else {
-                        metadata.tool_call_ids.insert(call.call_id.clone());
-                        true
-                    }
-                });
-
-                // If all tool calls were duplicates, skip the message entirely
-                if calls.is_empty() && original_count > 0 {
-                    tracing::debug!("All tool calls were duplicates, skipping message");
-                    return;
-                }
-
-                // Count only the non-duplicate tool calls
                 metadata.total_tool_calls += calls.len();
-            }
-        }
-        if let MessageContent::ToolResponses(calls) = &mut message.content {
-            let mut metadata = self.metadata.write().await;
-
-            // Filter out any duplicate tool calls
-            let original_count = calls.len();
-            calls.retain(|call| {
-                if metadata.tool_response_ids.contains(&call.call_id) {
-                    tracing::debug!(
-                        "Filtering out duplicate tool response with ID: {}",
-                        call.call_id
-                    );
-                    false
-                } else if metadata.tool_call_ids.contains(&call.call_id) {
-                    metadata.tool_response_ids.insert(call.call_id.clone());
-                    true
-                } else {
-                    tracing::debug!(
-                        "Filtering out unpaired tool response with ID: {}",
-                        call.call_id
-                    );
-                    false
-                }
-            });
-
-            // If all tool calls were duplicates, skip the message entirely
-            if calls.is_empty() && original_count > 0 {
-                tracing::debug!("All tool responses were duplicates, skipping message");
-                return;
-            }
-
-            {
-                let mut history = self.history.write().await;
-                if let Some(last) = history.messages.last().clone() {
-                    if !matches!(
-                        last.content,
-                        MessageContent::ToolCalls(_) | MessageContent::Blocks(_),
-                    ) {
-                        history.messages.pop();
-                        return;
+            } else if let MessageContent::Blocks(blocks) = &message.content {
+                let mut metadata = self.metadata.write().await;
+                for block in blocks {
+                    if matches!(block, crate::message::ContentBlock::ToolUse { .. }) {
+                        metadata.total_tool_calls += 1;
                     }
                 }
             }
         }
 
-        if let MessageContent::Blocks(blocks) = &mut message.content {
-            let mut metadata = self.metadata.write().await;
-            let mut should_keep = true;
-            for block in blocks {
-                match block {
-                    crate::message::ContentBlock::ToolUse { id, .. } => {
-                        if metadata.tool_call_ids.contains(id) {
-                            tracing::debug!("Filtering out duplicate tool call with ID: {}", id);
-                            should_keep = false;
-                        } else {
-                            metadata.tool_call_ids.insert(id.clone());
-                            metadata.total_tool_calls += 1;
-                        }
-                    }
-                    crate::message::ContentBlock::ToolResult { tool_use_id, .. } => {
-                        if metadata.tool_response_ids.contains(tool_use_id) {
-                            tracing::debug!(
-                                "Filtering out duplicate tool response with ID: {}",
-                                tool_use_id
-                            );
-                            should_keep = false;
-                        } else if metadata.tool_call_ids.contains(tool_use_id) {
-                            metadata.tool_response_ids.insert(tool_use_id.clone());
-                        } else {
-                            tracing::debug!(
-                                "Filtering out unpaired tool response with ID: {}",
-                                tool_use_id
-                            );
-                            should_keep = false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // {
-            //     let mut history = self.history.write().await;
-            //     if let Some(last) = history.messages.last().clone() {
-            //         if !matches!(
-            //             last.content,
-            //             MessageContent::ToolCalls(_) | MessageContent::Blocks(_),
-            //         ) {
-            //             history.messages.pop();
-            //             return;
-            //         }
-            //     }
-            // }
-            if !should_keep {
-                tracing::debug!("duplicate or unpaired tool responses, skipping message");
-                return;
-            }
-        }
-
+        // Add message to history - batches handle duplicate detection and sequencing
         let mut history = self.history.write().await;
-        history.messages.push(message);
-        {
-            let mut metadata = self.metadata.write().await;
-            metadata.total_messages += 1;
-            metadata.last_active = Utc::now();
+        let updated_message = history.add_message(message);
+
+        // Update metadata
+        let mut metadata = self.metadata.write().await;
+        metadata.total_messages += 1;
+        metadata.last_active = Utc::now();
+
+        updated_message
+    }
+
+    /// Add a message to a specific batch
+    pub async fn add_message_to_batch(
+        &self,
+        batch_id: crate::agent::SnowflakePosition,
+        message: Message,
+    ) {
+        let mut history = self.history.write().await;
+        history.add_message_to_batch(batch_id, message);
+
+        let mut metadata = self.metadata.write().await;
+        metadata.total_messages += 1;
+        metadata.last_active = Utc::now();
+    }
+
+    /// Add an entire batch
+    pub async fn add_batch(&self, batch: crate::message::MessageBatch) {
+        let message_count = batch.len();
+        let mut history = self.history.write().await;
+        history.add_batch(batch);
+
+        let mut metadata = self.metadata.write().await;
+        metadata.total_messages += message_count;
+        metadata.last_active = Utc::now();
+    }
+
+    /// Clean up errors in batches - adds failure responses then runs finalize without marking complete
+    /// This is used when exiting process_message_stream early due to errors
+    pub async fn cleanup_errors(
+        &self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+        error_message: &str,
+    ) {
+        let mut history = self.history.write().await;
+
+        // Find and clean up the current batch if specified
+        if let Some(batch_id) = current_batch_id {
+            if let Some(batch) = history.batches.iter_mut().find(|b| b.id == batch_id) {
+                // First, add failure responses for any pending tool calls
+                let pending_calls = batch.get_pending_tool_calls();
+                if !pending_calls.is_empty() {
+                    tracing::info!(
+                        "Adding {} failure responses for pending tool calls in batch {}",
+                        pending_calls.len(),
+                        batch_id
+                    );
+                    for call_id in pending_calls {
+                        let error_response = crate::message::ToolResponse {
+                            call_id: call_id.clone(),
+                            content: format!("Error: {}", error_message),
+                        };
+                        batch.add_tool_response_with_sequencing(error_response);
+                    }
+                }
+
+                // Then finalize to clean up any remaining issues
+                let removed = batch.finalize();
+                if !removed.is_empty() {
+                    tracing::warn!(
+                        "Cleaned up {} unpaired tool calls in current batch {} during error handling",
+                        removed.len(),
+                        batch_id
+                    );
+                }
+                // Don't mark complete - leave that decision to the caller
+            }
+        }
+
+        // Also clean up any other incomplete batches (defensive)
+        for batch in history.batches.iter_mut() {
+            if !batch.is_complete && batch.has_pending_tool_calls() {
+                // Add failure responses for pending calls
+                let pending_calls = batch.get_pending_tool_calls();
+                for call_id in pending_calls {
+                    let error_response = crate::message::ToolResponse {
+                        call_id: call_id.clone(),
+                        content: format!("Error: {}", error_message),
+                    };
+                    batch.add_tool_response_with_sequencing(error_response);
+                }
+
+                let removed = batch.finalize();
+                if !removed.is_empty() {
+                    tracing::warn!(
+                        "Cleaned up {} unpaired tool calls in incomplete batch {} during error handling",
+                        removed.len(),
+                        batch.id
+                    );
+                }
+                // Don't mark complete - these may be resumed later
+            }
         }
     }
 
     /// Process a single tool call and return the response
     pub async fn process_tool_call(&self, call: &ToolCall) -> Result<Option<ToolResponse>> {
-        // Check for duplicate
-        let metadata = self.metadata.read().await;
-        if metadata.tool_call_ids.contains(&call.call_id) {
-            return Ok(None);
-        }
-        drop(metadata);
-
+        // No duplicate checking needed - batches handle this
         tracing::debug!(
             "Executing tool: {} with args: {:?}",
             call.fn_name,
             call.fn_arguments
         );
 
-        let response = match self
+        match self
             .tools
             .execute(&call.fn_name, call.fn_arguments.clone())
             .await
@@ -1070,89 +1226,7 @@ impl AgentContext {
                     content: format!("Error: {:?}", e),
                 }))
             }
-        };
-        if let Ok(Some(_response)) = response.as_ref() {
-            let metadata = self.metadata.read().await;
-            if metadata.tool_response_ids.contains(&call.call_id) {
-                return Ok(None);
-            }
         }
-        response
-    }
-
-    /// Process a chat response and update state
-    /// Returns a vec of responses: the original (minus tool calls) and a separate tool response if needed
-    pub async fn process_response(&self, mut response: Response) -> Response {
-        let mut memory_updates = Vec::new();
-
-        let mut offset = 0usize; // as we add responses, our index gets offset.
-        // Execute all tools, collecting responses or errors
-        for (index, content) in response.content.clone().iter().enumerate() {
-            let mut tool_responses = Vec::new();
-            if let MessageContent::ToolCalls(call_group) = content {
-                for call in call_group {
-                    // Deduplicate tool calls here.
-                    let metadata = self.metadata.read().await;
-                    if metadata.tool_call_ids.contains(&call.call_id) {
-                        continue;
-                    }
-                    drop(metadata);
-
-                    tracing::debug!(
-                        "Executing tool: {} with args: {:?}",
-                        call.fn_name,
-                        call.fn_arguments
-                    );
-                    match self
-                        .tools
-                        .execute(&call.fn_name, call.fn_arguments.clone())
-                        .await
-                    {
-                        Ok(tool_response) => {
-                            tracing::debug!("✅ Tool {} executed successfully", call.fn_name);
-
-                            // Track memory tool calls for persistence
-                            if call.fn_name.contains("memory") {
-                                memory_updates
-                                    .push((call.fn_name.clone(), call.fn_arguments.clone()));
-                            }
-
-                            tool_responses.push(ToolResponse {
-                                call_id: call.call_id.clone(),
-                                content: serde_json::to_string_pretty(&tool_response)
-                                    .unwrap_or("Error serializing tool response".to_string()),
-                            });
-                        }
-                        Err(e) => {
-                            crate::log_error!(
-                                format!("❌ Tool execution failed for {}", call.fn_name),
-                                e
-                            );
-
-                            // Add error response for this tool
-                            tool_responses.push(ToolResponse {
-                                call_id: call.call_id.clone(),
-                                content: format!(
-                                    "Error: Failed to execute tool '{}': {}",
-                                    call.fn_name, e
-                                ),
-                            });
-                        }
-                    }
-                }
-                if !tool_responses.is_empty() {
-                    // Insert tool responses RIGHT AFTER the tool calls
-                    response.content.insert(
-                        index + offset + 1,
-                        MessageContent::ToolResponses(tool_responses),
-                    );
-                    // update our offset to accommodate the insertion
-                    offset += 1;
-                }
-            }
-        }
-
-        response
     }
 
     /// Update a memory block
@@ -1199,30 +1273,184 @@ impl AgentContext {
         Ok(())
     }
 
-    /// Compress messages using the configured strategy
-    async fn compress_messages(&self) -> Result<()> {
+    /// Estimate the token count for system prompt and memory blocks
+    fn estimate_system_prompt_tokens(&self, memory_blocks: &[MemoryBlock]) -> usize {
+        // Build a rough approximation of the system prompt
+        let mut prompt_text = String::new();
+
+        // Add base instructions
+        prompt_text.push_str(&self.context_config.base_instructions);
+        prompt_text.push_str("\n\n");
+
+        // Add metadata section (rough approximation)
+        prompt_text.push_str("System Metadata:\n");
+        prompt_text.push_str("Current time: ");
+        prompt_text.push_str(&chrono::Utc::now().to_rfc3339());
+        prompt_text.push_str("\n\n");
+
+        // Add memory blocks
+        if !memory_blocks.is_empty() {
+            prompt_text.push_str("Memory Blocks:\n");
+            for block in memory_blocks {
+                prompt_text.push_str(&format!("[{}] ", block.label));
+                prompt_text.push_str(&block.value);
+                prompt_text.push_str("\n");
+            }
+            prompt_text.push_str("\n");
+        }
+
+        // Add tool usage rules if configured
+        for rule in &self.context_config.tool_usage_rules {
+            prompt_text.push_str(&rule.rule);
+            prompt_text.push_str("\n");
+        }
+
+        // Estimate tokens using the same formula as Message::estimate_tokens()
+        // ~4 characters per token, with a multiplier for safety
+        let char_count = prompt_text.len();
+        let base_tokens = char_count / 4;
+
+        // Apply the token multiplier from model adjustments if available
+        let multiplier = self.context_config.model_adjustments.token_multiplier;
+        (base_tokens as f32 * multiplier) as usize
+    }
+
+    /// Force compression regardless of current limits
+    /// Used when we get a "prompt too long" error from the model
+    pub async fn force_compression(&self) -> Result<()> {
         let mut history = self.history.write().await;
-        let compressor = MessageCompressor::new(history.compression_strategy.clone());
+
+        // Calculate system prompt tokens (including memory blocks)
+        let memory_blocks = self.handle.memory.get_all_blocks();
+        let system_prompt_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+
+        let mut compressor = MessageCompressor::new(history.compression_strategy.clone())
+            .with_system_prompt_tokens(system_prompt_tokens)
+            .with_existing_summary(history.archive_summary.clone());
+
+        // Add model provider if available
+        if let Some(ref provider) = self.model_provider {
+            compressor = compressor.with_model_provider(provider.clone());
+        }
+
+        // Sort batches by ID (oldest to newest) before compression
+        history.batches.sort_by_key(|b| b.id);
+
+        let batch_count_before = history.batches.len();
+        let message_count_before: usize = history.batches.iter().map(|b| b.len()).sum();
+
+        tracing::info!(
+            "FORCING compression due to prompt too long: {} batches with {} total messages",
+            batch_count_before,
+            message_count_before
+        );
+
+        // Force compression by using very aggressive limits
+        // Use 50% of normal limits to ensure we compress enough
+        let forced_message_limit = self.context_config.max_context_messages / 2;
+        let forced_token_limit = self.context_config.max_context_tokens.map(|t| t / 2);
 
         let result = compressor
             .compress(
-                history.messages.clone(),
-                self.context_config.max_context_messages,
+                history.batches.clone(),
+                forced_message_limit,
+                forced_token_limit,
             )
             .await?;
 
+        // Update history with compressed batches
+        history.batches = result.active_batches;
+
+        // Store compression metadata
+        if let Some(summary) = result.summary {
+            history.archive_summary = Some(summary);
+        }
+
+        history.last_compression = chrono::Utc::now();
+
+        let batch_count_after = history.batches.len();
+        let message_count_after: usize = history.batches.iter().map(|b| b.len()).sum();
+
+        tracing::info!(
+            "Force compression complete: {} -> {} batches, {} -> {} messages (removed {})",
+            batch_count_before,
+            batch_count_after,
+            message_count_before,
+            message_count_after,
+            message_count_before - message_count_after
+        );
+
+        Ok(())
+    }
+
+    /// Compress messages using the configured strategy
+    async fn compress_messages(&self) -> Result<()> {
+        let mut history = self.history.write().await;
+
+        // Calculate system prompt tokens (including memory blocks)
+        let memory_blocks = self.handle.memory.get_all_blocks();
+        let system_prompt_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+
+        let mut compressor = MessageCompressor::new(history.compression_strategy.clone())
+            .with_system_prompt_tokens(system_prompt_tokens)
+            .with_existing_summary(history.archive_summary.clone());
+
+        // Add model provider if available
+        if let Some(ref provider) = self.model_provider {
+            compressor = compressor.with_model_provider(provider.clone());
+        }
+
+        // Sort batches by ID (oldest to newest) before compression
+        history.batches.sort_by_key(|b| b.id);
+
+        let batch_count_before = history.batches.len();
+        let message_count_before: usize = history.batches.iter().map(|b| b.len()).sum();
+
+        tracing::debug!(
+            "Starting compression: {} batches with {} total messages",
+            batch_count_before,
+            message_count_before
+        );
+
+        let result = compressor
+            .compress(
+                history.batches.clone(),
+                self.context_config.max_context_messages,
+                self.context_config.max_context_tokens,
+            )
+            .await?;
+
+        let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
+        let archived_message_count: usize = result.archived_batches.iter().map(|b| b.len()).sum();
+
+        tracing::info!(
+            "Compression result: {} active batches ({} msgs), {} archived batches ({} msgs)",
+            result.active_batches.len(),
+            active_message_count,
+            result.archived_batches.len(),
+            archived_message_count
+        );
+
         let archived_ids = self.apply_compression_result(&mut history, result)?;
+        let archive_summary = history.archive_summary.clone();
         history.last_compression = Utc::now();
         self.metadata.write().await.compression_events += 1;
 
-        // Return the archived IDs so the caller can persist them to the database
-        // For now, just log that compression happened
-        if !archived_ids.is_empty() {
-            tracing::info!(
-                "Compressed {} messages for agent {}, ready to archive in database",
-                archived_ids.len(),
-                self.handle.agent_id
-            );
+        // Archive the messages in the database and store the summary
+        if !archived_ids.is_empty() || archive_summary.is_some() {
+            if let Err(e) = self
+                .handle
+                .archive_messages(archived_ids.clone(), archive_summary)
+                .await
+            {
+                tracing::error!("Failed to archive messages in database: {:?}", e);
+            } else {
+                tracing::info!(
+                    "Successfully archived {} messages for agent {}",
+                    archived_ids.len(),
+                    self.handle.agent_id
+                );
+            }
         }
 
         Ok(())
@@ -1236,23 +1464,23 @@ impl AgentContext {
     ) -> Result<Vec<crate::MessageId>> {
         // Collect message IDs that will be archived
         let archived_ids: Vec<crate::MessageId> = result
-            .archived_messages
+            .archived_batches
             .iter()
-            .map(|msg| msg.id.clone())
+            .flat_map(|batch| batch.messages.iter().map(|msg| msg.id.clone()))
             .collect();
 
-        // Move compressed messages to archive
-        history.archived_messages.extend(result.archived_messages);
+        // Move compressed batches to archive
+        history.archived_batches.extend(result.archived_batches);
 
-        // Update active messages
-        history.messages = result.active_messages;
+        // Update active batches
+        history.batches = result.active_batches;
 
         // Update or append to summary
         if let Some(new_summary) = result.summary {
-            if let Some(existing_summary) = &mut history.message_summary {
+            if let Some(existing_summary) = &mut history.archive_summary {
                 *existing_summary = format!("{}\n\n{}", existing_summary, new_summary);
             } else {
-                history.message_summary = Some(new_summary);
+                history.archive_summary = Some(new_summary);
             }
         }
 
@@ -1266,8 +1494,8 @@ impl AgentContext {
         let metadata = self.metadata.read().await;
         AgentStats {
             total_messages: metadata.total_messages,
-            active_messages: history.messages.len(),
-            archived_messages: history.archived_messages.len(),
+            active_messages: history.batches.iter().map(|b| b.len()).sum(),
+            archived_messages: history.archived_batches.iter().map(|b| b.len()).sum(),
             total_tool_calls: metadata.total_tool_calls,
             memory_blocks: self.handle.memory.list_blocks().len(),
             compression_events: metadata.compression_events,
@@ -1282,7 +1510,7 @@ impl AgentContext {
         StateCheckpoint {
             agent_id: self.handle.agent_id.clone(),
             timestamp: Utc::now(),
-            messages: history.messages.clone(),
+            batches: history.batches.clone(),
             memory_snapshot: self.handle.memory.clone(),
             metadata: self.metadata.read().await.clone(),
         }
@@ -1298,7 +1526,7 @@ impl AgentContext {
         }
 
         let mut history = self.history.write().await;
-        history.messages = checkpoint.messages;
+        history.batches = checkpoint.batches;
         // Note: memory is shared via handle, so we can't restore it here
         // This might need a different approach
         *self.metadata.write().await = checkpoint.metadata;
@@ -1324,7 +1552,7 @@ pub struct AgentStats {
 pub struct StateCheckpoint {
     pub agent_id: AgentId,
     pub timestamp: DateTime<Utc>,
-    pub messages: Vec<Message>,
+    pub batches: Vec<crate::message::MessageBatch>,
     pub memory_snapshot: Memory,
     pub metadata: AgentContextMetadata,
 }

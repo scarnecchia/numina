@@ -544,17 +544,17 @@ impl EventHandler for DiscordBot {
                                                     }
 
                                                     // Send any remaining text
-                                                    if !response_text.trim().is_empty() {
-                                                        if let Err(e) = channel_id
-                                                            .say(&ctx_clone.http, &response_text)
-                                                            .await
-                                                        {
-                                                            warn!(
-                                                                "Failed to send final reaction response: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
+                                                    // if !response_text.trim().is_empty() {
+                                                    //     if let Err(e) = channel_id
+                                                    //         .say(&ctx_clone.http, &response_text)
+                                                    //         .await
+                                                    //     {
+                                                    //         warn!(
+                                                    //             "Failed to send final reaction response: {}",
+                                                    //             e
+                                                    //         );
+                                                    //     }
+                                                    // }
                                                 }
                                                 Err(e) => {
                                                     warn!(
@@ -1208,28 +1208,28 @@ impl DiscordBot {
                             has_sent_initial_response = true; // ANY activity counts as a response
 
                             match event {
-                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id: _, text, is_final } => {
-                                    // Filter out single '.' which is a null response
-                                    if !text.is_empty() && text.trim() != "." {
-                                        current_message.push_str(&text);
+                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id: _, text:_, is_final:_ } => {
+                                    // // Filter out single '.' which is a null response
+                                    // if !text.is_empty() && text.trim() != "." {
+                                    //     current_message.push_str(&text);
 
-                                        // Send complete sentences/paragraphs as they arrive
-                                        if is_final || text.ends_with('\n') || text.ends_with(". ") || current_message.len() > 1500 {
-                                            if !current_message.trim().is_empty() && current_message.trim() != "." {
-                                                for chunk in split_message(&current_message, 2000) {
-                                                    // Use channel.say() to respond in the same channel instead of DM
-                                                    if let Err(e) = msg.channel_id.say(&ctx.http, chunk).await {
-                                                        warn!("Failed to send response chunk to channel {}: {}", msg.channel_id, e);
-                                                        // Log more details about the context
-                                                        warn!("Message context - Guild: {:?}, Channel: {}, Is DM: {}",
-                                                            msg.guild_id, msg.channel_id, msg.guild_id.is_none());
-                                                    }
-                                                    has_sent_initial_response = true;
-                                                }
-                                                current_message.clear();
-                                            }
-                                        }
-                                    }
+                                    //     // Send complete sentences/paragraphs as they arrive
+                                    //     if is_final || text.ends_with('\n') || text.ends_with(". ") || current_message.len() > 1500 {
+                                    //         if !current_message.trim().is_empty() && current_message.trim() != "." {
+                                    //             for chunk in split_message(&current_message, 2000) {
+                                    //                 // Use channel.say() to respond in the same channel instead of DM
+                                    //                 if let Err(e) = msg.channel_id.say(&ctx.http, chunk).await {
+                                    //                     warn!("Failed to send response chunk to channel {}: {}", msg.channel_id, e);
+                                    //                     // Log more details about the context
+                                    //                     warn!("Message context - Guild: {:?}, Channel: {}, Is DM: {}",
+                                    //                         msg.guild_id, msg.channel_id, msg.guild_id.is_none());
+                                    //                 }
+                                    //                 has_sent_initial_response = true;
+                                    //             }
+                                    //             current_message.clear();
+                                    //         }
+                                    //     }
+                                    // }
                                 },
                                 pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id: _, call_id, fn_name, args: _ } => {
                                     info!("Tool call started: {} ({})", fn_name, call_id);

@@ -152,6 +152,24 @@ pub async fn search_conversations(
                         (i + 1).to_string().bright_white(),
                         format!("({})", msg.id.0).dimmed()
                     );
+
+                    // Show batch/position/sequence info
+                    let batch_info = format!(
+                        "batch: {}, pos: {}, seq: {}",
+                        msg.batch
+                            .as_ref()
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        msg.position
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        msg.sequence_num
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "none".to_string())
+                    );
+                    output.kv("Batch Info", &batch_info.dimmed().to_string());
+
                     output.kv(
                         "Role",
                         &format!("{:?}", msg.role).bright_yellow().to_string(),
@@ -872,7 +890,8 @@ pub async fn show_context(agent_name: &str, config: &PatternConfig) -> Result<()
                 agent_record.id.to_string().dimmed()
             ),
         );
-        output.info("State:", &format!("{:?}", agent_record.state));
+        // State is runtime-only, not persisted
+        output.info("State:", "Ready");
         println!();
 
         let (heartbeat_sender, _) = pattern_core::context::heartbeat::heartbeat_channel();
@@ -958,15 +977,17 @@ pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>)
         .collect();
 
     if let Some(agent_record) = agents.first() {
-        // Query for the specific memory block
+        // Query for the specific memory block for this agent
         let query_sql = r#"
-            SELECT * FROM mem
-            WHERE label = $label
-            LIMIT 1
+            SELECT * FROM agent_memories
+            WHERE in = $agent_id
+            AND out.*.label = $label
+            FETCH out
         "#;
 
         let mut response = DB
             .query(query_sql)
+            .bind(("agent_id", agent_record.id.clone()))
             .bind(("label", label.to_string()))
             .await
             .into_diagnostic()?;

@@ -22,8 +22,10 @@ Use snowflake IDs to create implicit batches without requiring a separate batch 
 // Add to Message struct
 pub struct Message {
     pub id: MessageId,                      // Existing UUID-based ID
-    pub snowflake_id: Option<SnowflakeId>,  // Unique ordering ID
-    pub batch_id: Option<SnowflakeId>,      // ID of first message in batch
+    // NOTE: These fields are Option during migration but should become required:
+    // After migration completes, remove Option wrapper and make these fields mandatory
+    pub position: Option<SnowflakeId>,  // Unique ordering ID
+    pub batch: Option<SnowflakeId>,      // ID of first message in batch
     pub sequence_num: Option<u32>,          // Position within batch
     pub batch_type: Option<BatchType>,      // Type of processing cycle
     // ... existing fields
@@ -61,9 +63,9 @@ The context builder would:
 ### Processing Flow
 
 #### New Request Flow
-1. User message arrives without `batch_id`
-2. `process_message_stream` generates new `batch_id` 
-3. All messages in processing cycle use this `batch_id`
+1. User message arrives without `batch id`
+2. `process_message_stream` generates new `batch id`
+3. All messages in processing cycle use this `batch id`
 4. Sequence numbers increment for each message
 5. Context builder receives `current_batch_id` to include incomplete batch
 
@@ -95,12 +97,22 @@ pub fn build_context(&self, current_batch_id: Option<SnowflakeId>) -> Result<Mem
 ### Database Changes
 
 ```rust
-// In agent_messages relation, sync position with snowflake_id
+// In agent_messages relation, add batch tracking alongside position
 pub struct AgentMessageRelation {
-    pub position: String,  // Now uses message.snowflake_id.to_string()
+    pub position: Option<SnowflakePosition>,
+    pub batch: Option<SnowflakePosition>, // Same as message.batch_id
+    pub sequence_num: Option<u32>,          // Same as message.sequence_num
+    pub batch_type: Option<BatchType>,      // Same as message.batch_type
+
     // ... existing fields
 }
 ```
+
+Benefits of duplicating batch fields in the relation:
+- Can query directly on agent_messages table for batch info
+- No need to join with message table for batch operations
+- Easier to find incomplete batches per agent
+- Can efficiently query "all messages in batch X for agent Y"
 
 No new tables needed - batching is entirely reconstructed from message metadata.
 
@@ -156,15 +168,19 @@ No new tables needed - batching is entirely reconstructed from message metadata.
 
 ## Migration Strategy
 
-1. Add batch support alongside existing system (backward compatible)
-2. New messages get batch IDs, old messages work as-is
-3. Gradually migrate old messages to batches based on timestamps
-4. Eventually make batch_id required for all new messages
+1. Add batch fields as Option<T> for backward compatibility
+2. Run migration function to populate fields for existing messages
+3. New messages get all batch fields populated immediately
+4. Once all messages migrated, make fields non-optional:
+   - Remove Option wrapper from struct fields
+   - Update all constructors to require these fields
+   - Compilation will catch any missing updates
+5. Database schema remains flexible (SurrealDB handles missing fields)
 
 ## Success Metrics
 
 - No more context corruption from incomplete tool sequences
-- Parallel tool execution without ordering issues  
+- Parallel tool execution without ordering issues
 - Reduced context rebuilding errors
 - Cleaner conversation exports
 - Improved debugging capability through batch inspection

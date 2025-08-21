@@ -123,7 +123,9 @@ pub async fn export_group(
 
     output_handler.success(&format!("Export complete!"));
     output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
-    output_handler.kv("Members", &manifest.stats.message_count.to_string());
+    output_handler.kv("Messages", &manifest.stats.message_count.to_string());
+    output_handler.kv("Memories", &manifest.stats.memory_count.to_string());
+    output_handler.kv("Members", &group.members.len().to_string());
 
     Ok(())
 }
@@ -167,16 +169,10 @@ pub async fn export_constellation(output: Option<PathBuf>, config: &PatternConfi
 
     output_handler.success(&format!("Export complete!"));
     output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
-    output_handler.kv("Agents", &manifest.stats.memory_count.to_string());
-    output_handler.kv(
-        "Groups",
-        &(manifest.stats.total_blocks
-            - manifest.stats.memory_count
-            - manifest.stats.message_count
-            - manifest.stats.chunk_count
-            - 1)
-        .to_string(),
-    );
+    output_handler.kv("Messages", &manifest.stats.message_count.to_string());
+    output_handler.kv("Memories", &manifest.stats.memory_count.to_string());
+    output_handler.kv("Groups", &constellation.groups.len().to_string());
+    output_handler.kv("Direct Agents", &constellation.agents.len().to_string());
 
     Ok(())
 }
@@ -254,7 +250,7 @@ pub async fn import(
 }
 
 // Helper function to get agent by name
-async fn get_agent_by_name<C: surrealdb::Connection>(
+pub async fn get_agent_by_name<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     user_id: &UserId,
     name: &str,

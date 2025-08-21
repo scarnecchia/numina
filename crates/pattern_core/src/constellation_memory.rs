@@ -207,7 +207,9 @@ pub fn create_constellation_activity_block(
     content: String,
 ) -> MemoryBlock {
     MemoryBlock::owned_with_id(memory_id, owner_id, "constellation_activity", content)
-        .with_description("Shared activity log for all agents in the constellation")
+        .with_description(
+            "Shared, automatically-updating activity log for all agents in the constellation",
+        )
         .with_memory_type(MemoryType::Core)
         .with_permission(MemoryPermission::ReadOnly)
         .with_pinned(true) // Don't swap this out

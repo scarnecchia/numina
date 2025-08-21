@@ -13,7 +13,7 @@ use crate::context::AgentHandle;
 use crate::db::DbEntity;
 use crate::id::RelationId;
 use crate::message::{
-    ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
+    BatchType, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
 };
 use crate::model::ResponseOptions;
 use crate::tool::builtin::BuiltinTools;
@@ -22,7 +22,7 @@ use crate::QueuedMessage;
 use crate::{
     CoreError, MemoryBlock, ModelProvider, Result, UserId,
     agent::{
-        Agent, AgentMemoryRelation, AgentState, AgentType,
+        Agent, AgentMemoryRelation, AgentState, AgentType, RecoverableErrorKind,
         tool_rules::{ToolRule, ToolRuleEngine},
     },
     context::{
@@ -38,7 +38,48 @@ use crate::{
 };
 use chrono::Utc;
 
-use crate::agent::ResponseEvent;
+use crate::agent::{ResponseEvent, get_next_message_position_sync};
+
+/// Wrapper for model providers to work with Arc<RwLock<M>>
+#[derive(Debug, Clone)]
+struct ModelProviderWrapper<M: ModelProvider> {
+    model: Arc<RwLock<M>>,
+}
+
+#[async_trait]
+impl<M: ModelProvider> ModelProvider for ModelProviderWrapper<M> {
+    fn name(&self) -> &str {
+        "model_wrapper"
+    }
+
+    async fn complete(
+        &self,
+        options: &crate::model::ResponseOptions,
+        request: crate::message::Request,
+    ) -> crate::Result<crate::message::Response> {
+        let model = self.model.read().await;
+        model.complete(options, request).await
+    }
+
+    async fn list_models(&self) -> crate::Result<Vec<crate::model::ModelInfo>> {
+        let model = self.model.read().await;
+        model.list_models().await
+    }
+
+    async fn supports_capability(
+        &self,
+        model: &str,
+        capability: crate::model::ModelCapability,
+    ) -> bool {
+        let provider = self.model.read().await;
+        provider.supports_capability(model, capability).await
+    }
+
+    async fn count_tokens(&self, model: &str, content: &str) -> crate::Result<usize> {
+        let provider = self.model.read().await;
+        provider.count_tokens(model, content).await
+    }
+}
 
 /// A concrete agent implementation backed by the database
 #[derive(Clone)]
@@ -125,6 +166,109 @@ where
         }
     }
 
+    /// Run error recovery based on the error kind
+    ///
+    /// This method performs cleanup and recovery actions based on the type of error
+    /// encountered, making the agent more resilient to API quirks and transient issues.
+    async fn run_error_recovery(
+        &self,
+        context: &Arc<RwLock<AgentContext>>,
+        error_kind: RecoverableErrorKind,
+        error_msg: &str,
+    ) {
+        tracing::warn!("Running error recovery for {:?}: {}", error_kind, error_msg);
+
+        match error_kind {
+            RecoverableErrorKind::AnthropicThinkingOrder => {
+                // Fix message ordering for Anthropic thinking mode
+                let ctx = context.write().await;
+                let _history = ctx.history.write().await;
+
+                // TODO: Implement message reordering logic
+                // Could use the extracted index from error context to target specific messages
+                tracing::info!("Would fix Anthropic thinking message order");
+            }
+            RecoverableErrorKind::GeminiEmptyContents => {
+                // Remove empty message arrays for Gemini
+                let ctx = context.write().await;
+                let mut history = ctx.history.write().await;
+
+                // Finalize batches to clean up empty messages
+                for batch in &mut history.batches {
+                    let removed = batch.finalize();
+                    if !removed.is_empty() {
+                        tracing::info!("Removed {} empty messages from batch", removed.len());
+                    }
+                }
+                tracing::info!("Cleaned up for Gemini empty contents error");
+            }
+            RecoverableErrorKind::UnpairedToolCalls
+            | RecoverableErrorKind::UnpairedToolResponses => {
+                // Clean up unpaired tool calls/responses
+                let ctx = context.write().await;
+                let mut history = ctx.history.write().await;
+
+                // Finalize all batches to clean up unpaired calls
+                for batch in &mut history.batches {
+                    let removed = batch.finalize();
+                    if !removed.is_empty() {
+                        tracing::info!("Removed {} unpaired messages from batch", removed.len());
+                    }
+                }
+            }
+            RecoverableErrorKind::PromptTooLong => {
+                // Force compression when prompt is too long
+                tracing::info!("Prompt too long, forcing compression");
+                let ctx = context.read().await;
+
+                // Force compression by temporarily setting a very low message limit
+                if let Err(e) = ctx.force_compression().await {
+                    tracing::error!("Failed to force compression: {:?}", e);
+                } else {
+                    tracing::info!("Successfully compressed context to fit token limit");
+                }
+            }
+            RecoverableErrorKind::MessageCompressionFailed => {
+                // Reset compression state
+                let ctx = context.write().await;
+                let mut history = ctx.history.write().await;
+
+                // Reset compression tracking to current time
+                history.last_compression = chrono::Utc::now();
+                tracing::info!("Reset compression state");
+            }
+            RecoverableErrorKind::ContextBuildFailed => {
+                // Clear and rebuild context
+                let ctx = context.write().await;
+                let mut history = ctx.history.write().await;
+
+                // Finalize incomplete batches
+                for batch in &mut history.batches {
+                    batch.finalize();
+                }
+
+                // Batches are already finalized above
+                tracing::info!("Cleaned up context for rebuild");
+            }
+            RecoverableErrorKind::ModelApiError | RecoverableErrorKind::Unknown => {
+                // Generic cleanup
+                let ctx = context.write().await;
+                let mut history = ctx.history.write().await;
+
+                // Finalize any incomplete batches
+                for batch in &mut history.batches {
+                    batch.finalize();
+                }
+                tracing::info!("Generic error cleanup completed");
+            }
+        }
+
+        // TODO: Persist any changes to database
+        // This would involve updating messages in the database with their corrected state
+
+        tracing::info!("Error recovery complete");
+    }
+
     /// Create a new database-backed agent
     /// Create a new database agent
     ///
@@ -162,6 +306,12 @@ where
             context_config,
         );
         context.handle.state = AgentState::Ready;
+
+        // Add model provider for compression strategies
+        let model_wrapper = ModelProviderWrapper {
+            model: model.clone(),
+        };
+        context.model_provider = Some(Arc::new(model_wrapper));
 
         // Wire up database connection to handle for archival memory tools
         context.handle = context.handle.with_db(db.clone());
@@ -288,12 +438,12 @@ where
         let memory = Memory::with_owner(&record.owner_id);
 
         // Load memory blocks from the record's relations
-        for (memory_block, _relation) in &record.memories {
+        for (memory_block, relation) in &record.memories {
             tracing::debug!(
                 "Loading memory block: label={}, type={:?}, permission={:?}, size={} chars",
                 memory_block.label,
                 memory_block.memory_type,
-                memory_block.permission,
+                relation.access_level,
                 memory_block.value.len()
             );
             memory.create_block(memory_block.label.clone(), memory_block.value.clone())?;
@@ -307,13 +457,32 @@ where
                 block.is_active = memory_block.is_active;
                 // CRITICAL: Copy memory type and permission from database
                 block.memory_type = memory_block.memory_type.clone();
-                block.permission = memory_block.permission.clone();
+                block.permission = relation.access_level.clone();
                 block.owner_id = memory_block.owner_id.clone();
             }
         }
 
-        // Build the context config from the record
-        let context_config = record.to_context_config();
+        // Get model info from provider to determine context window
+        let max_context_tokens = if let Some(model_id) = &record.model_id {
+            // Try to get model info from the provider
+            let model_guard = model.read().await;
+            let models = model_guard.list_models().await.unwrap_or_default();
+
+            // Find the model with matching ID
+            models
+                .iter()
+                .find(|m| m.id == *model_id || m.name == *model_id)
+                .map(|m| {
+                    // Use 90% of context window to leave room for output
+                    (m.context_window as f64 * 0.9) as usize
+                })
+        } else {
+            None
+        };
+
+        // Build the context config from the record with token limit
+        let mut context_config = record.to_context_config();
+        context_config.max_context_tokens = max_context_tokens.or(Some(180_000)); // Fallback to 180k
 
         // Load tool rules from database record (with config fallback)
         let tool_rules = if !record.tool_rules.is_empty() {
@@ -347,6 +516,15 @@ where
             }
         };
 
+        // Log the loaded configuration
+        tracing::info!(
+            "Loaded agent {} config: max_messages={}, compression_threshold={}, compression_strategy={:?}",
+            record.name,
+            record.max_messages,
+            record.compression_threshold,
+            record.compression_strategy
+        );
+
         // Create the agent with the loaded configuration
         let agent = Self::new(
             record.id.clone(),
@@ -355,7 +533,7 @@ where
             record.name.clone(),
             context_config.base_instructions.clone(),
             memory,
-            db,
+            db.clone(),
             model,
             tools,
             embeddings,
@@ -366,7 +544,7 @@ where
         // Restore the agent state
         {
             let mut context = agent.context.write().await;
-            context.handle.state = record.state;
+            context.handle.state = AgentState::Ready;
         }
 
         // Restore message history and compression state
@@ -374,7 +552,7 @@ where
             let context = agent.context.read().await;
             let mut history = context.history.write().await;
             history.compression_strategy = record.compression_strategy.clone();
-            history.message_summary = record.message_summary.clone();
+            history.archive_summary = record.message_summary.clone();
 
             // Load active messages from relations (already ordered by position)
             let mut loaded_messages = 0;
@@ -403,9 +581,55 @@ where
                         message.role,
                         content_preview
                     );
-                    history.messages.push(message.clone());
+                    let _updated_message = history.add_message(message.clone());
+
+                    // // If sequence number was added/changed, update the database
+                    // if updated_message.sequence_num != message.sequence_num {
+                    //     tracing::debug!(
+                    //         "Updating message {} with sequence_num: {:?} -> {:?}",
+                    //         message.id,
+                    //         message.sequence_num,
+                    //         updated_message.sequence_num
+                    //     );
+                    //     // Use persist_agent_message to update both message and relation
+                    //     let _ = crate::db::ops::persist_agent_message(
+                    //         &db,
+                    //         &record.id,
+                    //         &updated_message,
+                    //         relation.message_type,
+                    //     )
+                    //     .await
+                    //     .inspect_err(|e| {
+                    //         tracing::warn!(
+                    //             "Failed to update message with sequence number: {:?}",
+                    //             e
+                    //         );
+                    //     });
+                    // }
+
                     loaded_messages += 1;
                 }
+            }
+
+            // Debug: Check batch distribution
+            let batch_count = history.batches.len();
+            let message_distribution: Vec<usize> =
+                history.batches.iter().map(|b| b.len()).collect();
+            tracing::debug!(
+                "Created {} batches from {} messages. Distribution: {:?} (showing first 10)",
+                batch_count,
+                loaded_messages,
+                &message_distribution[..message_distribution.len().min(10)]
+            );
+
+            // Finalize and mark all loaded batches as complete - they're historical data
+            for batch in history.batches.iter_mut() {
+                batch.finalize();
+                batch.mark_complete(); // Force complete since these are loaded from DB
+            }
+            for batch in history.archived_batches.iter_mut() {
+                batch.finalize();
+                batch.mark_complete(); // Force complete since these are loaded from DB
             }
             tracing::debug!("Loaded {} active messages into history", loaded_messages);
         }
@@ -453,23 +677,32 @@ where
     /// Store the current agent state to the database
     pub async fn store(&self) -> Result<()> {
         // Create an AgentRecord from the current state
-        let (agent_id, name, agent_type, state) = {
+        let (agent_id, name, agent_type) = {
             let context = self.context.read().await;
             (
                 context.handle.agent_id.clone(),
                 context.handle.name.clone(),
                 context.handle.agent_type.clone(),
-                context.handle.state,
             )
         };
 
-        let (base_instructions, max_messages, memory_char_limit, enable_thinking) = {
+        let (
+            base_instructions,
+            max_messages,
+            memory_char_limit,
+            enable_thinking,
+            compression_strategy,
+            message_summary,
+        ) = {
             let context = self.context.read().await;
+            let history = context.history.read().await;
             (
                 context.context_config.base_instructions.clone(),
                 context.context_config.max_context_messages,
                 context.context_config.memory_char_limit,
                 context.context_config.enable_thinking,
+                history.compression_strategy.clone(),
+                history.archive_summary.clone(),
             )
         };
 
@@ -502,10 +735,9 @@ where
 
         let now = chrono::Utc::now();
         let agent_record = crate::agent::AgentRecord {
-            id: agent_id,
+            id: agent_id.clone(),
             name,
             agent_type,
-            state,
             model_id,
             base_instructions,
             max_messages,
@@ -520,10 +752,12 @@ where
             created_at: now, // This will be overwritten if agent already exists
             updated_at: now,
             last_active,
+            compression_strategy,
+            message_summary,
             ..Default::default()
         };
 
-        // Store the agent record
+        // ops::update_agent_context_config(&self.db, agent_id, &agent_record).await?;
         agent_record.store_with_relations(&self.db).await?;
         Ok(())
     }
@@ -990,7 +1224,7 @@ where
 
                         // Update compression events if the message summary changed
                         let history_read = history.read().await;
-                        if agent_record.message_summary != history_read.message_summary {
+                        if agent_record.message_summary != history_read.archive_summary {
                             meta.compression_events += 1;
                         }
                         drop(history_read);
@@ -998,7 +1232,7 @@ where
                         // Update history if message summary changed
                         if agent_record.message_summary.is_some() {
                             let mut history_write = history.write().await;
-                            history_write.message_summary = agent_record.message_summary;
+                            history_write.archive_summary = agent_record.message_summary;
                         }
                     }
                     _ => {
@@ -1022,7 +1256,7 @@ where
         let needs_compression = {
             let context = self.context.read().await;
             let history = context.history.read().await;
-            history.messages.len() > context.context_config.max_context_messages
+            history.total_message_count() > context.context_config.max_context_messages
         };
 
         if !needs_compression {
@@ -1036,75 +1270,42 @@ where
             history.compression_strategy.clone()
         };
 
-        // Create a wrapper for the model provider that can be passed to the compressor
-        #[derive(Debug)]
-        struct ModelProviderWrapper<M: ModelProvider> {
-            model: Arc<RwLock<M>>,
-        }
-
-        #[async_trait]
-        impl<M: ModelProvider> ModelProvider for ModelProviderWrapper<M> {
-            fn name(&self) -> &str {
-                "compression_wrapper"
-            }
-
-            async fn complete(
-                &self,
-                options: &crate::model::ResponseOptions,
-                request: crate::message::Request,
-            ) -> crate::Result<crate::message::Response> {
-                let model = self.model.read().await;
-                model.complete(options, request).await
-            }
-
-            async fn list_models(&self) -> crate::Result<Vec<crate::model::ModelInfo>> {
-                let model = self.model.read().await;
-                model.list_models().await
-            }
-
-            async fn supports_capability(
-                &self,
-                model: &str,
-                capability: crate::model::ModelCapability,
-            ) -> bool {
-                let provider = self.model.read().await;
-                provider.supports_capability(model, capability).await
-            }
-
-            async fn count_tokens(&self, model: &str, content: &str) -> crate::Result<usize> {
-                let provider = self.model.read().await;
-                provider.count_tokens(model, content).await
-            }
-        }
-
+        // Use the module-level ModelProviderWrapper
         let model_wrapper = ModelProviderWrapper {
             model: self.model.clone(),
         };
 
         let compressor = crate::context::MessageCompressor::new(compression_strategy)
-            .with_model_provider(Box::new(model_wrapper));
+            .with_model_provider(Arc::new(model_wrapper));
 
-        // Get messages to compress
-        let messages_to_compress = {
+        // Get batches to compress
+        let batches_to_compress = {
             let context = self.context.read().await;
             let history = context.history.read().await;
-            history.messages.clone()
+            history.batches.clone()
         };
 
         // Perform compression
-        let max_context_messages = {
+        let (max_context_messages, max_context_tokens) = {
             let context = self.context.read().await;
-            context.context_config.max_context_messages
+            (
+                context.context_config.max_context_messages,
+                context.context_config.max_context_tokens,
+            )
         };
         let compression_result = compressor
-            .compress(messages_to_compress, max_context_messages)
+            .compress(
+                batches_to_compress,
+                max_context_messages,
+                max_context_tokens,
+            )
             .await?;
 
-        // Collect archived message IDs
+        // Collect archived message IDs from archived batches
         let archived_ids: Vec<crate::MessageId> = compression_result
-            .archived_messages
+            .archived_batches
             .iter()
-            .map(|msg| msg.id.clone())
+            .flat_map(|batch| batch.messages.iter().map(|msg| msg.id.clone()))
             .collect();
 
         // Apply compression to state
@@ -1112,20 +1313,20 @@ where
             let context = self.context.read().await;
             let mut history = context.history.write().await;
 
-            // Move compressed messages to archive
+            // Move compressed batches to archive
             history
-                .archived_messages
-                .extend(compression_result.archived_messages);
+                .archived_batches
+                .extend(compression_result.archived_batches);
 
-            // Update active messages
-            history.messages = compression_result.active_messages;
+            // Update active batches
+            history.batches = compression_result.active_batches;
 
             // Update or append to summary
             if let Some(new_summary) = compression_result.summary {
-                if let Some(existing_summary) = &mut history.message_summary {
+                if let Some(existing_summary) = &mut history.archive_summary {
                     *existing_summary = format!("{}\n\n{}", existing_summary, new_summary);
                 } else {
-                    history.message_summary = Some(new_summary.clone());
+                    history.archive_summary = Some(new_summary.clone());
                 }
 
                 // Also update the agent record's message summary in background
@@ -1320,10 +1521,12 @@ where
         &self,
         response: &Response,
         agent_id: &AgentId,
+        batch_id: Option<crate::SnowflakePosition>,
+        batch_type: Option<BatchType>,
     ) -> Result<()> {
         let response_messages = {
             let context = self.context.read().await;
-            Message::from_response(response, &context.handle.agent_id)
+            Message::from_response(response, &context.handle.agent_id, batch_id, batch_type)
         };
 
         for message in response_messages {
@@ -1340,17 +1543,17 @@ where
                     }
                 );
 
-                // Add the message to context
-                {
+                // Add the message to context and get the updated version with sequence numbers
+                let updated_message = {
                     let context = self.context.read().await;
-                    context.add_message(message.clone()).await;
-                }
+                    context.add_message(message).await
+                };
 
-                // Also persist to DB
+                // Persist the updated message to DB (now with sequence numbers!)
                 let _ = crate::db::ops::persist_agent_message(
                     &self.db,
                     agent_id,
-                    &message,
+                    &updated_message,
                     crate::message::MessageRelationType::Active,
                 )
                 .await
@@ -1520,7 +1723,7 @@ where
     /// Process a message and stream responses as they happen
     pub async fn process_message_stream(
         self: Arc<Self>,
-        message: Message,
+        mut message: Message,
     ) -> Result<impl Stream<Item = ResponseEvent>> {
         use tokio_stream::wrappers::ReceiverStream;
 
@@ -1536,18 +1739,95 @@ where
 
         // Spawn the processing task
         tokio::spawn(async move {
-            // Wait for agent to be ready using watch channel
+            // Batch-aware waiting logic
             let (current_state, maybe_receiver) = self_clone.state().await;
-            if current_state != AgentState::Ready {
-                if let Some(mut receiver) = maybe_receiver {
-                    let timeout = tokio::time::timeout(
-                        Duration::from_secs(200),
-                        receiver.wait_for(|s| *s == AgentState::Ready),
-                    );
-                    let _ = timeout.await;
+            match current_state {
+                AgentState::Ready => {
+                    // Ready to process, but maybe wait JUST a little
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                AgentState::Processing { active_batches: _ } => {
+                    // Check if we're continuing an existing batch
+                    if let Some(batch_id) = message.batch {
+                        // Try to find and wait on the batch's notifier
+                        let notifier = {
+                            let ctx = context.read().await;
+                            let history = ctx.history.read().await;
+                            history
+                                .batches
+                                .iter()
+                                .find(|b| b.id == batch_id)
+                                .map(|batch| batch.get_tool_pairing_notifier())
+                        };
+
+                        if let Some(notifier) = notifier {
+                            // Wait for tool responses, then wait for ready with a short timeout
+                            notifier.notified().await;
+                            if let Some(mut receiver) = maybe_receiver {
+                                let timeout = tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    receiver.wait_for(|s| matches!(s, AgentState::Ready)),
+                                );
+                                let _ = timeout.await;
+                            }
+                        }
+                    } else {
+                        // New batch, wait for Ready state with medium timeout
+                        if let Some(mut receiver) = maybe_receiver {
+                            let timeout = tokio::time::timeout(
+                                Duration::from_secs(20),
+                                receiver.wait_for(|s| matches!(s, AgentState::Ready)),
+                            );
+                            let _ = timeout.await;
+                        }
+                    }
+                }
+                AgentState::Error {
+                    kind,
+                    message: error_msg,
+                } => {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    // Run error recovery based on kind
+                    tracing::warn!("Agent in error state: {:?} - {}", kind, error_msg);
+
+                    // Use the centralized recovery method
+                    self_clone
+                        .run_error_recovery(&context, kind, &error_msg)
+                        .await;
+
+                    // Reset to Ready state after recovery
+                    self_clone.set_state(AgentState::Ready).await.ok();
+                    tracing::info!("Error recovery complete, agent reset to Ready");
+                }
+                _ => {
+                    // Cooldown or Suspended - wait for Ready
+                    if let Some(mut receiver) = maybe_receiver {
+                        let timeout = tokio::time::timeout(
+                            Duration::from_secs(200),
+                            receiver.wait_for(|s| matches!(s, AgentState::Ready)),
+                        );
+                        let _ = timeout.await;
+                    }
                 }
             }
-            self_clone.set_state(AgentState::Processing).await.ok();
+
+            // Generate batch ID early so we can track it in state
+            let current_batch_id = Some(message.batch.unwrap_or(get_next_message_position_sync()));
+            let current_batch_type = message.batch_type.clone().or(Some(BatchType::UserRequest));
+
+            // Add this batch to active batches (preserving any existing ones)
+            let (current_state, _) = self_clone.state().await;
+            let mut active_batches = match current_state {
+                AgentState::Processing { active_batches } => active_batches,
+                _ => std::collections::HashSet::new(),
+            };
+            if let Some(batch_id) = current_batch_id {
+                active_batches.insert(batch_id);
+            }
+            self_clone
+                .set_state(AgentState::Processing { active_batches })
+                .await
+                .ok();
 
             // Helper to send events
             let send_event = |event: ResponseEvent| {
@@ -1566,8 +1846,31 @@ where
             {
                 match &message.content {
                     crate::message::MessageContent::Text(text) => {
-                        // For now, include full text without truncation
-                        Some(text.clone())
+                        // Truncate to approximately 1000 chars total (500 from start, 500 from end)
+                        let truncated = if text.len() > 1000 {
+                            // Find safe char boundaries
+                            let start_boundary = text
+                                .char_indices()
+                                .take_while(|(i, _)| *i <= 500)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(0);
+
+                            let end_start = text.len().saturating_sub(500);
+                            let end_boundary = text
+                                .char_indices()
+                                .skip_while(|(i, _)| *i < end_start)
+                                .next()
+                                .map(|(i, _)| i)
+                                .unwrap_or(text.len());
+
+                            let start = &text[..start_boundary];
+                            let end = &text[end_boundary..];
+                            format!("{}\n...\n{}", start, end)
+                        } else {
+                            text.clone()
+                        };
+                        Some(truncated)
                     }
                     _ => None,
                 }
@@ -1624,22 +1927,44 @@ where
 
             let _ = self.persist_memory_changes().await;
 
+            // Update message with batch info if needed
+            if message.batch.is_none() {
+                message.position = current_batch_id;
+                message.sequence_num = Some(0);
+                message.batch_type = current_batch_type.clone();
+            } else {
+                // need to find the batch and get the correct sequence num?
+            }
+            message.batch = current_batch_id;
+
             // Update state and persist message
             {
                 let mut ctx = context.write().await;
-                ctx.handle.state = AgentState::Processing;
+
+                // Add this batch to active batches (preserving any existing ones)
+                let mut active_batches = match &ctx.handle.state {
+                    AgentState::Processing { active_batches } => active_batches.clone(),
+                    _ => std::collections::HashSet::new(),
+                };
+                if let Some(batch_id) = current_batch_id {
+                    active_batches.insert(batch_id);
+                }
+                ctx.handle.state = AgentState::Processing { active_batches };
+
+                // Add message to context first to get sequence numbers
+                let updated_message = ctx.add_message(message).await;
+
+                // Now persist with the sequence numbers
                 let _ = crate::db::ops::persist_agent_message(
                     &db,
                     &agent_id,
-                    &message,
+                    &updated_message,
                     crate::message::MessageRelationType::Active,
                 )
                 .await
                 .inspect_err(|e| {
                     crate::log_error!("Failed to persist incoming message", e);
                 });
-
-                ctx.add_message(message).await;
             }
 
             // Add tool rules from rule engine to context before building
@@ -1649,12 +1974,27 @@ where
                 ctx.add_tool_rules(tool_rules);
             }
 
-            // Build memory context
-            let memory_context = match context.read().await.build_context().await {
+            // Build memory context with the current batch ID
+            let memory_context = match context.read().await.build_context(current_batch_id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
+                    // Clean up errors and set state before exiting
+                    let error_msg = format!("Failed to build context: {:?}", e);
+                    context
+                        .read()
+                        .await
+                        .cleanup_errors(current_batch_id, &error_msg)
+                        .await;
+                    {
+                        let mut ctx = context.write().await;
+                        ctx.handle.state = AgentState::Error {
+                            kind: RecoverableErrorKind::ContextBuildFailed,
+                            message: error_msg.clone(),
+                        };
+                    }
+
                     send_event(ResponseEvent::Error {
-                        message: format!("Failed to build context: {:?}", e),
+                        message: error_msg,
                         recoverable: false,
                     })
                     .await;
@@ -1679,6 +2019,22 @@ where
                 }
                 Err(e) => {
                     crate::log_error_chain!("❌ Failed to execute start constraint tools:", e);
+
+                    // Clean up errors and set state before exiting
+                    let error_msg = format!("Start constraint tools failed: {:?}", e);
+                    context
+                        .read()
+                        .await
+                        .cleanup_errors(current_batch_id, &error_msg)
+                        .await;
+                    {
+                        let mut ctx = context.write().await;
+                        ctx.handle.state = AgentState::Error {
+                            kind: RecoverableErrorKind::ContextBuildFailed,
+                            message: error_msg.clone(),
+                        };
+                    }
+
                     send_event(ResponseEvent::Error {
                         message: format!("Start constraint tools failed: {:?}", e),
                         recoverable: false,
@@ -1691,7 +2047,7 @@ where
             // Create request
             let request = Request {
                 system: Some(vec![memory_context.system_prompt.clone()]),
-                messages: memory_context.messages,
+                messages: memory_context.messages(),
                 tools: Some(memory_context.tools),
             };
 
@@ -1701,12 +2057,96 @@ where
                 .clone()
                 .expect("should have options or default");
 
+            // Wait for any pending tool responses with timeout
+            if let Some(batch_id) = current_batch_id {
+                let notifier = {
+                    let ctx = context.read().await;
+                    let history = ctx.history.read().await;
+                    history
+                        .batches
+                        .iter()
+                        .find(|b| b.id == batch_id)
+                        .and_then(|batch| {
+                            let pending = batch.get_pending_tool_calls();
+                            if !pending.is_empty() {
+                                tracing::info!(
+                                    "Waiting for {} tool responses before LLM request (max 5s)",
+                                    pending.len()
+                                );
+                                Some(batch.get_tool_pairing_notifier())
+                            } else {
+                                None
+                            }
+                        })
+                };
+
+                if let Some(notifier) = notifier {
+                    // Wait for notification or timeout
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        notifier.notified(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            tracing::info!("Tool responses received, continuing with request");
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "Timeout waiting for tool responses, cleaning up unpaired calls"
+                            );
+                            // Finalize batch to remove unpaired calls
+                            let ctx = context.write().await;
+                            let mut history = ctx.history.write().await;
+                            if let Some(batch) =
+                                history.batches.iter_mut().find(|b| b.id == batch_id)
+                            {
+                                let removed = batch.finalize();
+                                if !removed.is_empty() {
+                                    tracing::warn!(
+                                        "Removed {} unpaired messages from batch",
+                                        removed.len()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Get response from model with retry logic
             let response = {
                 let model = model.read().await;
-                match Self::complete_with_retry(&*model, &options, request, 3).await {
+                match Self::complete_with_retry(&*model, &options, request, 10).await {
                     Ok(resp) => resp,
                     Err(e) => {
+                        // Parse error to determine recovery type using reusable function
+                        let error_str = e.to_string();
+                        let error_kind = RecoverableErrorKind::from_error_str(&error_str);
+
+                        // Extract additional context if available (like Anthropic's problematic index)
+                        if let Some(context) =
+                            RecoverableErrorKind::extract_error_context(&error_str)
+                        {
+                            tracing::debug!("Error context extracted: {:?}", context);
+                            // TODO: Use this context for more targeted fixes
+                        }
+
+                        // Now clean up any remaining unpaired calls and set state
+                        let error_msg = format!("Model error: {:?}", e);
+                        context
+                            .read()
+                            .await
+                            .cleanup_errors(current_batch_id, &error_msg)
+                            .await;
+                        {
+                            let mut ctx = context.write().await;
+                            ctx.handle.state = AgentState::Error {
+                                kind: error_kind,
+                                message: error_msg.clone(),
+                            };
+                        }
+
                         send_event(ResponseEvent::Error {
                             message: format!("Model error: {:?}", e),
                             recoverable: false,
@@ -2111,7 +2551,12 @@ where
 
                     // Persist response
                     if let Err(e) = self_clone
-                        .persist_response_messages(&processed_response, &agent_id)
+                        .persist_response_messages(
+                            &processed_response,
+                            &agent_id,
+                            current_batch_id,
+                            current_batch_type,
+                        )
                         .await
                     {
                         send_event(ResponseEvent::Error {
@@ -2144,11 +2589,24 @@ where
                     // IMPORTANT: Rebuild context to get fresh memory state after tool execution
                     // This ensures agents see updated memory blocks immediately
                     let context_lock = context.read().await;
-                    let memory_context = match context_lock.build_context().await {
+                    let memory_context = match context_lock.build_context(current_batch_id).await {
                         Ok(ctx) => ctx,
                         Err(e) => {
+                            let error_msg = format!("Failed to rebuild context: {:?}", e);
+                            context
+                                .read()
+                                .await
+                                .cleanup_errors(current_batch_id, &error_msg)
+                                .await;
+                            {
+                                let mut ctx = context.write().await;
+                                ctx.handle.state = AgentState::Error {
+                                    kind: RecoverableErrorKind::ContextBuildFailed,
+                                    message: error_msg.clone(),
+                                };
+                            }
                             send_event(ResponseEvent::Error {
-                                message: format!("Failed to rebuild context: {:?}", e),
+                                message: error_msg,
                                 recoverable: false,
                             })
                             .await;
@@ -2157,41 +2615,38 @@ where
                     };
                     drop(context_lock);
 
-                    let request_with_tools = Request {
-                        system: Some(vec![memory_context.system_prompt.clone()]),
-                        messages: memory_context.messages.clone(),
-                        tools: Some(memory_context.tools),
-                    };
+                    let request_with_tools = memory_context.into_request();
 
                     current_response = {
                         let model = model.read().await;
-                        match Self::complete_with_retry(&*model, &options, request_with_tools, 3)
+                        match Self::complete_with_retry(&*model, &options, request_with_tools, 10)
                             .await
                         {
                             Ok(resp) => resp,
                             Err(e) => {
+                                // Clean up batch and set error state
+                                let error_msg = format!("Model error during continuation: {:?}", e);
+                                context
+                                    .read()
+                                    .await
+                                    .cleanup_errors(current_batch_id, &error_msg)
+                                    .await;
+                                {
+                                    let mut ctx = context.write().await;
+                                    ctx.handle.state = AgentState::Error {
+                                        kind: RecoverableErrorKind::ContextBuildFailed,
+                                        message: error_msg.clone(),
+                                    };
+                                }
+
                                 send_event(ResponseEvent::Error {
                                     message: format!("Model error in continuation: {:?}", e),
                                     recoverable: false,
                                 })
                                 .await;
-                                crate::log_error!("offending request:\n", memory_context.messages);
-
-                                // Clean up any unpaired tool calls from the context before breaking
-                                {
-                                    let ctx = context.write().await;
-                                    let mut history = ctx.history.write().await;
-                                    if let Some(last_msg) = history.messages.last() {
-                                        if matches!(&last_msg.content, MessageContent::ToolCalls(_))
-                                        {
-                                            tracing::warn!(
-                                                "Removing unpaired tool calls from context after model error"
-                                            );
-                                            history.messages.pop();
-                                        }
-                                    }
-                                }
-
+                                // Log the full context for debugging
+                                crate::log_error!("Model error during continuation", e);
+                                tracing::debug!("Full context on error: {:?}", &memory_context);
                                 break;
                             }
                         }
@@ -2209,7 +2664,12 @@ where
 
                         // Persist response
                         if let Err(e) = self_clone
-                            .persist_response_messages(&current_response, &agent_id)
+                            .persist_response_messages(
+                                &current_response,
+                                &agent_id,
+                                current_batch_id,
+                                current_batch_type,
+                            )
                             .await
                         {
                             send_event(ResponseEvent::Error {
@@ -2347,7 +2807,12 @@ where
 
                     // Persist final response
                     let persist_result = self_clone
-                        .persist_response_messages(&current_response, &agent_id)
+                        .persist_response_messages(
+                            &current_response,
+                            &agent_id,
+                            current_batch_id,
+                            current_batch_type,
+                        )
                         .await;
                     if let Err(e) = persist_result {
                         send_event(ResponseEvent::Error {
@@ -2371,16 +2836,51 @@ where
                     tracing::error!("Failed to persist memory before heartbeat: {:?}", e);
                 }
 
+                // Get next sequence number from current batch
+                let next_seq_num = {
+                    let ctx = context.read().await;
+                    let history = ctx.history.read().await;
+                    current_batch_id.and_then(|batch_id| {
+                        history
+                            .batches
+                            .iter()
+                            .find(|b| b.id == batch_id)
+                            .map(|b| b.next_sequence_num())
+                    })
+                };
+
+                // Get model vendor from options
+                let model_vendor = {
+                    let opts = chat_options.read().await;
+                    opts.as_ref().map(|o| {
+                        crate::model::ModelVendor::from_provider_string(&o.model_info.provider)
+                    })
+                };
+
                 // NOW send the single heartbeat for background processing
                 use crate::context::heartbeat::HeartbeatRequest;
                 let heartbeat_req = HeartbeatRequest {
                     agent_id: agent_id.clone(),
                     tool_name: "continuation".to_string(),
                     tool_call_id: format!("cont_{}", uuid::Uuid::new_v4().simple()),
+                    batch_id: current_batch_id,
+                    next_sequence_num: next_seq_num,
+                    model_vendor,
                 };
 
                 if let Err(e) = self_clone.heartbeat_sender.try_send(heartbeat_req) {
                     tracing::warn!("Failed to send async heartbeat: {:?}", e);
+                }
+            } else {
+                // Not continuing - mark the batch as complete
+                if let Some(batch_id) = current_batch_id {
+                    let ctx = context.write().await;
+                    let mut history = ctx.history.write().await;
+                    if let Some(batch) = history.batches.iter_mut().find(|b| b.id == batch_id) {
+                        batch.finalize();
+                        batch.mark_complete();
+                        tracing::info!("✅ Marked batch {} as complete", batch_id);
+                    }
                 }
             }
 
@@ -2410,10 +2910,27 @@ where
                 }
             }
 
-            // Reset state
+            // Remove batch from active set and reset state if no other batches
             {
                 let mut ctx = context.write().await;
-                ctx.handle.state = AgentState::Ready;
+
+                // Remove current batch from active set
+                if let AgentState::Processing {
+                    ref mut active_batches,
+                } = ctx.handle.state
+                {
+                    if let Some(batch_id) = current_batch_id {
+                        active_batches.remove(&batch_id);
+                    }
+
+                    // If no more active batches, set to Ready
+                    if active_batches.is_empty() {
+                        ctx.handle.state = AgentState::Ready;
+                    }
+                } else {
+                    // Fallback to Ready if not in Processing state
+                    ctx.handle.state = AgentState::Ready;
+                }
             }
 
             // Log to constellation activity tracker if present
@@ -3245,7 +3762,7 @@ where
         }
 
         let context = self.context.read().await;
-        match context.build_context().await {
+        match context.build_context(None).await {
             Ok(memory_context) => {
                 // Split the built system prompt into logical sections
                 memory_context
@@ -3269,7 +3786,10 @@ where
 
     async fn state(&self) -> (AgentState, Option<tokio::sync::watch::Receiver<AgentState>>) {
         let context = self.context.read().await;
-        (context.handle.state, context.handle.state_receiver())
+        (
+            context.handle.state.clone(),
+            context.handle.state_receiver(),
+        )
     }
 
     /// Set the agent's state
@@ -3277,7 +3797,7 @@ where
         // Update the state in the context
         {
             let mut context = self.context.write().await;
-            context.handle.update_state(state);
+            context.handle.update_state(state.clone());
             let mut metadata = context.metadata.write().await;
             metadata.last_active = chrono::Utc::now();
         }

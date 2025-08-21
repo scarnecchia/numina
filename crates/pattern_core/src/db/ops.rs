@@ -7,7 +7,7 @@ use super::{
 use serde_json::json;
 use surrealdb::{Connection, Surreal};
 
-use crate::agent::AgentRecord;
+use crate::agent::{AgentRecord, get_next_message_position_sync};
 use crate::coordination::groups::{AgentGroup, GroupMembership};
 use crate::embeddings::EmbeddingProvider;
 use crate::id::{AgentId, GroupId, IdType, MemoryId, UserId};
@@ -651,7 +651,7 @@ pub async fn get_agent_memories<C: Connection>(
     conn: &Surreal<C>,
     agent_id: &AgentId,
 ) -> Result<Vec<(MemoryBlock, crate::memory::MemoryPermission)>> {
-    use crate::db::entity::AgentMemoryRelation;
+    use crate::memory::MemoryPermission;
 
     tracing::debug!("🔍 Looking for memories for agent {}", agent_id);
 
@@ -663,52 +663,48 @@ pub async fn get_agent_memories<C: Connection>(
         debug_result
     );
 
-    // Query the edge entities for this agent
+    // Query the edge entities for this agent and fetch memory blocks in one query
     let query = r#"
-        SELECT * FROM agent_memories
-        WHERE in = $agent_id
+        SELECT access_level, out.* as memory FROM agent_memories
+        WHERE in = $agent_id AND out.*.is_active = true
+        FETCH out
     "#;
 
     let mut result = conn
         .query(query)
-        .bind(("agent_id", RecordId::from(agent_id.clone())))
+        .bind(("agent_id", RecordId::from(agent_id)))
         .await?;
 
-    // Take the DB models (which have the serde rename attributes)
-    let relation_db_models: Vec<<AgentMemoryRelation as DbEntity>::DbModel> = result.take(0)?;
+    // Define a struct to capture the query result shape
+    #[derive(serde::Deserialize)]
+    struct AgentMemoryRow {
+        access_level: MemoryPermission,
+        memory: <MemoryBlock as DbEntity>::DbModel,
+    }
+
+    // Take the results as our expected type
+    let rows: Vec<AgentMemoryRow> = result.take(0)?;
 
     tracing::debug!(
-        "Found {} agent_memories relations",
-        relation_db_models.len()
+        "Found {} agent_memories relations with fetched blocks",
+        rows.len()
     );
 
-    // Convert DB models to domain types
-    let relations: Vec<AgentMemoryRelation> = relation_db_models
-        .into_iter()
-        .map(|db_model| AgentMemoryRelation::from_db_model(db_model).map_err(DatabaseError::from))
-        .collect::<Result<Vec<_>>>()?;
-
-    tracing::debug!("Converted {} relations to domain types", relations.len());
-
-    // Now fetch the actual memory blocks
+    // Process the results
     let mut memories = Vec::new();
     let mut seen_labels = std::collections::HashSet::<compact_str::CompactString>::new();
 
-    for relation in relations {
-        let memory_db: Option<<MemoryBlock as DbEntity>::DbModel> =
-            conn.select(RecordId::from(relation.out_id)).await?;
+    for row in rows {
+        let memory = MemoryBlock::from_db_model(row.memory)?;
 
-        if let Some(db_model) = memory_db {
-            let memory = MemoryBlock::from_db_model(db_model)?;
-            // Deduplicate by label
-            if seen_labels.insert(memory.label.clone()) {
-                memories.push((memory, relation.access_level));
-            } else {
-                tracing::warn!(
-                    "Skipping duplicate memory block with label: {}",
-                    memory.label
-                );
-            }
+        // Deduplicate by label
+        if seen_labels.insert(memory.label.clone()) {
+            memories.push((memory, row.access_level));
+        } else {
+            tracing::debug!(
+                "Skipping duplicate memory block with label: {}",
+                memory.label
+            );
         }
     }
 
@@ -832,7 +828,7 @@ pub async fn persist_agent_message<C: Connection>(
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Check if it's a transaction conflict
-                if attempt == 1
+                if attempt < 4
                     && e.to_string()
                         .contains("Failed to commit transaction due to a read or write conflict")
                 {
@@ -863,22 +859,27 @@ async fn persist_agent_message_inner<C: Connection>(
     tracing::debug!("Stored message with id: {:?}", stored_message.id);
 
     // Then create the agent-message relation with position
-    let position = crate::agent::get_next_message_position().await;
+    let position = stored_message.position;
 
     let relation = crate::message::AgentMessageRelation {
         id: RelationId::nil(),
         in_id: agent_id.clone(),
         out_id: stored_message.id.clone(),
         message_type,
-        position: position.clone(),
+        position,
         added_at: Utc::now(),
+        batch: message.batch.clone(),
+        sequence_num: message.sequence_num,
+        batch_type: message.batch_type,
     };
 
     tracing::debug!(
         "Creating agent_messages relation: agent={}, message={:?}, position={}",
         agent_id,
         stored_message.id,
-        position
+        stored_message
+            .position
+            .unwrap_or_else(get_next_message_position_sync)
     );
 
     let created_relation = create_relation_typed(conn, &relation).await?;
@@ -965,6 +966,41 @@ pub async fn persist_agent_memory<C: Connection>(
 
     let _created_relation = create_relation_typed(conn, &relation).await?;
     tracing::debug!("Agent-memory relation created/confirmed");
+
+    Ok(())
+}
+
+pub async fn update_agent_context_config<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    config: &AgentRecord,
+) -> Result<()> {
+    let query = r#"
+         UPDATE agent
+         SET
+             compression_strategy = $compression_strategy,
+             compression_threshold = $compression_threshold,
+             max_messages = $max_messages,
+             max_message_age_hours = $max_message_age_hours,
+             memory_char_limit = $memory_char_limit,
+             enable_thinking = $enable_thinking,
+             updated_at = $updated_at
+         WHERE id = $id
+     "#;
+
+    let resp: surrealdb::Response = conn
+        .query(query)
+        .bind(("id", RecordId::from(agent_id)))
+        .bind(("compression_strategy", config.compression_strategy.clone()))
+        .bind(("compression_threshold", config.compression_threshold))
+        .bind(("max_messages", config.max_messages))
+        .bind(("max_message_age_hours", config.max_message_age_hours))
+        .bind(("memory_char_limit", config.memory_char_limit))
+        .bind(("enable_thinking", config.enable_thinking))
+        .bind(("updated_at", surrealdb::Datetime::from(Utc::now())))
+        .await?;
+
+    tracing::debug!("context config updated {:?}", resp.pretty_debug());
 
     Ok(())
 }
@@ -1607,7 +1643,7 @@ pub async fn create_group_for_user<C: Connection>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentRecord, AgentState, AgentType};
+    use crate::agent::{AgentRecord, AgentType};
     use crate::db::{
         client,
         entity::{BaseTask, BaseTaskPriority, BaseTaskStatus},
@@ -1715,7 +1751,6 @@ mod tests {
             id: AgentId::generate(),
             name: "Test Agent".to_string(),
             agent_type: AgentType::Generic,
-            state: AgentState::Ready,
             model_id: None,
             owner_id: user.id.clone(),
             ..Default::default()

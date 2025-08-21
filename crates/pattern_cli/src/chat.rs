@@ -7,7 +7,7 @@ use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
     Agent, ToolRegistry,
-    agent::{AgentState, ResponseEvent},
+    agent::ResponseEvent,
     config::PatternConfig,
     context::heartbeat::{self, HeartbeatReceiver, HeartbeatSender},
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
@@ -17,8 +17,6 @@ use pattern_core::{
     tool::builtin::DataSourceTool,
 };
 use std::sync::Arc;
-use std::time::Duration;
-use tokio_stream::StreamExt;
 
 use crate::{
     agent_ops::{
@@ -34,7 +32,7 @@ use crate::{
 /// Chat with an agent
 pub async fn chat_with_agent(
     agent: Arc<dyn Agent>,
-    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    heartbeat_receiver: heartbeat::HeartbeatReceiver,
 ) -> Result<()> {
     use rustyline_async::{Readline, ReadlineEvent};
     let output = Output::new();
@@ -66,57 +64,19 @@ pub async fn chat_with_agent(
         output.info("Default endpoint:", "CLI");
     }
 
-    // Spawn heartbeat monitor task
-    let agent_clone = agent.clone();
+    // Use generic heartbeat processor
     let output_clone = output.clone();
-    tokio::spawn(async move {
-        while let Some(heartbeat) = heartbeat_receiver.recv().await {
-            tracing::debug!(
-                "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
-                heartbeat.agent_id,
-                heartbeat.tool_name,
-                heartbeat.tool_call_id
-            );
-
-            // Clone for the task
-            let agent = agent_clone.clone();
+    tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
+        heartbeat_receiver,
+        vec![agent.clone()],
+        move |event, _agent_id, agent_name| {
             let output = output_clone.clone();
-            // Spawn task to handle this heartbeat
-            tokio::spawn(async move {
-                let (current_state, maybe_receiver) = agent.state().await;
-                if current_state != AgentState::Ready {
-                    if let Some(mut receiver) = maybe_receiver {
-                        let timeout = tokio::time::timeout(
-                            Duration::from_secs(200),
-                            receiver.wait_for(|s| *s == AgentState::Ready),
-                        );
-                        let _ = timeout.await;
-                    }
-                }
-                tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
-                // Create a system message to trigger another turn
-                let heartbeat_message = Message::user(format!(
-                    "[Heartbeat continuation from tool: {}]",
-                    heartbeat.tool_name
-                ));
-
-                match agent.process_message_stream(heartbeat_message).await {
-                    Ok(mut response_stream) => {
-                        while let Some(event) = response_stream.next().await {
-                            // Display heartbeat response
-                            output.status("💓 Heartbeat continuation:");
-
-                            print_response_event(event, &output);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Error processing heartbeat: {}", e);
-                    }
-                }
-            });
-        }
-        tracing::debug!("Heartbeat monitor task exiting");
-    });
+            async move {
+                output.status(&format!("💓 Heartbeat continuation from {}:", agent_name));
+                print_response_event(event, &output);
+            }
+        },
+    ));
 
     loop {
         // Handle user input
@@ -267,9 +227,8 @@ pub fn print_response_event(event: ResponseEvent, output: &Output) {
 }
 
 /// Chat with a group of agents
-pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
+pub async fn chat_with_group(
     group_name: &str,
-    pattern_manager: M,
     model: Option<String>,
     no_tools: bool,
     config: &PatternConfig,
@@ -285,21 +244,46 @@ pub async fn chat_with_group<M: GroupManager + Clone + 'static>(
     let output = Output::new().with_writer(writer.clone());
 
     // Use shared setup function
-    let group_setup = setup_group(
-        group_name,
-        &pattern_manager,
-        model,
-        no_tools,
-        config,
-        &output,
-    )
-    .await?;
+    let group_setup = setup_group(group_name, model, no_tools, config, &output).await?;
 
-    // Run the chat loop
+    let is_context_sync = group_setup.group.name == "Context Sync";
+
+    // Handle Context Sync special case for sleeptime groups
+    if is_context_sync {
+        if let pattern_core::coordination::types::CoordinationPattern::Sleeptime { .. } =
+            &group_setup.group.coordination_pattern
+        {
+            output.success("Starting Context Sync background monitoring...");
+
+            // Start the background monitoring task
+            let monitoring_handle = crate::background_tasks::start_context_sync_monitoring(
+                group_setup.group.clone(),
+                group_setup.agents_with_membership.clone(),
+                group_setup.pattern_manager.clone(),
+                output.clone(),
+            )
+            .await?;
+
+            output.info(
+                "Background task started",
+                "Context sync will run periodically in the background",
+            );
+
+            // Don't enter interactive chat for Context Sync, just let it run
+            output.status("Context Sync group is now running in background mode");
+            output.status("Press Ctrl+C to stop monitoring");
+
+            // Wait for the monitoring task to complete (or be cancelled)
+            monitoring_handle.await.into_diagnostic()?;
+            return Ok(());
+        }
+    }
+
+    // Run normal chat loop for all other cases
     run_group_chat_loop(
         group_setup.group,
         group_setup.agents_with_membership,
-        pattern_manager,
+        group_setup.pattern_manager,
         group_setup.heartbeat_receiver,
         output,
         rl,
@@ -313,6 +297,7 @@ pub struct GroupSetup {
     pub agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
     pub pattern_agent: Option<Arc<dyn Agent>>,
     pub agent_tools: Vec<ToolRegistry>, // Each agent's tool registry
+    pub pattern_manager: Arc<dyn GroupManager + Send + Sync>,
     #[allow(dead_code)] // Used during agent creation, kept for potential future use
     pub constellation_tracker:
         Arc<pattern_core::constellation_memory::ConstellationActivityTracker>,
@@ -322,21 +307,101 @@ pub struct GroupSetup {
 }
 
 /// Set up a group with all necessary components
-pub async fn setup_group<M: GroupManager + Clone + 'static>(
+pub async fn setup_group(
     group_name: &str,
-    pattern_manager: &M,
     model: Option<String>,
     no_tools: bool,
     config: &PatternConfig,
     output: &Output,
 ) -> Result<GroupSetup> {
-    // Load the group from database
+    // Load the group from database or create from config
     let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
     let group = match group {
         Some(g) => g,
         None => {
-            output.error(&format!("Group '{}' not found", group_name));
-            return Err(miette::miette!("Group not found"));
+            // Check if group is defined in config
+            if let Some(group_config) = config.groups.iter().find(|g| g.name == group_name) {
+                output.status(&format!("Creating group '{}' from config...", group_name));
+
+                // Convert pattern from config to coordination pattern
+                let coordination_pattern = crate::commands::group::convert_pattern_config(
+                    &group_config.pattern,
+                    &config.user.id,
+                    &group_config.members,
+                )
+                .await?;
+
+                // Create the group
+                let new_group = pattern_core::coordination::groups::AgentGroup {
+                    id: group_config
+                        .id
+                        .clone()
+                        .unwrap_or_else(pattern_core::id::GroupId::generate),
+                    name: group_config.name.clone(),
+                    description: group_config.description.clone(),
+                    coordination_pattern,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    is_active: true,
+                    state: pattern_core::coordination::types::GroupState::RoundRobin {
+                        current_index: 0,
+                        last_rotation: chrono::Utc::now(),
+                    },
+                    members: vec![],
+                };
+
+                // Create group in database
+                let created = ops::create_group_for_user(&DB, &config.user.id, &new_group).await?;
+                output.success(&format!("Created group: {}", created.name));
+
+                // Add members from config
+                for member_config in &group_config.members {
+                    output.status(&format!("Adding member: {}", member_config.name));
+
+                    // Load or create agent from member config
+                    let agent = crate::agent_ops::load_or_create_agent_from_member(
+                        member_config,
+                        &config.user.id,
+                        model.clone(),
+                        !no_tools,
+                        heartbeat::heartbeat_channel().0, // temporary sender for member creation
+                        Some(config),
+                    )
+                    .await?;
+
+                    // Convert role
+                    let role = crate::commands::group::convert_role_config(&member_config.role);
+
+                    // Create membership
+                    let membership = pattern_core::coordination::groups::GroupMembership {
+                        id: pattern_core::id::RelationId::nil(),
+                        in_id: agent.id().clone(),
+                        out_id: created.id.clone(),
+                        joined_at: chrono::Utc::now(),
+                        role,
+                        is_active: true,
+                        capabilities: member_config.capabilities.clone(),
+                    };
+
+                    // Add to group
+                    ops::add_agent_to_group(&DB, &membership).await?;
+                    output.success(&format!(
+                        "Added member: {} ({:?})",
+                        member_config.name, membership.role
+                    ));
+                }
+
+                // Reload the group with members
+                ops::get_group_by_name(&DB, &config.user.id, group_name)
+                    .await?
+                    .ok_or_else(|| miette::miette!("Failed to reload created group"))?
+            } else {
+                output.error(&format!(
+                    "Group '{}' not found in database or config",
+                    group_name
+                ));
+                return Err(miette::miette!("Group not found"));
+            }
         }
     };
 
@@ -456,10 +521,11 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
                     agent_cfg.persona.as_ref().map(|p| p.len()).unwrap_or(0)
                 ),
             );
+            let model = agent_cfg.model.clone().unwrap_or(config.model.clone());
             PatternConfig {
                 user: config.user.clone(),
                 agent: agent_cfg,
-                model: config.model.clone(),
+                model,
                 database: config.database.clone(),
                 groups: config.groups.clone(),
                 bluesky: config.bluesky.clone(),
@@ -535,9 +601,28 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
     // Save pattern agent reference
     let pattern_agent = pattern_agent_index.map(|idx| agents[idx].clone());
 
+    // Create the appropriate pattern manager based on the group's coordination pattern
+    use pattern_core::coordination::selectors::DefaultSelectorRegistry;
+    use pattern_core::coordination::types::CoordinationPattern;
+    use pattern_core::coordination::{
+        DynamicManager, PipelineManager, RoundRobinManager, SleeptimeManager, SupervisorManager,
+        VotingManager,
+    };
+
+    let pattern_manager: Arc<dyn GroupManager + Send + Sync> = match &group.coordination_pattern {
+        CoordinationPattern::RoundRobin { .. } => Arc::new(RoundRobinManager),
+        CoordinationPattern::Dynamic { .. } => Arc::new(DynamicManager::new(Arc::new(
+            DefaultSelectorRegistry::new(),
+        ))),
+        CoordinationPattern::Pipeline { .. } => Arc::new(PipelineManager),
+        CoordinationPattern::Supervisor { .. } => Arc::new(SupervisorManager),
+        CoordinationPattern::Voting { .. } => Arc::new(VotingManager),
+        CoordinationPattern::Sleeptime { .. } => Arc::new(SleeptimeManager),
+    };
+
     // Initialize group chat (registers CLI and Group endpoints)
     let agents_with_membership =
-        init_group_chat(&group, agents.clone(), pattern_manager, output).await?;
+        init_group_chat(&group, agents.clone(), &pattern_manager, output).await?;
 
     // Check config for sleeptime groups that share the same members and start them
     // This is done here so we can reuse the already-loaded agents
@@ -610,13 +695,14 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
                         );
 
                         if sleeptime_agents.len() == agents.len() {
-                            // Start background monitoring
-                            let manager = pattern_core::coordination::SleeptimeManager;
+                            // Start background monitoring with a new sleeptime manager
+                            let sleeptime_manager: Arc<dyn GroupManager + Send + Sync> =
+                                Arc::new(pattern_core::coordination::SleeptimeManager);
                             let monitoring_handle =
                                 crate::background_tasks::start_context_sync_monitoring(
                                     sleeptime_group.clone(),
                                     sleeptime_agents,
-                                    manager,
+                                    sleeptime_manager,
                                     output.clone(),
                                 )
                                 .await?;
@@ -649,6 +735,7 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
         agents_with_membership,
         pattern_agent,
         agent_tools,
+        pattern_manager,
         constellation_tracker,
         heartbeat_sender,
         heartbeat_receiver,
@@ -656,10 +743,10 @@ pub async fn setup_group<M: GroupManager + Clone + 'static>(
 }
 
 /// Initialize group chat and return the agents with membership data
-pub async fn init_group_chat<M: GroupManager + Clone + 'static>(
+pub async fn init_group_chat(
     group: &AgentGroup,
     agents: Vec<Arc<dyn Agent>>,
-    pattern_manager: &M,
+    pattern_manager: &Arc<dyn GroupManager + Send + Sync>,
     output: &Output,
 ) -> Result<Vec<AgentWithMembership<Arc<dyn Agent>>>> {
     use pattern_core::coordination::groups::AgentWithMembership;
@@ -695,7 +782,7 @@ pub async fn init_group_chat<M: GroupManager + Clone + 'static>(
     let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
         group: group.clone(),
         agents: agents_with_membership.clone(),
-        manager: Arc::new(pattern_manager.clone()),
+        manager: pattern_manager.clone(),
         output: output.clone(),
     });
 
@@ -716,11 +803,11 @@ pub async fn init_group_chat<M: GroupManager + Clone + 'static>(
 }
 
 /// Run the group chat loop with initialized agents
-pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
+pub async fn run_group_chat_loop(
     group: AgentGroup,
     agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
-    pattern_manager: M,
-    mut heartbeat_receiver: heartbeat::HeartbeatReceiver,
+    pattern_manager: Arc<dyn GroupManager + Send + Sync>,
+    heartbeat_receiver: heartbeat::HeartbeatReceiver,
     output: Output,
     mut rl: rustyline_async::Readline,
 ) -> Result<()> {
@@ -732,80 +819,19 @@ pub async fn run_group_chat_loop<M: GroupManager + Clone + 'static>(
         .map(|awm| awm.agent.clone())
         .collect();
 
-    // Spawn heartbeat monitor task
+    // Use generic heartbeat processor
     let output_clone = output.clone();
-    tokio::spawn(async move {
-        tracing::info!(
-            "💓 Heartbeat monitor task started with {} agents",
-            agents_for_heartbeat.len()
-        );
-        for agent in &agents_for_heartbeat {
-            tracing::info!(
-                "  - Agent available for heartbeat: {} ({})",
-                agent.name(),
-                agent.id()
-            );
-        }
-
-        while let Some(heartbeat) = heartbeat_receiver.recv().await {
-            tracing::info!(
-                "💓 Received heartbeat request from agent {}: tool {} (call_id: {})",
-                heartbeat.agent_id,
-                heartbeat.tool_name,
-                heartbeat.tool_call_id
-            );
-
-            // Find the agent that sent the heartbeat
-            if let Some(agent) = agents_for_heartbeat
-                .iter()
-                .find(|a| a.id() == heartbeat.agent_id)
-            {
-                tracing::info!("✅ Found agent {} for heartbeat", agent.name());
-                let agent = agent.clone();
-                let output = output_clone.clone();
-
-                // Spawn task to handle this heartbeat
-                tokio::spawn(async move {
-                    let (current_state, maybe_receiver) = agent.state().await;
-                    if current_state != AgentState::Ready {
-                        if let Some(mut receiver) = maybe_receiver {
-                            let timeout = tokio::time::timeout(
-                                Duration::from_secs(200),
-                                receiver.wait_for(|s| *s == AgentState::Ready),
-                            );
-                            let _ = timeout.await;
-                        }
-                    }
-                    tracing::info!("💓 Processing heartbeat from tool: {}", heartbeat.tool_name);
-
-                    // Create a system message to trigger another turn
-                    let heartbeat_message = Message::user(format!(
-                        "[System message: Heartbeat continuation from tool: {}]",
-                        heartbeat.tool_name
-                    ));
-
-                    match agent.process_message_stream(heartbeat_message).await {
-                        Ok(mut response_stream) => {
-                            while let Some(event) = response_stream.next().await {
-                                // Display heartbeat response
-                                output.status("💓 Heartbeat continuation:");
-                                print_response_event(event, &output);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Error processing heartbeat: {}", e);
-                        }
-                    }
-                });
-            } else {
-                tracing::warn!(
-                    "Received heartbeat from unknown agent {}",
-                    heartbeat.agent_id
-                );
+    tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
+        heartbeat_receiver,
+        agents_for_heartbeat,
+        move |event, _agent_id, agent_name| {
+            let output = output_clone.clone();
+            async move {
+                output.status(&format!("💓 Heartbeat continuation from {}:", agent_name));
+                print_response_event(event, &output);
             }
-        }
-        tracing::debug!("Heartbeat monitor task exiting");
-    });
+        },
+    ));
 
     loop {
         let event = rl.readline().await;
@@ -1065,9 +1091,8 @@ pub async fn print_group_response_event(
 /// Set up a group chat with Jetstream data routing to the group
 /// This creates agents for the group, registers data sources to route to the group,
 /// and starts the chat interface
-pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
+pub async fn chat_with_group_and_jetstream(
     group_name: &str,
-    pattern_manager: M,
     model: Option<String>,
     no_tools: bool,
     config: &PatternConfig,
@@ -1084,21 +1109,14 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
     let output = Output::new().with_writer(writer.clone());
 
     // Use shared setup function
-    let group_setup = setup_group(
-        group_name,
-        &pattern_manager,
-        model,
-        no_tools,
-        config,
-        &output,
-    )
-    .await?;
+    let group_setup = setup_group(group_name, model, no_tools, config, &output).await?;
 
     let GroupSetup {
         group,
         agents_with_membership,
         pattern_agent,
         agent_tools,
+        pattern_manager,
         constellation_tracker: _,
         heartbeat_sender: _,
         heartbeat_receiver,
@@ -1183,7 +1201,7 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
                 let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
                     group: group.clone(),
                     agents: agents_with_membership.clone(),
-                    manager: Arc::new(pattern_manager.clone()),
+                    manager: pattern_manager.clone(),
                     output: output.clone(),
                 });
                 data_sources_router
@@ -1205,7 +1223,7 @@ pub async fn chat_with_group_and_jetstream<M: GroupManager + Clone + 'static>(
     run_group_chat_loop(
         group.clone(),
         agents_with_membership,
-        pattern_manager.clone(),
+        pattern_manager,
         heartbeat_receiver,
         output.clone(),
         rl,

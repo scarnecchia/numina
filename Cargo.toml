@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Orual <orual@nonbinary.computer>"]
 license = "AGPL-3.0"
@@ -114,7 +114,12 @@ clap = { version = "4.5", features = ["derive"] }
 tracing-appender = "0.2"
 dotenvy = "0.15"
 schemars = { version = "1.0", features = ["chrono04"] }
-ferroid = { version = "0.5", features = ["snowflake", "async-tokio", "serde"] }
+ferroid = { version = "0.5", features = [
+    "snowflake",
+    "async-tokio",
+    "serde",
+    "base32",
+] }
 
 # Authentication
 jsonwebtoken = "9.3"
@@ -140,3 +145,7 @@ bsky-sdk = { version = "0.1.20", features = ["default-client"] }
 [workspace.lints.clippy]
 mod_module_files = "warn"
 manual_range_contains = "allow"
+
+
+[profile.dev.package."surrealdb"]
+opt-level = 2

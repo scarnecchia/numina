@@ -10,7 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
-    message::{CacheControl, Message, MessageContent},
+    message::{CacheControl, Message, MessageBatch},
     tool::{DynamicTool, ToolRegistry},
 };
 
@@ -27,7 +27,7 @@ pub use state::{AgentContext, AgentContextBuilder, AgentHandle, AgentStats, Stat
 const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 10000;
 
 /// Maximum messages to keep in immediate context before compression
-const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 50;
+const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 200;
 
 /// A complete context ready to be sent to an LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,11 +38,74 @@ pub struct MemoryContext {
     /// Tools available to the agent in genai format
     pub tools: Vec<genai::chat::Tool>,
 
-    /// Message history
-    pub messages: Vec<Message>,
+    /// Message batches (complete and current)
+    pub batches: Vec<MessageBatch>,
+
+    /// Current batch being processed (if any)
+    pub current_batch_id: Option<crate::agent::SnowflakePosition>,
+
+    /// Summary of archived/compressed batches (if any)
+    pub archive_summary: Option<String>,
 
     /// Metadata about the context (for debugging/logging)
     pub metadata: ContextMetadata,
+}
+
+impl MemoryContext {
+    /// Get all messages as a flat list for sending to LLM
+    /// Filters out incomplete batches except for the current one
+    pub fn get_messages_for_request(&self) -> Vec<Message> {
+        let mut messages = Vec::new();
+
+        for batch in &self.batches {
+            // Include batch if it's complete OR if it's the current batch being processed
+            let should_include =
+                batch.is_complete || self.current_batch_id.as_ref() == Some(&batch.id);
+
+            if should_include {
+                messages.extend(batch.messages.clone());
+            }
+        }
+
+        messages
+    }
+
+    /// Temporary compatibility method - returns all messages
+    pub fn messages(&self) -> Vec<Message> {
+        self.get_messages_for_request()
+    }
+
+    /// Get the total number of messages across all batches
+    pub fn len(&self) -> usize {
+        self.batches.iter().map(|b| b.len()).sum()
+    }
+
+    /// Check if there are any messages
+    pub fn is_empty(&self) -> bool {
+        self.batches.is_empty() || self.batches.iter().all(|b| b.is_empty())
+    }
+
+    /// Convert this context into a Request for the LLM
+    pub fn into_request(&self) -> crate::message::Request {
+        let mut messages = Vec::new();
+
+        // Add archive summary as initial system message if present
+        if let Some(summary) = &self.archive_summary {
+            messages.push(crate::message::Message::system(format!(
+                "Previous conversation summary:\n{}",
+                summary
+            )));
+        }
+
+        // Then add all the regular messages from batches
+        messages.extend(self.get_messages_for_request());
+
+        crate::message::Request {
+            system: Some(vec![self.system_prompt.clone()]),
+            messages,
+            tools: Some(self.tools.clone()),
+        }
+    }
 }
 
 /// Metadata about the context build
@@ -70,6 +133,10 @@ pub struct ContextConfig {
     /// Maximum messages before compression
     pub max_context_messages: usize,
 
+    /// Maximum tokens before compression (if set, overrides model defaults)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
+
     /// Whether to include thinking/reasoning in responses
     pub enable_thinking: bool,
 
@@ -89,6 +156,7 @@ impl Default for ContextConfig {
             base_instructions: DEFAULT_BASE_INSTRUCTIONS.to_string(),
             memory_char_limit: DEFAULT_CORE_MEMORY_CHAR_LIMIT,
             max_context_messages: DEFAULT_MAX_CONTEXT_MESSAGES,
+            max_context_tokens: Some(128000),
             enable_thinking: true,
             tool_usage_rules: Vec::new(),
             tool_workflow_rules: Vec::new(),
@@ -120,7 +188,7 @@ impl Default for ModelAdjustments {
             native_thinking: false,
             use_xml_tags: true,
             max_context_tokens: Some(128_000),
-            token_multiplier: 1.3, // Rough estimate: 1 token ≈ 0.75 words
+            token_multiplier: 3.0, // Rough estimate: 1 token ≈ 0.75 words
         }
     }
 }
@@ -138,9 +206,10 @@ pub struct ContextBuilder {
     config: ContextConfig,
     memory_blocks: Vec<MemoryBlock>,
     tools: Vec<Box<dyn DynamicTool>>,
-    messages: Vec<Message>,
+    batches: Vec<MessageBatch>,
     current_time: DateTime<Utc>,
     compression_strategy: CompressionStrategy,
+    archive_summary: Option<String>,
 }
 
 impl ContextBuilder {
@@ -151,9 +220,10 @@ impl ContextBuilder {
             config,
             memory_blocks: Vec::new(),
             tools: Vec::new(),
-            messages: Vec::new(),
+            batches: Vec::new(),
             current_time: Utc::now(),
             compression_strategy: CompressionStrategy::default(),
+            archive_summary: None,
         }
     }
 
@@ -193,9 +263,16 @@ impl ContextBuilder {
         self
     }
 
-    /// Add message history
-    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
-        self.messages = messages;
+    /// Add message batches
+    pub fn with_batches(mut self, batches: Vec<MessageBatch>) -> Self {
+        self.batches = batches;
+        self.batches.sort_by_key(|b| b.id.0);
+        self
+    }
+
+    /// Add a single batch
+    pub fn add_batch(mut self, batch: MessageBatch) -> Self {
+        self.batches.push(batch);
         self
     }
 
@@ -211,26 +288,39 @@ impl ContextBuilder {
         self
     }
 
+    /// Set the archive summary for compressed/archived batches
+    pub fn with_archive_summary(mut self, summary: Option<String>) -> Self {
+        self.archive_summary = summary;
+        self
+    }
+
     /// Build the final context
-    pub async fn build(self) -> Result<MemoryContext> {
+    pub async fn build(
+        self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+    ) -> Result<MemoryContext> {
         // Build system prompt
         let system_prompt = self.build_system_prompt()?;
 
         // Convert tools to genai format
         let tools = self.tools.iter().map(|t| t.to_genai_tool()).collect();
 
-        // Process messages (compress if needed)
-        let (messages, compressed_count) = self.process_messages().await?;
+        // Process batches (compress if needed, filter incomplete)
+        let (batches, compressed_count) = self.process_batches(current_batch_id).await?;
+
+        // Count total messages for metadata
+        let total_message_count: usize = batches.iter().map(|b| b.len()).sum();
 
         // Estimate token count
-        let total_tokens_estimate = self.estimate_tokens(&system_prompt, &messages);
+        let all_messages: Vec<Message> = batches.iter().flat_map(|b| b.messages.clone()).collect();
+        let total_tokens_estimate = self.estimate_tokens(&system_prompt, &all_messages);
 
         // Build metadata
         let metadata = ContextMetadata {
             agent_id: self.agent_id,
             build_time: Utc::now(),
             total_tokens_estimate,
-            message_count: messages.len(),
+            message_count: total_message_count,
             compressed_message_count: compressed_count,
             memory_blocks_count: self.memory_blocks.len(),
             tools_count: self.tools.len(),
@@ -239,7 +329,9 @@ impl ContextBuilder {
         Ok(MemoryContext {
             system_prompt,
             tools,
-            messages,
+            batches,
+            current_batch_id,
+            archive_summary: self.archive_summary.clone(),
             metadata,
         })
     }
@@ -286,12 +378,10 @@ impl ContextBuilder {
             .max()
             .unwrap_or(self.current_time);
 
-        let recall_count = self
-            .messages
-            .len()
-            .saturating_sub(self.config.max_context_messages);
-
-        let active_message_count = self.messages.len();
+        // Count total messages across all batches
+        let total_message_count: usize = self.batches.iter().map(|b| b.len()).sum();
+        let recall_count = total_message_count.saturating_sub(self.config.max_context_messages);
+        let active_message_count = total_message_count.min(self.config.max_context_messages);
 
         if self.config.model_adjustments.use_xml_tags {
             format!(
@@ -502,153 +592,129 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
         }
     }
 
-    /// Clean up unpaired tool calls and responses
-    fn clean_unpaired_tool_messages(&self, messages: Vec<Message>) -> Vec<Message> {
-        use crate::message::ContentBlock;
-        use std::collections::HashSet;
+    /// Process batches, filtering incomplete and compressing if needed
+    async fn process_batches(
+        &self,
+        current_batch_id: Option<crate::agent::SnowflakePosition>,
+    ) -> Result<(Vec<MessageBatch>, usize)> {
+        let mut filtered_batches = Vec::new();
 
-        // First pass: collect all tool call IDs and response IDs
-        let mut tool_call_ids = HashSet::new();
-        let mut tool_response_ids = HashSet::new();
+        tracing::debug!(
+            "Processing {} batches for context. Current batch ID: {:?}",
+            self.batches.len(),
+            current_batch_id
+        );
 
-        for msg in &messages {
-            match &msg.content {
-                MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        tool_call_ids.insert(call.call_id.clone());
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        tool_response_ids.insert(response.call_id.clone());
-                    }
-                }
-                MessageContent::Blocks(blocks) => {
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                tool_call_ids.insert(id.clone());
-                            }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                tool_response_ids.insert(tool_use_id.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
+        // Filter batches: include complete batches and current batch
+        for batch in &self.batches {
+            let should_include = batch.is_complete || current_batch_id.as_ref() == Some(&batch.id);
+
+            if should_include {
+                filtered_batches.push(batch.clone());
             }
         }
 
-        // Find paired IDs (present in both sets)
-        let paired_ids: HashSet<_> = tool_call_ids
-            .intersection(&tool_response_ids)
-            .cloned()
-            .collect();
+        tracing::debug!(
+            "After filtering: {} batches included (from {} total)",
+            filtered_batches.len(),
+            self.batches.len()
+        );
 
-        // Second pass: filter messages to keep only paired tool calls/responses
-        messages
-            .into_iter()
-            .map(|mut msg| {
-                match &mut msg.content {
-                    MessageContent::ToolCalls(calls) => {
-                        // Keep only tool calls that have matching responses
-                        calls.retain(|call| paired_ids.contains(&call.call_id));
+        // Log the included batch IDs and message counts
+        if !filtered_batches.is_empty() {
+            let batch_info: Vec<String> = filtered_batches
+                .iter()
+                .take(10) // First 10 for brevity
+                .map(|b| format!("{} ({} msgs)", b.id, b.len()))
+                .collect();
+            tracing::debug!("Included batches (first 10): {:?}", batch_info);
+        }
 
-                        // If no tool calls remain, convert to empty text message
-                        if calls.is_empty() {
-                            msg.content = MessageContent::Text(String::new());
-                        }
-                    }
-                    MessageContent::ToolResponses(responses) => {
-                        // Keep only responses that have matching calls
-                        responses.retain(|response| paired_ids.contains(&response.call_id));
+        // Count total messages
+        let total_messages: usize = filtered_batches.iter().map(|b| b.len()).sum();
 
-                        // If no responses remain, convert to empty text message
-                        if responses.is_empty() {
-                            msg.content = MessageContent::Text(String::new());
-                        }
-                    }
-                    MessageContent::Blocks(blocks) => {
-                        // Filter blocks to keep only paired tool calls/responses
-                        blocks.retain(|block| match block {
-                            ContentBlock::ToolUse { id, .. } => paired_ids.contains(id),
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                paired_ids.contains(tool_use_id)
-                            }
-                            _ => true, // Keep all other block types
-                        });
-
-                        // If only empty blocks remain, convert to empty text message
-                        if blocks.is_empty() {
-                            msg.content = MessageContent::Text(String::new());
-                        } else if let Some(last) = blocks.last() {
-                            if matches!(
-                                last,
-                                ContentBlock::Thinking { .. }
-                                    | ContentBlock::RedactedThinking { .. }
-                            ) {
-                                // trailing thinking blocks are a problem.
-                                blocks.push(ContentBlock::Text {
-                                    text: ".".to_string(),
-                                })
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                msg
-            })
-            // Filter out any empty text messages we created
-            .filter(|msg| {
-                if let MessageContent::Text(text) = &msg.content {
-                    !text.is_empty()
-                } else {
-                    true
-                }
-            })
-            .collect()
-    }
-
-    /// Process messages, compressing if needed and adding cache control
-    async fn process_messages(&self) -> Result<(Vec<Message>, usize)> {
-        // First clean up unpaired tool calls/responses
-        let cleaned_messages = self.clean_unpaired_tool_messages(self.messages.clone());
-
-        let (mut messages, compressed_count) =
-            if cleaned_messages.len() <= self.config.max_context_messages {
-                (cleaned_messages, 0)
+        // Apply compression if needed
+        let (final_batches, compressed_count) =
+            if total_messages <= self.config.max_context_messages {
+                (filtered_batches, 0)
             } else {
-                // Use MessageCompressor with configured strategy
-                let compressor = MessageCompressor::new(self.compression_strategy.clone());
+                // For now, just take the most recent batches that fit
+                // TODO: implement smarter compression that respects batch boundaries
+                let mut kept_batches = Vec::new();
+                let mut message_count = 0;
+                let mut compressed = 0;
 
-                let compression_result = compressor
-                    .compress(cleaned_messages, self.config.max_context_messages)
-                    .await?;
+                // Walk backwards through batches, keeping as many as fit
+                for batch in filtered_batches.iter().rev() {
+                    let batch_size = batch.len();
+                    if message_count + batch_size <= self.config.max_context_messages {
+                        kept_batches.push(batch.clone());
+                        message_count += batch_size;
+                    } else {
+                        compressed += batch_size;
+                    }
+                }
 
-                // Return the active messages and the count of compressed messages
-                (
-                    compression_result.active_messages,
-                    compression_result.metadata.compressed_count,
-                )
+                kept_batches.reverse();
+                (kept_batches, compressed)
             };
 
-        // Add cache control to optimize token usage (especially for Anthropic)
-        // Cache the first message (system prompt will be cached separately)
-        if let Some(first_msg) = messages.first_mut() {
-            first_msg.options.cache_control = Some(CacheControl::Ephemeral);
+        // Log final batches after compression
+        if compressed_count > 0 {
+            tracing::debug!(
+                "After compression: {} batches kept with {} messages (compressed {} messages)",
+                final_batches.len(),
+                final_batches.iter().map(|b| b.len()).sum::<usize>(),
+                compressed_count
+            );
+
+            let batch_info: Vec<String> = final_batches
+                .iter()
+                .take(10)
+                .map(|b| format!("{} ({} msgs)", b.id, b.len()))
+                .collect();
+            tracing::debug!(
+                "Final batches after compression (first 10): {:?}",
+                batch_info
+            );
         }
 
-        // Add cache control periodically throughout the conversation
-        // Every 20 messages to create cache breakpoints
-        const CACHE_INTERVAL: usize = 20;
-        for (i, msg) in messages.iter_mut().enumerate() {
-            if i > 0 && i % CACHE_INTERVAL == 0 {
-                msg.options.cache_control = Some(CacheControl::Ephemeral);
+        // Add cache control to messages in batches - max 4 cache points total
+        let mut result_batches = Vec::new();
+        let total_batches = final_batches.len();
+        let mut cache_points_used = 0;
+        const MAX_CACHE_POINTS: usize = 4;
+
+        // Calculate which batches should get cache points
+        // Strategy: cache early context and recent context
+        let cache_positions: Vec<usize> = if total_batches <= MAX_CACHE_POINTS {
+            // If we have 4 or fewer batches, cache the first message of each
+            (0..total_batches).collect()
+        } else {
+            // Otherwise, distribute cache points strategically:
+            // 1. First batch (early context)
+            // 2. 25% through
+            // 3. 50% through
+            // 4. Most recent batch
+            vec![0, total_batches / 4, total_batches / 2, total_batches - 1]
+        };
+
+        for (batch_idx, mut batch) in final_batches.into_iter().enumerate() {
+            // Only add cache control if this batch is in our cache positions
+            // and we haven't exceeded the limit
+            if cache_positions.contains(&batch_idx)
+                && cache_points_used < MAX_CACHE_POINTS
+                && !batch.messages.is_empty()
+            {
+                batch.messages[0].options.cache_control = Some(CacheControl::Ephemeral);
+                cache_points_used += 1;
             }
-        }
 
-        Ok((messages, compressed_count))
+            result_batches.push(batch);
+        }
+        result_batches.sort_by_key(|b| b.id.0);
+
+        Ok((result_batches, compressed_count))
     }
 
     /// Estimate token count for the context
@@ -751,7 +817,7 @@ mod tests {
                 is_active: true,
                 ..Default::default()
             })
-            .build()
+            .build(None)
             .await
             .unwrap();
 
@@ -787,7 +853,7 @@ mod tests {
                 is_active: true,
                 ..Default::default()
             })
-            .build()
+            .build(None)
             .await
             .unwrap();
 
@@ -819,7 +885,7 @@ mod tests {
         let builder =
             ContextBuilder::new(AgentId::generate(), config).with_tools_from_registry(&registry);
 
-        let context = builder.build().await.unwrap();
+        let context = builder.build(None).await.unwrap();
 
         // Check that tool behaviors were loaded from the registry
         assert!(

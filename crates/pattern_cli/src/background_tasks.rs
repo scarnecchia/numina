@@ -19,10 +19,10 @@ use std::sync::Arc;
 ///
 /// This spawns a task that periodically sends trigger messages to the group
 /// to check if any sleeptime triggers should fire.
-pub async fn start_context_sync_monitoring<M: GroupManager + Clone + 'static>(
+pub async fn start_context_sync_monitoring(
     group: AgentGroup,
     agents: Vec<AgentWithMembership<Arc<dyn Agent>>>,
-    manager: M,
+    manager: Arc<dyn GroupManager + Send + Sync>,
     output: Output,
 ) -> Result<tokio::task::JoinHandle<()>> {
     // Extract check interval from the group's coordination pattern
