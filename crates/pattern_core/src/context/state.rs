@@ -658,43 +658,17 @@ impl AgentHandle {
                 tracing::debug!("Parsed end_time from query: {:?}", end_time);
             }
 
-            // Query msg table directly with content search (we'll filter by agent after)
-            let sql = format!(
-                "SELECT * FROM msg WHERE {} ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC, created_at DESC LIMIT {}",
-                conditions.join(" AND "),
-                limit * 10 // Get more results since we'll filter some out
-            );
-            (sql, false, true)
-        } else {
-            // No content search - use existing graph traversal approach
-            let mut conditions = vec![];
-            if role_filter.is_some() {
-                conditions.push("role = $role");
-            }
-            if start_time.is_some() {
-                conditions.push("created_at >= $start_time");
-            }
-            if end_time.is_some() {
-                conditions.push("created_at <= $end_time");
-            }
-
-            let where_clause = if conditions.is_empty() {
-                String::new()
+            if cleaned.is_empty() {
+                None
             } else {
-                format!(" WHERE {}", conditions.join(" AND "))
-            };
-
-            // Query the agent_messages relation table directly
-            let sql = format!(
-                "SELECT position, batch, sequence_num, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC LIMIT $limit FETCH messages",
-                where_clause,
-                self.agent_id.to_key()
-            );
-            (sql, true, false)
+                Some(cleaned)
+            }
+        } else {
+            None
         };
 
         // Use different search paths based on whether we have a content query
-        if let Some(search_query) = cleaned_query.as_deref() {
+        if let Some(search_query) = &cleaned_query {
             // Use helper function for content search
             let mut scored_msgs = self
                 .execute_content_search(
@@ -1573,6 +1547,7 @@ impl AgentContext {
                         let error_response = crate::message::ToolResponse {
                             call_id: call_id.clone(),
                             content: format!("Error: {}", error_message),
+                            is_error: Some(true),
                         };
                         batch.add_tool_response_with_sequencing(error_response);
                     }
@@ -1600,6 +1575,7 @@ impl AgentContext {
                     let error_response = crate::message::ToolResponse {
                         call_id: call_id.clone(),
                         content: format!("Error: {}", error_message),
+                        is_error: Some(true),
                     };
                     batch.add_tool_response_with_sequencing(error_response);
                 }

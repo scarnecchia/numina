@@ -209,11 +209,13 @@ impl MessageBatch {
                         if let ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            ..
                         } = block
                         {
                             Some(ToolResponse {
                                 call_id: tool_use_id.clone(),
                                 content: content.clone(),
+                                is_error: None,
                             })
                         } else {
                             None
@@ -875,6 +877,17 @@ impl Default for Message {
 }
 
 impl Message {
+    /// Check if content contains tool calls
+    fn content_has_tool_calls(content: &MessageContent) -> bool {
+        match content {
+            MessageContent::ToolCalls(_) => true,
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. })),
+            _ => false,
+        }
+    }
+
     /// Estimate word count for content
     fn estimate_word_count(content: &MessageContent) -> u32 {
         match content {
@@ -1594,53 +1607,103 @@ impl Response {
     }
 
     pub fn has_unpaired_tool_calls(&self) -> bool {
-        // Check for unpaired tool calls (tool calls without matching responses)
-        let mut tool_call_ids: std::collections::HashSet<String> = self
-            .content
-            .iter()
-            .filter_map(|content| match content {
-                MessageContent::ToolCalls(calls) => Some(calls.iter().map(|c| c.call_id.clone())),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        // Collect all tool call IDs
+        let mut tool_calls: Vec<String> = Vec::new();
 
-        // Also check for tool calls inside blocks
+        // Get tool calls from ToolCalls content
+        for content in &self.content {
+            if let MessageContent::ToolCalls(calls) = content {
+                for call in calls {
+                    tool_calls.push(call.call_id.clone());
+                }
+            }
+        }
+
+        // Get tool calls from Blocks
         for content in &self.content {
             if let MessageContent::Blocks(blocks) = content {
                 for block in blocks {
                     if let ContentBlock::ToolUse { id, .. } = block {
-                        tool_call_ids.insert(id.clone());
+                        tool_calls.push(id.clone());
                     }
                 }
             }
         }
 
-        let mut tool_response_ids: std::collections::HashSet<String> = self
-            .content
-            .iter()
-            .filter_map(|content| match content {
-                MessageContent::ToolResponses(responses) => {
-                    Some(responses.iter().map(|r| r.call_id.clone()))
-                }
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        // If no tool calls, we're done
+        if tool_calls.is_empty() {
+            return false;
+        }
 
-        // Also check for tool responses inside blocks
-        for content in &self.content {
-            if let MessageContent::Blocks(blocks) = content {
-                for block in blocks {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        tool_response_ids.insert(tool_use_id.clone());
+        // Check if we have Anthropic-style IDs (start with "toolu_")
+        let has_anthropic_ids = tool_calls.iter().any(|id| id.starts_with("toolu_"));
+
+        if has_anthropic_ids {
+            // Anthropic IDs are unique - use set difference
+            let tool_call_set: std::collections::HashSet<String> = tool_calls.into_iter().collect();
+
+            let mut tool_response_set: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
+            // Get tool responses from ToolResponses content
+            for content in &self.content {
+                if let MessageContent::ToolResponses(responses) = content {
+                    for response in responses {
+                        tool_response_set.insert(response.call_id.clone());
                     }
                 }
             }
-        }
 
-        // Check if there are any tool calls without responses
-        tool_call_ids.difference(&tool_response_ids).count() > 0
+            // Get tool responses from Blocks
+            for content in &self.content {
+                if let MessageContent::Blocks(blocks) = content {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            tool_response_set.insert(tool_use_id.clone());
+                        }
+                    }
+                }
+            }
+
+            // Check if there are any tool calls without responses
+            tool_call_set.difference(&tool_response_set).count() > 0
+        } else {
+            // Gemini/other IDs may not be unique - count occurrences
+            use std::collections::HashMap;
+            let mut call_counts: HashMap<String, usize> = HashMap::new();
+
+            // Count tool calls
+            for id in tool_calls {
+                *call_counts.entry(id).or_insert(0) += 1;
+            }
+
+            // Subtract tool responses
+            for content in &self.content {
+                if let MessageContent::ToolResponses(responses) = content {
+                    for response in responses {
+                        if let Some(count) = call_counts.get_mut(&response.call_id) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+
+            // Subtract tool responses from Blocks
+            for content in &self.content {
+                if let MessageContent::Blocks(blocks) = content {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            if let Some(count) = call_counts.get_mut(tool_use_id) {
+                                *count = count.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if any tool calls remain unpaired
+            call_counts.values().any(|&count| count > 0)
+        }
     }
 
     pub fn only_text(&self) -> String {
@@ -1699,7 +1762,7 @@ impl Message {
     /// Create a user message with the given content
     pub fn user(content: impl Into<MessageContent>) -> Self {
         let content = content.into();
-        let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
+        let has_tool_calls = Self::content_has_tool_calls(&content);
         let word_count = Self::estimate_word_count(&content);
         let position = get_next_message_position_sync();
 
@@ -1725,7 +1788,7 @@ impl Message {
     /// Create a system message with the given content
     pub fn system(content: impl Into<MessageContent>) -> Self {
         let content = content.into();
-        let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
+        let has_tool_calls = Self::content_has_tool_calls(&content);
         let word_count = Self::estimate_word_count(&content);
         let position = get_next_message_position_sync();
 
@@ -1751,7 +1814,7 @@ impl Message {
     /// Create an agent (assistant) message with the given content
     pub fn agent(content: impl Into<MessageContent>) -> Self {
         let content = content.into();
-        let has_tool_calls = matches!(&content, MessageContent::ToolCalls(_));
+        let has_tool_calls = Self::content_has_tool_calls(&content);
         let word_count = Self::estimate_word_count(&content);
         let position = get_next_message_position_sync();
 
@@ -1945,10 +2008,7 @@ impl Message {
                 current_assistant_content[0].clone()
             };
 
-            let has_tool_calls = matches!(
-                &combined_content,
-                MessageContent::ToolCalls(_) | MessageContent::Blocks(_)
-            );
+            let has_tool_calls = Self::content_has_tool_calls(&combined_content);
             let word_count = Self::estimate_word_count(&combined_content);
 
             messages.push(Self {
@@ -2112,13 +2172,23 @@ impl Message {
 
     /// Check if this message contains tool calls
     pub fn has_tool_calls(&self) -> bool {
-        matches!(&self.content, MessageContent::ToolCalls(_))
+        match &self.content {
+            MessageContent::ToolCalls(_) => true,
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. })),
+            _ => false,
+        }
     }
 
     /// Get the number of tool calls in this message
     pub fn tool_call_count(&self) -> usize {
         match &self.content {
             MessageContent::ToolCalls(calls) => calls.len(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                .count(),
             _ => 0,
         }
     }
@@ -2127,6 +2197,10 @@ impl Message {
     pub fn tool_response_count(&self) -> usize {
         match &self.content {
             MessageContent::ToolResponses(calls) => calls.len(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                .count(),
             _ => 0,
         }
     }
