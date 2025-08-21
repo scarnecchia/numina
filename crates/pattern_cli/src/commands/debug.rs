@@ -276,7 +276,7 @@ pub async fn search_conversations(
                                     .status(&format!("Content: [Blocks: {} blocks]", blocks.len()));
                                 for (j, block) in blocks.iter().enumerate().take(3) {
                                     match block {
-                                        ContentBlock::Text { text } => {
+                                        ContentBlock::Text { text, .. } => {
                                             let preview = if text.len() > 100 {
                                                 format!("{}...", &text[..100])
                                             } else {
@@ -1467,7 +1467,7 @@ pub async fn context_cleanup(
                             println!("      Content: [Blocks: {} blocks]", blocks.len());
                             for (j, block) in blocks.iter().enumerate().take(3) {
                                 match block {
-                                    ContentBlock::Text { text } => {
+                                    ContentBlock::Text { text, .. } => {
                                         let preview = if text.len() > 100 {
                                             format!("{}...", &text[..100])
                                         } else {

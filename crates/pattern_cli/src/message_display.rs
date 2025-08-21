@@ -152,7 +152,7 @@ pub fn display_message_content(
             output.kv("Content", &format!("[Blocks: {} blocks]", blocks.len()));
             for (j, block) in blocks.iter().enumerate().take(3) {
                 match block {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::Text { text, .. } => {
                         let preview = if text.len() > preview_len {
                             format!("{}...", text.chars().take(preview_len).collect::<String>())
                         } else {

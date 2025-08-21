@@ -39,7 +39,7 @@ impl Schema {
     /// Create vector index query for a table
     pub fn vector_index(table: &str, field: &str, dimensions: usize) -> String {
         format!(
-            "DEFINE INDEX {}_vector_idx ON {} FIELDS {} HNSW DIMENSION {} DIST COSINE",
+            "DEFINE INDEX OVERWRITE {}_vector_idx ON {} FIELDS {} HNSW DIMENSION {} DIST COSINE",
             table, table, field, dimensions
         )
     }

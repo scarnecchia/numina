@@ -380,6 +380,9 @@ pub async fn create_agent_from_record(
 
     // Set the chat options with our selected model
     {
+        let mut context = agent.context.write().await;
+        context.context_config.max_context_tokens =
+            Some(response_options.model_info.context_window);
         let mut options = agent.chat_options.write().await;
         *options = Some(response_options);
     }

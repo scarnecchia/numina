@@ -34,22 +34,40 @@ impl From<genai::chat::MessageContent> for MessageContent {
                     blocks
                         .into_iter()
                         .map(|block| match block {
-                            genai::chat::ContentBlock::Text { text } => ContentBlock::Text { text },
+                            genai::chat::ContentBlock::Text {
+                                text,
+                                thought_signature,
+                            } => ContentBlock::Text {
+                                text,
+                                thought_signature,
+                            },
                             genai::chat::ContentBlock::Thinking { text, signature } => {
                                 ContentBlock::Thinking { text, signature }
                             }
                             genai::chat::ContentBlock::RedactedThinking { data } => {
                                 ContentBlock::RedactedThinking { data }
                             }
-                            genai::chat::ContentBlock::ToolUse { id, name, input } => {
-                                ContentBlock::ToolUse { id, name, input }
-                            }
+                            genai::chat::ContentBlock::ToolUse {
+                                id,
+                                name,
+                                input,
+                                thought_signature,
+                            } => ContentBlock::ToolUse {
+                                id,
+                                name,
+                                input,
+                                thought_signature,
+                            },
                             genai::chat::ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
+                                is_error,
+                                thought_signature,
                             } => ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
+                                is_error,
+                                thought_signature,
                             },
                         })
                         .collect(),
@@ -114,6 +132,7 @@ impl From<genai::chat::ToolResponse> for ToolResponse {
         Self {
             call_id: resp.call_id,
             content: resp.content,
+            is_error: resp.is_error,
         }
     }
 }
@@ -150,22 +169,40 @@ impl From<MessageContent> for genai::chat::MessageContent {
                     blocks
                         .into_iter()
                         .map(|block| match block {
-                            ContentBlock::Text { text } => genai::chat::ContentBlock::Text { text },
+                            ContentBlock::Text {
+                                text,
+                                thought_signature,
+                            } => genai::chat::ContentBlock::Text {
+                                text,
+                                thought_signature,
+                            },
                             ContentBlock::Thinking { text, signature } => {
                                 genai::chat::ContentBlock::Thinking { text, signature }
                             }
                             ContentBlock::RedactedThinking { data } => {
                                 genai::chat::ContentBlock::RedactedThinking { data }
                             }
-                            ContentBlock::ToolUse { id, name, input } => {
-                                genai::chat::ContentBlock::ToolUse { id, name, input }
-                            }
+                            ContentBlock::ToolUse {
+                                id,
+                                name,
+                                input,
+                                thought_signature,
+                            } => genai::chat::ContentBlock::ToolUse {
+                                id,
+                                name,
+                                input,
+                                thought_signature,
+                            },
                             ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
+                                is_error,
+                                thought_signature,
                             } => genai::chat::ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
+                                is_error,
+                                thought_signature,
                             },
                         })
                         .collect(),
@@ -230,6 +267,7 @@ impl From<ToolResponse> for genai::chat::ToolResponse {
         genai::chat::ToolResponse {
             call_id: resp.call_id,
             content: resp.content,
+            is_error: resp.is_error,
         }
     }
 }

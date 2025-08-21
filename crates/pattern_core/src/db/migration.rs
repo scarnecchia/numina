@@ -2,7 +2,7 @@
 
 use super::{DatabaseError, Result};
 use crate::db::schema::Schema;
-use crate::id::{IdType, MemoryId, TaskId};
+use crate::id::{IdType, MemoryId, MessageId, TaskId};
 use surrealdb::{Connection, Surreal};
 
 /// Database migration runner
@@ -231,7 +231,7 @@ impl MigrationRunner {
         }
 
         // Create vector indexes with default dimensions (384 for MiniLM)
-        let dimensions = 384;
+        let dimensions = 1536;
 
         // Create vector indexes for tables with embeddings
         let memory_index = Schema::vector_index(MemoryId::PREFIX, "embedding", dimensions);
@@ -1346,8 +1346,8 @@ impl MigrationRunner {
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
-        // Create vector indexes with default dimensions (384 for MiniLM)
-        let dimensions = 384;
+        // Create vector indexes with default dimensions (1536 for text-embedding-3-small)
+        let dimensions = 1536;
 
         let memory_index = Schema::vector_index(MemoryId::PREFIX, "embedding", dimensions);
         db.query(&memory_index)

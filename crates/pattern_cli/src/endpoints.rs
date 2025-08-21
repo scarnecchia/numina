@@ -51,7 +51,7 @@ impl MessageEndpoint for CliEndpoint {
                 blocks
                     .iter()
                     .find_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .unwrap_or("")

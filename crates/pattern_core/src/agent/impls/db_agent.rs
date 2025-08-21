@@ -87,7 +87,7 @@ pub struct DatabaseAgent<M, E> {
     /// The user who owns this agent
     pub user_id: UserId,
     /// The agent's context (includes all state)
-    context: Arc<RwLock<AgentContext>>,
+    pub context: Arc<RwLock<AgentContext>>,
 
     /// model provider
     model: Arc<RwLock<M>>,
@@ -1594,6 +1594,7 @@ where
                     let error_response = ToolResponse {
                         call_id: call.call_id.clone(),
                         content: format!("Tool rule violation: {:?}", violation),
+                        is_error: Some(true),
                     };
                     responses.push(error_response);
                     continue;
@@ -1632,6 +1633,7 @@ where
                 Some(ToolResponse {
                     call_id: call.call_id.clone(),
                     content: format!("Error executing tool: {:?}", e),
+                    is_error: Some(true),
                 })
             });
 
@@ -2320,6 +2322,7 @@ where
                                                             "Tool execution failed: {:?}",
                                                             e
                                                         ),
+                                                        is_error: Some(true),
                                                     })
                                                     .collect();
 
@@ -2401,7 +2404,7 @@ where
 
                                 for block in blocks {
                                     match block {
-                                        ContentBlock::Text { text } => {
+                                        ContentBlock::Text { text, .. } => {
                                             // Accumulate text for constellation logging
                                             if !agent_response_text.is_empty() {
                                                 agent_response_text.push('\n');
@@ -2428,7 +2431,9 @@ where
                                         ContentBlock::RedactedThinking { .. } => {
                                             other_blocks.push(block.clone());
                                         }
-                                        ContentBlock::ToolUse { id, name, input } => {
+                                        ContentBlock::ToolUse {
+                                            id, name, input, ..
+                                        } => {
                                             // Convert to ToolCall
                                             let tool_call = ToolCall {
                                                 call_id: id.clone(),
@@ -2496,6 +2501,7 @@ where
                                                 .map(|call| ToolResponse {
                                                     call_id: call.call_id.clone(),
                                                     content: format!("Error: {:?}", e),
+                                                    is_error: Some(true),
                                                 })
                                                 .collect()
                                         }
@@ -2756,7 +2762,7 @@ where
                                 // Process blocks in sequence
                                 for block in blocks {
                                     match block {
-                                        ContentBlock::Text { text } => {
+                                        ContentBlock::Text { text, .. } => {
                                             // Accumulate text for constellation logging
                                             if !agent_response_text.is_empty() {
                                                 agent_response_text.push('\n');
@@ -2783,7 +2789,9 @@ where
                                         ContentBlock::RedactedThinking { .. } => {
                                             // Skip redacted thinking in the stream
                                         }
-                                        ContentBlock::ToolUse { id, name, input } => {
+                                        ContentBlock::ToolUse {
+                                            id, name, input, ..
+                                        } => {
                                             // Convert to ToolCall and emit
                                             let tool_call = ToolCall {
                                                 call_id: id.clone(),

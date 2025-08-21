@@ -19,6 +19,28 @@ use crate::{
     tool::ToolRegistry,
 };
 
+/// Search result with relevance score
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredMessage {
+    pub message: Message,
+    pub score: f32,
+}
+
+/// Search result for memory blocks with relevance score
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredMemoryBlock {
+    pub block: MemoryBlock,
+    pub score: f32,
+}
+
+/// Search result for constellation messages with relevance score
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredConstellationMessage {
+    pub agent_name: String,
+    pub message: Message,
+    pub score: f32,
+}
+
 use super::{
     CompressionResult, CompressionStrategy, ContextBuilder, ContextConfig, MemoryContext,
     MessageCompressor,
@@ -98,6 +120,19 @@ impl AgentHandle {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryBlock>> {
+        let scored = self
+            .search_archival_memories_with_options(query, limit, None)
+            .await?;
+        Ok(scored.into_iter().map(|sm| sm.block).collect())
+    }
+
+    /// Search archival memories with fuzzy search options (returns scored results)
+    pub async fn search_archival_memories_with_options(
+        &self,
+        query: &str,
+        limit: usize,
+        _fuzzy_level: Option<u8>,
+    ) -> Result<Vec<ScoredMemoryBlock>> {
         let db = self.db.as_ref().ok_or_else(|| {
             crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
                 surrealdb::error::Api::InvalidParams(
@@ -106,14 +141,18 @@ impl AgentHandle {
             ))
         })?;
 
-        // Single-step query using graph traversal
-        // Need to construct the full record reference inline
+        // Use @1@ to identify this search for scoring functions
+        // TODO: Implement actual fuzzy search when SurrealDB supports it
+        let _fuzzy = _fuzzy_level.unwrap_or(0) > 0; // Currently unused
+
+        // Single-step query using graph traversal with BM25 scoring
         let sql = format!(
             r#"
-            SELECT * FROM mem
+            SELECT *, value, search::score(1) AS relevance_score FROM mem
             WHERE (<-agent_memories<-agent:⟨{}⟩..)
             AND memory_type = 'archival'
-            AND value @@ $search_term
+            AND value @1@ $search_term
+            ORDER BY relevance_score DESC
             LIMIT $limit
         "#,
             self.agent_id.to_key()
@@ -137,15 +176,29 @@ impl AgentHandle {
 
         tracing::debug!("search results: {:#?}", result);
 
-        let blocks: Vec<<MemoryBlock as DbEntity>::DbModel> =
-            result.take(0).map_err(DatabaseError::from)?;
+        // Extract results with scores - must deserialize properly from SurrealDB
+        #[derive(serde::Deserialize)]
+        struct ScoredResult {
+            #[serde(flatten)]
+            block_data: <MemoryBlock as DbEntity>::DbModel,
+            relevance_score: Option<f32>, // Optional since query might not return score
+        }
 
-        let blocks: Vec<MemoryBlock> = blocks
+        let scored_results: Vec<ScoredResult> = result.take(0).map_err(DatabaseError::from)?;
+
+        let scored_blocks: Vec<ScoredMemoryBlock> = scored_results
             .into_iter()
-            .map(|b| MemoryBlock::from_db_model(b).expect("model type should convert"))
+            .map(|sr| {
+                let block =
+                    MemoryBlock::from_db_model(sr.block_data).expect("model type should convert");
+                ScoredMemoryBlock {
+                    block,
+                    score: sr.relevance_score.unwrap_or(1.0),
+                }
+            })
             .collect();
 
-        Ok(blocks)
+        Ok(scored_blocks)
     }
 
     /// Insert a new archival memory to in-memory storage
@@ -350,6 +403,239 @@ impl AgentHandle {
         end_time: Option<DateTime<Utc>>,
         limit: usize,
     ) -> Result<Vec<crate::message::Message>> {
+        let scored = self
+            .search_conversations_with_options(
+                query,
+                role_filter,
+                start_time,
+                end_time,
+                limit,
+                None, // Use default (exact) search
+            )
+            .await?;
+        Ok(scored.into_iter().map(|sm| sm.message).collect())
+    }
+
+    /// Execute a content search query against the msg table
+    async fn execute_content_search(
+        &self,
+        search_query: &str,
+        role_filter: Option<crate::message::ChatRole>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        result_multiplier: usize,
+    ) -> Result<Vec<ScoredMessage>> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for content search".into(),
+                ),
+            ))
+        })?;
+        // Build conditions for msg table query
+        let mut conditions = vec!["content @1@ $search_query".to_string()];
+
+        if role_filter.is_some() {
+            conditions.push("role = $role".to_string());
+        }
+        if start_time.is_some() {
+            conditions.push("created_at >= $start_time".to_string());
+        }
+        if end_time.is_some() {
+            conditions.push("created_at <= $end_time".to_string());
+        }
+
+        // Query msg table directly with content search and BM25 scoring
+        let sql = format!(
+            "SELECT *, content, search::score(1) AS relevance_score FROM msg WHERE {} ORDER BY relevance_score DESC, created_at DESC LIMIT {}",
+            conditions.join(" AND "),
+            result_multiplier
+        );
+
+        // Build query and bind parameters
+        let mut query_builder = db
+            .query(&sql)
+            .bind(("search_query", search_query.to_string()));
+
+        if let Some(role) = &role_filter {
+            query_builder = query_builder.bind(("role", role.to_string()));
+        }
+
+        if let Some(start) = start_time {
+            query_builder =
+                query_builder.bind(("start_time", surrealdb::sql::Datetime::from(start)));
+        }
+
+        if let Some(end) = end_time {
+            query_builder = query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
+        }
+
+        // Execute query
+        let mut result = query_builder.await.map_err(DatabaseError::from)?;
+
+        // Extract messages with scores
+        // Define a struct that matches the exact query result structure from SurrealDB
+        // with the relevance_score added from our SELECT
+        #[derive(serde::Deserialize)]
+        struct ScoredMsgResult {
+            // Fields from MessageDbModel
+            id: surrealdb::RecordId,
+            role: crate::message::ChatRole,
+            owner_id: Option<crate::id::UserId>,
+            content: serde_json::Value,  // DB stores as JSON value
+            metadata: serde_json::Value, // DB stores as JSON value
+            options: serde_json::Value,  // DB stores as JSON value
+            has_tool_calls: bool,
+            word_count: u32,
+            created_at: surrealdb::Datetime,
+            position: Option<String>, // DB stores snowflake as string
+            batch: Option<String>,    // DB stores snowflake as string
+            sequence_num: Option<u32>,
+            batch_type: Option<crate::message::BatchType>,
+            embedding: Option<Vec<f32>>,
+            embedding_model: Option<String>,
+            // Added by our query
+            relevance_score: Option<f32>,
+        }
+
+        let scored_results: Vec<ScoredMsgResult> = result.take(0).map_err(DatabaseError::from)?;
+
+        let scored_msgs: Vec<ScoredMessage> = scored_results
+            .into_iter()
+            .map(|sr| {
+                // Convert from DB model format to domain Message
+                // We need to reconstruct the MessageDbModel from our query results
+                use crate::message::MessageDbModel;
+
+                let db_model = MessageDbModel {
+                    id: sr.id,
+                    role: sr.role,
+                    owner_id: sr.owner_id,
+                    content: sr.content,
+                    metadata: sr.metadata,
+                    options: sr.options,
+                    has_tool_calls: sr.has_tool_calls,
+                    word_count: sr.word_count,
+                    created_at: sr.created_at,
+                    position: sr.position,
+                    batch: sr.batch,
+                    sequence_num: sr.sequence_num,
+                    batch_type: sr.batch_type,
+                    embedding: sr.embedding,
+                    embedding_model: sr.embedding_model,
+                };
+
+                let msg =
+                    Message::from_db_model(db_model).expect("message should convert from db model");
+
+                ScoredMessage {
+                    message: msg,
+                    score: sr.relevance_score.unwrap_or(1.0),
+                }
+            })
+            .collect();
+
+        Ok(scored_msgs)
+    }
+
+    /// Parse time filter from query string (e.g., "search term > 5 days")
+    fn parse_time_filter(query: &str) -> (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+        use chrono::Duration;
+        use regex::Regex;
+
+        // Check if the potential time expression is quoted - if so, it's part of the search query
+        // This allows searching for literal time expressions like: search for "5 days"
+        let quote_check = Regex::new(r#"["']\s*(?:[<>]\s*)?\d+(?:\s*-\s*\d+)?\s*(?:days?|hours?|weeks?|months?)\s*(?:old|ago)?\s*["']$"#).unwrap();
+        if quote_check.is_match(query) {
+            // Time expression is quoted, don't parse it
+            return (query.to_string(), None, None);
+        }
+
+        // Match patterns like "> 5 days", "< 2 hours", "3-7 days"
+        // Regex breakdown:
+        // (?i)                     - case insensitive
+        // \s*                      - optional whitespace
+        // (?:([<>])\s*)?           - optional: capture group 1 for < or > with optional space after
+        // (\d+)                    - capture group 2: first number (required)
+        // (?:\s*-\s*(\d+))?        - optional: dash and capture group 3 for second number (ranges)
+        // \s*                      - optional whitespace
+        // (days?|hours?|weeks?|months?) - capture group 4: time unit (? makes 's' optional for singular/plural)
+        // \s*                      - optional whitespace
+        // (?:old|ago)?             - optional: "old" or "ago" (not captured, just matched)
+        // $                        - must be at end of string
+        let time_pattern = Regex::new(r"(?i)\s*(?:([<>])\s*)?(\d+)(?:\s*-\s*(\d+))?\s*(days?|hours?|weeks?|months?)\s*(?:old|ago)?$").unwrap();
+
+        if let Some(captures) = time_pattern.captures(query) {
+            let cleaned_query = query[..captures.get(0).unwrap().start()].trim().to_string();
+            let now = Utc::now();
+
+            let operator = captures.get(1).map(|m| m.as_str());
+            let num1: i64 = captures
+                .get(2)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(0);
+            let num2: Option<i64> = captures.get(3).and_then(|m| m.as_str().parse().ok());
+            let unit = captures
+                .get(4)
+                .map(|m| m.as_str().to_lowercase())
+                .unwrap_or_default();
+
+            // Convert to duration
+            let duration1 = match unit.as_str() {
+                s if s.starts_with("hour") => Duration::hours(num1),
+                s if s.starts_with("day") => Duration::days(num1),
+                s if s.starts_with("week") => Duration::weeks(num1),
+                s if s.starts_with("month") => Duration::days(num1 * 30), // Approximate
+                _ => Duration::days(num1),
+            };
+
+            let (start_time, end_time) = match (operator, num2) {
+                (Some(">"), None) => {
+                    // Older than X time
+                    (None, Some(now - duration1))
+                }
+                (Some("<"), None) => {
+                    // Within last X time
+                    (Some(now - duration1), None)
+                }
+                (None, Some(n2)) => {
+                    // Range: X-Y time ago
+                    let duration2 = match unit.as_str() {
+                        s if s.starts_with("hour") => Duration::hours(n2),
+                        s if s.starts_with("day") => Duration::days(n2),
+                        s if s.starts_with("week") => Duration::weeks(n2),
+                        s if s.starts_with("month") => Duration::days(n2 * 30),
+                        _ => Duration::days(n2),
+                    };
+                    (Some(now - duration2), Some(now - duration1))
+                }
+                _ => {
+                    // Default: exact time ago (like "5 days old" means around 5 days ago)
+                    // We'll use a 1-day window around that time
+                    let window = Duration::days(1);
+                    (
+                        Some(now - duration1 - window),
+                        Some(now - duration1 + window),
+                    )
+                }
+            };
+
+            (cleaned_query, start_time, end_time)
+        } else {
+            (query.to_string(), None, None)
+        }
+    }
+
+    /// Search conversation messages with advanced options including fuzzy search and scoring
+    pub async fn search_conversations_with_options(
+        &self,
+        query: Option<&str>,
+        role_filter: Option<crate::message::ChatRole>,
+        mut start_time: Option<DateTime<Utc>>,
+        mut end_time: Option<DateTime<Utc>>,
+        limit: usize,
+        _fuzzy_level: Option<u8>, // 0=exact, 1=fuzzy, 2=very fuzzy
+    ) -> Result<Vec<ScoredMessage>> {
         let db = self.db.as_ref().ok_or_else(|| {
             crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
                 surrealdb::error::Api::InvalidParams(
@@ -358,22 +644,18 @@ impl AgentHandle {
             ))
         })?;
 
-        // If we have a content search, we need to do two queries:
-        // 1. Get all message IDs belonging to this agent
-        // 2. Query msg table directly with content search
-        // Then filter in code
-        let (sql, _needs_messages_extraction, _needs_agent_filtering) = if query.is_some() {
-            // Build conditions for msg table query (without agent filter)
-            let mut conditions = vec!["content @@ $search_query".to_string()];
+        // Parse time filter from query if present
+        let cleaned_query = if let Some(q) = query {
+            let (cleaned, parsed_start, parsed_end) = Self::parse_time_filter(q);
 
-            if role_filter.is_some() {
-                conditions.push("role = $role".to_string());
+            // Use parsed times if not explicitly provided
+            if start_time.is_none() && parsed_start.is_some() {
+                start_time = parsed_start;
+                tracing::debug!("Parsed start_time from query: {:?}", start_time);
             }
-            if start_time.is_some() {
-                conditions.push("created_at >= $start_time".to_string());
-            }
-            if end_time.is_some() {
-                conditions.push("created_at <= $end_time".to_string());
+            if end_time.is_none() && parsed_end.is_some() {
+                end_time = parsed_end;
+                tracing::debug!("Parsed end_time from query: {:?}", end_time);
             }
 
             // Query msg table directly with content search (we'll filter by agent after)
@@ -411,12 +693,156 @@ impl AgentHandle {
             (sql, true, false)
         };
 
+        // Use different search paths based on whether we have a content query
+        if let Some(search_query) = cleaned_query.as_deref() {
+            // Use helper function for content search
+            let mut scored_msgs = self
+                .execute_content_search(
+                    search_query,
+                    role_filter.clone(),
+                    start_time,
+                    end_time,
+                    limit * 10, // Get more results since we'll filter some out
+                )
+                .await?;
+
+            // Filter by agent if needed
+            // Get all message IDs belonging to this agent
+            let agent_record_id: RecordId = self.agent_id.clone().into();
+            let agent_msg_sql = format!(
+                "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
+                agent_record_id
+            );
+
+            let mut agent_msg_result = db
+                .query(&agent_msg_sql)
+                .await
+                .map_err(DatabaseError::from)?;
+
+            // Extract the "out" field from each result object
+            #[derive(serde::Deserialize)]
+            struct OutRecord {
+                out: RecordId,
+            }
+
+            let out_records: Vec<OutRecord> =
+                agent_msg_result.take(0).map_err(DatabaseError::from)?;
+
+            let agent_msg_ids: Vec<RecordId> = out_records.into_iter().map(|r| r.out).collect();
+
+            let agent_msg_id_set: std::collections::HashSet<RecordId> =
+                agent_msg_ids.into_iter().collect();
+
+            // Filter messages to only those belonging to this agent
+            scored_msgs.retain(|sm| {
+                let msg_record_id = RecordId::from((MessageId::PREFIX, sm.message.id.to_key()));
+                agent_msg_id_set.contains(&msg_record_id)
+            });
+
+            // Truncate to limit
+            scored_msgs.truncate(limit);
+
+            // If no results, try fallback search with individual words
+            if scored_msgs.is_empty() && search_query.contains(' ') {
+                tracing::debug!("No results for '{}', trying fallback search", search_query);
+
+                // Split into words and try each (longest first)
+                let mut words: Vec<&str> = search_query.split_whitespace().collect();
+                words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+
+                let mut fallback_results = Vec::new();
+                let mut seen_ids = std::collections::HashSet::new();
+
+                for word in words {
+                    if word.len() < 3 {
+                        // Skip very short words
+                        continue;
+                    }
+
+                    tracing::debug!("Trying fallback search for word: '{}'", word);
+
+                    // Search with this word
+                    let word_results = self
+                        .execute_content_search(
+                            word,
+                            role_filter.clone(),
+                            start_time,
+                            end_time,
+                            limit * 5, // Get fewer per word
+                        )
+                        .await?;
+
+                    // Add results with reduced scores (50% penalty for fallback)
+                    for mut result in word_results {
+                        if !seen_ids.contains(&result.message.id) {
+                            seen_ids.insert(result.message.id.clone());
+                            result.score *= 0.5; // Reduce score for fallback results
+                            fallback_results.push(result);
+                        }
+                    }
+
+                    // Stop if we have enough
+                    if fallback_results.len() >= limit * 2 {
+                        break;
+                    }
+                }
+
+                if !fallback_results.is_empty() {
+                    tracing::info!(
+                        "Fallback search found {} results for original query '{}'",
+                        fallback_results.len(),
+                        search_query
+                    );
+
+                    // Sort by score and filter by agent
+                    fallback_results.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    // Filter by agent
+                    fallback_results.retain(|sm| {
+                        let msg_record_id =
+                            RecordId::from((MessageId::PREFIX, sm.message.id.to_key()));
+                        agent_msg_id_set.contains(&msg_record_id)
+                    });
+
+                    fallback_results.truncate(limit);
+                    return Ok(fallback_results);
+                }
+            }
+
+            return Ok(scored_msgs);
+        }
+
+        // No content search - use graph traversal approach
+        let mut conditions = vec![];
+        if role_filter.is_some() {
+            conditions.push("role = $role");
+        }
+        if start_time.is_some() {
+            conditions.push("created_at >= $start_time");
+        }
+        if end_time.is_some() {
+            conditions.push("created_at <= $end_time");
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        // Query the agent_messages relation table directly
+        let sql = format!(
+            "SELECT position, batch, sequence_num, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC LIMIT $limit FETCH messages",
+            where_clause,
+            self.agent_id.to_key()
+        );
+
         // Build query and bind all parameters
         let mut query_builder = db.query(&sql).bind(("limit", limit));
-
-        if let Some(search_query) = query {
-            query_builder = query_builder.bind(("search_query", search_query.to_string()));
-        }
 
         if let Some(role) = &role_filter {
             query_builder = query_builder.bind(("role", role.to_string()));
@@ -434,72 +860,27 @@ impl AgentHandle {
         // Execute the query
         let mut result = query_builder.await.map_err(DatabaseError::from)?;
 
-        // Extract messages based on query type
-        let mut messages: Vec<Message> = if _needs_messages_extraction {
-            // Graph traversal query - messages are nested under "messages" field
-            let db_messages: Vec<Vec<<Message as DbEntity>::DbModel>> =
-                result.take("messages").map_err(DatabaseError::from)?;
+        // Extract messages - graph traversal query has messages nested under "messages" field
+        let db_messages: Vec<Vec<<Message as DbEntity>::DbModel>> =
+            result.take("messages").map_err(DatabaseError::from)?;
 
-            db_messages
-                .into_iter()
-                .flatten()
-                .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
-                .collect()
-        } else {
-            // Direct msg table query - messages are at the top level
-            let db_messages: Vec<<Message as DbEntity>::DbModel> =
-                result.take(0).map_err(DatabaseError::from)?;
-
-            let mut converted_messages: Vec<Message> = db_messages
-                .into_iter()
-                .map(|m| Message::from_db_model(m).expect("message should convert from db model"))
-                .collect();
-
-            // If we did a content search, we need to filter by agent
-            if _needs_agent_filtering {
-                // Get all message IDs belonging to this agent
-                let agent_record_id: RecordId = self.agent_id.clone().into();
-                let agent_msg_sql = format!(
-                    "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
-                    agent_record_id
-                );
-
-                let mut agent_msg_result = db
-                    .query(&agent_msg_sql)
-                    .await
-                    .map_err(DatabaseError::from)?;
-
-                // Debug: print the raw result
-                //tracing::info!("Agent messages query raw result: {:?}", agent_msg_result);
-
-                // Extract the "out" field from each result object
-                #[derive(serde::Deserialize)]
-                struct OutRecord {
-                    out: RecordId,
+        let scored_messages: Vec<ScoredMessage> = db_messages
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                let msg = Message::from_db_model(m).expect("message should convert from db model");
+                ScoredMessage {
+                    message: msg,
+                    score: 1.0, // No score for graph traversal queries
                 }
-
-                let out_records: Vec<OutRecord> =
-                    agent_msg_result.take(0).map_err(DatabaseError::from)?;
-
-                let agent_msg_ids: Vec<RecordId> = out_records.into_iter().map(|r| r.out).collect();
-
-                let agent_msg_id_set: std::collections::HashSet<RecordId> =
-                    agent_msg_ids.into_iter().collect();
-
-                // Filter messages to only those belonging to this agent
-                converted_messages.retain(|msg| {
-                    let msg_record_id = RecordId::from((MessageId::PREFIX, msg.id.to_key()));
-                    agent_msg_id_set.contains(&msg_record_id)
-                });
-            }
-
-            converted_messages
-        };
+            })
+            .collect();
 
         // Apply limit in application code since we may get more than limit from the query
-        messages.truncate(limit);
+        let mut limited_messages = scored_messages;
+        limited_messages.truncate(limit);
 
-        Ok(messages)
+        Ok(limited_messages)
     }
 
     /// Search messages from all agents in the same constellation
@@ -511,6 +892,32 @@ impl AgentHandle {
         end_time: Option<DateTime<Utc>>,
         limit: usize,
     ) -> Result<Vec<(String, crate::message::Message)>> {
+        let scored = self
+            .search_constellation_messages_with_options(
+                query,
+                role_filter,
+                start_time,
+                end_time,
+                limit,
+                None,
+            )
+            .await?;
+        Ok(scored
+            .into_iter()
+            .map(|scm| (scm.agent_name, scm.message))
+            .collect())
+    }
+
+    /// Search constellation messages with fuzzy search options (returns scored results)
+    pub async fn search_constellation_messages_with_options(
+        &self,
+        query: Option<&str>,
+        role_filter: Option<crate::message::ChatRole>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: usize,
+        _fuzzy_level: Option<u8>,
+    ) -> Result<Vec<ScoredConstellationMessage>> {
         let db = self.db.as_ref().ok_or_else(|| {
             crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
                 surrealdb::error::Api::InvalidParams(
@@ -571,31 +978,105 @@ impl AgentHandle {
             }
         }
 
-        // Build conditions for msg filtering
-        let mut conditions = vec![];
-        if query.is_some() {
-            conditions.push("content @@ $search_query");
+        // Similar to conversation search, we need different approaches for content vs non-content search
+        if let Some(search_query) = query {
+            // Use helper function for content search
+            let scored_msgs = self
+                .execute_content_search(
+                    search_query,
+                    role_filter,
+                    start_time,
+                    end_time,
+                    limit * 20, // Get more since we'll filter by constellation agents
+                )
+                .await?;
+
+            // Now filter by constellation agents and pair with agent names
+            // We need to map messages to their agents
+            let agent_ids: Vec<String> = agent_names.keys().cloned().collect();
+            let agent_records: Vec<String> =
+                agent_ids.iter().map(|id| format!("agent:{}", id)).collect();
+            let agent_ids_str = agent_records.join(", ");
+
+            let constellation_msg_sql = format!(
+                "SELECT out AS msg_id, in AS agent_id FROM agent_messages WHERE in IN [{}]",
+                agent_ids_str
+            );
+
+            let mut constellation_result = db
+                .query(&constellation_msg_sql)
+                .await
+                .map_err(DatabaseError::from)?;
+
+            #[derive(serde::Deserialize)]
+            struct MsgAgent {
+                msg_id: surrealdb::RecordId,
+                agent_id: surrealdb::RecordId,
+            }
+
+            let msg_to_agent: Vec<MsgAgent> =
+                constellation_result.take(0).map_err(DatabaseError::from)?;
+
+            // Create a map of message ID to agent ID for quick lookup
+            let mut msg_agent_map = std::collections::HashMap::new();
+            for entry in msg_to_agent {
+                msg_agent_map.insert(entry.msg_id.to_string(), entry.agent_id.to_string());
+            }
+
+            // Filter and pair messages with agent names and scores
+            let mut scored_constellation_messages = Vec::new();
+            for scored_msg in scored_msgs {
+                let msg_id = format!("msg:{}", scored_msg.message.id.to_key());
+
+                // Check if this message belongs to a constellation agent
+                if let Some(agent_record_id) = msg_agent_map.get(&msg_id) {
+                    // Extract agent ID from record (e.g., "agent:abc123" -> "abc123")
+                    let agent_id = agent_record_id
+                        .strip_prefix("agent:")
+                        .unwrap_or(agent_record_id);
+
+                    let agent_name = agent_names
+                        .get(agent_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Unknown ({})", agent_id));
+
+                    scored_constellation_messages.push(ScoredConstellationMessage {
+                        agent_name,
+                        message: scored_msg.message,
+                        score: scored_msg.score,
+                    });
+
+                    // Stop if we have enough results
+                    if scored_constellation_messages.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            return Ok(scored_constellation_messages);
         }
+
+        // No content search - use graph traversal approach
+        let mut traversal_conditions = vec![];
         if role_filter.is_some() {
-            conditions.push("role = $role");
+            traversal_conditions.push("role = $role");
         }
         if start_time.is_some() {
-            conditions.push("created_at >= $start_time");
+            traversal_conditions.push("created_at >= $start_time");
         }
         if end_time.is_some() {
-            conditions.push("created_at <= $end_time");
+            traversal_conditions.push("created_at <= $end_time");
         }
 
-        // Build WHERE clause for msg filtering
-        let where_clause = if conditions.is_empty() {
+        let where_clause = if traversal_conditions.is_empty() {
             String::new()
         } else {
-            format!(" WHERE {}", conditions.join(" AND "))
+            format!(" WHERE {}", traversal_conditions.join(" AND "))
         };
 
-        // Build query to get messages from all constellation agents using efficient traversal
+        // Graph traversal to get messages from constellation agents
         let sql = format!(
-            r#"SELECT position, in AS agent_id, ->(msg{}) AS messages FROM agent_messages
+            r#"SELECT in AS agent_id, out AS message FROM agent_messages
             WHERE in IN (
                 -- Direct agents in the constellation
                 SELECT VALUE out FROM constellation_agents
@@ -607,19 +1088,21 @@ impl AgentHandle {
                     SELECT VALUE out FROM composed_of
                     WHERE in = {}
                 )
-            ) AND out IS NOT NULL
-            ORDER BY position DESC
+            ) AND out IS NOT NULL {}
+            ORDER BY out.created_at DESC
             LIMIT $limit
-            FETCH messages"#,
-            where_clause, constellation_id, constellation_id
+            FETCH message"#,
+            constellation_id,
+            constellation_id,
+            if where_clause.is_empty() {
+                String::new()
+            } else {
+                format!("AND out.({})", where_clause.trim_start_matches(" WHERE "))
+            }
         );
 
         // Build query and bind all parameters
         let mut query_builder = db.query(&sql).bind(("limit", limit));
-
-        if let Some(search_query) = query {
-            query_builder = query_builder.bind(("search_query", search_query.to_string()));
-        }
 
         if let Some(role) = &role_filter {
             query_builder = query_builder.bind(("role", role.to_string()));
@@ -634,108 +1117,49 @@ impl AgentHandle {
             query_builder = query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
         }
 
-        // Execute query and get results with agent names
-        let results: Vec<serde_json::Value> = query_builder
-            .await
-            .map_err(DatabaseError::from)?
-            .take(0)
-            .map_err(DatabaseError::from)?;
+        // Execute query
+        let mut result = query_builder.await.map_err(DatabaseError::from)?;
 
-        // Parse results to extract agent ID and message ID, then fetch messages
-        let mut messages_with_agents = Vec::new();
-        for result in results {
-            if let (Some(agent_id_val), Some(message_id_val)) =
-                (result.get("agent_id"), result.get("message"))
-            {
-                // Extract the agent ID string
-                let agent_id = if let Some(obj) = agent_id_val.as_object() {
-                    if let Some(id_str) = obj.get("id").and_then(|v| v.as_str()) {
-                        id_str
-                    } else {
-                        continue;
-                    }
-                } else if let Some(id_str) = agent_id_val.as_str() {
-                    id_str
-                } else {
-                    continue;
-                };
+        // Graph traversal path: Results include agent_id and message fields (no scores)
+        #[derive(serde::Deserialize)]
+        struct AgentMessageResult {
+            agent_id: surrealdb::RecordId,
+            message: Option<<Message as DbEntity>::DbModel>,
+        }
 
-                // Look up agent name from our map
-                let agent_name = agent_names
-                    .get(agent_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Unknown ({})", agent_id));
+        let results: Vec<AgentMessageResult> = result.take(0).map_err(DatabaseError::from)?;
 
-                // Extract message ID and fetch the message
-                let message_id = if let Some(obj) = message_id_val.as_object() {
-                    if let (Some(tb), Some(id)) = (
-                        obj.get("tb").and_then(|v| v.as_str()),
-                        obj.get("id").and_then(|v| v.as_str()),
-                    ) {
-                        format!("{}:{}", tb, id)
-                    } else {
-                        continue;
-                    }
-                } else if let Some(id_str) = message_id_val.as_str() {
-                    id_str.to_string()
-                } else {
-                    continue;
-                };
+        let mut scored_messages = Vec::new();
+        for entry in results {
+            if let Some(db_msg) = entry.message {
+                if let Ok(msg) = Message::from_db_model(db_msg) {
+                    // Extract agent ID from record
+                    let agent_id = entry
+                        .agent_id
+                        .to_string()
+                        .strip_prefix("agent:")
+                        .unwrap_or(&entry.agent_id.to_string())
+                        .to_string();
 
-                // Fetch the actual message
-                let msg_query = format!("SELECT * FROM {}", message_id);
-                if let Ok(mut msg_result) = db.query(&msg_query).await {
-                    if let Ok(msg_data) = msg_result.take::<Vec<serde_json::Value>>(0) {
-                        if let Some(msg_val) = msg_data.into_iter().next() {
-                            // Convert to Message
-                            if let Ok(db_model) =
-                                serde_json::from_value::<<Message as DbEntity>::DbModel>(msg_val)
-                            {
-                                if let Ok(message) = Message::from_db_model(db_model) {
-                                    // Apply filters
-                                    if let Some(q) = query {
-                                        if let Some(text) = message.text_content() {
-                                            if !text.to_lowercase().contains(&q.to_lowercase()) {
-                                                continue;
-                                            }
-                                        } else {
-                                            continue;
-                                        }
-                                    }
+                    let agent_name = agent_names
+                        .get(&agent_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Unknown ({})", agent_id));
 
-                                    if let Some(role) = &role_filter {
-                                        if message.role != *role {
-                                            continue;
-                                        }
-                                    }
+                    scored_messages.push(ScoredConstellationMessage {
+                        agent_name,
+                        message: msg,
+                        score: 1.0, // No score for graph traversal queries
+                    });
 
-                                    if let Some(start) = start_time {
-                                        if message.created_at < start {
-                                            continue;
-                                        }
-                                    }
-
-                                    if let Some(end) = end_time {
-                                        if message.created_at > end {
-                                            continue;
-                                        }
-                                    }
-
-                                    messages_with_agents.push((agent_name, message));
-
-                                    // Check if we've reached the limit
-                                    if messages_with_agents.len() >= limit {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                    if scored_messages.len() >= limit {
+                        break;
                     }
                 }
             }
         }
 
-        Ok(messages_with_agents)
+        Ok(scored_messages)
     }
 }
 
@@ -1216,6 +1640,7 @@ impl AgentContext {
                 Ok(Some(ToolResponse {
                     call_id: call.call_id.clone(),
                     content: response_json,
+                    is_error: None,
                 }))
             }
             Err(e) => {
@@ -1224,6 +1649,7 @@ impl AgentContext {
                 Ok(Some(ToolResponse {
                     call_id: call.call_id.clone(),
                     content: format!("Error: {:?}", e),
+                    is_error: Some(true),
                 }))
             }
         }

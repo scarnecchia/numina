@@ -487,6 +487,7 @@ default_filter = { nsids = [
     "did:plc:2xreieabu3louljggmfkgc74", # blocked pattern after informed of their nature (belt + suspenders)
     "did:plc:e6n7jxtu2qrhwvp3j6ib6sq6", # proptermalone
     "did:plc:klhtmrnregub7we7h6jwiljm", # ed3d
+    "did:plc:ap56m7pvnz4lnrtaguxiuawm", # random spammer
 ] }
 auto_connect_firehose = true # Control when to connect
 

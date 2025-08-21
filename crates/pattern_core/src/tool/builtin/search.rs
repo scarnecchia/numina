@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::search_utils::{extract_snippet, process_search_results};
 use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
 
 /// Search domains available
@@ -47,6 +48,11 @@ pub struct SearchInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
 
+    /// Enable fuzzy search (Note: Currently a placeholder - fuzzy search not yet implemented)
+    /// This will enable typo-tolerant search once SurrealDB fuzzy functions are integrated
+    #[serde(default)]
+    pub fuzzy: bool,
+
     /// Request another turn after this tool executes
     #[serde(default)]
     pub request_heartbeat: bool,
@@ -83,17 +89,34 @@ impl AiTool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Unified search across different domains (archival_memory, conversations, constellation_messages, all). Returns relevant results based on query and filters. Use constellation_messages to search messages from all agents in your constellation. archival_memory domain searches your recall memory."
+        "Unified search across different domains (archival_memory, conversations, constellation_messages, all). Returns relevant results ranked by BM25 relevance score. Make regular use of this to ground yourself in past events.
+        - Use constellation_messages to search messages from all agents in your constellation.
+        - archival_memory domain searches your recall memory.
+        - To broaden your search, use a larger limit
+        - To narrow your search, you can:
+            - use explicit start_time and end_time parameters with rfc3339 datetime parsing
+            - filter based on role (user, assistant, tool)
+            - use time expressions after your query string
+                - e.g. 'search term > 5 days', 'search term < 3 hours',
+                       'search term 5 days old', 'search term 1-2 weeks'
+                - supported units: hour/hours, day/days, week/weeks, month/months
+                - IMPORTANT: time expression must come after query string, distinguishable by regular expression
+                - if the only thing in the query is a time expression, it becomes a simple time-based filter
+                - if you need to search for something that might otherwise be parsed as a time expression, quote it with \"5 days old\"
+                "
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
         let limit = params
             .limit
             .map(|l| l.max(1).min(100) as usize)
-            .unwrap_or(10);
+            .unwrap_or(20);
 
         match params.domain {
-            SearchDomain::ArchivalMemory => self.search_archival(&params.query, limit).await,
+            SearchDomain::ArchivalMemory => {
+                self.search_archival(&params.query, limit, params.fuzzy)
+                    .await
+            }
             SearchDomain::Conversations => {
                 let role = params
                     .role
@@ -117,8 +140,15 @@ impl AiTool for SearchTool {
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc));
 
-                self.search_conversations(&params.query, role, start_time, end_time, limit)
-                    .await
+                self.search_conversations(
+                    &params.query,
+                    role,
+                    start_time,
+                    end_time,
+                    limit,
+                    params.fuzzy,
+                )
+                .await
             }
             SearchDomain::ConstellationMessages => {
                 let role = params
@@ -143,10 +173,17 @@ impl AiTool for SearchTool {
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc));
 
-                self.search_constellation_messages(&params.query, role, start_time, end_time, limit)
-                    .await
+                self.search_constellation_messages(
+                    &params.query,
+                    role,
+                    start_time,
+                    end_time,
+                    limit,
+                    params.fuzzy,
+                )
+                .await
             }
-            SearchDomain::All => self.search_all(&params.query, limit).await,
+            SearchDomain::All => self.search_all(&params.query, limit, params.fuzzy).await,
         }
     }
 
@@ -165,6 +202,7 @@ impl AiTool for SearchTool {
                     role: None,
                     start_time: None,
                     end_time: None,
+                    fuzzy: false,
                     request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
@@ -187,6 +225,7 @@ impl AiTool for SearchTool {
                     role: Some("assistant".to_string()),
                     start_time: None,
                     end_time: None,
+                    fuzzy: false,
                     request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
@@ -205,19 +244,50 @@ impl AiTool for SearchTool {
 }
 
 impl SearchTool {
-    async fn search_archival(&self, query: &str, limit: usize) -> Result<SearchOutput> {
+    async fn search_archival(
+        &self,
+        query: &str,
+        limit: usize,
+        fuzzy: bool,
+    ) -> Result<SearchOutput> {
         // Try to use database if available
         if self.handle.has_db_connection() {
-            match self.handle.search_archival_memories(query, limit).await {
-                Ok(blocks) => {
-                    let results: Vec<_> = blocks
+            // Note: fuzzy parameter is a placeholder for future fuzzy search implementation
+            // Currently just passes through to methods that will use it when available
+            let fuzzy_level = if fuzzy { Some(1) } else { None };
+            match self
+                .handle
+                .search_archival_memories_with_options(query, limit, fuzzy_level)
+                .await
+            {
+                Ok(mut scored_blocks) => {
+                    // Re-sort and limit after we have all scores
+                    scored_blocks.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    scored_blocks.truncate(limit);
+
+                    let results: Vec<_> = scored_blocks
                         .into_iter()
-                        .map(|block| {
+                        .enumerate()
+                        .map(|(i, sb)| {
+                            // Progressive truncation: show less content for lower-ranked results
+                            let content = if i < 2 {
+                                sb.block.value.clone()
+                            } else if i < 5 {
+                                extract_snippet(&sb.block.value, query, 1000)
+                            } else {
+                                extract_snippet(&sb.block.value, query, 400)
+                            };
+
                             json!({
-                                "label": block.label,
-                                "content": block.value,
-                                "created_at": block.created_at,
-                                "updated_at": block.updated_at
+                                "label": sb.block.label,
+                                "content": content,
+                                "created_at": sb.block.created_at,
+                                "updated_at": sb.block.updated_at,
+                                "relevance_score": sb.score
                             })
                         })
                         .collect();
@@ -290,23 +360,51 @@ impl SearchTool {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         limit: usize,
+        fuzzy: bool,
     ) -> Result<SearchOutput> {
         // Use database search if available
         if self.handle.has_db_connection() {
+            // Note: fuzzy parameter is a placeholder for future fuzzy search implementation
+            // Currently just passes through to methods that will use it when available
+            let fuzzy_level = if fuzzy { Some(1) } else { None };
             match self
                 .handle
-                .search_conversations(Some(query), role, start_time, end_time, limit)
+                .search_conversations_with_options(
+                    Some(query),
+                    role,
+                    start_time,
+                    end_time,
+                    limit,
+                    fuzzy_level,
+                )
                 .await
             {
-                Ok(messages) => {
-                    let results: Vec<_> = messages
+                Ok(scored_messages) => {
+                    // Process results with score adjustments and re-sorting
+                    let processed = process_search_results(scored_messages, query, limit);
+
+                    let results: Vec<_> = processed
                         .into_iter()
-                        .map(|msg| {
+                        .enumerate()
+                        .map(|(i, sm)| {
+                            // Progressive content display
+                            let content = if i < 2 {
+                                // Full content for top 2 results
+                                sm.message.display_content()
+                            } else if i < 5 {
+                                // Snippet for next 3 results
+                                extract_snippet(&sm.message.display_content(), query, 400)
+                            } else {
+                                // Shorter snippet for remaining results
+                                extract_snippet(&sm.message.display_content(), query, 200)
+                            };
+
                             json!({
-                                "id": msg.id,
-                                "role": msg.role.to_string(),
-                                "content": msg.display_content(),
-                                "created_at": msg.created_at
+                                "id": sm.message.id,
+                                "role": sm.message.role.to_string(),
+                                "content": content,
+                                "created_at": sm.message.created_at,
+                                "relevance_score": sm.score
                             })
                         })
                         .collect();
@@ -314,7 +412,7 @@ impl SearchTool {
                     Ok(SearchOutput {
                         success: true,
                         message: Some(format!(
-                            "Found {} messages matching '{}'",
+                            "Found {} messages matching '{}' (ranked by relevance)",
                             results.len(),
                             query
                         )),
@@ -343,24 +441,51 @@ impl SearchTool {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
         limit: usize,
+        fuzzy: bool,
     ) -> Result<SearchOutput> {
         // Use database search if available
         if self.handle.has_db_connection() {
+            // Note: fuzzy parameter is a placeholder for future fuzzy search implementation
+            // Currently just passes through to methods that will use it when available
+            let fuzzy_level = if fuzzy { Some(1) } else { None };
             match self
                 .handle
-                .search_constellation_messages(Some(query), role, start_time, end_time, limit)
+                .search_constellation_messages_with_options(
+                    Some(query),
+                    role,
+                    start_time,
+                    end_time,
+                    limit,
+                    fuzzy_level,
+                )
                 .await
             {
-                Ok(messages) => {
-                    let results: Vec<_> = messages
+                Ok(scored_messages) => {
+                    // Process results with score adjustments and truncation
+                    use super::search_utils::{extract_snippet, process_constellation_results};
+                    let processed_messages =
+                        process_constellation_results(scored_messages, query, limit);
+
+                    let results: Vec<_> = processed_messages
                         .into_iter()
-                        .map(|(agent_name, msg)| {
+                        .enumerate()
+                        .map(|(i, scm)| {
+                            // Progressive content display
+                            let content = if i < 2 {
+                                scm.message.display_content()
+                            } else if i < 5 {
+                                extract_snippet(&scm.message.display_content(), query, 400)
+                            } else {
+                                extract_snippet(&scm.message.display_content(), query, 200)
+                            };
+
                             json!({
-                                "agent": agent_name,
-                                "id": msg.id,
-                                "role": msg.role.to_string(),
-                                "content": msg.display_content(),
-                                "created_at": msg.created_at
+                                "agent": scm.agent_name,
+                                "id": scm.message.id,
+                                "role": scm.message.role.to_string(),
+                                "content": content,
+                                "created_at": scm.message.created_at,
+                                "relevance_score": scm.score
                             })
                         })
                         .collect();
@@ -368,7 +493,7 @@ impl SearchTool {
                     Ok(SearchOutput {
                         success: true,
                         message: Some(format!(
-                            "Found {} constellation messages matching '{}'",
+                            "Found {} constellation messages matching '{}' (ranked by relevance)",
                             results.len(),
                             query
                         )),
@@ -392,11 +517,11 @@ impl SearchTool {
         }
     }
 
-    async fn search_all(&self, query: &str, limit: usize) -> Result<SearchOutput> {
+    async fn search_all(&self, query: &str, limit: usize, fuzzy: bool) -> Result<SearchOutput> {
         // Search both domains and combine results
-        let archival_result = self.search_archival(query, limit).await?;
+        let archival_result = self.search_archival(query, limit, fuzzy).await?;
         let conv_result = self
-            .search_conversations(query, None, None, None, limit)
+            .search_conversations(query, None, None, None, limit, fuzzy)
             .await?;
 
         let all_results = json!({

@@ -7,6 +7,7 @@ mod context;
 pub mod data_source;
 mod recall;
 mod search;
+pub mod search_utils;
 mod send_message;
 mod system_integrity;
 #[cfg(test)]

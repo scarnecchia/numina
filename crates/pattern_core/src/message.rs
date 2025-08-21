@@ -894,7 +894,7 @@ impl Message {
             MessageContent::Blocks(blocks) => blocks
                 .iter()
                 .map(|block| match block {
-                    ContentBlock::Text { text } => text.split_whitespace().count() as u32,
+                    ContentBlock::Text { text, .. } => text.split_whitespace().count() as u32,
                     ContentBlock::Thinking { text, .. } => text.split_whitespace().count() as u32,
                     ContentBlock::RedactedThinking { .. } => 1000, // Estimate
                     ContentBlock::ToolUse { .. } => 500,           // Estimate
@@ -1213,6 +1213,7 @@ impl Request {
                             );
                             blocks.push(ContentBlock::Text {
                                 text: ".".to_string(), // Single period to satisfy non-empty requirement
+                                thought_signature: None,
                             });
                         }
                     }
@@ -1481,16 +1482,26 @@ pub struct ToolCall {
 pub struct ToolResponse {
     pub call_id: String,
     pub content: String,
+    /// Whether this tool response represents an error
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
 }
 
 /// Content blocks for providers that need exact sequence preservation (e.g. Anthropic with thinking)
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ContentBlock {
     /// Text content
-    Text { text: String },
+    Text {
+        text: String,
+        /// Optional thought signature for Gemini-style thinking
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+    },
     /// Thinking content (Anthropic)
     Thinking {
         text: String,
+        /// Signature for maintaining context across turns
+        #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
     /// Redacted thinking content (Anthropic) - encrypted/hidden thinking
@@ -1500,11 +1511,20 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: Value,
+        /// Optional thought signature for Gemini-style thinking
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     /// Tool result response
     ToolResult {
         tool_use_id: String,
         content: String,
+        /// Whether this tool result represents an error
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+        /// Optional thought signature for Gemini-style thinking
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
 }
 
@@ -1514,6 +1534,7 @@ impl ToolResponse {
         Self {
             call_id: call_id.into(),
             content: content.into(),
+            is_error: None,
         }
     }
 }
@@ -2061,7 +2082,7 @@ impl Message {
                 blocks
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.clone()),
+                        ContentBlock::Text { text, .. } => Some(text.clone()),
                         ContentBlock::Thinking { text, .. } => {
                             // Include reasoning content for searchability
                             Some(format!("[Reasoning] {}", text))
