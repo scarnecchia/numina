@@ -10,7 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
-    message::{CacheControl, Message, MessageBatch, MessageContent},
+    message::{CacheControl, Message, MessageBatch},
     tool::{DynamicTool, ToolRegistry},
 };
 
@@ -590,115 +590,6 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
                 rules_text
             )
         }
-    }
-
-    /// Clean up unpaired tool calls and responses
-    #[allow(dead_code)]
-    fn clean_unpaired_tool_messages(&self, messages: Vec<Message>) -> Vec<Message> {
-        use crate::message::ContentBlock;
-        use std::collections::HashSet;
-
-        // First pass: collect all tool call IDs and response IDs
-        let mut tool_call_ids = HashSet::new();
-        let mut tool_response_ids = HashSet::new();
-
-        for msg in &messages {
-            match &msg.content {
-                MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        tool_call_ids.insert(call.call_id.clone());
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        tool_response_ids.insert(response.call_id.clone());
-                    }
-                }
-                MessageContent::Blocks(blocks) => {
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                tool_call_ids.insert(id.clone());
-                            }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                tool_response_ids.insert(tool_use_id.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Find paired IDs (present in both sets)
-        let paired_ids: HashSet<_> = tool_call_ids
-            .intersection(&tool_response_ids)
-            .cloned()
-            .collect();
-
-        // Second pass: filter messages to keep only paired tool calls/responses
-        messages
-            .into_iter()
-            .map(|mut msg| {
-                match &mut msg.content {
-                    MessageContent::ToolCalls(calls) => {
-                        // Keep only tool calls that have matching responses
-                        calls.retain(|call| paired_ids.contains(&call.call_id));
-
-                        // If no tool calls remain, convert to empty text message
-                        if calls.is_empty() {
-                            msg.content = MessageContent::Text(String::new());
-                        }
-                    }
-                    MessageContent::ToolResponses(responses) => {
-                        // Keep only responses that have matching calls
-                        responses.retain(|response| paired_ids.contains(&response.call_id));
-
-                        // If no responses remain, convert to empty text message
-                        if responses.is_empty() {
-                            msg.content = MessageContent::Text(String::new());
-                        }
-                    }
-                    MessageContent::Blocks(blocks) => {
-                        // Filter blocks to keep only paired tool calls/responses
-                        blocks.retain(|block| match block {
-                            ContentBlock::ToolUse { id, .. } => paired_ids.contains(id),
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                paired_ids.contains(tool_use_id)
-                            }
-                            _ => true, // Keep all other block types
-                        });
-
-                        // If only empty blocks remain, convert to empty text message
-                        if blocks.is_empty() {
-                            msg.content = MessageContent::Text(String::new());
-                        } else if let Some(last) = blocks.last() {
-                            if matches!(
-                                last,
-                                ContentBlock::Thinking { .. }
-                                    | ContentBlock::RedactedThinking { .. }
-                            ) {
-                                // trailing thinking blocks are a problem.
-                                blocks.push(ContentBlock::Text {
-                                    text: ".".to_string(),
-                                })
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                msg
-            })
-            // Filter out any empty text messages we created
-            .filter(|msg| {
-                if let MessageContent::Text(text) = &msg.content {
-                    !text.is_empty()
-                } else {
-                    true
-                }
-            })
-            .collect()
     }
 
     /// Process batches, filtering incomplete and compressing if needed

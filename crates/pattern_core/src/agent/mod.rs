@@ -382,6 +382,9 @@ pub enum RecoverableErrorKind {
     /// Context building failed
     ContextBuildFailed,
 
+    /// Prompt exceeds token limit
+    PromptTooLong,
+
     /// Model API error
     ModelApiError,
 
@@ -393,6 +396,15 @@ impl RecoverableErrorKind {
     /// Parse an error message to determine the appropriate recovery kind
     pub fn from_error_str(error_str: &str) -> Self {
         let lower = error_str.to_lowercase();
+
+        // Check for prompt too long errors
+        if lower.contains("prompt is too long")
+            || lower.contains("prompt") && lower.contains("too") && lower.contains("long")
+            || (lower.contains("tokens") && lower.contains("maximum"))
+            || lower.contains("context length exceeded")
+        {
+            return Self::PromptTooLong;
+        }
 
         // Anthropic thinking mode errors
         if lower.contains("messages: roles must alternate")

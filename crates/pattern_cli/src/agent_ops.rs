@@ -337,6 +337,7 @@ pub async fn load_model_embedding_providers(
         response_format: None,
         normalize_reasoning_content: Some(true),
         reasoning_effort: Some(genai::chat::ReasoningEffort::Medium),
+        custom_headers: None,
     };
 
     // Enable reasoning mode if the model supports it

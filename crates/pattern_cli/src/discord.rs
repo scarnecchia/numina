@@ -20,7 +20,6 @@ use owo_colors::OwoColorize;
 use pattern_core::{
     Agent,
     config::PatternConfig,
-    coordination::groups::GroupManager,
     data_source::{BlueskyFilter, DataSourceBuilder},
     db::client::DB,
     tool::builtin::DataSourceTool,
@@ -100,9 +99,8 @@ pub async fn setup_discord_endpoint(agent: &Arc<dyn Agent>, output: &Output) -> 
 
 /// Run a Discord bot for group chat with optional concurrent CLI interface
 #[cfg(feature = "discord")]
-pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
+pub async fn run_discord_bot_with_group(
     group_name: &str,
-    pattern_manager: M,
     model: Option<String>,
     no_tools: bool,
     config: &PatternConfig,
@@ -138,21 +136,14 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
     };
 
     // Use shared setup function
-    let group_setup = setup_group(
-        group_name,
-        &pattern_manager,
-        model,
-        no_tools,
-        config,
-        &output,
-    )
-    .await?;
+    let group_setup = setup_group(group_name, model, no_tools, config, &output).await?;
 
     let GroupSetup {
         group,
         agents_with_membership,
         pattern_agent,
         agent_tools,
+        pattern_manager,
         constellation_tracker: _,
         heartbeat_sender: _,
         heartbeat_receiver,
@@ -231,7 +222,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                 let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
                     group: group.clone(),
                     agents: agents_with_membership.clone(),
-                    manager: Arc::new(pattern_manager.clone()),
+                    manager: pattern_manager.clone(),
                     output: output.clone(),
                 });
                 data_sources_router
@@ -279,7 +270,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
         let bot = Arc::new(DiscordBot::new_cli_mode(
             agents_with_membership.clone(),
             group.clone(),
-            Arc::new(pattern_manager.clone()),
+            pattern_manager.clone(),
         ));
 
         // Connect the bot to the Discord endpoint for timing context
@@ -337,7 +328,7 @@ pub async fn run_discord_bot_with_group<M: GroupManager + Clone + 'static>(
                 run_group_chat_loop(
                     group.clone(),
                     agents_with_membership,
-                    pattern_manager.clone(),
+                    pattern_manager,
                     heartbeat_receiver,
                     output.clone(),
                     rl,

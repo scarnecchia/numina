@@ -978,12 +978,43 @@ impl AgentContext {
             metadata.context_rebuilds += 1;
         }
 
-        // Check if we need to compress batches
+        // Check if we need to compress batches (by message count OR token count)
         {
             let history = self.history.read().await;
             let total_messages: usize = history.batches.iter().map(|b| b.len()).sum();
-            if total_messages > self.context_config.max_context_messages {
+
+            // Check message count
+            let needs_message_compression =
+                total_messages > self.context_config.max_context_messages;
+
+            // Check token count if we have a limit
+            let needs_token_compression =
+                if let Some(max_tokens) = self.context_config.max_context_tokens {
+                    // Estimate current token usage
+                    let memory_blocks = self.handle.memory.get_all_blocks();
+                    let system_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+                    let message_tokens: usize = history
+                        .batches
+                        .iter()
+                        .flat_map(|b| &b.messages)
+                        .map(|m| m.estimate_tokens())
+                        .sum();
+                    let total_tokens = system_tokens + message_tokens;
+
+                    // Leave some buffer (use 80% of limit to trigger compression)
+                    total_tokens > (max_tokens * 4 / 5)
+                } else {
+                    false
+                };
+
+            if needs_message_compression || needs_token_compression {
                 drop(history); // release read lock
+                tracing::info!(
+                    "Triggering compression: messages={} (limit={}), tokens_exceeded={}",
+                    total_messages,
+                    self.context_config.max_context_messages,
+                    needs_token_compression
+                );
                 self.compress_messages().await?;
             }
         }
@@ -1242,10 +1273,127 @@ impl AgentContext {
         Ok(())
     }
 
+    /// Estimate the token count for system prompt and memory blocks
+    fn estimate_system_prompt_tokens(&self, memory_blocks: &[MemoryBlock]) -> usize {
+        // Build a rough approximation of the system prompt
+        let mut prompt_text = String::new();
+
+        // Add base instructions
+        prompt_text.push_str(&self.context_config.base_instructions);
+        prompt_text.push_str("\n\n");
+
+        // Add metadata section (rough approximation)
+        prompt_text.push_str("System Metadata:\n");
+        prompt_text.push_str("Current time: ");
+        prompt_text.push_str(&chrono::Utc::now().to_rfc3339());
+        prompt_text.push_str("\n\n");
+
+        // Add memory blocks
+        if !memory_blocks.is_empty() {
+            prompt_text.push_str("Memory Blocks:\n");
+            for block in memory_blocks {
+                prompt_text.push_str(&format!("[{}] ", block.label));
+                prompt_text.push_str(&block.value);
+                prompt_text.push_str("\n");
+            }
+            prompt_text.push_str("\n");
+        }
+
+        // Add tool usage rules if configured
+        for rule in &self.context_config.tool_usage_rules {
+            prompt_text.push_str(&rule.rule);
+            prompt_text.push_str("\n");
+        }
+
+        // Estimate tokens using the same formula as Message::estimate_tokens()
+        // ~4 characters per token, with a multiplier for safety
+        let char_count = prompt_text.len();
+        let base_tokens = char_count / 4;
+
+        // Apply the token multiplier from model adjustments if available
+        let multiplier = self.context_config.model_adjustments.token_multiplier;
+        (base_tokens as f32 * multiplier) as usize
+    }
+
+    /// Force compression regardless of current limits
+    /// Used when we get a "prompt too long" error from the model
+    pub async fn force_compression(&self) -> Result<()> {
+        let mut history = self.history.write().await;
+
+        // Calculate system prompt tokens (including memory blocks)
+        let memory_blocks = self.handle.memory.get_all_blocks();
+        let system_prompt_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+
+        let mut compressor = MessageCompressor::new(history.compression_strategy.clone())
+            .with_system_prompt_tokens(system_prompt_tokens)
+            .with_existing_summary(history.archive_summary.clone());
+
+        // Add model provider if available
+        if let Some(ref provider) = self.model_provider {
+            compressor = compressor.with_model_provider(provider.clone());
+        }
+
+        // Sort batches by ID (oldest to newest) before compression
+        history.batches.sort_by_key(|b| b.id);
+
+        let batch_count_before = history.batches.len();
+        let message_count_before: usize = history.batches.iter().map(|b| b.len()).sum();
+
+        tracing::info!(
+            "FORCING compression due to prompt too long: {} batches with {} total messages",
+            batch_count_before,
+            message_count_before
+        );
+
+        // Force compression by using very aggressive limits
+        // Use 50% of normal limits to ensure we compress enough
+        let forced_message_limit = self.context_config.max_context_messages / 2;
+        let forced_token_limit = self.context_config.max_context_tokens.map(|t| t / 2);
+
+        let result = compressor
+            .compress(
+                history.batches.clone(),
+                forced_message_limit,
+                forced_token_limit,
+            )
+            .await?;
+
+        // Update history with compressed batches
+        history.batches = result.active_batches;
+
+        // Store compression metadata
+        if let Some(summary) = result.summary {
+            history.archive_summary = Some(summary);
+        }
+
+        history.last_compression = chrono::Utc::now();
+
+        let batch_count_after = history.batches.len();
+        let message_count_after: usize = history.batches.iter().map(|b| b.len()).sum();
+
+        tracing::info!(
+            "Force compression complete: {} -> {} batches, {} -> {} messages (removed {})",
+            batch_count_before,
+            batch_count_after,
+            message_count_before,
+            message_count_after,
+            message_count_before - message_count_after
+        );
+
+        Ok(())
+    }
+
     /// Compress messages using the configured strategy
     async fn compress_messages(&self) -> Result<()> {
         let mut history = self.history.write().await;
-        let mut compressor = MessageCompressor::new(history.compression_strategy.clone());
+
+        // Calculate system prompt tokens (including memory blocks)
+        let memory_blocks = self.handle.memory.get_all_blocks();
+        let system_prompt_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+
+        let mut compressor = MessageCompressor::new(history.compression_strategy.clone())
+            .with_system_prompt_tokens(system_prompt_tokens)
+            .with_existing_summary(history.archive_summary.clone());
 
         // Add model provider if available
         if let Some(ref provider) = self.model_provider {

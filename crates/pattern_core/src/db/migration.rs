@@ -55,6 +55,11 @@ impl MigrationRunner {
         let current_version = Self::get_schema_version(db).await?;
         tracing::info!("Current schema version: {}", current_version);
 
+        // Always ensure entity schemas are up to date, regardless of version
+        // This handles cases where entity definitions change between releases
+        tracing::info!("Ensuring entity schemas are up to date...");
+        Self::ensure_entity_schemas(db).await?;
+
         if current_version < 1 {
             tracing::info!("Running migration v1: Initial schema");
             let migration_start = std::time::Instant::now();
@@ -157,6 +162,54 @@ impl MigrationRunner {
         }
 
         tracing::info!("All database migrations completed in {:?}", start.elapsed());
+        Ok(())
+    }
+
+    /// Ensure all entity schemas are up to date
+    /// This runs regardless of migration version to handle schema changes
+    async fn ensure_entity_schemas<C: Connection>(db: &Surreal<C>) -> Result<()> {
+        use crate::MemoryBlock;
+        use crate::agent::AgentRecord;
+        use crate::db::entity::{BaseEvent, BaseTask, DbEntity};
+        use crate::db::schema::ToolCall;
+        use crate::message::Message;
+        use crate::users::User;
+
+        let start = std::time::Instant::now();
+
+        // Update all entity table schemas
+        // SurrealDB's DEFINE TABLE is idempotent and will update existing schemas
+        for table_def in [
+            User::schema(),
+            AgentRecord::schema(),
+            BaseTask::schema(),
+            MemoryBlock::schema(),
+            BaseEvent::schema(),
+            Message::schema(),
+            ToolCall::schema(),
+        ] {
+            let table_name = table_def
+                .schema
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or("unknown");
+
+            // Apply schema updates (DEFINE TABLE is idempotent)
+            db.query(&table_def.schema)
+                .await
+                .map_err(|e| DatabaseError::QueryFailed(e))?;
+
+            // Update indexes (DEFINE INDEX is also idempotent)
+            for index in &table_def.indexes {
+                db.query(index)
+                    .await
+                    .map_err(|e| DatabaseError::QueryFailed(e))?;
+            }
+
+            tracing::debug!("Ensured schema for table {}", table_name);
+        }
+
+        tracing::info!("Entity schemas updated in {:?}", start.elapsed());
         Ok(())
     }
 

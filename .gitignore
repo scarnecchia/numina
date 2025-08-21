@@ -18,3 +18,4 @@ mcp-wrapper.sh
 **.log.**
 **.json
 **.sql
+**.surql

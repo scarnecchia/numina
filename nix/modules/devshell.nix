@@ -33,6 +33,9 @@
           #surrealdb
           pkg-config
           cargo-expand
+          jujutsu
+          git
+          gh
         ];
       };
     };

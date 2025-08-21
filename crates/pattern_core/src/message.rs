@@ -886,7 +886,7 @@ impl Message {
                     _ => 100,
                 })
                 .sum(),
-            MessageContent::ToolCalls(calls) => calls.len() as u32 * 200, // Estimate
+            MessageContent::ToolCalls(calls) => calls.len() as u32 * 500, // Estimate
             MessageContent::ToolResponses(responses) => responses
                 .iter()
                 .map(|r| r.content.split_whitespace().count() as u32)
@@ -897,7 +897,7 @@ impl Message {
                     ContentBlock::Text { text } => text.split_whitespace().count() as u32,
                     ContentBlock::Thinking { text, .. } => text.split_whitespace().count() as u32,
                     ContentBlock::RedactedThinking { .. } => 1000, // Estimate
-                    ContentBlock::ToolUse { .. } => 200,           // Estimate
+                    ContentBlock::ToolUse { .. } => 500,           // Estimate
                     ContentBlock::ToolResult { content, .. } => {
                         content.split_whitespace().count() as u32
                     }
@@ -2114,22 +2114,7 @@ impl Message {
     ///
     /// Uses the approximation of ~4 characters per token
     pub fn estimate_tokens(&self) -> usize {
-        // Rough estimation: ~4 chars per token
-        match &self.content {
-            MessageContent::Text(text) => (text.len() as f32 / 4.0) as usize,
-            MessageContent::Parts(parts) => {
-                parts
-                    .iter()
-                    .map(|part| match part {
-                        ContentPart::Text(text) => (text.len() as f32 / 4.0) as usize,
-                        _ => 25, // Rough estimate for non-text content
-                    })
-                    .sum()
-            }
-            MessageContent::ToolCalls(calls) => calls.len() * 50, // Rough estimate
-            MessageContent::ToolResponses(responses) => responses.len() * 30, // Rough estimate
-            MessageContent::Blocks(blocks) => blocks.len() * 50,  // Rough estimate
-        }
+        self.display_content().len() / 4
     }
 }
 

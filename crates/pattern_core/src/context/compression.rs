@@ -5,7 +5,6 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
@@ -157,6 +156,8 @@ pub struct MessageCompressor {
     strategy: CompressionStrategy,
     model_provider: Option<Arc<dyn ModelProvider>>,
     scoring_config: ImportanceScoringConfig,
+    system_prompt_tokens: usize,
+    existing_archive_summary: Option<String>,
 }
 
 impl MessageCompressor {
@@ -166,7 +167,21 @@ impl MessageCompressor {
             strategy,
             model_provider: None,
             scoring_config: ImportanceScoringConfig::default(),
+            system_prompt_tokens: 0,
+            existing_archive_summary: None,
         }
+    }
+
+    /// Set the system prompt token count (includes memory blocks)
+    pub fn with_system_prompt_tokens(mut self, tokens: usize) -> Self {
+        self.system_prompt_tokens = tokens;
+        self
+    }
+
+    /// Set the existing archive summary to build upon
+    pub fn with_existing_summary(mut self, summary: Option<String>) -> Self {
+        self.existing_archive_summary = summary;
+        self
     }
 
     /// Set the model provider for strategies that need it
@@ -193,7 +208,7 @@ impl MessageCompressor {
 
         // Calculate total token count if we have a limit
         let original_tokens = if max_tokens.is_some() {
-            self.estimate_tokens_from_batches(&batches)
+            self.system_prompt_tokens + self.estimate_tokens_from_batches(&batches)
         } else {
             0
         };
@@ -307,166 +322,6 @@ impl MessageCompressor {
         }
     }
 
-    /// Validate and fix tool call/response ordering to ensure Anthropic compatibility
-    /// Anthropic requires tool results to immediately follow tool uses
-    #[allow(dead_code)]
-    fn validate_and_reorder_tool_calls(&self, messages: Vec<Message>) -> Vec<Message> {
-        let mut fixed_messages = Vec::new();
-        let mut pending_tool_calls = HashMap::new();
-        let mut orphaned_tool_results = HashSet::new();
-
-        // First pass: identify all tool calls and results
-        for (i, msg) in messages.iter().enumerate() {
-            match &msg.content {
-                MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        pending_tool_calls.insert(call.call_id.clone(), (i, msg.clone()));
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        if !pending_tool_calls.contains_key(&response.call_id) {
-                            orphaned_tool_results.insert(response.call_id.clone());
-                        }
-                    }
-                }
-                MessageContent::Blocks(blocks) => {
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                pending_tool_calls.insert(id.clone(), (i, msg.clone()));
-                            }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                if !pending_tool_calls.contains_key(tool_use_id) {
-                                    orphaned_tool_results.insert(tool_use_id.clone());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Second pass: rebuild message list with proper ordering
-        let mut processed_indices = HashSet::new();
-        let mut i = 0;
-
-        while i < messages.len() {
-            if processed_indices.contains(&i) {
-                i += 1;
-                continue;
-            }
-
-            let msg = &messages[i];
-
-            // Check if this message has tool calls
-            let tool_call_ids: Vec<String> = match &msg.content {
-                MessageContent::ToolCalls(calls) => {
-                    calls.iter().map(|c| c.call_id.clone()).collect()
-                }
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::ToolUse { id, .. } = b {
-                            Some(id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => vec![],
-            };
-
-            if !tool_call_ids.is_empty() {
-                // This message has tool calls - find corresponding results
-                let mut found_results = false;
-
-                // Look for tool results in subsequent messages
-                for j in (i + 1)..messages.len() {
-                    if processed_indices.contains(&j) {
-                        continue;
-                    }
-
-                    let result_msg = &messages[j];
-                    let result_ids: Vec<String> = match &result_msg.content {
-                        MessageContent::ToolResponses(responses) => {
-                            responses.iter().map(|r| r.call_id.clone()).collect()
-                        }
-                        MessageContent::Blocks(blocks) => blocks
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::ToolResult { tool_use_id, .. } = b {
-                                    Some(tool_use_id.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect(),
-                        _ => vec![],
-                    };
-
-                    // Check if these results match our tool calls
-                    if result_ids.iter().all(|rid| tool_call_ids.contains(rid)) {
-                        // Found matching results - add both messages
-                        fixed_messages.push(msg.clone());
-                        fixed_messages.push(result_msg.clone());
-                        processed_indices.insert(i);
-                        processed_indices.insert(j);
-                        found_results = true;
-                        break;
-                    }
-                }
-
-                if !found_results {
-                    // No results found for these tool calls - skip this message
-                    tracing::warn!(
-                        "Removing message with orphaned tool calls: {:?}",
-                        tool_call_ids
-                    );
-                    processed_indices.insert(i);
-                }
-            } else {
-                // Check if this is an orphaned tool result
-                let result_ids: Vec<String> = match &msg.content {
-                    MessageContent::ToolResponses(responses) => {
-                        responses.iter().map(|r| r.call_id.clone()).collect()
-                    }
-                    MessageContent::Blocks(blocks) => blocks
-                        .iter()
-                        .filter_map(|b| {
-                            if let ContentBlock::ToolResult { tool_use_id, .. } = b {
-                                Some(tool_use_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
-                    _ => vec![],
-                };
-
-                if !result_ids.is_empty()
-                    && result_ids
-                        .iter()
-                        .all(|rid| orphaned_tool_results.contains(rid))
-                {
-                    // Skip orphaned tool results
-                    tracing::warn!("Removing orphaned tool results: {:?}", result_ids);
-                    processed_indices.insert(i);
-                } else {
-                    // Regular message - add it
-                    fixed_messages.push(msg.clone());
-                    processed_indices.insert(i);
-                }
-            }
-
-            i += 1;
-        }
-
-        fixed_messages
-    }
-
     /// Simple truncation strategy with chunk-based compression
     fn truncate_messages(
         &self,
@@ -475,6 +330,13 @@ impl MessageCompressor {
         max_messages: usize,
         max_tokens: Option<usize>,
     ) -> Result<CompressionResult> {
+        let max_tokens = if let Some(max_tokens) = max_tokens {
+            // Account for system prompt when setting the adjusted limit
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+        } else {
+            None
+        };
+
         let original_count: usize = batches.iter().map(|b| b.len()).sum();
         let original_tokens = if max_tokens.is_some() {
             self.estimate_tokens_from_batches(&batches)
@@ -549,7 +411,7 @@ impl MessageCompressor {
         max_tokens: Option<usize>,
         chunk_size: usize,
         summarization_model: &str,
-        summarization_prompt: Option<&str>,
+        _summarization_prompt: Option<&str>,
     ) -> Result<CompressionResult> {
         if self.model_provider.is_none() {
             return Err(CoreError::ConfigurationError {
@@ -559,6 +421,13 @@ impl MessageCompressor {
                 cause: crate::error::ConfigError::MissingField("model_provider".to_string()),
             });
         }
+
+        let max_tokens = if let Some(max_tokens) = max_tokens {
+            // Account for system prompt when setting the adjusted limit
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+        } else {
+            None
+        };
 
         // Sort batches by batch_id (oldest first)
         batches.sort_by_key(|b| b.id);
@@ -591,27 +460,35 @@ impl MessageCompressor {
             });
         }
 
-        // Calculate target: keep max_messages - chunk_size messages
-        let target_messages = max_messages.saturating_sub(chunk_size);
+        // Calculate how many messages we need to archive to get under limits
+        // We want to archive at least chunk_size messages when over the limit
+        let messages_to_archive = if original_count > max_messages {
+            // Archive enough to get back under the limit, at minimum chunk_size
+            chunk_size.max(original_count - max_messages + chunk_size)
+        } else if let Some(max_tok) = max_tokens {
+            if original_tokens > max_tok {
+                // Over token limit, archive at least chunk_size messages
+                chunk_size
+            } else {
+                0
+            }
+        } else {
+            0
+        };
 
         let mut active_batches = Vec::new();
         let mut archived_batches = Vec::new();
-        let mut current_count = 0;
+        let mut archived_count = 0;
 
-        // Iterate from newest to oldest (reverse), keeping recent batches up to target
-        for batch in batches.into_iter().rev() {
-            if current_count < target_messages {
-                current_count += batch.len();
-                active_batches.push(batch);
+        // Iterate from oldest to newest, archiving until we have enough
+        for batch in batches.into_iter() {
+            if archived_count < messages_to_archive {
+                // Unconditionally archive oldest batches until we have enough
+                archived_count += batch.len();
+                archived_batches.push(batch);
             } else {
-                // Only include complete batches in archives
-                if batch.is_complete {
-                    archived_batches.push(batch);
-                } else {
-                    // If batch is incomplete, keep it in active
-                    current_count += batch.len();
-                    active_batches.push(batch);
-                }
+                // Keep remaining batches as active
+                active_batches.push(batch);
             }
         }
 
@@ -662,18 +539,36 @@ impl MessageCompressor {
                 batch_chunk
             };
 
-            // Create summary prompt for this chunk
-            let summary_prompt = self.create_summary_prompt(actual_chunk, chunk_size)?;
+            // Build the messages for summarization
+            let mut messages_for_summary = Vec::new();
+
+            // Add existing summary as context if present
+            if let Some(ref existing_summary) = self.existing_archive_summary {
+                messages_for_summary.push(Message::system(format!(
+                    "Previous summary of conversation:\n{}",
+                    existing_summary
+                )));
+            }
+
+            // Add the actual messages to summarize
+            messages_for_summary.extend(actual_chunk.iter().cloned());
+
+            // Add the summarization directive as the final user message
+            messages_for_summary.push(Message::user(
+                "Please summarize all the previous messages, focusing on key information, \
+                 decisions made, and important context. If there was a previous summary provided, \
+                 build upon it with the new information. Maintain the conversational style and \
+                 preserve important details.",
+            ));
 
             // Generate summary using the model
             let chunk_summary = if let Some(provider) = &self.model_provider {
                 let request = crate::message::Request {
                     system: Some(vec![
-                        "You are a helpful assistant that creates concise summaries of conversations. \
-                         Focus on key information, decisions made, and important context. Maintain the style of the messages as much as possible."
+                        "You are a helpful assistant that creates concise summaries of conversations."
                             .to_string(),
                     ]),
-                    messages: vec![Message::user(summary_prompt)],
+                    messages: messages_for_summary,
                     tools: None,
                 };
 
@@ -765,6 +660,13 @@ impl MessageCompressor {
             self.estimate_tokens_from_batches(&batches)
         } else {
             0
+        };
+
+        let max_tokens = if let Some(max_tokens) = max_tokens {
+            // Account for system prompt when setting the adjusted limit
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+        } else {
+            None
         };
 
         // Check if we're within both limits
@@ -1017,6 +919,13 @@ impl MessageCompressor {
             0
         };
 
+        let max_tokens = if let Some(max_tokens) = max_tokens {
+            // Account for system prompt when setting the adjusted limit
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+        } else {
+            None
+        };
+
         // Check if we're within both limits
         let within_message_limit = original_count <= max_messages;
         let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
@@ -1100,6 +1009,7 @@ impl MessageCompressor {
     }
 
     /// Create a prompt for summarizing messages
+    #[allow(dead_code)]
     fn create_summary_prompt(&self, messages: &[Message], chunk_size: usize) -> Result<String> {
         let mut chunks = Vec::new();
 

@@ -216,6 +216,18 @@ where
                     }
                 }
             }
+            RecoverableErrorKind::PromptTooLong => {
+                // Force compression when prompt is too long
+                tracing::info!("Prompt too long, forcing compression");
+                let ctx = context.read().await;
+
+                // Force compression by temporarily setting a very low message limit
+                if let Err(e) = ctx.force_compression().await {
+                    tracing::error!("Failed to force compression: {:?}", e);
+                } else {
+                    tracing::info!("Successfully compressed context to fit token limit");
+                }
+            }
             RecoverableErrorKind::MessageCompressionFailed => {
                 // Reset compression state
                 let ctx = context.write().await;
@@ -450,8 +462,27 @@ where
             }
         }
 
-        // Build the context config from the record
-        let context_config = record.to_context_config();
+        // Get model info from provider to determine context window
+        let max_context_tokens = if let Some(model_id) = &record.model_id {
+            // Try to get model info from the provider
+            let model_guard = model.read().await;
+            let models = model_guard.list_models().await.unwrap_or_default();
+
+            // Find the model with matching ID
+            models
+                .iter()
+                .find(|m| m.id == *model_id || m.name == *model_id)
+                .map(|m| {
+                    // Use 90% of context window to leave room for output
+                    (m.context_window as f64 * 0.9) as usize
+                })
+        } else {
+            None
+        };
+
+        // Build the context config from the record with token limit
+        let mut context_config = record.to_context_config();
+        context_config.max_context_tokens = max_context_tokens.or(Some(180_000)); // Fallback to 180k
 
         // Load tool rules from database record (with config fallback)
         let tool_rules = if !record.tool_rules.is_empty() {
@@ -1815,8 +1846,31 @@ where
             {
                 match &message.content {
                     crate::message::MessageContent::Text(text) => {
-                        // For now, include full text without truncation
-                        Some(text.clone())
+                        // Truncate to approximately 1000 chars total (500 from start, 500 from end)
+                        let truncated = if text.len() > 1000 {
+                            // Find safe char boundaries
+                            let start_boundary = text
+                                .char_indices()
+                                .take_while(|(i, _)| *i <= 500)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(0);
+
+                            let end_start = text.len().saturating_sub(500);
+                            let end_boundary = text
+                                .char_indices()
+                                .skip_while(|(i, _)| *i < end_start)
+                                .next()
+                                .map(|(i, _)| i)
+                                .unwrap_or(text.len());
+
+                            let start = &text[..start_boundary];
+                            let end = &text[end_boundary..];
+                            format!("{}\n...\n{}", start, end)
+                        } else {
+                            text.clone()
+                        };
+                        Some(truncated)
                     }
                     _ => None,
                 }

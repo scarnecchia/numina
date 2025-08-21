@@ -254,7 +254,7 @@ pub async fn import(
 }
 
 // Helper function to get agent by name
-async fn get_agent_by_name<C: surrealdb::Connection>(
+pub async fn get_agent_by_name<C: surrealdb::Connection>(
     db: &surrealdb::Surreal<C>,
     user_id: &UserId,
     name: &str,

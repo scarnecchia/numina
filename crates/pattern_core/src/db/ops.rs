@@ -828,7 +828,7 @@ pub async fn persist_agent_message<C: Connection>(
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Check if it's a transaction conflict
-                if attempt == 1
+                if attempt < 4
                     && e.to_string()
                         .contains("Failed to commit transaction due to a read or write conflict")
                 {
