@@ -145,18 +145,14 @@ impl AgentHandle {
         // TODO: Implement actual fuzzy search when SurrealDB supports it
         let _fuzzy = _fuzzy_level.unwrap_or(0) > 0; // Currently unused
 
-        // Single-step query using graph traversal with BM25 scoring
-        let sql = format!(
-            r#"
+        // Direct query to mem table with BM25 scoring, filter by owner after
+        let sql = r#"
             SELECT *, value, search::score(1) AS relevance_score FROM mem
-            WHERE (<-agent_memories<-agent:⟨{}⟩..)
-            AND memory_type = 'archival'
+            WHERE memory_type = 'archival'
             AND value @1@ $search_term
             ORDER BY relevance_score DESC
-            LIMIT $limit
-        "#,
-            self.agent_id.to_key()
-        );
+            LIMIT $limit_multiplier
+        "#;
 
         tracing::debug!(
             "Executing search with query='{}' for agent={}",
@@ -165,9 +161,9 @@ impl AgentHandle {
         );
 
         let mut result = db
-            .query(&sql)
+            .query(sql)
             .bind(("search_term", query.to_string()))
-            .bind(("limit", limit))
+            .bind(("limit_multiplier", limit * 10)) // Get more results since we'll filter
             .await
             .map_err(|e| {
                 crate::log_error!("Search query failed", e);
@@ -176,27 +172,255 @@ impl AgentHandle {
 
         tracing::debug!("search results: {:#?}", result);
 
-        // Extract results with scores - must deserialize properly from SurrealDB
+        // Extract results with scores - mirror the full structure
         #[derive(serde::Deserialize)]
-        struct ScoredResult {
-            #[serde(flatten)]
-            block_data: <MemoryBlock as DbEntity>::DbModel,
-            relevance_score: Option<f32>, // Optional since query might not return score
+        struct ScoredMemResult {
+            id: surrealdb::RecordId,
+            owner_id: surrealdb::RecordId,
+            label: String,
+            value: String,
+            description: Option<String>,
+            memory_type: crate::memory::MemoryType,
+            permission: crate::memory::MemoryPermission,
+            metadata: serde_json::Value,
+            embedding_model: Option<String>,
+            embedding: Option<Vec<f32>>,
+            created_at: surrealdb::Datetime,
+            updated_at: surrealdb::Datetime,
+            is_active: bool,
+            pinned: bool,
+            relevance_score: Option<f32>,
         }
 
-        let scored_results: Vec<ScoredResult> = result.take(0).map_err(DatabaseError::from)?;
+        let mut scored_results: Vec<ScoredMemResult> =
+            result.take(0).map_err(DatabaseError::from)?;
+
+        // Extract the "out" field from each result object
+        #[derive(serde::Deserialize)]
+        struct OutRecord {
+            out: RecordId,
+        }
+
+        let mut agent_mem_id_set: std::collections::HashSet<RecordId> =
+            std::collections::HashSet::new();
+
+        let agent_mem_sql = format!(
+            "SELECT out FROM agent_memories WHERE in = {} AND out IS NOT NULL",
+            self.agent_id.to_string()
+        );
+
+        let mut agent_mem_result = db
+            .query(&agent_mem_sql)
+            .await
+            .map_err(DatabaseError::from)?;
+
+        let out_records: Vec<OutRecord> = agent_mem_result.take(0).map_err(DatabaseError::from)?;
+
+        for record in out_records.into_iter() {
+            agent_mem_id_set.insert(record.out.clone());
+        }
+
+        // Filter messages to only those belonging to this agent
+        scored_results.retain(|sm| agent_mem_id_set.contains(&sm.id));
 
         let scored_blocks: Vec<ScoredMemoryBlock> = scored_results
             .into_iter()
             .map(|sr| {
-                let block =
-                    MemoryBlock::from_db_model(sr.block_data).expect("model type should convert");
+                // Reconstruct the DbModel from our query results
+                use crate::memory::MemoryBlockDbModel;
+                let db_model = MemoryBlockDbModel {
+                    id: sr.id,
+                    owner_id: sr.owner_id,
+                    label: sr.label,
+                    value: sr.value,
+                    description: sr.description,
+                    memory_type: sr.memory_type,
+                    permission: sr.permission,
+                    metadata: sr.metadata,
+                    embedding_model: sr.embedding_model,
+                    embedding: sr.embedding,
+                    created_at: sr.created_at,
+                    updated_at: sr.updated_at,
+                    is_active: sr.is_active,
+                    pinned: sr.pinned,
+                };
+
+                let block = MemoryBlock::from_db_model(db_model)
+                    .expect("memory should convert from db model");
+
                 ScoredMemoryBlock {
                     block,
                     score: sr.relevance_score.unwrap_or(1.0),
                 }
             })
             .collect();
+
+        Ok(scored_blocks)
+    }
+
+    /// Search archival memories across all agents in the same groups as this agent
+    pub async fn search_group_archival_memories_with_options(
+        &self,
+        query: &str,
+        limit: usize,
+        _fuzzy_level: Option<u8>,
+    ) -> Result<Vec<ScoredMemoryBlock>> {
+        let db = self.db.as_ref().ok_or_else(|| {
+            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                surrealdb::error::Api::InvalidParams(
+                    "No database connection available for group archival search".into(),
+                ),
+            ))
+        })?;
+
+        let mut agents_result = db
+            .query("SELECT ->group_members->group<-group_members<-agent AS agents FROM $agent_id")
+            .bind(("agent_id", RecordId::from(&self.agent_id)))
+            .await
+            .map_err(|e| {
+                crate::log_error!("Failed to get group members", e);
+                crate::db::DatabaseError::QueryFailed(e)
+            })?;
+
+        #[derive(serde::Deserialize, Debug)]
+        struct GroupResult {
+            agents: Vec<RecordId>,
+        }
+
+        let result: Vec<GroupResult> = agents_result.take(0).map_err(DatabaseError::from)?;
+        let agents = result
+            .into_iter()
+            .next()
+            .map(|r| r.agents)
+            .unwrap_or_default();
+
+        if agents.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        tracing::debug!(
+            "Executing group archival search with query='{}' for {} agents",
+            query,
+            agents.len()
+        );
+
+        // Search all archival memories then filter by owner
+        let sql = r#"
+            SELECT *, value, search::score(1) AS relevance_score FROM mem
+            WHERE  value @1@ $search_term
+            ORDER BY relevance_score DESC
+            LIMIT $limit_multiplier
+        "#;
+
+        let mut result = db
+            .query(sql)
+            .bind(("search_term", query.to_string()))
+            .bind(("limit_multiplier", limit * 10)) // Get more since we'll filter
+            .await
+            .map_err(|e| {
+                crate::log_error!("Group archival search query failed", e);
+                crate::db::DatabaseError::QueryFailed(e)
+            })?;
+
+        tracing::debug!("search results: {:#?}", result);
+
+        // Extract results with scores - use same struct as single-agent search
+        #[derive(serde::Deserialize)]
+        struct ScoredMemResult {
+            id: surrealdb::RecordId,
+            owner_id: surrealdb::RecordId,
+            label: String,
+            value: String,
+            description: Option<String>,
+            memory_type: crate::memory::MemoryType,
+            permission: crate::memory::MemoryPermission,
+            metadata: serde_json::Value,
+            embedding_model: Option<String>,
+            embedding: Option<Vec<f32>>,
+            created_at: surrealdb::Datetime,
+            updated_at: surrealdb::Datetime,
+            is_active: bool,
+            pinned: bool,
+            relevance_score: Option<f32>,
+        }
+
+        let mut scored_results: Vec<ScoredMemResult> =
+            result.take(0).map_err(DatabaseError::from)?;
+
+        // Extract the "out" field from each result object
+        #[derive(serde::Deserialize)]
+        struct OutRecord {
+            out: RecordId,
+        }
+
+        let mut agent_mem_id_set: std::collections::HashSet<RecordId> =
+            std::collections::HashSet::new();
+
+        for agent_record in agents {
+            let agent_id = crate::AgentId::from_record(agent_record);
+            let agent_mem_sql = format!(
+                "SELECT out FROM agent_memories WHERE in = {} AND out IS NOT NULL",
+                agent_id.to_string()
+            );
+
+            let mut agent_mem_result = db
+                .query(&agent_mem_sql)
+                .await
+                .map_err(DatabaseError::from)?;
+
+            let out_records: Vec<OutRecord> =
+                agent_mem_result.take(0).map_err(DatabaseError::from)?;
+
+            for record in out_records.into_iter() {
+                agent_mem_id_set.insert(record.out.clone());
+            }
+        }
+
+        // Filter messages to only those belonging to this agent
+        scored_results.retain(|sm| agent_mem_id_set.contains(&sm.id));
+
+        // Filter by group members and convert to domain objects
+        let mut all_scored_blocks: Vec<ScoredMemoryBlock> = scored_results
+            .into_iter()
+            .map(|sr| {
+                // Reconstruct the DbModel from our query results
+                use crate::memory::MemoryBlockDbModel;
+                let db_model = MemoryBlockDbModel {
+                    id: sr.id,
+                    owner_id: sr.owner_id,
+                    label: sr.label,
+                    value: sr.value,
+                    description: sr.description,
+                    memory_type: sr.memory_type,
+                    permission: sr.permission,
+                    metadata: sr.metadata,
+                    embedding_model: sr.embedding_model,
+                    embedding: sr.embedding,
+                    created_at: sr.created_at,
+                    updated_at: sr.updated_at,
+                    is_active: sr.is_active,
+                    pinned: sr.pinned,
+                };
+
+                let block = MemoryBlock::from_db_model(db_model)
+                    .expect("memory should convert from db model");
+
+                ScoredMemoryBlock {
+                    block,
+                    score: sr.relevance_score.unwrap_or(1.0),
+                }
+            })
+            .collect();
+
+        // Sort all results by relevance score and limit
+        all_scored_blocks.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_scored_blocks.truncate(limit);
+
+        let scored_blocks = all_scored_blocks;
 
         Ok(scored_blocks)
     }
@@ -682,10 +906,9 @@ impl AgentHandle {
 
             // Filter by agent if needed
             // Get all message IDs belonging to this agent
-            let agent_record_id: RecordId = self.agent_id.clone().into();
             let agent_msg_sql = format!(
                 "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
-                agent_record_id
+                self.agent_id.to_string()
             );
 
             let mut agent_msg_result = db
@@ -900,56 +1123,42 @@ impl AgentHandle {
             ))
         })?;
 
-        // First, find the constellation this agent belongs to
-        let constellation_query = format!(
-            "SELECT VALUE <-constellation_agents<-constellation FROM agent:{} LIMIT 1",
-            self.agent_id.to_key()
-        );
-
-        let mut result = db
-            .query(&constellation_query)
+        let mut agents_result = db
+            .query("SELECT ->group_members->group<-group_members<-agent.{id, name} AS agents FROM $agent_id")
+            .bind(("agent_id", RecordId::from(&self.agent_id)))
             .await
-            .map_err(DatabaseError::from)?;
-        let constellation_ids: Vec<surrealdb::RecordId> =
-            result.take(0).map_err(DatabaseError::from)?;
+            .map_err(|e| {
+                crate::log_error!("Failed to get group members", e);
+                crate::db::DatabaseError::QueryFailed(e)
+            })?;
 
-        if constellation_ids.is_empty() {
-            // Agent not in a constellation, return empty
+        #[derive(serde::Deserialize)]
+        struct AgentResult {
+            id: RecordId,
+            name: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct GroupResult {
+            agents: Vec<AgentResult>,
+        }
+
+        let result: Vec<GroupResult> = agents_result.take(0).map_err(DatabaseError::from)?;
+        let agents = result
+            .into_iter()
+            .next()
+            .map(|r| r.agents)
+            .unwrap_or_default();
+
+        if agents.is_empty() {
             return Ok(Vec::new());
         }
 
-        let constellation_id = &constellation_ids[0];
-
-        // First, get all agents in the constellation with their names
-        let agents_query = format!(
-            r#"SELECT id, name FROM agent WHERE id IN (
-                -- Direct agents in the constellation
-                SELECT VALUE out FROM constellation_agents
-                WHERE in = {}
-                -- UNION with agents from groups in the constellation
-                UNION
-                SELECT VALUE in FROM group_members
-                WHERE out IN (
-                    SELECT VALUE out FROM composed_of
-                    WHERE in = {}
-                )
-            )"#,
-            constellation_id, constellation_id
-        );
-
-        let mut agents_result = db.query(&agents_query).await.map_err(DatabaseError::from)?;
-        let agents_data: Vec<serde_json::Value> =
-            agents_result.take(0).map_err(DatabaseError::from)?;
-
-        // Build a map of agent ID to name
+        // Build agent_names map from the results
         let mut agent_names = std::collections::HashMap::new();
-        for agent in agents_data {
-            if let (Some(id), Some(name)) = (
-                agent.get("id").and_then(|v| v.as_str()),
-                agent.get("name").and_then(|v| v.as_str()),
-            ) {
-                agent_names.insert(id.to_string(), name.to_string());
-            }
+        for agent in &agents {
+            let agent_id = crate::AgentId::from_record(agent.id.clone());
+            agent_names.insert(agent_id.to_key(), agent.name.clone());
         }
 
         // Similar to conversation search, we need different approaches for content vs non-content search
@@ -966,51 +1175,49 @@ impl AgentHandle {
                 .await?;
 
             // Now filter by constellation agents and pair with agent names
-            // We need to map messages to their agents
-            let agent_ids: Vec<String> = agent_names.keys().cloned().collect();
-            let agent_records: Vec<String> =
-                agent_ids.iter().map(|id| format!("agent:{}", id)).collect();
-            let agent_ids_str = agent_records.join(", ");
-
-            let constellation_msg_sql = format!(
-                "SELECT out AS msg_id, in AS agent_id FROM agent_messages WHERE in IN [{}]",
-                agent_ids_str
-            );
-
-            let mut constellation_result = db
-                .query(&constellation_msg_sql)
-                .await
-                .map_err(DatabaseError::from)?;
-
-            #[derive(serde::Deserialize)]
-            struct MsgAgent {
-                msg_id: surrealdb::RecordId,
-                agent_id: surrealdb::RecordId,
-            }
-
-            let msg_to_agent: Vec<MsgAgent> =
-                constellation_result.take(0).map_err(DatabaseError::from)?;
-
-            // Create a map of message ID to agent ID for quick lookup
+            // Build message-to-agent mapping by querying each agent's messages
             let mut msg_agent_map = std::collections::HashMap::new();
-            for entry in msg_to_agent {
-                msg_agent_map.insert(entry.msg_id.to_string(), entry.agent_id.to_string());
+
+            for agent in &agents {
+                let agent_id = crate::AgentId::from_record(agent.id.clone());
+                let agent_msg_sql = format!(
+                    "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
+                    agent_id.to_string()
+                );
+
+                let mut agent_result = db
+                    .query(&agent_msg_sql)
+                    .await
+                    .map_err(DatabaseError::from)?;
+
+                #[derive(serde::Deserialize)]
+                struct OutRecord {
+                    out: RecordId,
+                }
+
+                let out_records: Vec<OutRecord> =
+                    agent_result.take(0).map_err(DatabaseError::from)?;
+
+                for entry in out_records {
+                    msg_agent_map.insert(entry.out, agent.id.clone());
+                }
             }
 
             // Filter and pair messages with agent names and scores
             let mut scored_constellation_messages = Vec::new();
             for scored_msg in scored_msgs {
-                let msg_id = format!("msg:{}", scored_msg.message.id.to_key());
+                let msg_record_id = surrealdb::RecordId::from((
+                    crate::id::MessageId::PREFIX,
+                    scored_msg.message.id.to_key(),
+                ));
 
                 // Check if this message belongs to a constellation agent
-                if let Some(agent_record_id) = msg_agent_map.get(&msg_id) {
-                    // Extract agent ID from record (e.g., "agent:abc123" -> "abc123")
-                    let agent_id = agent_record_id
-                        .strip_prefix("agent:")
-                        .unwrap_or(agent_record_id);
+                if let Some(agent_record_id) = msg_agent_map.get(&msg_record_id) {
+                    // Look up agent name using the agent ID
+                    let agent_id = crate::AgentId::from_record(agent_record_id.clone());
 
                     let agent_name = agent_names
-                        .get(agent_id)
+                        .get(&agent_id.to_key())
                         .cloned()
                         .unwrap_or_else(|| format!("Unknown ({})", agent_id));
 
@@ -1021,11 +1228,13 @@ impl AgentHandle {
                     });
 
                     // Stop if we have enough results
-                    if scored_constellation_messages.len() >= limit {
+                    if scored_constellation_messages.len() >= limit * 10 {
                         break;
                     }
                 }
             }
+
+            scored_constellation_messages.truncate(limit);
 
             return Ok(scored_constellation_messages);
         }
@@ -1048,92 +1257,78 @@ impl AgentHandle {
             format!(" WHERE {}", traversal_conditions.join(" AND "))
         };
 
-        // Graph traversal to get messages from constellation agents
-        let sql = format!(
-            r#"SELECT in AS agent_id, out AS message FROM agent_messages
-            WHERE in IN (
-                -- Direct agents in the constellation
-                SELECT VALUE out FROM constellation_agents
-                WHERE in = {}
-                -- UNION with agents from groups in the constellation
-                UNION
-                SELECT VALUE in FROM group_members
-                WHERE out IN (
-                    SELECT VALUE out FROM composed_of
-                    WHERE in = {}
-                )
-            ) AND out IS NOT NULL {}
-            ORDER BY out.created_at DESC
-            LIMIT $limit
-            FETCH message"#,
-            constellation_id,
-            constellation_id,
-            if where_clause.is_empty() {
-                String::new()
-            } else {
-                format!("AND out.({})", where_clause.trim_start_matches(" WHERE "))
+        // Get messages from all group agents
+        let mut all_messages = Vec::new();
+
+        for agent in &agents {
+            let agent_id = crate::AgentId::from_record(agent.id.clone());
+            let agent_sql = format!(
+                r#"SELECT out AS message FROM agent_messages
+                WHERE in = {} AND out IS NOT NULL {}
+                ORDER BY out.created_at DESC
+                LIMIT $agent_limit
+                FETCH message"#,
+                agent_id.to_string(),
+                if where_clause.is_empty() {
+                    String::new()
+                } else {
+                    format!("AND out.({})", where_clause.trim_start_matches(" WHERE "))
+                }
+            );
+
+            // Build query and bind all parameters
+            let mut query_builder = db
+                .query(&agent_sql)
+                .bind(("agent_limit", limit / agents.len().max(1)));
+
+            if let Some(role) = &role_filter {
+                query_builder = query_builder.bind(("role", role.to_string()));
             }
-        );
 
-        // Build query and bind all parameters
-        let mut query_builder = db.query(&sql).bind(("limit", limit));
+            if let Some(start) = start_time {
+                query_builder =
+                    query_builder.bind(("start_time", surrealdb::sql::Datetime::from(start)));
+            }
 
-        if let Some(role) = &role_filter {
-            query_builder = query_builder.bind(("role", role.to_string()));
-        }
+            if let Some(end) = end_time {
+                query_builder =
+                    query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
+            }
 
-        if let Some(start) = start_time {
-            query_builder =
-                query_builder.bind(("start_time", surrealdb::sql::Datetime::from(start)));
-        }
+            // Execute query
+            let mut result = query_builder.await.map_err(DatabaseError::from)?;
 
-        if let Some(end) = end_time {
-            query_builder = query_builder.bind(("end_time", surrealdb::sql::Datetime::from(end)));
-        }
+            // Extract messages for this agent
+            let db_messages: Vec<<Message as DbEntity>::DbModel> =
+                result.take("message").map_err(DatabaseError::from)?;
 
-        // Execute query
-        let mut result = query_builder.await.map_err(DatabaseError::from)?;
-
-        // Graph traversal path: Results include agent_id and message fields (no scores)
-        #[derive(serde::Deserialize)]
-        struct AgentMessageResult {
-            agent_id: surrealdb::RecordId,
-            message: Option<<Message as DbEntity>::DbModel>,
-        }
-
-        let results: Vec<AgentMessageResult> = result.take(0).map_err(DatabaseError::from)?;
-
-        let mut scored_messages = Vec::new();
-        for entry in results {
-            if let Some(db_msg) = entry.message {
+            // Add messages with agent name
+            for db_msg in db_messages {
                 if let Ok(msg) = Message::from_db_model(db_msg) {
-                    // Extract agent ID from record
-                    let agent_id = entry
-                        .agent_id
-                        .to_string()
-                        .strip_prefix("agent:")
-                        .unwrap_or(&entry.agent_id.to_string())
-                        .to_string();
+                    let agent_name = agent.name.clone();
 
-                    let agent_name = agent_names
-                        .get(&agent_id)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Unknown ({})", agent_id));
-
-                    scored_messages.push(ScoredConstellationMessage {
+                    all_messages.push(ScoredConstellationMessage {
                         agent_name,
                         message: msg,
                         score: 1.0, // No score for graph traversal queries
                     });
 
-                    if scored_messages.len() >= limit {
+                    if all_messages.len() >= limit * 5 {
                         break;
                     }
                 }
             }
+
+            if all_messages.len() >= limit * 10 {
+                break;
+            }
         }
 
-        Ok(scored_messages)
+        // Sort by created_at and truncate to limit
+        all_messages.sort_by(|a, b| b.message.created_at.cmp(&a.message.created_at));
+        all_messages.truncate(limit);
+
+        Ok(all_messages)
     }
 }
 

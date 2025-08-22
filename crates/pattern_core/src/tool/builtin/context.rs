@@ -231,6 +231,9 @@ impl AiTool for ContextTool {
 }
 
 impl ContextTool {
+    pub fn new(handle: AgentHandle) -> Self {
+        Self { handle }
+    }
     async fn execute_append(&self, name: String, content: String) -> Result<ContextOutput> {
         // Check if the block exists first
         if !self.handle.memory.contains_block(&name) {

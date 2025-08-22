@@ -538,6 +538,7 @@ pub async fn setup_group(
         // Create agent with its own tool registry
         let tools = ToolRegistry::new();
         let agent = if agent_record.name == "Anchor" && !no_tools {
+            let tools = ToolRegistry::new();
             // Create Anchor agent with its own tools
             let agent = create_agent_from_record_with_tracker(
                 agent_record.clone(),
@@ -559,6 +560,32 @@ pub async fn setup_group(
             output.success(&format!(
                 "Emergency halt tool registered for {} agent",
                 "Anchor".bright_red()
+            ));
+
+            agent
+        } else if agent_record.name == "Archive" && !no_tools {
+            let tools = ToolRegistry::new();
+            // Create Archive agent with its own tools
+            let agent = create_agent_from_record_with_tracker(
+                agent_record.clone(),
+                model.clone(),
+                !no_tools,
+                &full_config,
+                heartbeat_sender.clone(),
+                Some(constellation_tracker.clone()),
+                output,
+                Some(tools.clone()),
+            )
+            .await?;
+
+            // Add SystemIntegrityTool only to Anchor's registry
+            use pattern_core::tool::builtin::ConstellationSearchTool;
+            let handle = agent.handle().await;
+            let integrity_tool = ConstellationSearchTool::new(handle);
+            tools.register(integrity_tool);
+            output.success(&format!(
+                "Memory specialist search tool registered for {} agent",
+                "Archive".bright_cyan()
             ));
 
             agent

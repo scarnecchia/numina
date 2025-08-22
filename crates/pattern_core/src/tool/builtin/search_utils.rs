@@ -49,12 +49,22 @@ pub fn extract_snippet(content: &str, query: &str, max_length: usize) -> String 
         let context_before = 50;
         let context_after = max_length.saturating_sub(context_before + query.len());
 
-        let start = pos.saturating_sub(context_before);
-        let end = (pos + query.len() + context_after).min(content.len());
+        let mut start = pos.saturating_sub(context_before);
+        let mut end = (pos + query.len() + context_after).min(content.len());
+
+        // Ensure we're at char boundaries
+        while start > 0 && !content.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < content.len() && !content.is_char_boundary(end) {
+            end += 1;
+        }
 
         // Find word boundaries
-        let start = if start > 0 {
-            content[..start]
+        let start = if start > 0 && start < content.len() {
+            // Search backwards from start for whitespace
+            let search_slice = &content[..start];
+            search_slice
                 .rfind(char::is_whitespace)
                 .map(|i| i + 1)
                 .unwrap_or(start)
@@ -63,13 +73,27 @@ pub fn extract_snippet(content: &str, query: &str, max_length: usize) -> String 
         };
 
         let end = if end < content.len() {
-            content[end..]
+            // Search forwards from end for whitespace
+            let search_start = end;
+            let search_slice = &content[search_start..];
+            search_slice
                 .find(char::is_whitespace)
-                .map(|i| end + i)
+                .map(|i| search_start + i)
                 .unwrap_or(end)
         } else {
             content.len()
         };
+
+        // Final boundary check for the adjusted positions
+        let mut start = start;
+        while start > 0 && !content.is_char_boundary(start) {
+            start -= 1;
+        }
+
+        let mut end = end;
+        while end < content.len() && !content.is_char_boundary(end) {
+            end += 1;
+        }
 
         let mut snippet = String::new();
         if start > 0 {
@@ -83,7 +107,14 @@ pub fn extract_snippet(content: &str, query: &str, max_length: usize) -> String 
         snippet
     } else {
         // No match found, return beginning of content
-        let end = content.len().min(max_length);
+        // Use char boundary-aware truncation
+        let mut end = content.len().min(max_length);
+
+        // Find the nearest char boundary if we're not at one
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+
         let mut snippet = content[..end].to_string();
         if end < content.len() {
             snippet.push_str("...");

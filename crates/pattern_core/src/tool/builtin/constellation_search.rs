@@ -1,4 +1,4 @@
-//! Unified search tool for querying across different domains
+//! Constellation-wide search tool for Archive agents with expanded scope
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -9,29 +9,40 @@ use serde_json::json;
 use super::search_utils::{extract_snippet, process_search_results};
 use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
 
-/// Search domains available
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SearchDomain {
-    ArchivalMemory,
-    Conversations,
-    ConstellationMessages,
-    All,
+/// Default search domain for constellation search
+fn default_domain() -> ConstellationSearchDomain {
+    ConstellationSearchDomain::GroupArchival
 }
 
-/// Input for unified search
+/// Default limit for constellation search (higher than normal)
+fn default_limit() -> i64 {
+    30
+}
+
+/// Search domains for constellation-wide access
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct SearchInput {
-    /// Where to search
-    pub domain: SearchDomain,
+#[serde(rename_all = "snake_case")]
+pub enum ConstellationSearchDomain {
+    LocalArchival,        // Just this agent's archival memory
+    GroupArchival,        // Archival memory across all group members
+    ConstellationHistory, // Conversation history across entire constellation
+    All,                  // Search everything at constellation level
+}
+
+/// Input for constellation-wide search
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ConstellationSearchInput {
+    /// Where to search (defaults to group_archival)
+    #[serde(default = "default_domain")]
+    pub domain: ConstellationSearchDomain,
 
     /// Search query
     pub query: String,
 
-    /// Maximum number of results (default: 10)
+    /// Maximum number of results per agent (default: 30 for comprehensive results)
     #[schemars(default, with = "i64")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<i64>,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
 
     /// For conversations: filter by role (user/assistant/tool)
     #[schemars(default, with = "String")]
@@ -73,15 +84,15 @@ pub struct SearchOutput {
     pub results: serde_json::Value,
 }
 
-/// Unified search tool
+/// Constellation-wide search tool for Archive agents
 #[derive(Debug, Clone)]
-pub struct SearchTool {
+pub struct ConstellationSearchTool {
     pub(crate) handle: AgentHandle,
 }
 
 #[async_trait]
-impl AiTool for SearchTool {
-    type Input = SearchInput;
+impl AiTool for ConstellationSearchTool {
+    type Input = ConstellationSearchInput;
     type Output = SearchOutput;
 
     fn name(&self) -> &str {
@@ -89,9 +100,12 @@ impl AiTool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Unified search across different domains (archival_memory, conversations, constellation_messages, all). Returns relevant results ranked by BM25 relevance score. Make regular use of this to ground yourself in past events.
-        - Use constellation_messages to search messages from all agents in your constellation.
-        - archival_memory domain searches your recall memory.
+        "Unified search across different domains:
+            - local_archival (your own recall memory)
+            - group_archival (recall memory for yourself and other entities in your constellation)
+            - constellation_history (message history for the entire constellation)
+            - all (all of the above)
+        Returns relevant results ranked by BM25 relevance score. Make regular use of this to ground yourself in past events.
         - To broaden your search, use a larger limit
         - To narrow your search, you can:
             - use explicit start_time and end_time parameters with rfc3339 datetime parsing
@@ -107,50 +121,20 @@ impl AiTool for SearchTool {
     }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        let limit = params
-            .limit
-            .map(|l| l.max(1).min(100) as usize)
-            .unwrap_or(20);
+        let limit = params.limit.max(1).min(100) as usize;
 
         match params.domain {
-            SearchDomain::ArchivalMemory => {
-                self.search_archival(&params.query, limit, params.fuzzy)
+            ConstellationSearchDomain::LocalArchival => {
+                // Search just this agent's archival
+                self.search_local_archival(&params.query, limit, params.fuzzy)
                     .await
             }
-            SearchDomain::Conversations => {
-                let role = params
-                    .role
-                    .as_ref()
-                    .and_then(|r| match r.to_lowercase().as_str() {
-                        "user" => Some(ChatRole::User),
-                        "assistant" => Some(ChatRole::Assistant),
-                        "tool" => Some(ChatRole::Tool),
-                        _ => None,
-                    });
-
-                let start_time = params
-                    .start_time
-                    .as_ref()
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&Utc));
-
-                let end_time = params
-                    .end_time
-                    .as_ref()
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&Utc));
-
-                self.search_conversations(
-                    &params.query,
-                    role,
-                    start_time,
-                    end_time,
-                    limit,
-                    params.fuzzy,
-                )
-                .await
+            ConstellationSearchDomain::GroupArchival => {
+                // Search archival across all group members
+                self.search_group_archival(&params.query, limit, params.fuzzy)
+                    .await
             }
-            SearchDomain::ConstellationMessages => {
+            ConstellationSearchDomain::ConstellationHistory => {
                 let role = params
                     .role
                     .as_ref()
@@ -183,7 +167,10 @@ impl AiTool for SearchTool {
                 )
                 .await
             }
-            SearchDomain::All => self.search_all(&params.query, limit, params.fuzzy).await,
+            ConstellationSearchDomain::All => {
+                // Search everything - both group archival and constellation history
+                self.search_all(&params.query, limit, params.fuzzy).await
+            }
         }
     }
 
@@ -195,10 +182,10 @@ impl AiTool for SearchTool {
         vec![
             crate::tool::ToolExample {
                 description: "Search archival memory for user preferences".to_string(),
-                parameters: SearchInput {
-                    domain: SearchDomain::ArchivalMemory,
+                parameters: ConstellationSearchInput {
+                    domain: ConstellationSearchDomain::LocalArchival,
                     query: "favorite color".to_string(),
-                    limit: Some(5),
+                    limit: 40,
                     role: None,
                     start_time: None,
                     end_time: None,
@@ -218,10 +205,10 @@ impl AiTool for SearchTool {
             },
             crate::tool::ToolExample {
                 description: "Search conversation history for technical discussions".to_string(),
-                parameters: SearchInput {
-                    domain: SearchDomain::Conversations,
+                parameters: ConstellationSearchInput {
+                    domain: ConstellationSearchDomain::ConstellationHistory,
                     query: "database design".to_string(),
-                    limit: Some(10),
+                    limit: 10,
                     role: Some("assistant".to_string()),
                     start_time: None,
                     end_time: None,
@@ -243,8 +230,12 @@ impl AiTool for SearchTool {
     }
 }
 
-impl SearchTool {
-    async fn search_archival(
+impl ConstellationSearchTool {
+    pub fn new(handle: AgentHandle) -> Self {
+        Self { handle }
+    }
+
+    async fn search_local_archival(
         &self,
         query: &str,
         limit: usize,
@@ -353,58 +344,49 @@ impl SearchTool {
         })
     }
 
-    async fn search_conversations(
+    async fn search_group_archival(
         &self,
         query: &str,
-        role: Option<ChatRole>,
-        start_time: Option<DateTime<Utc>>,
-        end_time: Option<DateTime<Utc>>,
         limit: usize,
         fuzzy: bool,
     ) -> Result<SearchOutput> {
         // Use database search if available
         if self.handle.has_db_connection() {
-            // Note: fuzzy parameter is a placeholder for future fuzzy search implementation
-            // Currently just passes through to methods that will use it when available
             let fuzzy_level = if fuzzy { Some(1) } else { None };
             match self
                 .handle
-                .search_conversations_with_options(
-                    Some(query),
-                    role,
-                    start_time,
-                    end_time,
-                    limit,
-                    fuzzy_level,
-                )
+                .search_group_archival_memories_with_options(query, limit, fuzzy_level)
                 .await
             {
-                Ok(scored_messages) => {
-                    // Process results with score adjustments and re-sorting
-                    let processed = process_search_results(scored_messages, query, limit);
+                Ok(mut scored_blocks) => {
+                    // Re-sort and limit after we have all scores
+                    scored_blocks.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    scored_blocks.truncate(limit);
 
-                    let results: Vec<_> = processed
+                    let results: Vec<_> = scored_blocks
                         .into_iter()
                         .enumerate()
-                        .map(|(i, sm)| {
-                            // Progressive content display
-                            let content = if i < 2 {
-                                // Full content for top 2 results
-                                sm.message.display_content()
-                            } else if i < 5 {
-                                // Snippet for next 3 results
-                                extract_snippet(&sm.message.display_content(), query, 400)
+                        .map(|(i, sb)| {
+                            // Progressive truncation for constellation search - longer content since this is for Archive
+                            let content = if i < 5 {
+                                // Show more content for top results (Archive is designed for this)
+                                sb.block.value.clone()
+                            } else if i < 15 {
+                                extract_snippet(&sb.block.value, query, 1500)
                             } else {
-                                // Shorter snippet for remaining results
-                                extract_snippet(&sm.message.display_content(), query, 200)
+                                extract_snippet(&sb.block.value, query, 800)
                             };
 
                             json!({
-                                "id": sm.message.id,
-                                "role": sm.message.role.to_string(),
+                                "label": sb.block.label,
                                 "content": content,
-                                "created_at": sm.message.created_at,
-                                "relevance_score": sm.score
+                                "created_at": sb.block.created_at,
+                                "updated_at": sb.block.updated_at,
+                                "relevance_score": sb.score
                             })
                         })
                         .collect();
@@ -412,23 +394,26 @@ impl SearchTool {
                     Ok(SearchOutput {
                         success: true,
                         message: Some(format!(
-                            "Found {} messages matching '{}' (ranked by relevance)",
+                            "Found {} group archival memories matching '{}'",
                             results.len(),
                             query
                         )),
                         results: json!(results),
                     })
                 }
-                Err(e) => Ok(SearchOutput {
-                    success: false,
-                    message: Some(format!("Conversation search failed: {:?}", e)),
-                    results: json!([]),
-                }),
+                Err(e) => {
+                    tracing::warn!("Group archival search failed: {}", e);
+                    Ok(SearchOutput {
+                        success: false,
+                        message: Some(format!("Group archival search failed: {:?}", e)),
+                        results: json!([]),
+                    })
+                }
             }
         } else {
             Ok(SearchOutput {
                 success: false,
-                message: Some("Conversation search requires database connection".to_string()),
+                message: Some("Group archival search requires database connection".to_string()),
                 results: json!([]),
             })
         }
@@ -519,9 +504,9 @@ impl SearchTool {
 
     async fn search_all(&self, query: &str, limit: usize, fuzzy: bool) -> Result<SearchOutput> {
         // Search both domains and combine results
-        let archival_result = self.search_archival(query, limit, fuzzy).await?;
+        let archival_result = self.search_local_archival(query, limit, fuzzy).await?;
         let conv_result = self
-            .search_conversations(query, None, None, None, limit, fuzzy)
+            .search_constellation_messages(query, None, None, None, limit, fuzzy)
             .await?;
 
         let all_results = json!({

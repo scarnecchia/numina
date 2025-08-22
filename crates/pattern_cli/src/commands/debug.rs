@@ -503,6 +503,144 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
     Ok(())
 }
 
+/// Search archival memory as if we were the agent
+#[allow(dead_code)]
+pub async fn search_group_archival_memory(
+    agent_name: &str,
+    query: &str,
+    limit: usize,
+) -> Result<()> {
+    let output = Output::new();
+
+    output.section("Searching archival memory");
+    println!();
+
+    // First, find the agent
+    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
+    let mut response = DB
+        .query(query_sql)
+        .bind(("name", agent_name.to_string()))
+        .await
+        .into_diagnostic()?;
+
+    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .collect();
+
+    if let Some(agent_record) = agents.first() {
+        output.info(
+            "Agent:",
+            &format!(
+                "{} (ID: {})",
+                agent_record.name.bright_cyan(),
+                agent_record.id.to_string().dimmed()
+            ),
+        );
+        output.kv(
+            "Owner",
+            &agent_record.owner_id.to_string().dimmed().to_string(),
+        );
+        output.kv("Query", &format!("\"{}\"", query.bright_yellow()));
+        output.kv("Limit", &limit.to_string().bright_white().to_string());
+
+        // Debug: Let's check what memories exist for this owner
+        let debug_query = format!(
+            "SELECT id, label, memory_type FROM mem WHERE owner_id = user:⟨{}⟩",
+            agent_record
+                .owner_id
+                .to_string()
+                .trim_start_matches("user_")
+        );
+        output.status("Debug - checking memories for owner...");
+        let debug_response = DB.query(&debug_query).await.into_diagnostic()?;
+        output.status(&format!("Debug response: {:?}", debug_response));
+        println!();
+
+        // Create a minimal agent handle for searching
+        // IMPORTANT: Use the actual owner_id from the database so the search will match
+        let memory = Memory::with_owner(&agent_record.owner_id);
+        let mut handle = AgentHandle::default();
+        handle.name = agent_record.name.clone();
+        handle.agent_id = agent_record.id.clone();
+        handle.agent_type = agent_record.agent_type.clone();
+        handle.memory = memory;
+        handle.state = AgentState::Ready;
+        let handle = handle.with_db(DB.clone());
+
+        // Perform the search
+        match handle
+            .search_group_archival_memories_with_options(query, limit, None)
+            .await
+        {
+            Ok(results) => {
+                output.success(&format!("Found {} results:", results.len()));
+                println!();
+
+                for (i, block) in results.iter().enumerate() {
+                    let block = &block.block;
+                    println!(
+                        "  {} Result {} {}",
+                        "[DOC]".bright_blue(),
+                        (i + 1).to_string().bright_white(),
+                        format!("({})", block.id).dimmed()
+                    );
+                    output.kv("Label", &block.label.bright_yellow().to_string());
+                    output.kv("Type", &format!("{:?}", block.memory_type));
+                    output.kv(
+                        "Created",
+                        &block.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                    );
+                    output.status("Content preview:");
+
+                    // Show first 200 chars of content
+                    let preview = if block.value.len() > 200 {
+                        format!("{}...", &block.value[..200])
+                    } else {
+                        block.value.clone()
+                    };
+
+                    for line in preview.lines() {
+                        println!("      {}", line.dimmed());
+                    }
+                    println!();
+                }
+
+                if results.is_empty() {
+                    output.status(&format!("No archival memories found matching '{}'", query));
+                    println!();
+                    output.status("Try:");
+                    output.list_item("Using broader search terms");
+                    output.list_item(&format!(
+                        "Checking if the agent has any archival memories with: pattern-cli debug list-archival --agent {}",
+                        agent_name
+                    ));
+                    output.list_item("Verifying the full-text search index exists in the database");
+                }
+            }
+            Err(e) => {
+                output.error(&format!("Search failed: {}", e));
+                println!();
+                output.status("This might mean:");
+                output.list_item("The database connection is not available");
+                output.list_item("The full-text search index is not set up");
+                output.list_item("There was an error in the query");
+            }
+        }
+    } else {
+        output.error(&format!("Agent '{}' not found", agent_name));
+        println!();
+        output.status("Available agents:");
+        let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
+        for agent in all_agents {
+            output.list_item(&agent.name.bright_cyan().to_string());
+        }
+    }
+
+    Ok(())
+}
+
 /// List all archival memories for an agent
 pub async fn list_archival_memory(agent_name: &str) -> Result<()> {
     let output = Output::new();

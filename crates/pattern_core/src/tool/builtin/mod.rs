@@ -3,6 +3,7 @@
 //! This module provides the standard tools that all agents have access to,
 //! including memory management and inter-agent communication.
 
+mod constellation_search;
 mod context;
 pub mod data_source;
 mod recall;
@@ -16,6 +17,9 @@ mod web;
 
 use std::fmt::Debug;
 
+pub use constellation_search::{
+    ConstellationSearchDomain, ConstellationSearchInput, ConstellationSearchTool,
+};
 pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationType};
 pub use data_source::{
     DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
