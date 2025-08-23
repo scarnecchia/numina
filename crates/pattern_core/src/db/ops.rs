@@ -722,7 +722,7 @@ pub async fn get_memory_by_label<C: Connection>(
         SELECT *, out.* AS memory_data
         FROM agent_memories
         WHERE in = $agent_id
-        AND out.label = $label
+        AND out.*.label = $label
     "#;
 
     let mut result = conn
@@ -945,8 +945,47 @@ pub async fn find_memory_by_owner_and_label<C: Connection>(
     }
 }
 
-/// Persist or update an agent's memory block with relation
+/// Persist or update an agent's memory block with relation (with retry logic)
 pub async fn persist_agent_memory<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: AgentId,
+    memory: &MemoryBlock,
+    access_level: crate::memory::MemoryPermission,
+) -> Result<()> {
+    use rand::Rng;
+    use tokio::time::{Duration, sleep};
+
+    // Try the operation, with retries on transaction conflict
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match persist_agent_memory_inner(conn, agent_id.clone(), memory, access_level).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Check if it's a transaction conflict
+                if attempt < 4
+                    && e.to_string()
+                        .contains("Failed to commit transaction due to a read or write conflict")
+                {
+                    // Random backoff between 50-150ms
+                    let backoff_ms = rand::rng().random_range(50..150);
+                    tracing::warn!(
+                        "Transaction conflict on memory persist for block {}, retrying after {}ms (attempt {})",
+                        memory.label,
+                        backoff_ms,
+                        attempt
+                    );
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Inner function that does the actual memory persistence
+async fn persist_agent_memory_inner<C: Connection>(
     conn: &Surreal<C>,
     agent_id: AgentId,
     memory: &MemoryBlock,

@@ -190,6 +190,12 @@ impl RecallTool {
         // Generate label if not provided
         let label = label.unwrap_or_else(|| format!("archival_{}", chrono::Utc::now().timestamp()));
 
+        tracing::info!(
+            "Recall insert operation for label '{}' (content: {} chars)",
+            label,
+            content.len()
+        );
+
         // Try to use database if available, fall back to in-memory
         if self.handle.has_db_connection() {
             match self.handle.insert_archival_memory(&label, &content).await {
@@ -209,6 +215,8 @@ impl RecallTool {
     }
 
     fn insert_in_memory(&self, label: String, content: String) -> Result<RecallOutput> {
+        tracing::info!("Using in-memory insert for recall label '{}'", label);
+
         // Check if label already exists
         if self.handle.memory.contains_block(&label) {
             return Ok(RecallOutput {
@@ -223,6 +231,7 @@ impl RecallTool {
 
         // Create the archival memory block
         self.handle.memory.create_block(&label, &content)?;
+        tracing::info!("Created memory block '{}' in memory", label);
 
         // Update it to be archival type with appropriate permissions using alter_block
         self.handle.memory.alter_block(&label, |_key, mut block| {
@@ -230,6 +239,7 @@ impl RecallTool {
             block.permission = MemoryPermission::ReadWrite;
             block
         });
+        tracing::info!("Updated block '{}' to Archival type", label);
 
         Ok(RecallOutput {
             success: true,
@@ -239,91 +249,23 @@ impl RecallTool {
     }
 
     async fn execute_read(&self, label: String) -> Result<RecallOutput> {
-        // Fall back to in-memory
-        if let Some(block) = self.handle.memory.get_block(&label) {
-            // Verify it's archival memory
-            if block.memory_type == MemoryType::Archival {
-                // Clone what we need and drop the ref immediately
-                let content = block.value.clone();
-                let _char_count = content.chars().count();
-                let preview_chars = 500; // Show more chars for direct read
-                let _content_preview = if content.len() > preview_chars {
-                    format!("{}...", &content[..preview_chars])
-                } else {
-                    content.clone()
-                };
-
-                let result = ArchivalSearchResult {
-                    label: block.label.to_string(),
-                    content: content,
-                    created_at: block.created_at,
-                    updated_at: block.updated_at,
-                };
-                drop(block); // Explicitly drop to release lock
-
-                Ok(RecallOutput {
-                    success: true,
-                    message: Some(format!("Found recall memory '{}'", label)),
-                    results: vec![result],
-                })
-            } else {
-                let memory_type = block.memory_type;
-                drop(block); // Explicitly drop to release lock
-
-                Ok(RecallOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Block '{}' exists but is not recall memory (type: {:?})",
-                        label, memory_type
-                    )),
-                    results: vec![],
-                })
-            }
+        if let Ok(Some(memory)) = self.handle.get_archival_memory_by_label(&label).await {
+            Ok(RecallOutput {
+                success: true,
+                message: Some(format!("Found recall memory '{}'", label)),
+                results: vec![ArchivalSearchResult {
+                    label,
+                    content: memory.value,
+                    created_at: memory.created_at,
+                    updated_at: memory.updated_at,
+                }],
+            })
         } else {
-            // Try database first if available
-            if self.handle.has_db_connection() {
-                // For now, we'll search for the exact label
-                match self.handle.search_archival_memories(&label, 10).await {
-                    Ok(blocks) => {
-                        // Find exact match
-                        if let Some(block) = blocks.iter().find(|b| b.label == label) {
-                            return Ok(RecallOutput {
-                                success: true,
-                                message: Some(format!("Found recall memory '{}'", label)),
-                                results: vec![ArchivalSearchResult {
-                                    label: block.label.to_string(),
-                                    content: block.value.clone(),
-                                    created_at: block.created_at,
-                                    updated_at: block.updated_at,
-                                }],
-                            });
-                        } else {
-                            Ok(RecallOutput {
-                                success: false,
-                                message: Some(format!(
-                                    "No recall memory found with label '{}'",
-                                    label
-                                )),
-                                results: vec![],
-                            })
-                        }
-                    }
-                    Err(e) => Ok(RecallOutput {
-                        success: false,
-                        message: Some(format!(
-                            "No recall memory found with label '{}' due to database error {}",
-                            label, e
-                        )),
-                        results: vec![],
-                    }),
-                }
-            } else {
-                Ok(RecallOutput {
-                    success: false,
-                    message: Some(format!("No recall memory found with label '{}'", label)),
-                    results: vec![],
-                })
-            }
+            Ok(RecallOutput {
+                success: false,
+                message: Some(format!("Couldn't find recall memory '{}'", label)),
+                results: vec![],
+            })
         }
     }
 
@@ -375,8 +317,15 @@ impl RecallTool {
     }
 
     async fn execute_append(&self, label: String, content: String) -> Result<RecallOutput> {
+        tracing::info!(
+            "Recall append operation for label '{}' (content: {} chars)",
+            label,
+            content.len()
+        );
+
         // Check if the block exists first
         if !self.handle.memory.contains_block(&label) {
+            tracing::warn!("Append failed: block '{}' not found", label);
             return Ok(RecallOutput {
                 success: false,
                 message: Some(format!("Archival memory '{}' not found", label)),

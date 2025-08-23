@@ -17,6 +17,12 @@ type = "importance_based"
 keep_recent = 30
 keep_important = 20
 
+[model]
+provider = "Anthropic"
+model = "claude-opus-4"
+temperature = 0.8
+
+
 # Shared memory blocks
 [memory.current_human]
 content_path = "../pattern-current-human-block.md"

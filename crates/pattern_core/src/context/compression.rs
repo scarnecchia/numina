@@ -332,7 +332,7 @@ impl MessageCompressor {
     ) -> Result<CompressionResult> {
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 5 / 6)
         } else {
             None
         };
@@ -411,7 +411,7 @@ impl MessageCompressor {
         max_tokens: Option<usize>,
         chunk_size: usize,
         summarization_model: &str,
-        _summarization_prompt: Option<&str>,
+        summarization_prompt: Option<&str>,
     ) -> Result<CompressionResult> {
         if self.model_provider.is_none() {
             return Err(CoreError::ConfigurationError {
@@ -424,7 +424,7 @@ impl MessageCompressor {
 
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 5 / 6)
         } else {
             None
         };
@@ -481,10 +481,11 @@ impl MessageCompressor {
         let mut archived_count = 0;
 
         // Iterate from oldest to newest, archiving until we have enough
-        for batch in batches.into_iter() {
+        for mut batch in batches.into_iter() {
             if archived_count < messages_to_archive {
                 // Unconditionally archive oldest batches until we have enough
                 archived_count += batch.len();
+                batch.finalize();
                 archived_batches.push(batch);
             } else {
                 // Keep remaining batches as active
@@ -496,13 +497,7 @@ impl MessageCompressor {
         active_batches.reverse();
         archived_batches.reverse();
 
-        // Flatten archived batches to messages for summarization
-        let messages_to_summarize: Vec<Message> = archived_batches
-            .iter()
-            .flat_map(|b| b.messages.clone())
-            .collect();
-
-        if messages_to_summarize.is_empty() {
+        if archived_batches.is_empty() {
             // Nothing to summarize
             return Ok(CompressionResult {
                 active_batches,
@@ -519,118 +514,72 @@ impl MessageCompressor {
             });
         }
 
-        // Process messages in batches if needed to stay under token limits
+        // Process batches recursively, including previous summaries in each request
         const MAX_TOKENS_PER_REQUEST: usize = 150_000; // Conservative limit for safety
-        const MESSAGES_PER_BATCH: usize = 100; // Process up to 100 messages at a time
 
-        let mut all_summaries = Vec::new();
+        let mut accumulated_summaries = Vec::new();
+        let mut batch_index = 0;
 
-        // Process messages in manageable chunks
-        for batch_chunk in messages_to_summarize.chunks(MESSAGES_PER_BATCH) {
-            // Estimate tokens for this chunk
-            let chunk_tokens = self.estimate_tokens(batch_chunk);
+        while batch_index < archived_batches.len() {
+            let mut current_batch_group = Vec::new();
+            let mut current_tokens = 0;
 
-            // If even this chunk is too big, need to make it smaller
-            let actual_chunk = if chunk_tokens > MAX_TOKENS_PER_REQUEST {
-                // Take fewer messages to stay under limit
-                let safe_count = (MESSAGES_PER_BATCH * MAX_TOKENS_PER_REQUEST) / chunk_tokens;
-                &batch_chunk[..safe_count.min(batch_chunk.len()).max(1)]
-            } else {
-                batch_chunk
-            };
+            // Calculate tokens for existing summaries + prompt overhead
+            let summaries_tokens = self.estimate_summary_tokens(&accumulated_summaries);
+            let prompt_overhead = 500; // Rough estimate for system prompt + summarization directive
+            let available_tokens =
+                MAX_TOKENS_PER_REQUEST.saturating_sub(summaries_tokens + prompt_overhead);
 
-            // Build the messages for summarization
-            let mut messages_for_summary = Vec::new();
+            // Add batches until we would exceed the token limit
+            while batch_index < archived_batches.len() {
+                let batch = &archived_batches[batch_index];
+                let batch_tokens = self.estimate_tokens_from_batches(&[batch.clone()]);
 
-            // Add existing summary as context if present
-            if let Some(ref existing_summary) = self.existing_archive_summary {
-                messages_for_summary.push(Message::system(format!(
-                    "Previous summary of conversation:\n{}",
-                    existing_summary
-                )));
+                if current_tokens + batch_tokens > available_tokens
+                    && !current_batch_group.is_empty()
+                {
+                    break; // Would exceed limit, process what we have
+                }
+                let mut batch = batch.clone();
+                batch.finalize();
+
+                current_batch_group.push(batch);
+                current_tokens += batch_tokens;
+                batch_index += 1;
             }
 
-            // Add the actual messages to summarize
-            messages_for_summary.extend(actual_chunk.iter().cloned());
+            // Flatten current batch group to messages
+            let group_messages: Vec<Message> = current_batch_group
+                .iter()
+                .flat_map(|b| b.messages.clone())
+                .collect();
 
-            // Add the summarization directive as the final user message
-            messages_for_summary.push(Message::user(
-                "Please summarize all the previous messages, focusing on key information, \
-                 decisions made, and important context. If there was a previous summary provided, \
-                 build upon it with the new information. Maintain the conversational style and \
-                 preserve important details.",
-            ));
-
-            // Generate summary using the model
-            let chunk_summary = if let Some(provider) = &self.model_provider {
-                let request = crate::message::Request {
-                    system: Some(vec![
-                        "You are a helpful assistant that creates concise summaries of conversations."
-                            .to_string(),
-                    ]),
-                    messages: messages_for_summary,
-                    tools: None,
-                };
-
-                // Create options for summarization
-                // Detect provider from model string
-                let provider_name = detect_provider_from_model(summarization_model);
-
-                let model_info = crate::model::ModelInfo {
-                    id: summarization_model.to_string(),
-                    name: summarization_model.to_string(),
-                    provider: provider_name,
-                    capabilities: vec![],
-                    context_window: 128000, // Default to a large context
-                    max_output_tokens: Some(4096),
-                    cost_per_1k_prompt_tokens: None,
-                    cost_per_1k_completion_tokens: None,
-                };
-
-                // Enhance with proper defaults
-                let model_info = crate::model::defaults::enhance_model_info(model_info);
-
-                let mut options = crate::model::ResponseOptions::new(model_info);
-                options.max_tokens = Some(1000);
-                options.temperature = Some(0.5);
-
-                match provider.complete(&options, request).await {
-                    Ok(response) => response.only_text(),
-                    Err(e) => {
-                        tracing::warn!("Failed to generate summary: {}", e);
-                        format!("[Summary generation failed: {}]", e)
-                    }
-                }
+            // Generate summary including all previous summaries
+            if let Some(group_summary) = self
+                .generate_recursive_summary(
+                    &accumulated_summaries,
+                    &group_messages,
+                    summarization_model,
+                    summarization_prompt,
+                )
+                .await
+            {
+                accumulated_summaries.push(group_summary);
             } else {
-                "[No model provider for summarization]".to_string()
-            };
-
-            tracing::debug!(
-                "Chunk summary ({} chars): {:.200}...",
-                chunk_summary.len(),
-                &chunk_summary
-            );
-            all_summaries.push(chunk_summary);
+                tracing::warn!("Failed to generate summary for batch group, skipping");
+            }
         }
 
-        // Combine all summaries
-        let final_summary = if all_summaries.is_empty() {
-            "[No messages to summarize]".to_string()
-        } else if all_summaries.len() == 1 {
-            // Single chunk, use as-is
-            all_summaries.into_iter().next().unwrap()
-        } else {
-            // Multiple chunks, just concatenate with separator
-            tracing::debug!("Combining {} chunk summaries", all_summaries.len());
-            all_summaries.join("\n\n----\n\n")
-        };
+        // The final summary is the last (most comprehensive) summary
+        let final_summary = accumulated_summaries.into_iter().last();
 
         // No need to validate tool ordering - batches maintain integrity
         let archived_count: usize = archived_batches.iter().map(|b| b.len()).sum();
+        let estimated_tokens_saved = self.estimate_tokens_from_batches(&archived_batches);
 
         Ok(CompressionResult {
             active_batches,
-            summary: Some(final_summary),
+            summary: final_summary,
             archived_batches,
             metadata: CompressionMetadata {
                 strategy_used: "recursive_summarization".to_string(),
@@ -638,7 +587,7 @@ impl MessageCompressor {
                 compressed_count: archived_count,
                 archived_count,
                 compression_time: Utc::now(),
-                estimated_tokens_saved: self.estimate_tokens(&messages_to_summarize),
+                estimated_tokens_saved,
             },
         })
     }
@@ -1088,6 +1037,100 @@ impl MessageCompressor {
         }
 
         scores
+    }
+
+    /// Estimate tokens for accumulated summaries
+    fn estimate_summary_tokens(&self, summaries: &[String]) -> usize {
+        summaries.iter().map(|s| s.len() / 4).sum() // Rough estimate: 4 chars per token
+    }
+
+    /// Generate summary including previous summaries for recursive approach
+    async fn generate_recursive_summary(
+        &self,
+        previous_summaries: &[String],
+        new_messages: &[Message],
+        summarization_model: &str,
+        summarization_prompt: Option<&str>,
+    ) -> Option<String> {
+        if let Some(provider) = &self.model_provider {
+            let mut messages_for_summary = Vec::new();
+
+            // Add system prompt
+            messages_for_summary.push(Message::system(
+                "You are a helpful assistant that creates concise summaries of conversations.",
+            ));
+
+            // Add previous summaries as context if present
+            if !previous_summaries.is_empty() {
+                let combined_previous = previous_summaries.join("\n\n---Previous Summary---\n\n");
+                messages_for_summary.push(Message::system(format!(
+                    "Previous summary of conversation:\n{}",
+                    combined_previous
+                )));
+            }
+
+            // Add the actual messages to summarize
+            messages_for_summary.extend(new_messages.iter().cloned());
+
+            // Add the summarization directive
+            messages_for_summary.push(Message::user(
+                "Please summarize all the previous messages, focusing on key information, \
+                 decisions made, and important context. If there was a previous summary provided, \
+                 build upon it with the new information. Maintain the conversational style and \
+                 preserve important details.",
+            ));
+
+            let system_prompt = if let Some(custom_prompt) = summarization_prompt {
+                vec![custom_prompt.to_string()]
+            } else {
+                vec![
+                    "You are a helpful assistant that creates concise summaries of conversations."
+                        .to_string(),
+                ]
+            };
+
+            let request = crate::message::Request {
+                system: Some(system_prompt),
+                messages: messages_for_summary,
+                tools: None,
+            };
+
+            // Detect provider and create options
+            let provider_name = detect_provider_from_model(summarization_model);
+            let model_info = crate::model::ModelInfo {
+                id: summarization_model.to_string(),
+                name: summarization_model.to_string(),
+                provider: provider_name,
+                capabilities: vec![],
+                context_window: 128000,
+                max_output_tokens: Some(4096),
+                cost_per_1k_prompt_tokens: None,
+                cost_per_1k_completion_tokens: None,
+            };
+
+            let model_info = crate::model::defaults::enhance_model_info(model_info);
+            let mut options = crate::model::ResponseOptions::new(model_info);
+            options.max_tokens = Some(1000);
+            options.temperature = Some(0.5);
+
+            match provider.complete(&options, request).await {
+                Ok(response) => {
+                    let summary = response.only_text();
+                    tracing::debug!(
+                        "Generated summary ({} chars): {:.200}...",
+                        summary.len(),
+                        &summary
+                    );
+                    Some(summary)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to generate summary: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
 }
 

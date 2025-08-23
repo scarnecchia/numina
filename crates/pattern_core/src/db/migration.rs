@@ -1303,18 +1303,8 @@ impl MigrationRunner {
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
         let message_search_index =
-            "DEFINE FIELD IF NOT EXISTS conversation_history
-                  ON TABLE agent
-                  VALUE <future> {
-                      (SELECT VALUE ->agent_messages->msg.*
-                       FROM ONLY $this)
-                  };
-            DEFINE INDEX IF NOT EXISTS msg_content_search ON msg FIELDS content SEARCH ANALYZER msg_content_analyzer BM25;
-            DEFINE INDEX IF NOT EXISTS idx_agent_conversation_search
-              ON TABLE agent
-              COLUMNS conversation_history.*.content
-              SEARCH ANALYZER msg_content_analyzer
-              BM25;
+            "
+            DEFINE INDEX IF NOT EXISTS msg_content_search ON msg FIELDS content SEARCH ANALYZER msg_content_analyzer BM25 HIGHLIGHTS CONCURRENTLY;
             ".to_string();
         db.query(&message_search_index)
             .await
@@ -1330,18 +1320,9 @@ impl MigrationRunner {
             .map_err(|e| DatabaseError::QueryFailed(e))?;
 
         let memory_search_index =
-            "DEFINE FIELD IF NOT EXISTS archival_memories
-                  ON TABLE agent
-                  VALUE <future> {
-                      (SELECT VALUE ->agent_memories->(mem WHERE memory_type = 'archival')
-                       FROM ONLY $this FETCH mem)
-                  };
-            DEFINE INDEX IF NOT EXISTS mem_value_search ON mem FIELDS value SEARCH ANALYZER mem_value_analyzer BM25;
-            DEFINE INDEX IF NOT EXISTS idx_agent_archival_search
-              ON TABLE agent
-              FIELDS archival_memories.*.value
-              SEARCH ANALYZER mem_value_analyzer
-              BM25;".to_string();
+            "DEFINE INDEX IF NOT EXISTS mem_value_search ON mem FIELDS value SEARCH ANALYZER mem_value_analyzer BM25 HIGHLIGHTS CONCURRENTLY;
+            DEFINE INDEX IF NOT EXISTS mem_desc_search ON mem FIELDS description SEARCH ANALYZER mem_value_analyzer BM25 HIGHLIGHTS CONCURRENTLY;
+            DEFINE INDEX IF NOT EXISTS mem_label_search ON mem FIELDS label SEARCH ANALYZER mem_value_analyzer BM25 HIGHLIGHTS CONCURRENTLY;".to_string();
         db.query(&memory_search_index)
             .await
             .map_err(|e| DatabaseError::QueryFailed(e))?;

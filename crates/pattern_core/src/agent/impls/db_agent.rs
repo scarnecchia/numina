@@ -121,7 +121,7 @@ where
     async fn complete_with_retry(
         model: &M,
         options: &ResponseOptions,
-        request: Request,
+        mut request: Request,
         max_retries: u32,
     ) -> Result<Response> {
         let mut retries = 0;
@@ -130,42 +130,18 @@ where
         loop {
             match model.complete(options, request.clone()).await {
                 Ok(response) => {
-                    // // Check for Gemini empty response bug (no content but has usage)
-                    // if response.content.is_empty() && response.usage.total_tokens > 0 {
-                    //     if retries < max_retries {
-                    //         retries += 1;
-                    //         tracing::warn!(
-                    //             "Gemini empty response bug detected (attempt {}/{}), retrying with modified prompt",
-                    //             retries,
-                    //             max_retries
-                    //         );
-
-                    //         // Modify the last user message slightly to work around the bug
-                    //         if let Some(last_msg) = request.messages.iter_mut().rev()
-                    //             .find(|m| m.role == crate::message::ChatRole::User)
-                    //         {
-                    //             // Append a space or punctuation to slightly change the prompt
-                    //             if let MessageContent::Text(ref mut text) = last_msg.content {
-                    //                 // Rotate through different modifications
-                    //                 let suffix = match retries % 3 {
-                    //                     0 => ".",
-                    //                     1 => " ",
-                    //                     _ => "!",
-                    //                 };
-                    //                 text.push_str(suffix);
-                    //                 tracing::debug!("Modified prompt with suffix: {:?}", suffix);
-                    //             }
-                    //         }
-
-                    //         // Small delay before retry
-                    //         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-                    //         continue;
-                    //     }
-                    // }
-
                     return Ok(response);
                 }
                 Err(e) => {
+                    // Check if this is the Gemini empty candidates error
+                    let is_gemini_empty_candidates = match &e {
+                        CoreError::ModelProviderError { cause, .. } => {
+                            let error_str = format!("{:?}", cause);
+                            error_str.contains("PropertyNotFound(\"/candidates/0/content/parts\")")
+                        }
+                        _ => false,
+                    };
+
                     // Check if this is a rate limit error (529)
                     let is_rate_limit = match &e {
                         CoreError::ModelProviderError { cause, .. } => {
@@ -177,6 +153,44 @@ where
                         }
                         _ => false,
                     };
+
+                    // Handle Gemini empty candidates error with prompt modification
+                    if is_gemini_empty_candidates && retries < max_retries {
+                        retries += 1;
+                        tracing::warn!(
+                            "Gemini empty candidates error (attempt {}/{}), retrying with modified prompt",
+                            retries,
+                            max_retries
+                        );
+
+                        // Modify the last user message slightly to work around the bug
+                        let mut modified_request = request.clone();
+                        if let Some(last_msg) = modified_request
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| m.role == crate::message::ChatRole::User)
+                        {
+                            // Append a space or punctuation to slightly change the prompt
+                            if let MessageContent::Text(ref mut text) = last_msg.content {
+                                // Rotate through different modifications
+                                let suffix = match retries % 3 {
+                                    0 => ".",
+                                    1 => " ",
+                                    _ => "!",
+                                };
+                                text.push_str(suffix);
+                                tracing::debug!("Modified prompt with suffix: {:?}", suffix);
+                            }
+                        }
+
+                        // Small delay before retry
+                        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+                        // Update request for next iteration
+                        request = modified_request;
+                        continue;
+                    }
 
                     if is_rate_limit && retries < max_retries {
                         retries += 1;
@@ -1428,6 +1442,11 @@ where
         let context = self.context.read().await;
         let memory = &context.handle.memory;
 
+        tracing::info!(
+            "persist_memory_changes called for agent {}",
+            context.handle.agent_id
+        );
+
         // Update constellation activity memory block if we have a tracker
         if let Some(tracker) = &context.constellation_tracker {
             let updated_content = tracker.format_as_memory_content().await;
@@ -1451,11 +1470,40 @@ where
         let new_blocks = memory.get_new_blocks();
         let dirty_blocks = memory.get_dirty_blocks();
 
-        tracing::debug!(
-            "Persisting memory changes: {} new blocks, {} dirty blocks",
+        tracing::info!(
+            "Persisting memory changes for {}: {} new blocks, {} dirty blocks",
+            context.handle.agent_id,
             new_blocks.len(),
             dirty_blocks.len()
         );
+
+        // Log the actual block labels we're about to persist
+        for block_id in &new_blocks {
+            if let Some(block) = memory
+                .get_all_blocks()
+                .into_iter()
+                .find(|b| &b.id == block_id)
+            {
+                tracing::info!(
+                    "  NEW block to persist: {} (type: {:?})",
+                    block.label,
+                    block.memory_type
+                );
+            }
+        }
+        for block_id in &dirty_blocks {
+            if let Some(block) = memory
+                .get_all_blocks()
+                .into_iter()
+                .find(|b| &b.id == block_id)
+            {
+                tracing::info!(
+                    "  DIRTY block to persist: {} (type: {:?})",
+                    block.label,
+                    block.memory_type
+                );
+            }
+        }
 
         // Handle new blocks - need to create and attach to agent
         for block_id in &new_blocks {
@@ -1466,44 +1514,25 @@ where
             {
                 tracing::debug!("Creating new memory block {} in database", block.label);
 
-                // Use upsert for new blocks too
-                let record_id = block.id.to_record_id();
-                let db_model = block.to_db_model();
-
-                let stored: Vec<<MemoryBlock as DbEntity>::DbModel> = self
-                    .db
-                    .upsert(record_id)
-                    .content(db_model)
-                    .await
-                    .map_err(|e| crate::CoreError::DatabaseQueryFailed {
-                        query: "UPSERT new memory block".to_string(),
-                        table: "mem".to_string(),
-                        cause: e,
-                    })?;
-
-                let stored = stored
-                    .into_iter()
-                    .next()
-                    .and_then(|db| MemoryBlock::from_db_model(db).ok())
-                    .unwrap_or(block.clone());
-
-                // Attach to agent
-                match ops::attach_memory_to_agent(
+                // Use persist_agent_memory which handles store_with_relations + retry logic
+                match ops::persist_agent_memory(
                     &self.db,
-                    &context.handle.agent_id.clone(),
-                    &stored.id,
+                    context.handle.agent_id.clone(),
+                    &block,
                     block.permission,
                 )
                 .await
                 {
                     Ok(_) => {
-                        tracing::debug!("Attached memory block {} to agent", stored.label);
+                        tracing::info!(
+                            "Successfully persisted memory block {} to database",
+                            block.label
+                        );
                     }
                     Err(e) => {
-                        // This shouldn't happen for new blocks
-                        tracing::warn!(
-                            "Failed to attach new memory block {} to agent: {:?}",
-                            stored.label,
+                        tracing::error!(
+                            "Failed to persist new memory block {} to database: {:?}",
+                            block.label,
                             e
                         );
                         return Err(e.into());
@@ -1546,6 +1575,10 @@ where
         }
 
         // Clear the tracking sets after successful persistence
+        tracing::info!(
+            "Clearing tracking sets for {} after successful persistence",
+            context.handle.agent_id
+        );
         memory.clear_new_blocks();
         memory.clear_dirty_blocks();
 

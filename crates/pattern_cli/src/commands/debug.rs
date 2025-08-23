@@ -456,9 +456,13 @@ pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize)
                     );
                     output.status("Content preview:");
 
-                    // Show first 200 chars of content
+                    // Show first 200 chars of content (respecting unicode boundaries)
                     let preview = if block.value.len() > 200 {
-                        format!("{}...", &block.value[..200])
+                        let mut end = 200;
+                        while !block.value.is_char_boundary(end) && end > 0 {
+                            end -= 1;
+                        }
+                        format!("{}...", &block.value[..end])
                     } else {
                         block.value.clone()
                     };
@@ -594,9 +598,13 @@ pub async fn search_group_archival_memory(
                     );
                     output.status("Content preview:");
 
-                    // Show first 200 chars of content
+                    // Show first 200 chars of content (respecting unicode boundaries)
                     let preview = if block.value.len() > 200 {
-                        format!("{}...", &block.value[..200])
+                        let mut end = 200;
+                        while !block.value.is_char_boundary(end) && end > 0 {
+                            end -= 1;
+                        }
+                        format!("{}...", &block.value[..end])
                     } else {
                         block.value.clone()
                     };
@@ -882,12 +890,9 @@ pub async fn list_all_memory(agent_name: &str) -> Result<()> {
 
         // Query for all memory blocks this agent has access to
         let mem_query = r#"
-            SELECT * FROM mem
-            WHERE id IN (
-                SELECT out FROM agent_memories
-                WHERE in = $agent_id
-            )
-            ORDER BY memory_type, created_at DESC
+            SELECT out FROM agent_memories
+                WHERE in = $agent_id AND OUT IS NOT NULL
+            FETCH out
         "#;
 
         let mut mem_response = DB
@@ -896,7 +901,7 @@ pub async fn list_all_memory(agent_name: &str) -> Result<()> {
             .await
             .into_diagnostic()?;
 
-        let memories: Vec<MemoryBlock> = mem_response.take(0).into_diagnostic()?;
+        let memories: Vec<MemoryBlock> = mem_response.take("out").into_diagnostic()?;
 
         // Group by memory type
         let mut core_memories = Vec::new();
@@ -1117,7 +1122,7 @@ pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>)
     if let Some(agent_record) = agents.first() {
         // Query for the specific memory block for this agent
         let query_sql = r#"
-            SELECT * FROM agent_memories
+            SELECT out FROM agent_memories
             WHERE in = $agent_id
             AND out.*.label = $label
             FETCH out
@@ -1125,13 +1130,13 @@ pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>)
 
         let mut response = DB
             .query(query_sql)
-            .bind(("agent_id", agent_record.id.clone()))
+            .bind(("agent_id", RecordId::from(&agent_record.id)))
             .bind(("label", label.to_string()))
             .await
             .into_diagnostic()?;
 
         let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
-            response.take(0).into_diagnostic()?;
+            response.take("out").into_diagnostic()?;
         let memories: Vec<MemoryBlock> = memory_models
             .into_iter()
             .filter_map(|m| MemoryBlock::from_db_model(m).ok())

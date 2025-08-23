@@ -136,7 +136,7 @@ pub async fn init_db_with_options(config: DatabaseConfig, force_schema_update: b
                         })?;
                     }
                 }
-                format!("surrealkv+versioned://{}", path)
+                format!("surrealkv://{}", path)
             };
             // Connect to the embedded database
             tracing::info!("Connecting to global DB at: {}", path);
