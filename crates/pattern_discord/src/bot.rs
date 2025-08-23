@@ -413,7 +413,29 @@ impl EventHandler for DiscordBot {
                 );
 
                 if msg.author.id == current_user.id {
-                    info!("Reaction is on bot's message - processing");
+                    // Check if we should process reactions from this channel
+                    let should_process = if self.cli_mode {
+                        if let Some(default_chan) = self.default_channel {
+                            // Only process reactions in the configured channel or DMs
+                            reaction.channel_id == default_chan || msg.guild_id.is_none()
+                        } else {
+                            // No default channel configured, only process DMs
+                            msg.guild_id.is_none()
+                        }
+                    } else {
+                        // In non-CLI mode, only process DMs
+                        msg.guild_id.is_none()
+                    };
+
+                    if !should_process {
+                        info!(
+                            "Ignoring reaction from channel {} (not in allowed channels)",
+                            reaction.channel_id
+                        );
+                        return;
+                    }
+
+                    info!("Reaction is on bot's message in allowed channel - processing");
                     // Someone reacted to our bot's message
                     // Get the user who reacted
                     if let Some(user_id) = reaction.user_id {
@@ -1189,7 +1211,7 @@ impl DiscordBot {
                 let mut last_activity = tokio::time::Instant::now();
 
                 // Track state
-                let mut current_message = String::new();
+                let current_message = String::new();
                 let mut has_sent_initial_response = false;
                 let mut active_agents: usize = 0;
                 let mut completed_agents = 0;

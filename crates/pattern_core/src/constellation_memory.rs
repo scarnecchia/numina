@@ -136,7 +136,7 @@ impl ConstellationActivityTracker {
         for event in events_by_time.iter().rev().take(50) {
             content.push_str(&format!(
                 "[{}] **{}**: {}\n",
-                event.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                event.timestamp.naive_local().format("%Y-%m-%d %H:%M:%S"),
                 event.agent_name,
                 event.description
             ));

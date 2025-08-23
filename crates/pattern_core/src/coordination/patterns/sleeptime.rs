@@ -106,7 +106,8 @@ impl GroupManager for SleeptimeManager {
             // Check if it's time to run checks
             let time_since_last_check = Utc::now() - last_check;
             let should_check = time_since_last_check
-                > ChronoDuration::from_std(*check_interval).unwrap_or(ChronoDuration::minutes(20));
+                >= ChronoDuration::from_std(*check_interval - Duration::from_secs(40))
+                    .unwrap_or(ChronoDuration::minutes(10));
 
             // Send start event
             let active_count = agents.iter().filter(|awm| awm.membership.is_active).count();
@@ -392,32 +393,34 @@ impl GroupManager for SleeptimeManager {
 impl SleeptimeManager {
     /// Get agent-specific context sync prompt
     fn get_agent_specific_context_sync(agent_name: &str) -> String {
+        let now = chrono::Local::now();
+
         let prompt = match agent_name {
             "Pattern" => {
-                "Context sync check:\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis. Self-check for reflexive validation in past interactions and correct if required.\n\nProvide brief status updates only if intervention is needed."
+                "\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis. Self-check for reflexive validation in past interactions and correct if required.\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Entropy" => {
-                "Context sync check:\n\nAnalyze task complexity in recent interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates only if intervention is needed."
+                "\n\nAnalyze task complexity in recent constellation and partner interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Flux" => {
-                "Context sync check:\n\nCheck temporal patterns and time blindness indicators. Any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates only if intervention is needed."
+                "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Archive" => {
-                "Context sync check:\n\nReview memory coherence and pattern recognition. Any important context that needs preservation? Patterns across conversations that should be noted?\n\nProvide brief status updates only if intervention is needed."
+                "\n\nReview memory coherence and pattern recognition. Any important context that needs preservation? Patterns across conversations that should be noted?\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Momentum" => {
-                "Context sync check:\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition?\n\nProvide brief status updates only if intervention is needed."
+                "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Anchor" => {
-                "Context sync check:\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?  Self-check for reflexive validation in past interactions and correct constellation members if required.\n\nProvide brief status updates or message partner if intervention is needed."
+                "\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?  Self-check for reflexive validation in past interactions and correct constellation members or your partner if required.\n\nProvide brief status updates, or message the facet or partner if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             _ => {
                 // Generic prompt for unknown agents
-                "Context sync check:\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed."
+                "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
         };
 
-        format!("[Periodic Context Sync]\n\n{}", prompt)
+        format!("[Periodic Context Sync] {}{}", now, prompt)
     }
 
     /// Find the agent that was least recently active

@@ -1328,26 +1328,73 @@ impl DataSource for BlueskyFirehoseSource {
                     }
                 };
 
-                // Collect users from thread context
-                // Add parent post author if available
+                // Check for excluded users and keywords in thread context - bail if any are found
+                // Check parent post author and content
                 if let Some(parent) = &thread_context.parent {
+                    if self
+                        .filter
+                        .exclude_dids
+                        .contains(&parent.author.did.as_str().to_string())
+                    {
+                        tracing::debug!(
+                            "Skipping thread - excluded user in parent: {}",
+                            parent.author.did.as_str()
+                        );
+                        return None;
+                    }
+
+                    // Check for excluded keywords in parent content
+                    if let Some((text, _, _, _)) = extract_post_data(parent) {
+                        let text_lower = text.to_lowercase();
+                        for keyword in &self.filter.exclude_keywords {
+                            if text_lower.contains(&keyword.to_lowercase()) {
+                                tracing::debug!(
+                                    "Skipping thread - excluded keyword '{}' found in parent",
+                                    keyword
+                                );
+                                return None;
+                            }
+                        }
+                    }
                     thread_users.push((
                         parent.author.handle.as_str().to_string(),
                         parent.author.did.as_str().to_string(),
                     ));
                 }
 
-                // Add sibling post authors
+                // Check sibling post authors
                 for sibling in &thread_context.siblings {
+                    if self
+                        .filter
+                        .exclude_dids
+                        .contains(&sibling.author.did.as_str().to_string())
+                    {
+                        tracing::debug!(
+                            "Skipping thread - excluded user in siblings: {}",
+                            sibling.author.did.as_str()
+                        );
+                        return None;
+                    }
                     thread_users.push((
                         sibling.author.handle.as_str().to_string(),
                         sibling.author.did.as_str().to_string(),
                     ));
                 }
 
-                // Add authors from replies
+                // Check authors from replies
                 for replies in thread_context.replies_map.values() {
                     for reply in replies {
+                        if self
+                            .filter
+                            .exclude_dids
+                            .contains(&reply.author.did.as_str().to_string())
+                        {
+                            tracing::debug!(
+                                "Skipping thread - excluded user in replies: {}",
+                                reply.author.did.as_str()
+                            );
+                            return None;
+                        }
                         thread_users.push((
                             reply.author.handle.as_str().to_string(),
                             reply.author.did.as_str().to_string(),
@@ -1975,6 +2022,8 @@ impl DataSource for BlueskyFirehoseSource {
             for (handle, did) in thread_users {
                 users_to_check.push((handle, did));
             }
+
+            users_to_check.dedup();
 
             // Process each user
             for (handle, did) in users_to_check {

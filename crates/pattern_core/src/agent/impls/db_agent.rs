@@ -129,7 +129,42 @@ where
 
         loop {
             match model.complete(options, request.clone()).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    // // Check for Gemini empty response bug (no content but has usage)
+                    // if response.content.is_empty() && response.usage.total_tokens > 0 {
+                    //     if retries < max_retries {
+                    //         retries += 1;
+                    //         tracing::warn!(
+                    //             "Gemini empty response bug detected (attempt {}/{}), retrying with modified prompt",
+                    //             retries,
+                    //             max_retries
+                    //         );
+
+                    //         // Modify the last user message slightly to work around the bug
+                    //         if let Some(last_msg) = request.messages.iter_mut().rev()
+                    //             .find(|m| m.role == crate::message::ChatRole::User)
+                    //         {
+                    //             // Append a space or punctuation to slightly change the prompt
+                    //             if let MessageContent::Text(ref mut text) = last_msg.content {
+                    //                 // Rotate through different modifications
+                    //                 let suffix = match retries % 3 {
+                    //                     0 => ".",
+                    //                     1 => " ",
+                    //                     _ => "!",
+                    //                 };
+                    //                 text.push_str(suffix);
+                    //                 tracing::debug!("Modified prompt with suffix: {:?}", suffix);
+                    //             }
+                    //         }
+
+                    //         // Small delay before retry
+                    //         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                    //         continue;
+                    //     }
+                    // }
+
+                    return Ok(response);
+                }
                 Err(e) => {
                     // Check if this is a rate limit error (529)
                     let is_rate_limit = match &e {
@@ -137,6 +172,7 @@ where
                             let error_str = format!("{:?}", cause);
                             error_str.contains("529")
                                 || error_str.contains("rate limit")
+                                || error_str.contains("Please retry")
                                 || error_str.contains("ResponseFailedStatus { status: 529")
                         }
                         _ => false,
@@ -2256,6 +2292,40 @@ where
                                                             ConstellationEventType,
                                                         };
 
+                                                        // Truncate to approximately 1000 chars total (500 from start, 500 from end)
+                                                        let truncated = if response.content.len()
+                                                            > 1000
+                                                        {
+                                                            // Find safe char boundaries
+                                                            let start_boundary = response
+                                                                .content
+                                                                .char_indices()
+                                                                .take_while(|(i, _)| *i <= 500)
+                                                                .last()
+                                                                .map(|(i, c)| i + c.len_utf8())
+                                                                .unwrap_or(0);
+
+                                                            let end_start = response
+                                                                .content
+                                                                .len()
+                                                                .saturating_sub(500);
+                                                            let end_boundary = response
+                                                                .content
+                                                                .char_indices()
+                                                                .skip_while(|(i, _)| *i < end_start)
+                                                                .next()
+                                                                .map(|(i, _)| i)
+                                                                .unwrap_or(response.content.len());
+
+                                                            let start =
+                                                                &response.content[..start_boundary];
+                                                            let end =
+                                                                &response.content[end_boundary..];
+                                                            format!("{}\n...\n{}", start, end)
+                                                        } else {
+                                                            response.content.clone()
+                                                        };
+
                                                         let event = ConstellationEvent {
                                                             timestamp: chrono::Utc::now(),
                                                             agent_id: agent_id.clone(),
@@ -2263,7 +2333,7 @@ where
                                                             event_type: ConstellationEventType::ToolExecuted {
                                                                 tool_name: call.fn_name.clone(),
                                                                 action: if response.content.starts_with("Error:") {
-                                                                    format!("Failed: {}", response.content)
+                                                                    format!("Failed: {}", truncated)
                                                                 } else {
                                                                     format!("Success")
                                                                 },

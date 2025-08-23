@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::search_utils::{extract_snippet, process_search_results};
+use super::search_utils::extract_snippet;
 use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
 
 /// Default search domain for constellation search

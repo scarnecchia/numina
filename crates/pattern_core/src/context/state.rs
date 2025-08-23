@@ -479,17 +479,21 @@ impl AgentHandle {
 
     /// Get an archival memory by exact label from the database
     pub async fn get_archival_memory_by_label(&self, label: &str) -> Result<Option<MemoryBlock>> {
-        let db = self.db.as_ref().ok_or_else(|| {
-            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
-                surrealdb::error::Api::InvalidParams(
-                    "No database connection available for archival get".into(),
-                ),
-            ))
-        })?;
+        if let Some(mem) = self.memory.get_block(label).map(|b| b.clone()) {
+            Ok(Some(mem))
+        } else {
+            let db = self.db.as_ref().ok_or_else(|| {
+                crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
+                    surrealdb::error::Api::InvalidParams(
+                        "No database connection available for archival get".into(),
+                    ),
+                ))
+            })?;
 
-        crate::db::ops::get_memory_by_label(db, self.agent_id.clone(), label)
-            .await
-            .map_err(|e| e.into())
+            crate::db::ops::get_memory_by_label(db, self.agent_id.clone(), label)
+                .await
+                .map_err(|e| e.into())
+        }
     }
 
     /// Delete an archival memory from the database
