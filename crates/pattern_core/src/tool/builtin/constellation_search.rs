@@ -528,6 +528,7 @@ mod tests {
     use crate::{
         UserId,
         memory::{Memory, MemoryType},
+        tool::builtin::{SearchDomain, SearchInput, SearchTool},
     };
 
     #[tokio::test]
@@ -561,6 +562,7 @@ mod tests {
                 role: None,
                 start_time: None,
                 end_time: None,
+                fuzzy: false,
                 request_heartbeat: false,
             })
             .await

@@ -981,11 +981,6 @@ impl MessageCompressor {
         ))
     }
 
-    /// Estimate tokens saved by archiving messages
-    fn estimate_tokens(&self, messages: &[Message]) -> usize {
-        messages.iter().map(|m| m.estimate_tokens()).sum()
-    }
-
     /// Estimate tokens for batches
     fn estimate_tokens_from_batches(&self, batches: &[crate::message::MessageBatch]) -> usize {
         batches
@@ -1160,6 +1155,8 @@ mod tests {
         let mut batches = Vec::new();
         let mut i = 0;
         while i < messages.len() {
+            // Add small delay to prevent snowflake exhaustion in tests
+            std::thread::sleep(std::time::Duration::from_millis(1));
             let batch_id = crate::agent::get_next_message_position_sync();
             let mut batch_messages = vec![messages[i].clone()];
             i += 1;
@@ -1181,7 +1178,9 @@ mod tests {
         let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
         let archived_message_count: usize = result.archived_batches.iter().map(|b| b.len()).sum();
 
-        assert_eq!(active_message_count, 5);
+        // With batch structure, we keep recent batches (each with 2 messages)
+        // So we expect 6 messages (3 batches * 2 messages each)
+        assert_eq!(active_message_count, 6);
         // We should have archived some messages
         assert!(archived_message_count > 0);
     }
@@ -1196,6 +1195,8 @@ mod tests {
         for i in 0..6 {
             messages.push(Message::user(format!("Question {}", i)));
             messages.push(Message::agent(format!("Answer {}", i)));
+            // Small delay to prevent snowflake exhaustion
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         // Add tool call sequence
@@ -1215,6 +1216,7 @@ mod tests {
             content: MessageContent::ToolResponses(vec![crate::message::ToolResponse {
                 call_id: "456".to_string(),
                 content: "Search results".to_string(),
+                is_error: Some(false),
             }]),
             ..Message::default()
         });
@@ -1271,6 +1273,8 @@ mod tests {
             keep_important: 1,
         });
 
+        // Small delay to prevent snowflake exhaustion
+        std::thread::sleep(std::time::Duration::from_millis(1));
         let msg = Message::user("This is very important: remember my name is Alice");
         let score = compressor.score_message_heuristic(&msg, 0, 10);
 
@@ -1437,6 +1441,8 @@ mod tests {
         })
         .with_scoring_config(config);
 
+        // Small delay to prevent snowflake exhaustion
+        std::thread::sleep(std::time::Duration::from_millis(1));
         let msg = Message::user("What's the deadline for this project?");
         let score = compressor.score_message_heuristic(&msg, 0, 1);
 
@@ -1473,6 +1479,9 @@ mod tests {
             keep_recent: 2,
             keep_important: 2,
         });
+
+        // Small delay to prevent snowflake exhaustion
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
 
         let messages = vec![
             Message::system("You are a helpful assistant"), // High importance
@@ -1537,6 +1546,7 @@ mod tests {
         let compressor = MessageCompressor::new(CompressionStrategy::RecursiveSummarization {
             chunk_size: 5,
             summarization_model: "gpt-3.5-turbo".to_string(),
+            summarization_prompt: None,
         });
 
         let messages = vec![
@@ -1580,6 +1590,8 @@ mod tests {
         ];
 
         // Create batches from messages
+        // Small delay to prevent snowflake exhaustion
+        std::thread::sleep(std::time::Duration::from_millis(1));
         let batch_id = crate::agent::get_next_message_position_sync();
         let batch = crate::message::MessageBatch::from_messages(
             batch_id,
@@ -1592,6 +1604,7 @@ mod tests {
 
         // Count active messages
         let active_message_count: usize = result.active_batches.iter().map(|b| b.len()).sum();
-        assert_eq!(active_message_count, 2);
+        // Importance-based keeps the full batch together when important messages are present
+        assert_eq!(active_message_count, 3);
     }
 }

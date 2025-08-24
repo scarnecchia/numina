@@ -19,7 +19,7 @@ pub enum CoreMemoryOperationType {
     Append,
     Replace,
     Archive,
-    LoadFromArchival,
+    Load,
     Swap,
 }
 
@@ -49,7 +49,7 @@ pub struct ContextInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_content: Option<String>,
 
-    /// For archive/load_from_archival/swap: label of the recall memory
+    /// For archive/load/swap: label of the recall memory
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archival_label: Option<String>,
@@ -96,11 +96,11 @@ impl AiTool for ContextTool {
     }
 
     fn description(&self) -> &str {
-        "Manage context sections (persona, human, etc). Context is always visible and shapes agent behavior. No need to read - it's already in your messages. Operations: append, replace, archive, load_from_archival, swap.
+        "Manage context sections (persona, human, etc). Context is always visible and shapes agent behavior. No need to read - it's already in your messages. Operations: append, replace, archive, load, swap.
  - 'append' adds a new chunk of text to the block. avoid duplicate append operations.
  - 'replace' replaces a section of text (old_content is matched and replaced with new content) within a block. this can be used to delete sections.
  - 'archive' swaps an entire block to recall memory (only works on 'working' memory, not 'core', requires permissions)
- - 'load_from_archival' is the reverse, pulling a block from recall memory into working memory for editing/reading
+ - 'load' pulls a block from recall memory into working memory (destination name optional - defaults to same label)
  - 'swap' replaces a working memory with the requested recall memory, by label"
     }
 
@@ -151,20 +151,16 @@ impl AiTool for ContextTool {
                 })?;
                 self.execute_archive(name, params.archival_label).await
             }
-            CoreMemoryOperationType::LoadFromArchival => {
+            CoreMemoryOperationType::Load => {
                 let archival_label = params.archival_label.ok_or_else(|| {
                     crate::CoreError::tool_execution_error(
                         "context",
-                        "load_from_archival operation requires 'archival_label' field",
+                        "load operation requires 'archival_label' field",
                     )
                 })?;
-                let name = params.name.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
-                        "context",
-                        "load_from_archival operation requires 'name' field for destination",
-                    )
-                })?;
-                self.execute_load_from_archival(archival_label, name).await
+                // Name is optional - defaults to archival_label
+                let name = params.name;
+                self.execute_load(archival_label, name).await
             }
             CoreMemoryOperationType::Swap => {
                 let archive_name = params.archive_name.ok_or_else(|| {
@@ -523,12 +519,31 @@ impl ContextTool {
         })
     }
 
-    async fn execute_load_from_archival(
+    async fn execute_load(
         &self,
         archival_label: String,
-        name: String,
+        name: Option<String>,
     ) -> Result<ContextOutput> {
-        // Check if recall memory exists
+        // Use archival_label as destination if name not provided
+        let destination_name = name.unwrap_or_else(|| archival_label.clone());
+
+        // First check if it's already in memory and just needs type change
+        if let Some(mut existing_block) = self.handle.memory.get_block_mut(&archival_label) {
+            if existing_block.memory_type == MemoryType::Archival {
+                // Just change the type to Working
+                existing_block.memory_type = MemoryType::Working;
+                return Ok(ContextOutput {
+                    success: true,
+                    message: Some(format!(
+                        "Changed recall memory '{}' to working memory",
+                        archival_label
+                    )),
+                    content: json!({}),
+                });
+            }
+        }
+
+        // If not in memory, check if it exists as archival
         let archival_block = match self.handle.memory.get_block(&archival_label) {
             Some(block) => {
                 if block.memory_type != MemoryType::Archival {
@@ -557,40 +572,51 @@ impl ContextTool {
             }
         };
 
-        // Check if context slot already exists
-        if self.handle.memory.contains_block(&name) {
+        // Check if destination slot already exists (only if different from source)
+        if destination_name != archival_label
+            && self.handle.memory.contains_block(&destination_name)
+        {
             return Ok(ContextOutput {
                 success: false,
                 message: Some(format!(
-                    "Core memory '{}' already exists. Use swap operation instead.",
-                    name
+                    "Working memory '{}' already exists. Use swap operation instead.",
+                    destination_name
                 )),
                 content: json!({}),
             });
         }
 
-        // Create the context block
+        // Create the context block at destination
         self.handle
             .memory
-            .create_block(&name, &archival_block.value)?;
+            .create_block(&destination_name, &archival_block.value)?;
 
-        // Update it to be core type
-        if let Some(mut core_block) = self.handle.memory.get_block_mut(&name) {
-            core_block.memory_type = MemoryType::Working;
-            core_block.permission = MemoryPermission::ReadWrite;
-            core_block.description =
+        // Update it to be working type
+        if let Some(mut working_block) = self.handle.memory.get_block_mut(&destination_name) {
+            working_block.memory_type = MemoryType::Working;
+            working_block.permission = MemoryPermission::ReadWrite;
+            working_block.description =
                 Some(format!("Loaded from recall memory '{}'", archival_label));
         }
 
-        // Remove the recall memory block
-        self.handle.memory.remove_block(&archival_label);
+        // Remove the original archival block only if we created a new one with different name
+        if destination_name != archival_label {
+            self.handle.memory.remove_block(&archival_label);
+        }
 
         Ok(ContextOutput {
             success: true,
-            message: Some(format!(
-                "Loaded recall memory '{}' into context '{}'",
-                archival_label, name
-            )),
+            message: Some(if destination_name == archival_label {
+                format!(
+                    "Loaded recall memory '{}' into working memory",
+                    archival_label
+                )
+            } else {
+                format!(
+                    "Loaded recall memory '{}' into working memory '{}'",
+                    archival_label, destination_name
+                )
+            }),
             content: json!({}),
         })
     }

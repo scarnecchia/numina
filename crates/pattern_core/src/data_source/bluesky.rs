@@ -1226,6 +1226,7 @@ impl DataSource for BlueskyFirehoseSource {
         let mut message = String::new();
         let mut reply_candidates = Vec::new();
         let mut memory_blocks = Vec::new();
+        let mut added_memory_labels = std::collections::HashSet::<String>::new();
 
         // Collect users for memory blocks
         let mut thread_users: Vec<(String, String)> = Vec::new();
@@ -2036,9 +2037,12 @@ impl DataSource for BlueskyFirehoseSource {
                     .await
                 {
                     if let Some(existing_block) = existing_memory {
-                        // Add existing block to our return list
-                        memory_blocks.push((compact_label, existing_block));
-                        message.push_str(&format!("\n\n📝 Memory exists: {}", memory_label));
+                        // Check if we've already added this memory block
+                        if added_memory_labels.insert(memory_label.clone()) {
+                            // Add existing block to our return list
+                            memory_blocks.push((compact_label, existing_block));
+                            message.push_str(&format!("\n\n📝 Memory exists: {}", memory_label));
+                        }
                     } else {
                         // Create new memory block
                         let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
@@ -2054,14 +2058,18 @@ impl DataSource for BlueskyFirehoseSource {
                         {
                             tracing::warn!("Failed to create memory block for {}: {}", handle, e);
                         } else {
-                            message.push_str(&format!("\n\n📝 Memory created: {}", memory_label));
+                            // Check if we've already added this memory block
+                            if added_memory_labels.insert(memory_label.clone()) {
+                                message
+                                    .push_str(&format!("\n\n📝 Memory created: {}", memory_label));
 
-                            // Now retrieve the created block to return it
-                            if let Ok(Some(created_block)) = agent_handle
-                                .get_archival_memory_by_label(&memory_label)
-                                .await
-                            {
-                                memory_blocks.push((compact_label, created_block));
+                                // Now retrieve the created block to return it
+                                if let Ok(Some(created_block)) = agent_handle
+                                    .get_archival_memory_by_label(&memory_label)
+                                    .await
+                                {
+                                    memory_blocks.push((compact_label, created_block));
+                                }
                             }
                         }
                     }

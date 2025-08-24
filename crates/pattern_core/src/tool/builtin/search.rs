@@ -576,6 +576,7 @@ mod tests {
                 role: None,
                 start_time: None,
                 end_time: None,
+                fuzzy: false,
                 request_heartbeat: false,
             })
             .await

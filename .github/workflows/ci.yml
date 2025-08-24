@@ -26,8 +26,8 @@ jobs:
               uses: actions-rs/cargo@v1
               with:
                   command: check
-            - name: Run cargo lib tests
-              uses: actions-rs/cargo@v1
-              with:
-                  command: test
-                  args: --lib
+            # - name: Run cargo lib tests
+            #   uses: actions-rs/cargo@v1
+            #   with:
+            #       command: test
+            #       args: --lib

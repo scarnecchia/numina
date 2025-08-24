@@ -454,6 +454,16 @@ impl AgentHandle {
     /// Insert a new working memory to in-memory storage
     /// Database persistence happens automatically via persist_memory_changes
     pub async fn insert_working_memory(&self, label: &str, content: &str) -> Result<MemoryBlock> {
+        // Check if block already exists to avoid unnecessary work
+        if let Some(existing_block) = self.memory.get_block(label) {
+            // If it's already a working memory block or core memory, just return it
+            if existing_block.memory_type == MemoryType::Working
+                || existing_block.memory_type == MemoryType::Core
+            {
+                return Ok(existing_block.clone());
+            }
+        }
+
         // Create the memory block in the DashMap
         self.memory.create_block(label, content)?;
 

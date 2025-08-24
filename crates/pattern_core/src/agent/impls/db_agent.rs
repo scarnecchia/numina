@@ -117,6 +117,26 @@ where
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
+    /// Clean up temporarily loaded memory blocks that are not pinned
+    async fn cleanup_temporary_memory_blocks(&self, loaded_memory_labels: &[String]) {
+        if !loaded_memory_labels.is_empty() {
+            tracing::debug!(
+                "🧹 Cleaning up {} temporarily loaded memory blocks",
+                loaded_memory_labels.len()
+            );
+            let handle = self.handle().await;
+            for label in loaded_memory_labels {
+                if let Some(block) = handle.memory.get_block(label) {
+                    // Only remove working memory blocks that are not pinned
+                    if block.memory_type == crate::memory::MemoryType::Working && !block.pinned {
+                        handle.memory.remove_block(label);
+                        tracing::debug!("🗑️ Removed temporary memory block: {}", label);
+                    }
+                }
+            }
+        }
+    }
+
     /// Retry model completion with exponential backoff for rate limit errors
     async fn complete_with_retry(
         model: &M,
@@ -1952,6 +1972,9 @@ where
             // Accumulate agent's response text for constellation logging
             let mut agent_response_text = String::new();
 
+            // Track memory blocks loaded for this request (for cleanup later)
+            let mut loaded_memory_labels = Vec::<String>::new();
+
             // Extract and attach memory blocks from metadata if present
             if let Some(blocks_value) = message.metadata.custom.get("memory_blocks") {
                 if let Ok(memory_blocks) = serde_json::from_value::<
@@ -1966,8 +1989,10 @@ where
                     // Parallelize memory block insertion
                     let insertion_futures = memory_blocks.into_iter().map(|(label, block)| {
                         let handle = self_clone.handle();
-                        let label = label.clone();
                         let value = block.value.clone();
+
+                        // Track this label for cleanup later
+                        loaded_memory_labels.push(label.to_string());
 
                         async move {
                             let handle = handle.await;
@@ -2056,6 +2081,11 @@ where
                         .await
                         .cleanup_errors(current_batch_id, &error_msg)
                         .await;
+
+                    // Clean up temporary memory blocks
+                    self_clone
+                        .cleanup_temporary_memory_blocks(&loaded_memory_labels)
+                        .await;
                     {
                         let mut ctx = context.write().await;
                         ctx.handle.state = AgentState::Error {
@@ -2097,6 +2127,11 @@ where
                         .read()
                         .await
                         .cleanup_errors(current_batch_id, &error_msg)
+                        .await;
+
+                    // Clean up temporary memory blocks
+                    self_clone
+                        .cleanup_temporary_memory_blocks(&loaded_memory_labels)
                         .await;
                     {
                         let mut ctx = context.write().await;
@@ -2209,6 +2244,11 @@ where
                             .read()
                             .await
                             .cleanup_errors(current_batch_id, &error_msg)
+                            .await;
+
+                        // Clean up temporary memory blocks
+                        self_clone
+                            .cleanup_temporary_memory_blocks(&loaded_memory_labels)
                             .await;
                         {
                             let mut ctx = context.write().await;
@@ -3086,6 +3126,11 @@ where
                 tracker.add_event(event).await;
             }
 
+            // Clean up temporarily loaded memory blocks that are not pinned
+            self_clone
+                .cleanup_temporary_memory_blocks(&loaded_memory_labels)
+                .await;
+
             // Send completion event with the incoming message ID
             send_event(ResponseEvent::Complete {
                 message_id: incoming_message_id,
@@ -3670,9 +3715,7 @@ where
                                         CoreMemoryOperationType::Archive => {
                                             MemoryChangeType::Archived
                                         }
-                                        CoreMemoryOperationType::LoadFromArchival => {
-                                            MemoryChangeType::Created
-                                        }
+                                        CoreMemoryOperationType::Load => MemoryChangeType::Created,
                                         CoreMemoryOperationType::Swap => MemoryChangeType::Updated,
                                     };
                                     Some((label, change_type))
