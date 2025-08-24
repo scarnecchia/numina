@@ -47,7 +47,17 @@ pub async fn init_db_instance<C: Connection>(
                 format!("surrealkv://{}", path)
             };
             // Connect to the embedded database
+            // IMPORTANT: Set SURREAL_SYNC_DATA=true in your .env file for data durability
+            // Without this, the database is NOT crash safe and can corrupt data
             tracing::info!("Connecting to embedded database at: {}", path);
+
+            // Log whether sync is enabled for visibility
+            if std::env::var("SURREAL_SYNC_DATA").unwrap_or_default() == "true" {
+                tracing::info!("✓ SURREAL_SYNC_DATA=true - Data durability enabled");
+            } else {
+                tracing::warn!("⚠️ SURREAL_SYNC_DATA not set to true - Data may be lost on crash!");
+            }
+
             let connect_start = std::time::Instant::now();
             let db = any::connect(path)
                 .await
@@ -139,7 +149,16 @@ pub async fn init_db_with_options(config: DatabaseConfig, force_schema_update: b
                 format!("surrealkv://{}", path)
             };
             // Connect to the embedded database
+            // IMPORTANT: Set SURREAL_SYNC_DATA=true in your .env file for data durability
             tracing::info!("Connecting to global DB at: {}", path);
+
+            // Log whether sync is enabled for visibility
+            if std::env::var("SURREAL_SYNC_DATA").unwrap_or_default() == "true" {
+                tracing::info!("✓ SURREAL_SYNC_DATA=true - Data durability enabled");
+            } else {
+                tracing::warn!("⚠️ SURREAL_SYNC_DATA not set to true - Data may be lost on crash!");
+            }
+
             let connect_start = std::time::Instant::now();
             let connect_result = DB.connect(&path).await;
             tracing::info!(

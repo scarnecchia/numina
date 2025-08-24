@@ -105,7 +105,7 @@ where
     E: EmbeddingProvider + Clone + 'static,
 {
     let endpoint =
-        endpoint.unwrap_or_else(|| "wss://jetstream2.us-east.bsky.network/subscribe".to_string());
+        endpoint.unwrap_or_else(|| "wss://jetstream2.us-west.bsky.network/subscribe".to_string());
 
     // Create a buffer with processing queue for rate limiting
     let buffer = StreamBuffer::new(1000, std::time::Duration::from_secs(3600)) // 1000 items, 1 hour

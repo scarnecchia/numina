@@ -106,6 +106,10 @@ pub async fn run_discord_bot_with_group(
     config: &PatternConfig,
     enable_cli: bool,
 ) -> Result<()> {
+    tracing::info!(
+        "run_discord_bot_with_group called with group: {}, discord: true",
+        group_name
+    );
     use pattern_discord::serenity::{Client, all::GatewayIntents};
     use rustyline_async::Readline;
 
@@ -155,7 +159,9 @@ pub async fn run_discord_bot_with_group(
 
     // Set up data sources if we have Pattern agent (similar to jetstream)
     if let Some(ref pattern_agent) = pattern_agent {
+        tracing::info!("Discord group mode: Checking for Bluesky config");
         if config.bluesky.is_some() {
+            tracing::info!("Discord group mode: Bluesky config found, setting up data sources");
             output.info("Bluesky:", "Setting up data source routing to group...");
 
             // Set up data sources with group as target
@@ -186,6 +192,7 @@ pub async fn run_discord_bot_with_group(
                     })
                     .clone();
 
+                tracing::info!("Discord: Building data sources with DataSourceBuilder");
                 let data_sources = DataSourceBuilder::new()
                     .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
                     .build_with_target(
@@ -200,11 +207,12 @@ pub async fn run_discord_bot_with_group(
                     .await
                     .map_err(|e| miette::miette!("Failed to build data sources: {}", e))?;
 
-                data_sources
-                    .start_monitoring("bluesky_jetstream")
-                    .await
-                    .map_err(|e| miette::miette!("Failed to start monitoring: {}", e))?;
-
+                // NOTE: Monitoring is already started during agent loading via register_data_sources
+                // Calling start_monitoring again here can cause write lock contention and deadlocks
+                // Just verify it's running instead
+                tracing::info!(
+                    "Discord: Data sources built, monitoring should already be active from agent loading"
+                );
                 output.success("Data sources configured for group");
 
                 // Register endpoints on the data source's router
@@ -338,6 +346,10 @@ pub async fn run_discord_bot_with_group(
 
             // When CLI exits, also stop Discord bot
             discord_handle.abort();
+
+            // Force exit the entire process to ensure all spawned tasks are killed
+            // This is a bit heavy-handed but ensures clean shutdown
+            std::process::exit(0);
         } else {
             // Run Discord bot in foreground (blocking)
             output.status("Discord bot starting... Press Ctrl+C to stop.");

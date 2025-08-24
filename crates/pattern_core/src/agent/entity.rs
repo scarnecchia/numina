@@ -290,13 +290,13 @@ impl AgentRecord {
         let query = if include_archived {
             format!(
                 r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
-                   WHERE in = $agent_id
+                   WHERE in = $agent_id AND batch IS NOT NULL
                    ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         } else {
             format!(
                 r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
-                   WHERE in = $agent_id AND message_type = "active"
+                   WHERE in = $agent_id AND message_type = "active" AND batch IS NOT NULL
                    ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         };

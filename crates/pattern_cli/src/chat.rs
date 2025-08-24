@@ -1148,6 +1148,7 @@ pub async fn chat_with_group_and_jetstream(
         heartbeat_sender: _,
         heartbeat_receiver,
     } = group_setup;
+    tracing::info!("chat_with_group_and_jetstream group setup complete");
 
     // Now that group endpoint is registered, set up data sources if we have Pattern agent
     if let Some(pattern_agent) = pattern_agent {

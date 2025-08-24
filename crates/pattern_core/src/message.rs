@@ -1210,7 +1210,16 @@ impl Request {
 
         // Fix assistant messages that end with thinking blocks
         for msg in &mut self.messages {
-            if msg.role == ChatRole::Assistant {
+            if msg.role == ChatRole::User || msg.role == ChatRole::System {
+                if let MessageContent::Text(text) = &msg.content {
+                    let timestamp = msg.created_at.naive_local();
+                    // injecting created time in to make agents less likely to be confused by artifacts and more temporally aware.
+                    msg.content = MessageContent::Text(format!(
+                        "<time_sync>created: {}</time_sync>\n{}",
+                        timestamp, text
+                    ));
+                }
+            } else if msg.role == ChatRole::Assistant {
                 if let MessageContent::Blocks(blocks) = &mut msg.content {
                     if let Some(last_block) = blocks.last() {
                         // Check if the last block is a thinking block
@@ -2011,6 +2020,8 @@ impl Message {
             let has_tool_calls = Self::content_has_tool_calls(&combined_content);
             let word_count = Self::estimate_word_count(&combined_content);
 
+            let position = crate::agent::get_next_message_position_sync();
+
             messages.push(Self {
                 id: MessageId::generate(),
                 role: ChatRole::Assistant,
@@ -2024,10 +2035,10 @@ impl Message {
                 owner_id: None,
                 has_tool_calls,
                 word_count,
-                position: None,
-                batch: None,
-                sequence_num: None,
-                batch_type: None,
+                position: Some(position),
+                batch: batch_id,
+                sequence_num: None, // Will be set by batch
+                batch_type,
                 embedding: None,
                 embedding_model: None,
             });

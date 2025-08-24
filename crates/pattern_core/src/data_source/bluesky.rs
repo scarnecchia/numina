@@ -918,11 +918,23 @@ impl DataSource for BlueskyFirehoseSource {
         from: Option<Self::Cursor>,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin>>
     {
+        tracing::info!(
+            "BlueskyFirehoseSource::subscribe called for source_id: {}, endpoint: {}",
+            self.source_id,
+            self.endpoint
+        );
+
         // Try to load cursor from file if not provided
         let effective_cursor = match from {
             Some(cursor) => Some(cursor),
             None => self.load_cursor_from_file().await?,
         };
+
+        tracing::info!(
+            "Effective cursor: {:?}, filter: {:?}",
+            effective_cursor,
+            self.filter
+        );
         // Apply collection filters (NSIDs map to collections)
         let collections = if !self.filter.nsids.is_empty() {
             self.filter.nsids.clone()
@@ -967,21 +979,35 @@ impl DataSource for BlueskyFirehoseSource {
                 loop {
                     ticker.tick().await;
 
-                    // Try to dequeue and send an event
-                    let event = {
-                        let mut buf = queue_buffer.lock();
-                        buf.dequeue_for_processing()
+                    // IMPORTANT: Acquire locks in same order as PostIngestor to avoid deadlock
+                    // Always: last_send_time THEN buffer (never the reverse)
+
+                    // First update the send time (acquire last_send_time lock)
+                    let should_send = {
+                        let mut last_send = queue_last_send_time.lock().await;
+                        let elapsed = last_send.elapsed();
+                        if elapsed >= interval {
+                            *last_send = std::time::Instant::now();
+                            true
+                        } else {
+                            false
+                        }
                     };
 
-                    if let Some(event) = event {
-                        if let Err(e) = queue_tx.send(Ok(event)).await {
-                            tracing::error!("Failed to send queued event: {}", e);
-                            break;
-                        } else {
-                            tracing::debug!("Sent queued post from processing queue");
-                            // Update last send time so the ingestor knows we're sending
-                            let mut last_send = queue_last_send_time.lock().await;
-                            *last_send = std::time::Instant::now();
+                    if should_send {
+                        // Now try to dequeue (acquire buffer lock AFTER releasing last_send_time)
+                        let event = {
+                            let mut buf = queue_buffer.lock();
+                            buf.dequeue_for_processing()
+                        };
+
+                        if let Some(event) = event {
+                            if let Err(e) = queue_tx.send(Ok(event)).await {
+                                tracing::error!("Failed to send queued event: {}", e);
+                                break;
+                            } else {
+                                tracing::debug!("Sent queued post from processing queue");
+                            }
                         }
                     }
                 }
@@ -1066,13 +1092,27 @@ impl DataSource for BlueskyFirehoseSource {
                 let c_source_id = manager_source_id.clone();
                 let ingestor_tx = manager_tx.clone();
 
+                // Create a shared flag for connection health
+                let connection_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let connection_alive_clone = connection_alive.clone();
+
                 // Spawn task to consume events from this connection
                 let handle = tokio::spawn(async move {
                     // Process messages from jetstream with a timeout
-                    // If we don't receive any message for 60 seconds, assume connection is dead
-                    const MESSAGE_TIMEOUT_SECS: u64 = 60;
+                    // Firehose should ALWAYS have messages - if we don't get any for 10 seconds, it's dead
+                    const MESSAGE_TIMEOUT_SECS: u64 = 10;
+                    let mut last_message_time = std::time::Instant::now();
+                    let mut messages_received = 0u64;
 
                     loop {
+                        // Check if connection was marked dead by health check
+                        if !connection_alive_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            tracing::error!(
+                                "Connection marked as dead by health check, exiting message handler"
+                            );
+                            break;
+                        }
+
                         match tokio::time::timeout(
                             Duration::from_secs(MESSAGE_TIMEOUT_SECS),
                             msg_rx.recv_async(),
@@ -1080,7 +1120,19 @@ impl DataSource for BlueskyFirehoseSource {
                         .await
                         {
                             Ok(Ok(message)) => {
+                                //tracing::debug!("📨 Raw message received from jetstream");
                                 // Got a message, process it
+                                last_message_time = std::time::Instant::now();
+                                messages_received += 1;
+
+                                // Log periodic health check
+                                if messages_received % 1000 == 0 {
+                                    tracing::debug!(
+                                        "Jetstream connection healthy: {} messages received",
+                                        messages_received
+                                    );
+                                }
+
                                 if let Err(e) = handler::handle_message(
                                     message,
                                     &ingestors,
@@ -1090,6 +1142,20 @@ impl DataSource for BlueskyFirehoseSource {
                                 .await
                                 {
                                     tracing::warn!("Error processing message: {}", e);
+
+                                    // Check if this is a connection error that should trigger reconnect
+                                    let error_str = e.to_string().to_lowercase();
+                                    if error_str.contains("websocket")
+                                        || error_str.contains("connection")
+                                        || error_str.contains("reset")
+                                    {
+                                        tracing::error!(
+                                            "WebSocket error detected in message handler: {}, breaking connection loop",
+                                            e
+                                        );
+                                        break;
+                                    }
+
                                     let _ =
                                         ingestor_tx.send(Err(crate::CoreError::DataSourceError {
                                             source_name: c_source_id.clone(),
@@ -1098,22 +1164,29 @@ impl DataSource for BlueskyFirehoseSource {
                                         }));
                                 }
                             }
-                            Ok(Err(_)) => {
-                                // Channel closed
-                                tracing::info!("Message channel closed, connection terminated");
+                            Ok(Err(e)) => {
+                                // Channel closed or error
+                                tracing::warn!(
+                                    "Message channel error: {:?}, connection terminated",
+                                    e
+                                );
                                 break;
                             }
                             Err(_) => {
-                                // Timeout - no messages for 60 seconds
-                                tracing::warn!(
-                                    "No messages received for {} seconds, assuming connection is dead",
-                                    MESSAGE_TIMEOUT_SECS
+                                // Timeout - no messages for 10 seconds (firehose should never be this quiet)
+                                let idle_duration =
+                                    std::time::Instant::now().duration_since(last_message_time);
+                                tracing::error!(
+                                    "CRITICAL: No Jetstream messages for {} seconds (idle for {:?}), connection is definitely dead. Messages received before timeout: {}",
+                                    MESSAGE_TIMEOUT_SECS,
+                                    idle_duration,
+                                    messages_received
                                 );
                                 break;
                             }
                         }
                     }
-                    tracing::info!("Message handler exiting");
+                    tracing::info!("Message handler exiting - will trigger reconnection");
                 });
 
                 // Try to connect (simplified - let rocketman handle retries)
@@ -1219,6 +1292,13 @@ impl DataSource for BlueskyFirehoseSource {
         &self,
         item: &Self::Item,
     ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
+        let start_time = std::time::Instant::now();
+        tracing::debug!(
+            "🔄 format_notification started for post @{}: {}",
+            item.handle,
+            item.text.chars().take(50).collect::<String>()
+        );
+
         // Clone the item so we can mutate it
         let mut item = item.clone();
 
@@ -1338,8 +1418,10 @@ impl DataSource for BlueskyFirehoseSource {
                         .contains(&parent.author.did.as_str().to_string())
                     {
                         tracing::debug!(
-                            "Skipping thread - excluded user in parent: {}",
-                            parent.author.did.as_str()
+                            "❌ format_notification EXIT 1 (excluded parent user): @{} in {:?} - {}",
+                            parent.author.did.as_str(),
+                            start_time.elapsed(),
+                            item.text.chars().take(30).collect::<String>()
                         );
                         return None;
                     }
@@ -1350,8 +1432,10 @@ impl DataSource for BlueskyFirehoseSource {
                         for keyword in &self.filter.exclude_keywords {
                             if text_lower.contains(&keyword.to_lowercase()) {
                                 tracing::debug!(
-                                    "Skipping thread - excluded keyword '{}' found in parent",
-                                    keyword
+                                    "❌ format_notification EXIT 2 (excluded keyword '{}'): in {:?} - {}",
+                                    keyword,
+                                    start_time.elapsed(),
+                                    item.text.chars().take(30).collect::<String>()
                                 );
                                 return None;
                             }
@@ -1371,8 +1455,10 @@ impl DataSource for BlueskyFirehoseSource {
                         .contains(&sibling.author.did.as_str().to_string())
                     {
                         tracing::debug!(
-                            "Skipping thread - excluded user in siblings: {}",
-                            sibling.author.did.as_str()
+                            "❌ format_notification EXIT 3 (excluded sibling user): @{} in {:?} - {}",
+                            sibling.author.did.as_str(),
+                            start_time.elapsed(),
+                            item.text.chars().take(30).collect::<String>()
                         );
                         return None;
                     }
@@ -1391,8 +1477,10 @@ impl DataSource for BlueskyFirehoseSource {
                             .contains(&reply.author.did.as_str().to_string())
                         {
                             tracing::debug!(
-                                "Skipping thread - excluded user in replies: {}",
-                                reply.author.did.as_str()
+                                "❌ format_notification EXIT 4 (excluded reply user): @{} in {:?} - {}",
+                                reply.author.did.as_str(),
+                                start_time.elapsed(),
+                                item.text.chars().take(30).collect::<String>()
                             );
                             return None;
                         }
@@ -1966,9 +2054,11 @@ impl DataSource for BlueskyFirehoseSource {
             let message_lower = message.to_lowercase();
             for keyword in &self.filter.exclude_keywords {
                 if message_lower.contains(&keyword.to_lowercase()) {
-                    tracing::debug!(
-                        "dropping thread because it contains excluded keyword '{}' in formatted message",
-                        keyword
+                    tracing::info!(
+                        "❌ format_notification EXIT 5 (excluded keyword '{}' in message): in {:?} - {}",
+                        keyword,
+                        start_time.elapsed(),
+                        item.text.chars().take(30).collect::<String>()
                     );
                     return None;
                 }
@@ -2007,9 +2097,9 @@ impl DataSource for BlueskyFirehoseSource {
 
             if !found_mention {
                 tracing::debug!(
-                    "dropping thread because it didn't mention any watched DIDs: {:?}, message:\n{}",
-                    mention_check_queue,
-                    message
+                    "❌ format_notification EXIT 6 (no watched DID mentions): in {:?} - {}",
+                    start_time.elapsed(),
+                    item.text.chars().take(30).collect::<String>()
                 );
                 return None;
             }
@@ -2090,6 +2180,12 @@ impl DataSource for BlueskyFirehoseSource {
         message
             .push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri of the post you want to reply to, from the above options), your response must contain under 300 characters or it will be truncated.\nAlternatively, you can 'like' the post by submitting a reply with 'like' as the sole text");
 
+        tracing::debug!(
+            "✅ format_notification SUCCESS: notification generated in {:?} for @{} - {}",
+            start_time.elapsed(),
+            item.handle,
+            item.text.chars().take(30).collect::<String>()
+        );
         Some((message, memory_blocks))
     }
 
@@ -2208,6 +2304,11 @@ impl LexiconIngestor for PostIngestor {
             };
 
             if should_include_post(&mut post_to_filter, &self.filter, &self.resolver).await {
+                tracing::debug!(
+                    "✓ Post passed filter, sending to agent: @{} - {}",
+                    post_to_filter.handle,
+                    post_to_filter.text.chars().take(100).collect::<String>()
+                );
                 let cursor = BlueskyFirehoseCursor {
                     seq: now.timestamp_micros() as u64,
                     time_us: now.timestamp_micros() as u64,
@@ -2242,10 +2343,14 @@ impl LexiconIngestor for PostIngestor {
                     }
                 } else {
                     // Can send immediately
-                    self.tx
-                        .send(Ok(event.clone()))
-                        .await
-                        .inspect_err(|e| tracing::error!("{}", e))?;
+                    tracing::debug!("📤 Sending post to channel: @{}", post_to_filter.handle);
+                    if let Err(e) = self.tx.send(Ok(event.clone())).await {
+                        tracing::error!(
+                            "Failed to send post to channel: {}. Channel likely closed, triggering reconnection.",
+                            e
+                        );
+                        return Err(anyhow::anyhow!("Channel closed: {}", e));
+                    }
 
                     *last_send = std::time::Instant::now();
 

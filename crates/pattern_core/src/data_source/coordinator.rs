@@ -296,6 +296,12 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
         let source_id = source.source_id().to_string();
         let buffer_config = source.buffer_config();
 
+        tracing::info!(
+            "DataIngestionCoordinator::add_source_with_target called for source: {}, notify_changes: {}",
+            source_id,
+            buffer_config.notify_changes
+        );
+
         // Create a type-erased wrapper
         let mut erased_source = Box::new(TypeErasedSource::new(source));
 
@@ -330,68 +336,166 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
         source_id: String,
         mut stream: Box<dyn Stream<Item = Result<StreamEvent<Value, Value>>> + Send + Unpin>,
     ) {
+        tracing::info!("🔍 monitor_source started for source: {}", source_id);
+
+        // Simplified error handling - just catch the main monitoring loop errors
+        let result = self.run_monitoring_loop(&source_id, &mut stream).await;
+
+        match result {
+            Ok(()) => {
+                tracing::info!("Source {} monitoring completed successfully", source_id);
+            }
+            Err(e) => {
+                tracing::error!("💀 Source {} monitoring failed: {}", source_id, e);
+            }
+        }
+
+        // Always log when the monitoring task is about to exit
+        tracing::error!("🚨 Monitoring task for source {} is exiting!", source_id);
+    }
+
+    /// Run the actual monitoring loop with proper error handling
+    async fn run_monitoring_loop(
+        &self,
+        source_id: &str,
+        stream: &mut Box<dyn Stream<Item = Result<StreamEvent<Value, Value>>> + Send + Unpin>,
+    ) -> Result<()> {
         use futures::StreamExt;
 
         while let Some(event_result) = stream.next().await {
             match event_result {
                 Ok(event) => {
-                    // Get source to format notification
-                    if let Some(handle) = self.sources.read().await.get(&source_id) {
-                        // Check if notifications are enabled before formatting
-                        if handle.source.notifications_enabled() {
-                            if let Some((message, memory_blocks)) =
-                                handle.source.format_notification(&event.item).await
-                            {
-                                // Use custom target if available, otherwise use default
-                                let target = if let Some(custom_target) = &handle.custom_target {
-                                    custom_target.clone()
-                                } else {
-                                    self.default_target.read().await.clone()
-                                };
-
-                                // Create origin for this data source
-                                let origin =
-                                    crate::context::message_router::MessageOrigin::DataSource {
-                                        source_id: source_id.clone(),
-                                        source_type: handle.source.metadata().source_type,
-                                        item_id: None, // Could extract from item if needed
-                                        cursor: Some(event.cursor.clone()),
-                                    };
-
-                                // Include memory blocks in metadata for now
-                                let mut metadata = serde_json::json!({
-                                    "source": "data_ingestion",
-                                    "source_id": source_id,
-                                    "item": event.item,
-                                    "cursor": event.cursor,
-                                });
-
-                                // Add memory blocks if any
-                                if !memory_blocks.is_empty() {
-                                    metadata["memory_blocks"] =
-                                        serde_json::to_value(&memory_blocks)
-                                            .unwrap_or(serde_json::Value::Null);
-                                }
-
-                                if let Err(e) = self
-                                    .agent_router
-                                    .send_message(target, message, Some(metadata), Some(origin))
-                                    .await
-                                {
-                                    tracing::warn!("Failed to send notification: {}", e);
-                                }
-                            }
-                        }
+                    // Wrap individual event processing in error handling
+                    if let Err(e) = self.process_stream_event(source_id, event).await {
+                        tracing::error!("Failed to process event for source {}: {}", source_id, e);
+                        // Continue processing other events despite individual failures
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Error from source {}: {}", source_id, e);
-                    // TODO: Consider reconnection strategy
+                    tracing::error!("Stream error from source {}: {}", source_id, e);
+                    // Stream errors might indicate connection issues - continue for now
+                    // TODO: Consider reconnection strategy based on error type
                 }
             }
         }
 
-        tracing::info!("Source {} stream ended", source_id);
+        tracing::info!("✅ Source {} stream ended normally", source_id);
+        Ok(())
+    }
+
+    /// Process a single stream event (extracted for better error handling)
+    async fn process_stream_event(
+        &self,
+        source_id: &str,
+        event: StreamEvent<Value, Value>,
+    ) -> Result<()> {
+        // Use read_owned() to get an owned guard that we can hold across await points
+        // This eliminates the double lock issue!
+        let sources_guard = self.sources.clone().read_owned().await;
+
+        let Some(handle) = sources_guard.get(source_id) else {
+            return Err(crate::CoreError::DataSourceError {
+                source_name: source_id.to_string(),
+                operation: "format_notification".to_string(),
+                cause: "Source not found in coordinator".to_string(),
+            });
+        };
+
+        // Check if notifications are enabled before formatting
+        if !handle.source.notifications_enabled() {
+            return Ok(());
+        }
+
+        let custom_target = handle.custom_target.clone();
+        let source_type = handle.source.metadata().source_type;
+
+        tracing::debug!("📞 Calling format_notification for source: {}", source_id);
+
+        // Now we can call format_notification without needing a second lock!
+        // The owned guard lets us keep the reference across the await
+        let start = std::time::Instant::now();
+        let notification_result = handle.source.format_notification(&event.item).await;
+
+        // Drop the guard after we're done with it
+        drop(sources_guard);
+
+        if start.elapsed() > std::time::Duration::from_secs(1) {
+            tracing::warn!(
+                "⚠️ format_notification took {:?} for source: {}",
+                start.elapsed(),
+                source_id
+            );
+        }
+
+        let Some((message, memory_blocks)) = notification_result else {
+            // No notification needed for this event
+            return Ok(());
+        };
+
+        // Use custom target if available, otherwise use default
+        let target = if let Some(custom_target) = custom_target {
+            custom_target
+        } else {
+            self.default_target.read().await.clone()
+        };
+
+        // Create origin for this data source
+        let origin = crate::context::message_router::MessageOrigin::DataSource {
+            source_id: source_id.to_string(),
+            source_type,
+            item_id: None, // Could extract from item if needed
+            cursor: Some(event.cursor.clone()),
+        };
+
+        // Include memory blocks in metadata for now
+        let mut metadata = serde_json::json!({
+            "source": "data_ingestion",
+            "source_id": source_id,
+            "item": event.item,
+            "cursor": event.cursor,
+        });
+
+        // Add memory blocks if any
+        if !memory_blocks.is_empty() {
+            metadata["memory_blocks"] =
+                serde_json::to_value(&memory_blocks).unwrap_or(serde_json::Value::Null);
+        }
+
+        tracing::info!(
+            "📮 Sending notification to agent router for source: {}",
+            source_id
+        );
+        let send_start = std::time::Instant::now();
+
+        let send_result = self
+            .agent_router
+            .send_message(target, message, Some(metadata), Some(origin))
+            .await;
+
+        match send_result {
+            Ok(_) => {
+                tracing::info!(
+                    "✅ Message sent successfully in {:?} for source: {}",
+                    send_start.elapsed(),
+                    source_id
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "❌ Failed to send message after {:?} for source: {}: {}",
+                    send_start.elapsed(),
+                    source_id,
+                    e
+                );
+                return Err(crate::CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "send_message".to_string(),
+                    cause: format!("Failed to send notification: {}", e),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// List all registered sources
@@ -504,14 +608,25 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
 
     /// Start monitoring a source
     pub async fn start_monitoring(&self, source_id: &str) -> Result<()> {
-        // First check if already monitoring
+        tracing::info!(
+            "DataIngestionCoordinator::start_monitoring called for source: {}",
+            source_id
+        );
+
+        // First check if already monitoring (and task is still alive)
         {
             let sources = self.sources.read().await;
             if let Some(handle) = sources.get(source_id) {
-                if handle.monitoring_handle.is_some() {
-                    return Ok(()); // Already monitoring
+                if let Some(ref task_handle) = handle.monitoring_handle {
+                    if !task_handle.is_finished() {
+                        tracing::info!("Source {} is already being monitored", source_id);
+                        return Ok(()); // Already monitoring
+                    } else {
+                        tracing::warn!("Source {} monitoring task died, will restart", source_id);
+                    }
                 }
             } else {
+                tracing::error!("Source '{}' not found in sources map", source_id);
                 return Err(crate::CoreError::ToolExecutionFailed {
                     tool_name: "data_ingestion".to_string(),
                     cause: format!("Source '{}' not found", source_id),

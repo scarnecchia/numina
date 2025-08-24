@@ -697,7 +697,9 @@ pub async fn register_data_sources_with_target<M, E>(
 
     // hardcoding so that only pattern gets messages initially
     if agent.name() == "Pattern" {
+        tracing::info!("Setting up Bluesky monitoring for Pattern agent");
         tokio::spawn(async move {
+            tracing::info!("Inside Bluesky setup spawn for Pattern agent");
             let filter = config
                 .bluesky
                 .as_ref()
@@ -737,10 +739,12 @@ pub async fn register_data_sources_with_target<M, E>(
                     .unwrap()
             };
 
+            tracing::info!("About to start monitoring bluesky_jetstream");
             data_sources
                 .start_monitoring("bluesky_jetstream")
                 .await
                 .unwrap();
+            tracing::info!("Successfully started monitoring bluesky_jetstream");
             tools.register(DataSourceTool::new(Arc::new(data_sources)));
         });
     }

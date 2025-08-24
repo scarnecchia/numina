@@ -518,11 +518,11 @@ async fn main() -> Result<()> {
     // Create the base subscriber with environment filter
     let env_filter = if cli.debug {
         EnvFilter::new(
-            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug",
+            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug",
         )
     } else {
         EnvFilter::new(
-            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,warn",
+            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,info",
         )
     };
 
@@ -665,6 +665,9 @@ async fn main() -> Result<()> {
 
                 // Just route to the appropriate chat function based on mode
                 if *discord {
+                    tracing::info!(
+                        "Main: Discord flag detected, calling run_discord_bot_with_group"
+                    );
                     #[cfg(feature = "discord")]
                     {
                         discord::run_discord_bot_with_group(

@@ -126,12 +126,17 @@ where
             );
             let handle = self.handle().await;
             for label in loaded_memory_labels {
-                if let Some(block) = handle.memory.get_block(label) {
+                // Check if we should remove the block (extract data and drop the guard!)
+                let should_remove = if let Some(block) = handle.memory.get_block(label) {
                     // Only remove working memory blocks that are not pinned
-                    if block.memory_type == crate::memory::MemoryType::Working && !block.pinned {
-                        handle.memory.remove_block(label);
-                        tracing::debug!("🗑️ Removed temporary memory block: {}", label);
-                    }
+                    block.memory_type == crate::memory::MemoryType::Working && !block.pinned
+                } else {
+                    false
+                }; // Guard is dropped here!
+
+                if should_remove {
+                    handle.memory.remove_block(label);
+                    tracing::debug!("🗑️ Removed temporary memory block: {}", label);
                 }
             }
         }
