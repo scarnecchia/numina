@@ -92,16 +92,12 @@ impl ThreadContext {
 
                 // Show parent chain (great-grandparent, grandparent, etc.) with siblings
                 // Skip ancestors that are the same as root to avoid duplicates
-                for (level, (ancestor, siblings)) in
-                    self.parent_chain.iter().skip(1).rev().enumerate()
-                {
+                for (ancestor, siblings) in self.parent_chain.iter().skip(1).rev() {
                     // Skip if this ancestor is the same as root
                     if ancestor.uri == root.uri {
                         continue;
                     }
-
-                    let levels_up = self.parent_chain.len() - level; // Levels from root
-                    ancestor.append_as_ancestor(buf, agent_did, "    ", levels_up);
+                    ancestor.append_as_ancestor(buf, agent_did, "    ");
 
                     // Show siblings at this level
                     for (idx, sibling) in siblings.iter().enumerate() {
@@ -1152,13 +1148,7 @@ impl BlueskyPost {
     }
 
     /// Append as ancestor post (grandparent, great-grandparent, etc.)
-    fn append_as_ancestor(
-        &self,
-        buf: &mut String,
-        agent_did: Option<&str>,
-        indent: &str,
-        levels_up: usize,
-    ) {
+    fn append_as_ancestor(&self, buf: &mut String, agent_did: Option<&str>, indent: &str) {
         let is_agent = agent_did.map_or(false, |did| self.did == did);
         let marker = if is_agent { "[YOU] " } else { "" };
 
