@@ -1979,15 +1979,142 @@ impl BlueskyFirehoseSource {
     /// Format a batch of posts into a single notification
     async fn format_batch_notification(
         &self,
-        posts: Vec<BlueskyPost>,
+        mut posts: Vec<BlueskyPost>,
     ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
         if posts.is_empty() {
             return None;
         }
 
-        // For now, just format the first post normally
-        // TODO: Implement proper batch formatting with consolidated thread context
-        self.format_single_notification(&posts[0]).await
+        // Sort by timestamp to find the most recent post as the "main" post
+        posts.sort_by_key(|p| p.created_at);
+        let main_post = posts.last()?.clone();
+
+        // Get agent DID from mentions filter (agent monitors for mentions of itself)
+        let agent_did = self.filter.mentions.first().map(|s| s.as_str());
+
+        // Try to get cached thread context or build it
+        let thread_context =
+            if let Some(ctx) = self.get_cached_thread_context(&main_post.thread_root()) {
+                ctx
+            } else if let Some(bsky_agent) = &self.bsky_agent {
+                // Build thread context if we have auth
+                match self
+                    .build_thread_context(
+                        &main_post.uri,
+                        main_post.reply.as_ref().map(|r| r.parent.uri.as_str()),
+                        bsky_agent,
+                        agent_did,
+                        &self.filter,
+                        2, // Limited depth for batch notifications
+                    )
+                    .await
+                {
+                    Ok(ctx) => ctx,
+                    Err(_) => ThreadContext {
+                        parent: None,
+                        siblings: posts[..posts.len() - 1].to_vec(), // All but the last as siblings
+                        replies_map: std::collections::HashMap::new(),
+                        engagement_map: std::collections::HashMap::new(),
+                        agent_interactions: std::collections::HashMap::new(),
+                    },
+                }
+            } else {
+                // No auth, minimal context
+                ThreadContext {
+                    parent: None,
+                    siblings: posts[..posts.len() - 1].to_vec(), // All but the last as siblings
+                    replies_map: std::collections::HashMap::new(),
+                    engagement_map: std::collections::HashMap::new(),
+                    agent_interactions: std::collections::HashMap::new(),
+                }
+            };
+
+        // Format the notification
+        let mut message = String::new();
+
+        // Add batch header
+        message.push_str(&format!(
+            "📦 Thread activity ({} posts in last 3 seconds)\n\n",
+            posts.len()
+        ));
+
+        // Format the thread tree
+        thread_context.append_thread_tree(&mut message, &main_post, agent_did);
+
+        // Add reply options
+        thread_context.format_reply_options(&mut message, &main_post);
+
+        // Collect memory blocks
+        let mut memory_blocks = Vec::new();
+        let mut added_memory_labels = std::collections::HashSet::new();
+
+        // Add user memory blocks for unique users in the batch
+        if let Some(ref agent_handle) = self.agent_handle {
+            let mut seen_users = std::collections::HashSet::new();
+            for post in &posts {
+                if seen_users.insert(post.did.clone()) {
+                    let memory_label = format!("bluesky_user_{}", post.handle.replace('.', "_"));
+                    let compact_label = CompactString::from(memory_label.clone());
+
+                    // Check if memory already exists
+                    if let Ok(existing_memory) = agent_handle
+                        .get_archival_memory_by_label(&memory_label)
+                        .await
+                    {
+                        if let Some(existing_block) = existing_memory {
+                            // Memory exists - add to return list and note in message
+                            if added_memory_labels.insert(memory_label.clone()) {
+                                memory_blocks.push((compact_label, existing_block));
+                                message
+                                    .push_str(&format!("\n\n📝 Memory exists: {}", memory_label));
+                            }
+                        } else {
+                            // Create new memory block
+                            let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
+                                Self::fetch_user_profile_for_memory(
+                                    bsky_agent,
+                                    &post.handle,
+                                    &post.did,
+                                )
+                                .await
+                            } else {
+                                create_basic_memory_content(&post.handle, &post.did)
+                            };
+
+                            // Insert into agent's archival memory
+                            if let Err(e) = agent_handle
+                                .insert_archival_memory(&memory_label, &memory_content)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to create memory block for {}: {}",
+                                    post.handle,
+                                    e
+                                );
+                            } else {
+                                // Mark as added and note in message
+                                if added_memory_labels.insert(memory_label.clone()) {
+                                    message.push_str(&format!(
+                                        "\n\n📝 Memory created: {}",
+                                        memory_label
+                                    ));
+
+                                    // Retrieve the created block to return it
+                                    if let Ok(Some(created_block)) = agent_handle
+                                        .get_archival_memory_by_label(&memory_label)
+                                        .await
+                                    {
+                                        memory_blocks.push((compact_label, created_block));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Some((message, memory_blocks))
     }
 
     /// Format a single post notification (without batching checks)
@@ -2000,10 +2127,191 @@ impl BlueskyFirehoseSource {
             .processed_uris
             .insert(item.uri.clone(), Instant::now());
 
-        // Process the post without batching checks
-        // This calls format_notification but since we marked it as processed,
-        // it won't get batched
-        <Self as DataSource>::format_notification(self, item).await
+        // Early exit for obvious exclusions (saves computation)
+        if self.filter.exclude_dids.contains(&item.did) {
+            tracing::debug!("Early exit: post from excluded DID: {}", item.did);
+            return None;
+        }
+
+        // Get agent DID from mentions filter (agent monitors for mentions of itself)
+        let agent_did = self.filter.mentions.first().map(|s| s.as_str());
+
+        // Build or get cached thread context if this is a reply
+        let thread_context = if let Some(reply) = &item.reply {
+            if let Some(ctx) = self.get_cached_thread_context(&item.thread_root()) {
+                Some(ctx)
+            } else if let Some(bsky_agent) = &self.bsky_agent {
+                self.build_thread_context(
+                    &item.uri,
+                    Some(&reply.parent.uri),
+                    bsky_agent,
+                    agent_did,
+                    &self.filter,
+                    2,
+                )
+                .await
+                .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Now that we have full thread context, apply comprehensive filtering
+
+        // Build list of all DIDs in the thread
+        let mut thread_dids = vec![item.did.clone()];
+        let mut mention_check_queue = item
+            .mentioned_dids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        if let Some(ref ctx) = thread_context {
+            // Add parent DID and mentions
+            if let Some(ref parent) = ctx.parent {
+                thread_dids.push(parent.did.clone());
+                mention_check_queue.extend(parent.mentioned_dids().iter().map(|s| s.to_string()));
+            }
+
+            // Add sibling DIDs and mentions
+            for sibling in &ctx.siblings {
+                thread_dids.push(sibling.did.clone());
+                mention_check_queue.extend(sibling.mentioned_dids().iter().map(|s| s.to_string()));
+            }
+
+            // Add reply DIDs and mentions
+            for replies in ctx.replies_map.values() {
+                for reply in replies {
+                    thread_dids.push(reply.did.clone());
+                    mention_check_queue
+                        .extend(reply.mentioned_dids().iter().map(|s| s.to_string()));
+                }
+            }
+        }
+
+        // Check if quoted post mentions anyone
+        if let Some(quoted) = item.quoted_post() {
+            thread_dids.push(quoted.did.clone());
+            mention_check_queue.push(quoted.did.clone());
+        }
+
+        // Apply exclusion filters on entire thread
+        for did in &thread_dids {
+            if self.filter.exclude_dids.contains(did) {
+                tracing::debug!("Excluding: thread contains excluded DID: {}", did);
+                return None;
+            }
+        }
+
+        // Check for excluded keywords in the entire formatted message (will build it temporarily)
+        if !self.filter.exclude_keywords.is_empty() {
+            let mut temp_message = String::new();
+            if let Some(ref ctx) = thread_context {
+                ctx.append_thread_tree(&mut temp_message, item, agent_did);
+            } else {
+                item.append_as_standalone(&mut temp_message, agent_did);
+            }
+
+            let message_lower = temp_message.to_lowercase();
+            for keyword in &self.filter.exclude_keywords {
+                if message_lower.contains(&keyword.to_lowercase()) {
+                    tracing::debug!("Excluding: thread contains excluded keyword: {}", keyword);
+                    return None;
+                }
+            }
+        }
+
+        // Check if any friends are in the thread
+        let has_friend_in_thread = thread_dids
+            .iter()
+            .any(|did| self.filter.friends.contains(did));
+
+        // Check if agent is mentioned anywhere
+        let agent_mentioned = agent_did.map_or(false, |aid| {
+            mention_check_queue.contains(&aid.to_string())
+                || mention_check_queue.contains(&format!("@{}", aid))
+        });
+
+        // Check if agent authored anything in thread
+        let agent_in_thread = agent_did.map_or(false, |aid| thread_dids.contains(&aid.to_string()));
+
+        // Determine if we should show this post
+        if !has_friend_in_thread && !agent_mentioned && !agent_in_thread {
+            tracing::debug!("Skipping: no friends in thread, agent not mentioned or involved");
+            return None;
+        }
+
+        // Format the notification
+        let mut message = String::new();
+
+        if let Some(ctx) = thread_context {
+            // This is a reply - show thread context
+            message.push_str("  • 💬 New reply in thread:\n\n");
+            ctx.append_thread_tree(&mut message, item, agent_did);
+            ctx.format_reply_options(&mut message, item);
+        } else {
+            // Standalone post
+            message.push_str("  • 📝 New post:\n\n");
+            item.append_as_standalone(&mut message, agent_did);
+
+            // Simple reply option for standalone posts
+            message.push_str(&format!(
+                "\n💭 Reply option: @{} ({})\n",
+                item.handle, item.uri
+            ));
+            message.push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri), your response must contain under 300 characters or it will be truncated.\n");
+        }
+
+        // Collect memory blocks
+        let mut memory_blocks = Vec::new();
+
+        // Add user memory block
+        if let Some(ref agent_handle) = self.agent_handle {
+            let memory_label = format!("bluesky_user_{}", item.handle.replace('.', "_"));
+            let compact_label = CompactString::from(memory_label.clone());
+
+            // Check if memory already exists
+            if let Ok(existing_memory) = agent_handle
+                .get_archival_memory_by_label(&memory_label)
+                .await
+            {
+                if let Some(existing_block) = existing_memory {
+                    // Memory exists - add to return list and note in message
+                    memory_blocks.push((compact_label, existing_block));
+                    message.push_str(&format!("\n\n📝 Memory exists: {}", memory_label));
+                } else {
+                    // Create new memory block
+                    let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
+                        Self::fetch_user_profile_for_memory(bsky_agent, &item.handle, &item.did)
+                            .await
+                    } else {
+                        create_basic_memory_content(&item.handle, &item.did)
+                    };
+
+                    // Insert into agent's archival memory
+                    if let Err(e) = agent_handle
+                        .insert_archival_memory(&memory_label, &memory_content)
+                        .await
+                    {
+                        tracing::warn!("Failed to create memory block for {}: {}", item.handle, e);
+                    } else {
+                        message.push_str(&format!("\n\n📝 Memory created: {}", memory_label));
+
+                        // Retrieve the created block to return it
+                        if let Ok(Some(created_block)) = agent_handle
+                            .get_archival_memory_by_label(&memory_label)
+                            .await
+                        {
+                            memory_blocks.push((compact_label, created_block));
+                        }
+                    }
+                }
+            }
+        }
+
+        Some((message, memory_blocks))
     }
 }
 
