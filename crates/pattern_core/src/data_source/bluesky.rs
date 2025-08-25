@@ -91,14 +91,24 @@ impl ThreadContext {
                 root.append_as_root(buf, agent_did, "    ");
 
                 // Show parent chain (great-grandparent, grandparent, etc.) with siblings
+                // Skip ancestors that are the same as root to avoid duplicates
                 for (level, (ancestor, siblings)) in
                     self.parent_chain.iter().skip(1).rev().enumerate()
                 {
+                    // Skip if this ancestor is the same as root
+                    if ancestor.uri == root.uri {
+                        continue;
+                    }
+
                     let levels_up = self.parent_chain.len() - level; // Levels from root
                     ancestor.append_as_ancestor(buf, agent_did, "    ", levels_up);
 
                     // Show siblings at this level
                     for (idx, sibling) in siblings.iter().enumerate() {
+                        // Skip if this sibling is the main post
+                        if sibling.uri == main_post.uri {
+                            continue;
+                        }
                         let is_last = idx == siblings.len() - 1;
                         sibling.append_as_sibling(buf, agent_did, "    ", is_last);
                     }
@@ -120,6 +130,10 @@ impl ThreadContext {
         for (level, (_, siblings)) in self.parent_chain.iter().enumerate() {
             if !siblings.is_empty() {
                 for (i, sibling) in siblings.iter().enumerate() {
+                    // Skip if this sibling is the main post
+                    if sibling.uri == main_post.uri {
+                        continue;
+                    }
                     let is_last = i == siblings.len() - 1;
                     let indent = if level == 0 { "      " } else { "        " }; // Deeper indent for higher levels
                     sibling.append_as_sibling(buf, agent_did, indent, is_last);
@@ -1147,16 +1161,10 @@ impl BlueskyPost {
     ) {
         let is_agent = agent_did.map_or(false, |did| self.did == did);
         let marker = if is_agent { "[YOU] " } else { "" };
-        let level_label = match levels_up {
-            2 => "GRANDPARENT",
-            3 => "GREAT-GRANDPARENT",
-            _ => &format!("ANCESTOR-{}", levels_up),
-        };
 
         buf.push_str(&format!(
-            "{}└─ {}: {}{} - {} ago: {}\n",
+            "{}├─ {}{} - {} ago: {}\n",
             indent,
-            level_label,
             marker,
             self.format_author(),
             self.format_timestamp(),
