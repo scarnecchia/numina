@@ -130,6 +130,10 @@ rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
 priority = 4
 
 [database]
+#type = "remote"
+#url = "ws://localhost:8000"  # or "wss://..." for secure connections
+#namespace = "pattern"
+#database = "pattern"
 type = "embedded"
 path = "./pattern_constellation.db"
 strict_mode = false

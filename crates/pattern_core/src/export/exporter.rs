@@ -15,10 +15,10 @@ use crate::{
     coordination::groups::{AgentGroup, Constellation, GroupMembership},
     db::entity::DbEntity,
     export::{
-        DEFAULT_CHUNK_SIZE, EXPORT_VERSION,
+        DEFAULT_CHUNK_SIZE, DEFAULT_MEMORY_CHUNK_SIZE, EXPORT_VERSION, MAX_BLOCK_BYTES,
         types::{
-            AgentExport, ConstellationExport, ExportManifest, ExportStats, ExportType, GroupExport,
-            MemoryChunk, MessageChunk,
+            AgentExport, AgentRecordExport, ConstellationExport, ExportManifest, ExportStats,
+            ExportType, GroupExport, MemoryChunk, MessageChunk,
         },
     },
     id::{ConstellationId, GroupId},
@@ -206,7 +206,7 @@ where
     }
 
     /// Export an agent to blocks without writing to CAR file
-    async fn export_agent_to_blocks(
+    pub(crate) async fn export_agent_to_blocks(
         &self,
         agent: &AgentRecord,
         options: &ExportOptions,
@@ -224,113 +224,271 @@ where
         let mut memory_chunk_cids = Vec::new();
         let mut message_chunk_cids = Vec::new();
 
-        // Serialize agent to DAG-CBOR
-        let agent_data = encode_dag_cbor(agent).map_err(|e| CoreError::DagCborEncodingError {
-            data_type: "AgentRecord".to_string(),
-            cause: e,
-        })?;
+        // Helper to write a block with size enforcement
+        let mut write_block = |cid: Cid, data: Vec<u8>| -> Result<()> {
+            if data.len() > MAX_BLOCK_BYTES {
+                return Err(CoreError::CarError {
+                    operation: format!("block exceeds {} bytes", MAX_BLOCK_BYTES),
+                    cause: iroh_car::Error::Parsing("block too large".to_string()),
+                });
+            }
+            stats.total_blocks += 1;
+            stats.uncompressed_size += data.len() as u64;
+            blocks.push((cid, data));
+            Ok(())
+        };
 
-        // Create CID for agent
-        let agent_cid = Self::create_cid(&agent_data)?;
-        stats.total_blocks += 1;
-        stats.uncompressed_size += agent_data.len() as u64;
-
-        blocks.push((agent_cid, agent_data));
-
-        // Export memories if any
+        // Export memories in chunks (two-phase to wire next_chunk)
         if !agent.memories.is_empty() {
-            let memory_chunk = MemoryChunk {
-                chunk_id: 0,
-                memories: agent.memories.clone(),
-                next_chunk: None,
+            stats.memory_count = agent.memories.len() as u64;
+
+            let mut current: Vec<(
+                crate::memory::MemoryBlock,
+                crate::agent::AgentMemoryRelation,
+            )> = Vec::new();
+            let mut pending_chunks: Vec<
+                Vec<(
+                    crate::memory::MemoryBlock,
+                    crate::agent::AgentMemoryRelation,
+                )>,
+            > = Vec::new();
+
+            let encode_mem_probe = |chunk_id: u32,
+                                    items: &Vec<(
+                crate::memory::MemoryBlock,
+                crate::agent::AgentMemoryRelation,
+            )>|
+             -> Result<usize> {
+                let chunk = MemoryChunk {
+                    chunk_id,
+                    memories: items.clone(),
+                    next_chunk: None,
+                };
+                let data =
+                    encode_dag_cbor(&chunk).map_err(|e| CoreError::DagCborEncodingError {
+                        data_type: "MemoryChunk".to_string(),
+                        cause: e,
+                    })?;
+                Ok(data.len())
             };
 
-            let chunk_data =
-                encode_dag_cbor(&memory_chunk).map_err(|e| CoreError::DagCborEncodingError {
-                    data_type: "MemoryChunk".to_string(),
-                    cause: e,
-                })?;
+            let mut chunk_id: u32 = 0;
+            for item in agent.memories.iter().cloned() {
+                let mut test_vec = current.clone();
+                test_vec.push(item.clone());
+                let est = encode_mem_probe(chunk_id, &test_vec)?;
+                if est <= (MAX_BLOCK_BYTES.saturating_sub(64))
+                    && test_vec.len() <= DEFAULT_MEMORY_CHUNK_SIZE
+                {
+                    current = test_vec;
+                } else {
+                    if !current.is_empty() {
+                        pending_chunks.push(current);
+                        stats.chunk_count += 1;
+                        chunk_id += 1;
+                        current = Vec::new();
+                    }
+                    // Ensure single item fits
+                    let est_single = encode_mem_probe(chunk_id, &vec![item.clone()])?;
+                    if est_single > MAX_BLOCK_BYTES {
+                        return Err(CoreError::CarError {
+                            operation: "encoding MemoryChunk".to_string(),
+                            cause: iroh_car::Error::Parsing(
+                                "single memory item exceeds block limit".to_string(),
+                            ),
+                        });
+                    }
+                    current.push(item);
+                }
+            }
+            if !current.is_empty() {
+                pending_chunks.push(current);
+                stats.chunk_count += 1;
+            }
 
-            let chunk_cid = Self::create_cid(&chunk_data)?;
-            stats.memory_count = agent.memories.len() as u64;
-            stats.total_blocks += 1;
-            stats.uncompressed_size += chunk_data.len() as u64;
-
-            memory_chunk_cids.push(chunk_cid);
-            blocks.push((chunk_cid, chunk_data));
+            // Finalize chunks in reverse to set next_chunk
+            let mut next: Option<Cid> = None;
+            let mut finalized_cids_rev: Vec<Cid> = Vec::new();
+            let mut cid_chunk_id = (pending_chunks.len() as u32).saturating_sub(1);
+            for items in pending_chunks.iter().rev() {
+                let chunk = MemoryChunk {
+                    chunk_id: cid_chunk_id,
+                    memories: items.clone(),
+                    next_chunk: next,
+                };
+                let data =
+                    encode_dag_cbor(&chunk).map_err(|e| CoreError::DagCborEncodingError {
+                        data_type: "MemoryChunk".to_string(),
+                        cause: e,
+                    })?;
+                if data.len() > MAX_BLOCK_BYTES {
+                    // safety check
+                    return Err(CoreError::CarError {
+                        operation: "finalizing MemoryChunk".to_string(),
+                        cause: iroh_car::Error::Parsing(
+                            "memory chunk exceeded block limit when linking".to_string(),
+                        ),
+                    });
+                }
+                let cid = Self::create_cid(&data)?;
+                write_block(cid, data)?;
+                finalized_cids_rev.push(cid);
+                next = Some(cid);
+                if cid_chunk_id > 0 {
+                    cid_chunk_id -= 1;
+                }
+            }
+            // reverse to forward order
+            memory_chunk_cids = finalized_cids_rev.into_iter().rev().collect();
         }
 
-        // Export messages if requested
+        // Export messages in chunks (two-phase to wire next_chunk)
         if options.include_messages {
-            let messages_with_positions: Vec<_> = if let Some(since) = options.messages_since {
+            let source: Vec<_> = if let Some(since) = options.messages_since {
                 agent
                     .messages
                     .iter()
                     .filter(|(msg, _)| msg.created_at >= since)
+                    .cloned()
                     .collect()
             } else {
-                agent.messages.iter().collect()
+                agent.messages.clone()
             };
 
-            if !messages_with_positions.is_empty() {
-                // Process messages in chunks
-                for (chunk_id, chunk) in messages_with_positions
-                    .chunks(options.chunk_size)
-                    .enumerate()
-                {
-                    let messages_with_relations: Vec<(
-                        Message,
-                        crate::message::AgentMessageRelation,
-                    )> = chunk
-                        .iter()
-                        .map(|&(msg, rel)| (msg.clone(), rel.clone()))
-                        .collect();
+            if !source.is_empty() {
+                let mut current: Vec<(Message, crate::message::AgentMessageRelation)> = Vec::new();
+                let mut pending_chunks: Vec<Vec<(Message, crate::message::AgentMessageRelation)>> =
+                    Vec::new();
 
-                    let message_chunk = MessageChunk {
-                        chunk_id: chunk_id as u32,
-                        start_position: chunk
-                            .first()
-                            .unwrap()
-                            .1
-                            .position
-                            .as_ref()
-                            .map(|p| p.to_string())
-                            .unwrap_or_default(),
-                        end_position: chunk
-                            .last()
-                            .unwrap()
-                            .1
-                            .position
-                            .as_ref()
-                            .map(|p| p.to_string())
-                            .unwrap_or_default(),
-                        messages: messages_with_relations,
-                        next_chunk: None, // We'll fix this up later if needed
+                let encode_msg_probe =
+                    |chunk_id: u32,
+                     items: &Vec<(Message, crate::message::AgentMessageRelation)>|
+                     -> Result<usize> {
+                        let chunk = MessageChunk {
+                            chunk_id,
+                            start_position: items
+                                .first()
+                                .and_then(|(_, rel)| rel.position.as_ref())
+                                .map(|p| p.to_string())
+                                .unwrap_or_default(),
+                            end_position: items
+                                .last()
+                                .and_then(|(_, rel)| rel.position.as_ref())
+                                .map(|p| p.to_string())
+                                .unwrap_or_default(),
+                            messages: items.clone(),
+                            next_chunk: None,
+                        };
+                        let data = encode_dag_cbor(&chunk).map_err(|e| {
+                            CoreError::DagCborEncodingError {
+                                data_type: "MessageChunk".to_string(),
+                                cause: e,
+                            }
+                        })?;
+                        Ok(data.len())
                     };
 
-                    stats.message_count += chunk.len() as u64;
+                let mut chunk_id: u32 = 0;
+                for item in source.into_iter() {
+                    let mut test_vec = current.clone();
+                    test_vec.push(item.clone());
+                    let est = encode_msg_probe(chunk_id, &test_vec)?;
+                    if est <= (MAX_BLOCK_BYTES.saturating_sub(64))
+                        && test_vec.len() <= options.chunk_size
+                    {
+                        current = test_vec;
+                    } else {
+                        if !current.is_empty() {
+                            pending_chunks.push(current);
+                            stats.chunk_count += 1;
+                            chunk_id += 1;
+                            current = Vec::new();
+                        }
+                        let est_single = encode_msg_probe(chunk_id, &vec![item.clone()])?;
+                        if est_single > MAX_BLOCK_BYTES {
+                            return Err(CoreError::CarError {
+                                operation: "encoding MessageChunk".to_string(),
+                                cause: iroh_car::Error::Parsing(
+                                    "single message exceeds block limit".to_string(),
+                                ),
+                            });
+                        }
+                        current.push(item);
+                    }
+                }
+                if !current.is_empty() {
+                    pending_chunks.push(current);
+                    stats.chunk_count += 1;
+                }
 
-                    let chunk_data = encode_dag_cbor(&message_chunk).map_err(|e| {
-                        CoreError::DagCborEncodingError {
+                // Finalize chunks in reverse to set next_chunk
+                let mut next: Option<Cid> = None;
+                let mut finalized_cids_rev: Vec<Cid> = Vec::new();
+                let mut cid_chunk_id = (pending_chunks.len() as u32).saturating_sub(1);
+                for items in pending_chunks.iter().rev() {
+                    let chunk = MessageChunk {
+                        chunk_id: cid_chunk_id,
+                        start_position: items
+                            .first()
+                            .and_then(|(_, rel)| rel.position.as_ref())
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                        end_position: items
+                            .last()
+                            .and_then(|(_, rel)| rel.position.as_ref())
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                        messages: items.clone(),
+                        next_chunk: next,
+                    };
+                    let data =
+                        encode_dag_cbor(&chunk).map_err(|e| CoreError::DagCborEncodingError {
                             data_type: "MessageChunk".to_string(),
                             cause: e,
-                        }
-                    })?;
-
-                    let chunk_cid = Self::create_cid(&chunk_data)?;
-                    message_chunk_cids.push(chunk_cid);
-                    blocks.push((chunk_cid, chunk_data));
-
-                    stats.chunk_count += 1;
-                    stats.total_blocks += 1;
-                    stats.uncompressed_size += blocks.last().unwrap().1.len() as u64;
+                        })?;
+                    if data.len() > MAX_BLOCK_BYTES {
+                        return Err(CoreError::CarError {
+                            operation: "finalizing MessageChunk".to_string(),
+                            cause: iroh_car::Error::Parsing(
+                                "message chunk exceeded block limit when linking".to_string(),
+                            ),
+                        });
+                    }
+                    let cid = Self::create_cid(&data)?;
+                    write_block(cid, data)?;
+                    finalized_cids_rev.push(cid);
+                    next = Some(cid);
+                    if cid_chunk_id > 0 {
+                        cid_chunk_id -= 1;
+                    }
+                    stats.message_count += items.len() as u64;
                 }
+                message_chunk_cids = finalized_cids_rev.into_iter().rev().collect();
             }
         }
 
-        // Create the AgentExport
+        // Build the slim export record as its own block
+        let agent_export_record = AgentRecordExport::from_agent(
+            agent,
+            message_chunk_cids.clone(),
+            memory_chunk_cids.clone(),
+        );
+        let agent_export_record_data =
+            encode_dag_cbor(&agent_export_record).map_err(|e| CoreError::DagCborEncodingError {
+                data_type: "AgentRecordExport".to_string(),
+                cause: e,
+            })?;
+        if agent_export_record_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding AgentRecordExport".to_string(),
+                cause: iroh_car::Error::Parsing("agent metadata block too large".to_string()),
+            });
+        }
+        let agent_export_cid = Self::create_cid(&agent_export_record_data)?;
+        write_block(agent_export_cid, agent_export_record_data)?;
+
         let agent_export = AgentExport {
-            agent: agent.clone(),
+            agent_cid: agent_export_cid,
             message_chunk_cids,
             memory_chunk_cids,
         };
@@ -892,5 +1050,123 @@ where
 
         group.members = members;
         Ok(group)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::client;
+    use crate::memory::{MemoryBlock, MemoryPermission, MemoryType};
+
+    async fn make_agent_with_data(msg_count: usize, mem_count: usize) -> AgentRecord {
+        use crate::id::RelationId;
+        use crate::message::{AgentMessageRelation, Message, MessageRelationType};
+        use chrono::Utc;
+
+        let mut agent = AgentRecord {
+            name: "ExportTest".to_string(),
+            owner_id: crate::UserId::generate(),
+            ..Default::default()
+        };
+
+        // Messages
+        let mut msgs = Vec::with_capacity(msg_count);
+        for i in 0..msg_count {
+            tokio::time::sleep(std::time::Duration::from_micros(500)).await;
+            let m = Message::user(format!("m{}", i));
+            // Relation mirrors message ids/positions for ordering
+            let rel = AgentMessageRelation {
+                id: RelationId::nil(),
+                in_id: agent.id.clone(),
+                out_id: m.id.clone(),
+                message_type: MessageRelationType::Active,
+                position: m.position.clone(),
+                added_at: Utc::now(),
+                batch: m.batch.clone(),
+                sequence_num: m.sequence_num,
+                batch_type: m.batch_type,
+            };
+            msgs.push((m, rel));
+        }
+        agent.messages = msgs;
+
+        // Memories
+        let mut mems = Vec::with_capacity(mem_count);
+        for i in 0..mem_count {
+            let mb = MemoryBlock {
+                owner_id: agent.owner_id.clone(),
+                label: compact_str::format_compact!("mem{}", i),
+                value: format!("value-{}", i),
+                memory_type: MemoryType::Working,
+                permission: MemoryPermission::Append,
+                ..Default::default()
+            };
+            let rel = crate::agent::AgentMemoryRelation {
+                id: RelationId::nil(),
+                in_id: agent.id.clone(),
+                out_id: mb.id.clone(),
+                access_level: MemoryPermission::Append,
+                created_at: Utc::now(),
+            };
+            mems.push((mb, rel));
+        }
+        agent.memories = mems;
+        agent
+    }
+
+    #[tokio::test]
+    async fn export_chunk_linkage_and_size() {
+        let db = client::create_test_db().await.unwrap();
+        let exporter = AgentExporter::new(db);
+        // Ensure we exceed both default chunk counts
+        let agent = make_agent_with_data(2500, 250).await;
+
+        let (export, blocks, stats) = exporter
+            .export_agent_to_blocks(&agent, &ExportOptions::default())
+            .await
+            .unwrap();
+
+        // Collect blocks for lookup
+        let map: std::collections::HashMap<_, _> = blocks.iter().cloned().collect();
+
+        // Verify no block exceeds limit
+        for (_cid, data) in blocks.iter() {
+            assert!(data.len() <= MAX_BLOCK_BYTES);
+        }
+
+        // Verify agent metadata block exists and decodes
+        let meta_bytes = map.get(&export.agent_cid).expect("agent meta present");
+        let meta: AgentRecordExport = serde_ipld_dagcbor::from_slice(meta_bytes).unwrap();
+        assert_eq!(meta.id, agent.id);
+        assert_eq!(meta.message_chunks.len(), export.message_chunk_cids.len());
+        assert_eq!(meta.memory_chunks.len(), export.memory_chunk_cids.len());
+
+        // Verify message next_chunk wiring
+        for (i, cid) in export.message_chunk_cids.iter().enumerate() {
+            let data = map.get(cid).expect("msg chunk present");
+            let chunk: MessageChunk = serde_ipld_dagcbor::from_slice(data).unwrap();
+            if i + 1 < export.message_chunk_cids.len() {
+                assert_eq!(chunk.next_chunk, Some(export.message_chunk_cids[i + 1]));
+            } else {
+                assert!(chunk.next_chunk.is_none());
+            }
+        }
+
+        // Verify memory next_chunk wiring
+        for (i, cid) in export.memory_chunk_cids.iter().enumerate() {
+            let data = map.get(cid).expect("mem chunk present");
+            let chunk: MemoryChunk = serde_ipld_dagcbor::from_slice(data).unwrap();
+            if i + 1 < export.memory_chunk_cids.len() {
+                assert_eq!(chunk.next_chunk, Some(export.memory_chunk_cids[i + 1]));
+            } else {
+                assert!(chunk.next_chunk.is_none());
+            }
+        }
+
+        // Sanity on stats
+        assert!(stats.message_count as usize >= 2500);
+        assert!(stats.memory_count as usize >= 250);
+        assert!(stats.chunk_count >= 3);
     }
 }

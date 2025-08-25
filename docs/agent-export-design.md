@@ -1,8 +1,10 @@
-# Agent Export/Import Design
+# Agent Export/Import Design (v2)
 
 ## Overview
 
 Pattern agents can be exported to and imported from CAR (Content Addressable aRchive) files using DAG-CBOR encoding. This provides an efficient, portable format for backing up, sharing, and migrating agents between systems.
+
+As of export format version 2, we use a slim agent metadata block and chunked message/memory blocks with a strict 1MB per-block cap for compatibility with IPLD tooling.
 
 ## Why DAG-CBOR CAR?
 
@@ -12,12 +14,12 @@ Pattern agents can be exported to and imported from CAR (Content Addressable aRc
 - **Streaming**: CAR files can be processed incrementally
 - **AT Protocol compatible**: Same format used by Bluesky/ATProto ecosystem
 
-## Archive Structure
+## Archive Structure (v2)
 
 ```
 AgentArchive (root)
 ├── manifest (metadata about the export)
-├── agent (AgentRecord)
+├── agent_meta (AgentRecordExport)
 ├── memories/ (MemoryBlock collection)
 │   ├── memory_1
 │   ├── memory_2
@@ -33,11 +35,11 @@ AgentArchive (root)
 ### Manifest Block
 ```rust
 struct ExportManifest {
-    version: u32,                    // Archive format version
+    version: u32,                    // Archive format version (2)
     exported_at: DateTime<Utc>,      // When exported
-    agent_id: AgentId,               // Agent being exported
+    export_type: ExportType,         // Agent | Group | Constellation
     stats: ExportStats,              // Counts and sizes
-    chunking: ChunkingStrategy,      // How messages are chunked
+    data_cid: Cid,                   // Root data block for this export
 }
 
 struct ExportStats {
@@ -48,16 +50,33 @@ struct ExportStats {
 }
 ```
 
-### Agent Block
-The existing `AgentRecord` struct, but with CID links instead of IDs:
-- `memories` → CIDs of memory blocks
-- `messages` → CIDs of message chunks
+### Agent Metadata Block (slim)
+`AgentRecordExport` contains only agent metadata and references to chunk blocks:
 
-### Memory Blocks
-Individual `MemoryBlock` structs with their relationships
+```rust
+pub struct AgentRecordExport {
+    id: AgentId,
+    name: String,
+    agent_type: AgentType,
+    // core configuration + model settings ...
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    last_active: DateTime<Utc>,
+    owner_id: UserId,
+
+    // References
+    message_chunks: Vec<Cid>,
+    memory_chunks: Vec<Cid>,
+}
+```
+
+The top-level `AgentExport` points to this slim metadata block via `agent_cid` and carries the same chunk CID lists.
+
+### Memory Chunks
+`MemoryBlock` items are grouped into `MemoryChunk` blocks for streaming and to respect the 1MB cap.
 
 ### Message Chunks
-Messages grouped into chunks for efficient streaming:
+Messages grouped into chunks for efficient streaming. Chunks are linked via `next_chunk` for forward traversal, and also listed in order in the agent metadata:
 ```rust
 struct MessageChunk {
     chunk_id: u32,
@@ -68,7 +87,20 @@ struct MessageChunk {
 }
 ```
 
-## Implementation Plan
+## Size Limits
+
+- Maximum block size: 1,000,000 bytes (hard cap; export fails if exceeded)
+- Default message chunk size: 1000 (subject to size cap)
+- Default memory chunk size: 100 (subject to size cap)
+- Agent metadata target: well below 64KB
+
+## Implementation Notes
+
+- Agent export builds message and memory chunks first, then writes a slim `AgentRecordExport` block, and finally an `AgentExport` block that references it.
+- Chunks are finalized in reverse so `next_chunk` can be set to the CID of the subsequent chunk without exceeding size limits.
+- Import reconstructs a full `AgentRecord` by decoding `AgentExport → AgentRecordExport → MessageChunk/MemoryChunk` blocks.
+
+## CLI Commands
 
 ### 1. Dependencies
 Add to `pattern-core/Cargo.toml`:

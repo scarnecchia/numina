@@ -8,8 +8,84 @@ use tokio::io::AsyncRead;
 use crate::{
     AgentId, CoreError, Result, UserId,
     agent::AgentRecord,
-    export::types::{ConstellationExport, ExportManifest, ExportType, GroupExport},
+    export::types::{
+        AgentExport, AgentRecordExport, ConstellationExport, ExportManifest, ExportType,
+        GroupExport, MemoryChunk, MessageChunk,
+    },
 };
+
+fn reconstruct_agent_from_export(
+    meta: &AgentRecordExport,
+    blocks: &std::collections::HashMap<cid::Cid, Vec<u8>>,
+) -> Result<AgentRecord> {
+    // Gather memories
+    let mut memories: Vec<(
+        crate::memory::MemoryBlock,
+        crate::agent::AgentMemoryRelation,
+    )> = Vec::new();
+    for cid in &meta.memory_chunks {
+        let data = blocks.get(cid).ok_or_else(|| CoreError::CarError {
+            operation: "finding memory chunk".to_string(),
+            cause: iroh_car::Error::Parsing(format!("block not found: {}", cid)),
+        })?;
+        let chunk: MemoryChunk =
+            decode_dag_cbor(data).map_err(|e| CoreError::DagCborDecodingError {
+                data_type: "MemoryChunk".to_string(),
+                details: e.to_string(),
+            })?;
+        memories.extend(chunk.memories);
+    }
+
+    // Gather messages
+    let mut messages: Vec<(
+        crate::message::Message,
+        crate::message::AgentMessageRelation,
+    )> = Vec::new();
+    for cid in &meta.message_chunks {
+        let data = blocks.get(cid).ok_or_else(|| CoreError::CarError {
+            operation: "finding message chunk".to_string(),
+            cause: iroh_car::Error::Parsing(format!("block not found: {}", cid)),
+        })?;
+        let chunk: MessageChunk =
+            decode_dag_cbor(data).map_err(|e| CoreError::DagCborDecodingError {
+                data_type: "MessageChunk".to_string(),
+                details: e.to_string(),
+            })?;
+        messages.extend(chunk.messages);
+    }
+
+    // Build a full AgentRecord
+    let mut agent = AgentRecord::default();
+    agent.id = meta.id.clone();
+    agent.name = meta.name.clone();
+    agent.agent_type = meta.agent_type.clone();
+    agent.model_id = meta.model_id.clone();
+    agent.model_config = meta.model_config.clone();
+    agent.base_instructions = meta.base_instructions.clone();
+    agent.max_messages = meta.max_messages;
+    agent.max_message_age_hours = meta.max_message_age_hours;
+    agent.compression_threshold = meta.compression_threshold;
+    agent.memory_char_limit = meta.memory_char_limit;
+    agent.enable_thinking = meta.enable_thinking;
+    agent.compression_strategy = meta.compression_strategy.clone();
+    agent.tool_rules = meta.tool_rules.clone();
+    agent.total_messages = meta.total_messages;
+    agent.total_tool_calls = meta.total_tool_calls;
+    agent.context_rebuilds = meta.context_rebuilds;
+    agent.compression_events = meta.compression_events;
+    agent.created_at = meta.created_at;
+    agent.updated_at = meta.updated_at;
+    agent.last_active = meta.last_active;
+    agent.owner_id = meta.owner_id.clone();
+    agent.message_summary = meta.message_summary.clone();
+    agent.memories = memories;
+    agent.messages = messages;
+    // Relations not exported
+    agent.assigned_task_ids.clear();
+    agent.scheduled_event_ids.clear();
+
+    Ok(agent)
+}
 
 /// Options for importing an agent
 #[derive(Debug, Clone)]
@@ -240,19 +316,30 @@ where
                     )),
                 })?;
 
-        // Try to decode as AgentExport first (new format)
-        let mut agent: AgentRecord = if let Ok(agent_export) =
-            decode_dag_cbor::<crate::export::AgentExport>(agent_export_data)
-        {
-            // New format - extract agent from AgentExport
-            agent_export.agent
-        } else {
-            // Old format - decode directly as AgentRecord
-            decode_dag_cbor(agent_export_data).map_err(|e| CoreError::DagCborDecodingError {
-                data_type: "AgentRecord".to_string(),
-                details: e.to_string(),
-            })?
-        };
+        // Decode AgentExport and then the slim AgentRecordExport
+        let mut agent: AgentRecord =
+            if let Ok(agent_export) = decode_dag_cbor::<AgentExport>(agent_export_data) {
+                let meta_cid = agent_export.agent_cid;
+                let meta_block = blocks.get(&meta_cid).ok_or_else(|| CoreError::CarError {
+                    operation: "finding agent metadata block".to_string(),
+                    cause: iroh_car::Error::Parsing(format!(
+                        "Agent metadata block not found for CID: {}",
+                        meta_cid
+                    )),
+                })?;
+                let meta: AgentRecordExport =
+                    decode_dag_cbor(meta_block).map_err(|e| CoreError::DagCborDecodingError {
+                        data_type: "AgentRecordExport".to_string(),
+                        details: e.to_string(),
+                    })?;
+                reconstruct_agent_from_export(&meta, &blocks)?
+            } else {
+                // Legacy fallback: decode directly as AgentRecord if present
+                decode_dag_cbor(agent_export_data).map_err(|e| CoreError::DagCborDecodingError {
+                    data_type: "AgentRecord".to_string(),
+                    details: e.to_string(),
+                })?
+            };
 
         // Store the original ID for mapping
         let original_id = agent.id.clone();
@@ -403,13 +490,37 @@ where
         // First import all member agents and preserve their membership data
         let mut imported_memberships = Vec::new();
 
-        for (_old_agent_id, agent_cid) in &group_export.member_agent_cids {
-            if let Some(agent_data) = blocks.get(agent_cid) {
+        for (_old_agent_id, agent_export_cid) in &group_export.member_agent_cids {
+            if let Some(agent_export_data) = blocks.get(agent_export_cid) {
+                // New format: AgentExport -> AgentRecordExport -> reconstruct
                 let mut agent: AgentRecord =
-                    decode_dag_cbor(agent_data).map_err(|e| CoreError::DagCborDecodingError {
-                        data_type: "AgentRecord".to_string(),
-                        details: e.to_string(),
-                    })?;
+                    if let Ok(export) = decode_dag_cbor::<AgentExport>(agent_export_data) {
+                        let meta_block =
+                            blocks
+                                .get(&export.agent_cid)
+                                .ok_or_else(|| CoreError::CarError {
+                                    operation: "finding agent metadata block".to_string(),
+                                    cause: iroh_car::Error::Parsing(format!(
+                                        "Agent metadata block not found for CID: {}",
+                                        export.agent_cid
+                                    )),
+                                })?;
+                        let meta: AgentRecordExport = decode_dag_cbor(meta_block).map_err(|e| {
+                            CoreError::DagCborDecodingError {
+                                data_type: "AgentRecordExport".to_string(),
+                                details: e.to_string(),
+                            }
+                        })?;
+                        reconstruct_agent_from_export(&meta, &blocks)?
+                    } else {
+                        // Legacy fallback
+                        decode_dag_cbor(agent_export_data).map_err(|e| {
+                            CoreError::DagCborDecodingError {
+                                data_type: "AgentRecord".to_string(),
+                                details: e.to_string(),
+                            }
+                        })?
+                    };
 
                 // Store the original ID
                 let original_id = agent.id.clone();
@@ -601,13 +712,35 @@ where
         };
 
         // Import all agents first
-        for (_old_agent_id, agent_cid) in &constellation_export.agent_export_cids {
-            if let Some(agent_data) = blocks.get(agent_cid) {
+        for (_old_agent_id, agent_export_cid) in &constellation_export.agent_export_cids {
+            if let Some(agent_export_data) = blocks.get(agent_export_cid) {
                 let mut agent: AgentRecord =
-                    decode_dag_cbor(agent_data).map_err(|e| CoreError::DagCborDecodingError {
-                        data_type: "AgentRecord".to_string(),
-                        details: e.to_string(),
-                    })?;
+                    if let Ok(export) = decode_dag_cbor::<AgentExport>(agent_export_data) {
+                        let meta_block =
+                            blocks
+                                .get(&export.agent_cid)
+                                .ok_or_else(|| CoreError::CarError {
+                                    operation: "finding agent metadata block".to_string(),
+                                    cause: iroh_car::Error::Parsing(format!(
+                                        "Agent metadata block not found for CID: {}",
+                                        export.agent_cid
+                                    )),
+                                })?;
+                        let meta: AgentRecordExport = decode_dag_cbor(meta_block).map_err(|e| {
+                            CoreError::DagCborDecodingError {
+                                data_type: "AgentRecordExport".to_string(),
+                                details: e.to_string(),
+                            }
+                        })?;
+                        reconstruct_agent_from_export(&meta, &blocks)?
+                    } else {
+                        decode_dag_cbor(agent_export_data).map_err(|e| {
+                            CoreError::DagCborDecodingError {
+                                data_type: "AgentRecord".to_string(),
+                                details: e.to_string(),
+                            }
+                        })?
+                    };
 
                 // Store original ID
                 let original_id = agent.id.clone();
@@ -770,5 +903,88 @@ where
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::client;
+    use crate::export::{AgentExporter, ExportOptions};
+
+    #[tokio::test]
+    async fn import_roundtrip_agent() {
+        // Build a simple agent with enough data to create multiple chunks
+        use crate::agent::AgentRecord;
+        use crate::id::RelationId;
+        use crate::memory::{MemoryBlock, MemoryPermission, MemoryType};
+        use crate::message::{AgentMessageRelation, Message, MessageRelationType};
+        use chrono::Utc;
+
+        let db = client::create_test_db().await.unwrap();
+        let exporter = AgentExporter::new(db.clone());
+
+        // Fabricate an agent in-memory
+        let mut agent = AgentRecord {
+            name: "RoundTrip".to_string(),
+            owner_id: crate::UserId::generate(),
+            ..Default::default()
+        };
+        let mut msgs = Vec::new();
+        for i in 0..1200usize {
+            tokio::time::sleep(std::time::Duration::from_micros(500)).await;
+            let m = Message::user(format!("msg{}", i));
+            let rel = AgentMessageRelation {
+                id: RelationId::nil(),
+                in_id: agent.id.clone(),
+                out_id: m.id.clone(),
+                message_type: MessageRelationType::Active,
+                position: m.position.clone(),
+                added_at: Utc::now(),
+                batch: m.batch.clone(),
+                sequence_num: m.sequence_num,
+                batch_type: m.batch_type,
+            };
+            msgs.push((m, rel));
+        }
+        agent.messages = msgs;
+        let mut mems = Vec::new();
+        for i in 0..120usize {
+            let mb = MemoryBlock {
+                owner_id: agent.owner_id.clone(),
+                label: compact_str::format_compact!("mem{}", i),
+                value: format!("value-{}", i),
+                memory_type: MemoryType::Working,
+                permission: MemoryPermission::Append,
+                ..Default::default()
+            };
+            let rel = crate::agent::AgentMemoryRelation {
+                id: RelationId::nil(),
+                in_id: agent.id.clone(),
+                out_id: mb.id.clone(),
+                access_level: MemoryPermission::Append,
+                created_at: Utc::now(),
+            };
+            mems.push((mb, rel));
+        }
+        agent.memories = mems;
+
+        // Export to blocks (no CAR), then reconstruct via helper
+        let (agent_export, blocks, _stats) = exporter
+            .export_agent_to_blocks(&agent, &ExportOptions::default())
+            .await
+            .unwrap();
+
+        // Build block map and decode meta
+        let map: std::collections::HashMap<_, _> = blocks.iter().cloned().collect();
+        let meta_bytes = map
+            .get(&agent_export.agent_cid)
+            .expect("agent meta present");
+        let meta: AgentRecordExport = serde_ipld_dagcbor::from_slice(meta_bytes).unwrap();
+
+        // Reconstruct and validate sizes
+        let reconstructed = super::reconstruct_agent_from_export(&meta, &map).unwrap();
+        assert!(reconstructed.messages.len() >= 1200);
+        assert!(reconstructed.memories.len() >= 120);
     }
 }

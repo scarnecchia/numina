@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, message::Message};
+use crate::{AgentId, agent::AgentRecord, message::Message};
 
 /// Manifest describing any export - this is always the root of a CAR file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,14 +36,97 @@ pub enum ExportType {
 /// Agent export with all related data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExport {
-    /// The agent record
-    pub agent: crate::agent::AgentRecord,
+    /// CID of the slim agent export record
+    pub agent_cid: Cid,
 
     /// CIDs of message chunks
     pub message_chunk_cids: Vec<Cid>,
 
     /// CIDs of memory chunks
     pub memory_chunk_cids: Vec<Cid>,
+}
+
+/// Slim, export-oriented view of an agent. Contains core metadata and
+/// references to message/memory chunks by CID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRecordExport {
+    pub id: crate::AgentId,
+    pub name: String,
+    pub agent_type: crate::agent::AgentType,
+
+    // Model configuration
+    pub model_id: Option<String>,
+    pub model_config: std::collections::HashMap<String, serde_json::Value>,
+
+    // Context/configuration parameters
+    pub base_instructions: String,
+    pub max_messages: usize,
+    pub max_message_age_hours: i64,
+    pub compression_threshold: usize,
+    pub memory_char_limit: usize,
+    pub enable_thinking: bool,
+    pub compression_strategy: crate::context::CompressionStrategy,
+
+    // Tool rules
+    #[serde(default)]
+    pub tool_rules: Vec<crate::config::ToolRuleConfig>,
+
+    // Runtime stats (for reference)
+    pub total_messages: usize,
+    pub total_tool_calls: usize,
+    pub context_rebuilds: usize,
+    pub compression_events: usize,
+
+    // Timestamps
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub last_active: chrono::DateTime<chrono::Utc>,
+
+    // Ownership
+    pub owner_id: crate::UserId,
+
+    // Optional summary metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_summary: Option<String>,
+
+    // References to data chunks instead of inline data
+    pub message_chunks: Vec<Cid>, // CIDs of MessageChunk blocks
+    pub memory_chunks: Vec<Cid>,  // CIDs of MemoryChunk blocks
+}
+
+impl AgentRecordExport {
+    pub fn from_agent(
+        agent: &AgentRecord,
+        message_chunks: Vec<Cid>,
+        memory_chunks: Vec<Cid>,
+    ) -> Self {
+        Self {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            agent_type: agent.agent_type.clone(),
+            model_id: agent.model_id.clone(),
+            model_config: agent.model_config.clone(),
+            base_instructions: agent.base_instructions.clone(),
+            max_messages: agent.max_messages,
+            max_message_age_hours: agent.max_message_age_hours,
+            compression_threshold: agent.compression_threshold,
+            memory_char_limit: agent.memory_char_limit,
+            enable_thinking: agent.enable_thinking,
+            compression_strategy: agent.compression_strategy.clone(),
+            tool_rules: agent.tool_rules.clone(),
+            total_messages: agent.total_messages,
+            total_tool_calls: agent.total_tool_calls,
+            context_rebuilds: agent.context_rebuilds,
+            compression_events: agent.compression_events,
+            created_at: agent.created_at,
+            updated_at: agent.updated_at,
+            last_active: agent.last_active,
+            owner_id: agent.owner_id.clone(),
+            message_summary: agent.message_summary.clone(),
+            message_chunks,
+            memory_chunks,
+        }
+    }
 }
 
 /// Statistics about an export

@@ -135,32 +135,38 @@ To ensure compatibility with IPLD standards:
 ## Implementation Steps
 
 ### Phase 1: Create New Types
-- [ ] Define `AgentRecordExport` struct
-- [ ] Define `GroupExport` struct (similar pattern)
-- [ ] Define `ConstellationExport` struct (similar pattern)
-- [ ] Add conversion methods between full and export types
+- [x] Define `AgentRecordExport` struct
+- [x] Define `GroupExport` struct (similar pattern)
+- [x] Define `ConstellationExport` struct (similar pattern)
+- [x] Add conversion methods between full and export types
 
 ### Phase 2: Update Export Logic
-- [ ] Modify `export_agent_to_blocks` to use slim records
-- [ ] Update `export_group` to not include full agents inline
-- [ ] Update `export_constellation` similarly
-- [ ] Add block size validation/warnings
+- [x] Modify `export_agent_to_blocks` to use slim records
+- [x] Update `export_group` to not include full agents inline
+- [x] Update `export_constellation` similarly
+- [x] Add block size validation (hard 1MB cap)
 
 ### Phase 3: Update Import Logic
-- [ ] Create `reconstruct_agent_from_export` method
-- [ ] Update `import_from_car` to handle new structure
-- [ ] Add backward compatibility for old CAR files
+- [x] Create `reconstruct_agent_from_export` method
+- [x] Update `import_from_car` to handle new structure
+- [x] Add backward compatibility for old CAR files
 
 ### Phase 4: Testing
-- [ ] Test with large agents (>10k messages)
-- [ ] Verify with go-car and other IPLD tools
+- [x] Unit tests for size cap, linkage, reconstruction (block-level)
+- [ ] Verify with go-car and other IPLD tools (manual)
 - [ ] Benchmark export/import performance
 - [ ] Test incremental/partial imports
 
 ### Phase 5: Migration
-- [ ] Document breaking changes
+- [x] Document format changes (see car-export-v2.md)
 - [ ] Provide migration tool for old CAR files
 - [ ] Update CLI help text and examples
+
+## Status
+
+- Implemented in code with `EXPORT_VERSION = 2`.
+- Slim agent metadata with chunk references is now the default.
+- Hard 1MB cap enforced for all blocks; chunks are size-aware and linked with `next_chunk`.
 
 ## Backward Compatibility
 

@@ -60,10 +60,13 @@ surreal start --user root --pass root --bind 0.0.0.0:8000 memory
 
 When migrating from an embedded database to an external one:
 
-1. Export your data using the CAR export feature:
+1. Export your data using the CAR export feature (format v2):
    ```bash
    pattern-cli export constellation -o backup.car
    ```
+   Notes:
+   - Export format version is 2 (slim agent metadata + chunked blocks, 1MB cap)
+   - Older CARs from pre-v2 builds may not be compatible with all IPLD tools
 
 2. Update your configuration to use the external database
 
