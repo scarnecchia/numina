@@ -380,6 +380,25 @@ impl MessageCompressor {
             }
         }
 
+        // Never archive incomplete batches - keep them active
+        let mut incomplete_batches = Vec::new();
+        archived_batches.retain(|batch| {
+            if !batch.is_complete {
+                incomplete_batches.push(batch.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        // Add incomplete batches to active
+        active_batches.extend(incomplete_batches);
+
+        // Always keep at least one batch (the most recent complete one if possible)
+        if active_batches.is_empty() && !archived_batches.is_empty() {
+            active_batches.push(archived_batches.pop().unwrap());
+        }
+
         // Reverse to maintain chronological order
         active_batches.reverse();
         archived_batches.reverse();
@@ -491,6 +510,25 @@ impl MessageCompressor {
                 // Keep remaining batches as active
                 active_batches.push(batch);
             }
+        }
+
+        // Never archive incomplete batches - keep them active
+        let mut incomplete_batches = Vec::new();
+        archived_batches.retain(|batch| {
+            if !batch.is_complete {
+                incomplete_batches.push(batch.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        // Add incomplete batches to active
+        active_batches.extend(incomplete_batches);
+
+        // Always keep at least one batch (the most recent complete one if possible)
+        if active_batches.is_empty() && !archived_batches.is_empty() {
+            active_batches.push(archived_batches.pop().unwrap());
         }
 
         // Restore chronological order (oldest to newest)
@@ -730,6 +768,26 @@ impl MessageCompressor {
         // Sort important batches back to chronological order
         important_batches.sort_by_key(|b| b.id);
 
+        // Never archive incomplete batches - keep them active
+        let mut incomplete_batches = Vec::new();
+        archived_batches.retain(|batch| {
+            if !batch.is_complete {
+                incomplete_batches.push(batch.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        // Add incomplete batches to active
+        important_batches.extend(incomplete_batches);
+
+        // Always keep at least one batch (the most recent complete one if possible)
+        if important_batches.is_empty() && active_batches.is_empty() && !archived_batches.is_empty()
+        {
+            important_batches.push(archived_batches.pop().unwrap());
+        }
+
         // Combine important and recent batches
         important_batches.extend(active_batches);
         let active_batches = important_batches;
@@ -934,6 +992,11 @@ impl MessageCompressor {
                 // Keep incomplete batches active
                 active_batches.push(batch.clone());
             }
+        }
+
+        // Always keep at least one batch (the most recent one) if we have none
+        if active_batches.is_empty() && !archived_batches.is_empty() {
+            active_batches.push(archived_batches.pop().unwrap());
         }
 
         // Sort to maintain chronological order

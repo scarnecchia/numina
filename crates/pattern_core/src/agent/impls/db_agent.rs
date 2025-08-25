@@ -179,6 +179,14 @@ where
                         _ => false,
                     };
 
+                    let is_anthropic_5h = match &e {
+                        CoreError::ModelProviderError { cause, .. } => {
+                            let error_str = format!("{:?}", cause);
+                            error_str.contains("anthropic-ratelimit-unified")
+                        }
+                        _ => false,
+                    };
+
                     // Handle Gemini empty candidates error with prompt modification
                     if is_gemini_empty_candidates && retries < max_retries {
                         retries += 1;
@@ -214,6 +222,24 @@ where
 
                         // Update request for next iteration
                         request = modified_request;
+                        continue;
+                    }
+
+                    if is_anthropic_5h {
+                        backoff_ms = backoff_ms * 2 + 600000;
+
+                        retries += 1;
+                        tracing::warn!(
+                            "Anthropic 5h limit error (attempt {}/{}), waiting {}ms before retry",
+                            retries,
+                            max_retries,
+                            backoff_ms
+                        );
+
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+
+                        backoff_ms += rand::random::<u64>() % 1000; // Add 0-1s jitter
+
                         continue;
                     }
 

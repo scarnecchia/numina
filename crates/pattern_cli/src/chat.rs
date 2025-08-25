@@ -414,7 +414,7 @@ pub async fn setup_group(
     let constellation_tracker = Arc::new(
         pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
             tracker_memory_id,
-            100,
+            50,
         ),
     );
 
