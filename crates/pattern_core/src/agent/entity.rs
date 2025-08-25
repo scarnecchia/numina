@@ -92,27 +92,25 @@ pub fn get_position_generator() -> &'static SnowflakeGen {
 ///
 /// This is designed for use in synchronous contexts like Default impls.
 /// In practice, we don't generate messages fast enough to hit the sequence
-/// limit (65536/ms), so Pending should never happen in our use case.
+/// limit (65536/ms), so Pending should rarely happen in production.
 ///
-/// LIMITATION: Currently panics if we somehow exhaust the sequence within
-/// a millisecond. This is a known limitation that will be addressed if it
-/// ever becomes an issue in production (extremely unlikely given our throughput).
+/// When the sequence is exhausted (e.g., in parallel tests), this will block
+/// briefly until the next millisecond boundary to get a fresh sequence.
 pub fn get_next_message_position_sync() -> SnowflakePosition {
     use ferroid::IdGenStatus;
 
     let generator = get_position_generator();
 
-    // Try the generator - this will succeed unless we're generating 65k+ messages/ms
-    match generator.next_id() {
-        IdGenStatus::Ready { id } => SnowflakePosition::new(id),
-        IdGenStatus::Pending { yield_for } => {
-            // This should never happen in practice - we don't generate 65k messages/ms
-            panic!(
-                "Snowflake ID sequence exhausted, would need to wait {}ms. \
-                This indicates extreme message generation rate (>65k/ms) which shouldn't \
-                happen in Pattern. If you're seeing this, please report it as a bug.",
-                yield_for
-            );
+    loop {
+        match generator.next_id() {
+            IdGenStatus::Ready { id } => return SnowflakePosition::new(id),
+            IdGenStatus::Pending { yield_for } => {
+                // If yield_for is 0, we're at the sequence limit but still in the same millisecond.
+                // Wait at least 1ms to roll over to the next millisecond and reset the sequence.
+                let wait_ms = yield_for.max(1) as u64;
+                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                // Loop will retry after the wait
+            }
         }
     }
 }
@@ -236,6 +234,62 @@ impl Default for AgentRecord {
 
 /// Extension methods for AgentRecord
 impl AgentRecord {
+    /// Store agent with relations individually to avoid payload size limits
+    ///
+    /// This is an alternative to store_with_relations() that works better
+    /// with remote database instances that have request size limits.
+    /// Each memory and message is stored separately rather than in bulk.
+    pub async fn store_with_relations_individually<C>(
+        &self,
+        db: &surrealdb::Surreal<C>,
+    ) -> Result<Self, crate::db::DatabaseError>
+    where
+        C: surrealdb::Connection + Clone,
+    {
+        // First store the agent itself without relations
+        let mut agent_only = self.clone();
+        agent_only.memories.clear();
+        agent_only.messages.clear();
+        agent_only.assigned_task_ids.clear();
+        agent_only.scheduled_event_ids.clear();
+
+        let stored_agent = agent_only.store_with_relations(db).await?;
+
+        // Store each memory and its relation individually
+        if !self.memories.is_empty() {
+            tracing::info!("Storing {} memory blocks...", self.memories.len());
+            for (i, (memory, relation)) in self.memories.iter().enumerate() {
+                // Store the memory block with its own relations
+                memory.store_with_relations(db).await?;
+                // Create the agent-memory relation
+                crate::db::ops::create_relation_typed(db, relation).await?;
+
+                let stored = i + 1;
+                tracing::info!("  Stored {}/{} memories", stored, self.memories.len());
+            }
+            tracing::info!("Finished storing {} memories", self.memories.len());
+        }
+
+        // Store each message and its relation individually
+        if !self.messages.is_empty() {
+            tracing::info!("Storing {} messages...", self.messages.len());
+            for (i, (message, relation)) in self.messages.iter().enumerate() {
+                // Store the message with its own relations
+                message.store_with_relations(db).await?;
+                // Create the agent-message relation
+                crate::db::ops::create_relation_typed(db, relation).await?;
+
+                let stored = i + 1;
+                if stored % 100 == 0 || stored == self.messages.len() {
+                    tracing::info!("  Stored {}/{} messages", stored, self.messages.len());
+                }
+            }
+            tracing::info!("Finished storing {} messages", self.messages.len());
+        }
+
+        Ok(stored_agent)
+    }
+
     /// Create a ContextConfig from the agent's stored configuration
     pub fn to_context_config(&self) -> ContextConfig {
         // Create model adjustments based on compression settings

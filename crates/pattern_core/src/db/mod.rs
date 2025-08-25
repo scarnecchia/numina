@@ -124,7 +124,7 @@ impl From<surrealdb::Error> for DatabaseError {
 pub type Result<T> = std::result::Result<T, DatabaseError>;
 
 /// Configuration for database backends
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DatabaseConfig {
     /// Embedded database using SurrealKV
@@ -156,6 +156,33 @@ pub enum DatabaseConfig {
 
 fn default_db_path() -> String {
     "./pattern.db".to_string()
+}
+
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatabaseConfig::Embedded { path, strict_mode } => f
+                .debug_struct("Embedded")
+                .field("path", path)
+                .field("strict_mode", strict_mode)
+                .finish(),
+            #[cfg(feature = "surreal-remote")]
+            DatabaseConfig::Remote {
+                url,
+                username,
+                password,
+                namespace,
+                database,
+            } => f
+                .debug_struct("Remote")
+                .field("url", url)
+                .field("username", username)
+                .field("password", &password.as_ref().map(|_| "***REDACTED***"))
+                .field("namespace", namespace)
+                .field("database", database)
+                .finish(),
+        }
+    }
 }
 
 impl Default for DatabaseConfig {

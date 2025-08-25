@@ -141,6 +141,12 @@ where
                 data_type: "AgentExport".to_string(),
                 cause: e,
             })?;
+        if agent_export_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding AgentExport".to_string(),
+                cause: iroh_car::Error::Parsing("agent export block too large".to_string()),
+            });
+        }
         let agent_export_cid = Self::create_cid(&agent_export_data)?;
 
         // Update stats
@@ -161,6 +167,12 @@ where
                 data_type: "ExportManifest".to_string(),
                 cause: e,
             })?;
+        if manifest_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding ExportManifest".to_string(),
+                cause: iroh_car::Error::Parsing("manifest block too large".to_string()),
+            });
+        }
         let manifest_cid = Self::create_cid(&manifest_data)?;
 
         // Create CAR writer with manifest as root
@@ -530,6 +542,18 @@ where
                     data_type: "AgentExport".to_string(),
                     cause: e,
                 })?;
+            if agent_export_data.len() > MAX_BLOCK_BYTES {
+                return Err(CoreError::CarError {
+                    operation: "encoding AgentExport".to_string(),
+                    cause: iroh_car::Error::Parsing("agent export block too large".to_string()),
+                });
+            }
+            if agent_export_data.len() > MAX_BLOCK_BYTES {
+                return Err(CoreError::CarError {
+                    operation: "encoding AgentExport".to_string(),
+                    cause: iroh_car::Error::Parsing("agent export block too large".to_string()),
+                });
+            }
             let agent_export_cid = Self::create_cid(&agent_export_data)?;
 
             agent_export_cids.push((agent.id.clone(), agent_export_cid));
@@ -553,6 +577,12 @@ where
                 data_type: "GroupExport".to_string(),
                 cause: e,
             })?;
+        if group_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding GroupExport".to_string(),
+                cause: iroh_car::Error::Parsing("group export block too large".to_string()),
+            });
+        }
         let group_cid = Self::create_cid(&group_data)?;
 
         total_stats.total_blocks += 1; // For the group export itself
@@ -572,6 +602,12 @@ where
                 data_type: "ExportManifest".to_string(),
                 cause: e,
             })?;
+        if manifest_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding ExportManifest".to_string(),
+                cause: iroh_car::Error::Parsing("manifest block too large".to_string()),
+            });
+        }
         let manifest_cid = Self::create_cid(&manifest_data)?;
 
         // Create CAR file with manifest as root
@@ -677,6 +713,12 @@ where
                     data_type: "GroupExport".to_string(),
                     cause: e,
                 })?;
+            if group_data.len() > MAX_BLOCK_BYTES {
+                return Err(CoreError::CarError {
+                    operation: "encoding GroupExport".to_string(),
+                    cause: iroh_car::Error::Parsing("group export block too large".to_string()),
+                });
+            }
             let group_cid = Self::create_cid(&group_data)?;
 
             all_blocks.push((group_cid, group_data));
@@ -685,11 +727,23 @@ where
             group_exports.push(group_export);
         }
 
-        // Create constellation export
+        // Create constellation export (slim: do not embed full agents inline)
+        let mut constellation_slim = constellation.clone();
+        // Preserve the membership data before clearing
+        let agent_memberships: Vec<(
+            AgentId,
+            crate::coordination::groups::ConstellationMembership,
+        )> = constellation
+            .agents
+            .iter()
+            .map(|(agent, membership)| (agent.id.clone(), membership.clone()))
+            .collect();
+        constellation_slim.agents.clear();
         let constellation_export = ConstellationExport {
-            constellation: constellation.clone(),
+            constellation: constellation_slim,
             groups: group_exports,
             agent_export_cids,
+            agent_memberships,
         };
 
         // Serialize constellation export
@@ -699,6 +753,12 @@ where
                 cause: e,
             }
         })?;
+        if constellation_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding ConstellationExport".to_string(),
+                cause: iroh_car::Error::Parsing("constellation export block too large".to_string()),
+            });
+        }
         let constellation_cid = Self::create_cid(&constellation_data)?;
 
         total_stats.total_blocks += 1; // For the constellation export itself
@@ -718,6 +778,12 @@ where
                 data_type: "ExportManifest".to_string(),
                 cause: e,
             })?;
+        if manifest_data.len() > MAX_BLOCK_BYTES {
+            return Err(CoreError::CarError {
+                operation: "encoding ExportManifest".to_string(),
+                cause: iroh_car::Error::Parsing("manifest block too large".to_string()),
+            });
+        }
         let manifest_cid = Self::create_cid(&manifest_data)?;
 
         // Create CAR file with manifest as root
@@ -767,18 +833,26 @@ where
         group: &AgentGroup,
         agent_cids: &[(AgentId, Cid)],
     ) -> Result<GroupExport> {
-        // Map member agent IDs to their export CIDs
-        let member_agent_cids: Vec<(AgentId, Cid)> = group
-            .members
-            .iter()
-            .filter_map(|(agent, _membership)| {
-                agent_cids.iter().find(|(id, _)| id == &agent.id).cloned()
-            })
-            .collect();
+        // Map member agent IDs to their export CIDs and preserve membership data
+        let mut member_agent_cids: Vec<(AgentId, Cid)> = Vec::new();
+        let mut member_memberships: Vec<(AgentId, GroupMembership)> = Vec::new();
+
+        for (agent, membership) in &group.members {
+            // Find the CID for this agent
+            if let Some((_, cid)) = agent_cids.iter().find(|(id, _)| id == &agent.id) {
+                member_agent_cids.push((agent.id.clone(), *cid));
+                member_memberships.push((agent.id.clone(), membership.clone()));
+            }
+        }
+
+        // Create a slim copy of the group without embedding full members inline
+        let mut group_slim = group.clone();
+        group_slim.members.clear();
 
         Ok(GroupExport {
-            group: group.clone(),
+            group: group_slim,
             member_agent_cids,
+            member_memberships,
         })
     }
 
@@ -791,40 +865,65 @@ where
         use crate::db::ops::get_entity;
 
         // First get the basic constellation
-        let constellation = get_entity::<Constellation, _>(&self.db, constellation_id)
+        let mut constellation = get_entity::<Constellation, _>(&self.db, constellation_id)
             .await?
             .ok_or_else(|| CoreError::agent_not_found(constellation_id.to_string()))?;
 
         let mut all_agents = Vec::new();
         let mut all_groups = Vec::new();
 
-        // Load direct constellation agents
-        let direct_agents_query = r#"
-            SELECT * FROM agent WHERE id IN (
-                SELECT out FROM constellation_agents WHERE in = $constellation_id
-            )
+        // Load direct constellation agents AND their membership data
+        let memberships_query = r#"
+            SELECT * FROM constellation_agents 
+            WHERE in = $constellation_id
+            ORDER BY joined_at ASC
         "#;
 
         let mut result = self
             .db
-            .query(direct_agents_query)
+            .query(memberships_query)
             .bind((
                 "constellation_id",
                 surrealdb::RecordId::from(constellation_id),
             ))
             .await
             .map_err(|e| CoreError::DatabaseQueryFailed {
-                query: direct_agents_query.to_string(),
-                table: "agent".to_string(),
+                query: memberships_query.to_string(),
+                table: "constellation_agents".to_string(),
                 cause: e.into(),
             })?;
 
-        let mut direct_agents: Vec<AgentRecord> =
+        let membership_db_models: Vec<crate::coordination::groups::ConstellationMembershipDbModel> =
             result.take(0).map_err(|e| CoreError::DatabaseQueryFailed {
-                query: direct_agents_query.to_string(),
-                table: "agent".to_string(),
+                query: memberships_query.to_string(),
+                table: "constellation_agents".to_string(),
                 cause: e.into(),
             })?;
+
+        // Convert membership models and load agents
+        let mut constellation_agents = Vec::new();
+        for membership_model in membership_db_models {
+            let membership = crate::coordination::groups::ConstellationMembership::from_db_model(
+                membership_model,
+            )?;
+            // Load the agent (out_id is the AgentId in constellation membership)
+            if let Some(agent) = crate::db::ops::get_entity::<crate::agent::AgentRecord, _>(
+                &self.db,
+                &membership.out_id,
+            )
+            .await?
+            {
+                constellation_agents.push((agent, membership));
+            }
+        }
+
+        constellation.agents = constellation_agents.clone();
+
+        // Extract just the agents for further processing
+        let mut direct_agents: Vec<AgentRecord> = constellation_agents
+            .into_iter()
+            .map(|(agent, _)| agent)
+            .collect();
 
         // Load memories and messages for direct agents too
         for agent in &mut direct_agents {

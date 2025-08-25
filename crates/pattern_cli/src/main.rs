@@ -128,7 +128,7 @@ enum Commands {
         rename_to: Option<String>,
 
         /// Preserve original IDs when importing
-        #[arg(long)]
+        #[arg(long, default_value_t = true)]
         preserve_ids: bool,
     },
 }

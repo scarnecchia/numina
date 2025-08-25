@@ -116,6 +116,9 @@ summarization_model = "claude-3-5-haiku-20241022"
 
 [context]
 max_messages = 250
+
+
+# Bluesky configuration for the constellation
 [bluesky]
 default_filter = { nsids = [
     "app.bsky.feed.post",
@@ -124,6 +127,18 @@ default_filter = { nsids = [
     "did:plc:xivud6i24ruyki3bwjypjgy2",
 ], dids = [
     # follower list
+    "did:plc:iln4c6fb4lubhtudetdey7xu",
+    "did:plc:mmdzunv3n7gx3ktnlqrufmz2",
+    "did:plc:hbveviy7odagwpqdgomiinzm",
+    "did:plc:xxwlzdibruiofw7dlzh7s6y6",
+    "did:plc:wjbi7np3zb7i35rwrjn2kgdf",
+    "did:plc:st75e54baancdywoua4vmwtw",
+    "did:plc:o56qmbc5xf5gnrlhm3ozhgpk",
+    "did:plc:nrpnhhmngqkb763azbtxpasc",
+    "did:plc:rlby4jh4uz37wykytzzegrla",
+    "did:plc:ysnmc23gs26h5j4wehufassx",
+    "did:plc:xc7mwqt5mxtargsqap5gvfmz",
+    "did:plc:p6bb7ne4qmbqb46onehp6kdl",
     "did:plc:foxemuxgrwgjfj4v75tjeynd",
     "did:plc:6e6n5nhhy7s2zqr7wx4s6p52",
     "did:plc:jwdk5e6rj6hmkd2rmhkq4cnd",
@@ -156,7 +171,6 @@ default_filter = { nsids = [
     "did:plc:aoraewlzl3vd6i4yszqjog76",
     "did:plc:m2b2xdzsguibjjjlmmvhsg65",
     "did:plc:movyewyj6cpzmxpnwu5cu2yo",
-    "did:plc:2ipe7b7r3u72hahng53pptv4",
     "did:plc:o3wvuchpresjihlghxzitmvn",
     "did:plc:vtikuhjz6zzwtwdb5uakibbf",
     "did:plc:pd2a54jyiaeexr75jyhw7ylk",
@@ -169,7 +183,6 @@ default_filter = { nsids = [
     "did:plc:vszw3ess46odfhnzdsy4huae",
     "did:plc:4gm5uxjg3tz4nat4qpjk2t6h",
     "did:plc:coqkaymd4t65envntucbpx2y",
-    "did:plc:o745pzskmlsvbqbgx6t3x7lh",
     "did:plc:imspa6h76sq52hcukzxc6q2j",
     "did:plc:idd5adskstkxy3fzsmer6dtn",
     "did:plc:2e3k45gdkqgxcuvdacb3pl22",
@@ -190,7 +203,6 @@ default_filter = { nsids = [
     "did:plc:d2wz6i5xyuqyb6hfqvdwbflm",
     "did:plc:rpevde4pmrk3pak6mccdtzmo",
     "did:plc:slv66466c5jlvqio6fufkxo7",
-    "did:plc:tft77e5qkblxtneeib4lp3zk",
     "did:plc:s7xw6pqvc72ha73bogjqp4m3",
     "did:plc:3deilm3cxnqundoo227xudg2",
     "did:plc:sbeloxkcwpltzdte26sxrnds",
@@ -238,7 +250,6 @@ default_filter = { nsids = [
     "did:plc:dhwkugfeb5zmgjaecq4jk4d4",
     "did:plc:b34qscz2xl2iggohmkni4wyj",
     "did:plc:tgo4sgmvasbn4aomyp3klw3d",
-    "did:plc:3md4muk42xbkpdgulfinoaxm",
     "did:plc:isa2xmpvbyjsnobbwbiqnaqz",
     "did:plc:7v33jhm3jle5ssn2u3ax2sxg",
     "did:plc:gfi2b5fzikadrgo4mvph4r7q",
@@ -270,6 +281,7 @@ default_filter = { nsids = [
     "did:plc:5m2galxyx7lpkfq5yjr7nyyu",
     "did:plc:sgqw2zixdcjtjjhrm4bw64ny",
     "did:plc:mwf7avtfm2brtzzmgawiztcc",
+    "did:plc:fgd4h4fwusrcfukesl7axe5e",
     "did:plc:u5stolpomsfbkgqfopef6jio",
     "did:plc:4dxjapf7zxwbld46q2l2jibu",
     "did:plc:o4hozhusvl7upazvtk6cttl6",

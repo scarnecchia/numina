@@ -1202,6 +1202,8 @@ pub async fn get_group_by_name<C: Connection>(
     _user_id: &UserId,
     group_name: &str,
 ) -> Result<Option<AgentGroup>> {
+    tracing::info!("get_group_by_name: searching for group '{}'", group_name);
+
     // For now, just query by name directly
     // TODO: Add constellation filtering once we fix the relation queries
     let query = r#"
@@ -1218,6 +1220,8 @@ pub async fn get_group_by_name<C: Connection>(
 
     let db_groups: Vec<<AgentGroup as DbEntity>::DbModel> =
         result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
+
+    tracing::info!("get_group_by_name: found {} groups", db_groups.len());
 
     if let Some(db_model) = db_groups.into_iter().next() {
         let mut group = AgentGroup::from_db_model(db_model)?;
@@ -1251,6 +1255,7 @@ pub async fn get_group_by_name<C: Connection>(
         // Now load the agents for each membership
         let mut members = Vec::new();
         for membership in memberships {
+            tracing::info!("Loading agent {:?} for group membership", membership.in_id);
             // Load the agent using the in_id (agent)
             if let Some(agent) = AgentRecord::load_with_relations(conn, &membership.in_id).await? {
                 members.push((agent, membership));

@@ -31,7 +31,12 @@ This document describes the export/import format introduced in EXPORT_VERSION=2.
 1. Read `ExportManifest` from CAR root.
 2. Load `data_cid` for the export payload (Agent/Group/Constellation).
 3. For agents, decode `AgentExport → AgentRecordExport`, then load all referenced chunk CIDs and reconstruct a full `AgentRecord`.
-4. For groups/constellations, iterate member agent export CIDs and import agents first; then restore group/constellation relationships.
+  4. For groups/constellations, iterate member agent export CIDs and import agents first; then restore group/constellation relationships.
+
+### ID Preservation (default)
+
+- By default, import preserves original IDs (`preserve_ids = true`).
+- Set `merge_existing = true` to update existing records with the same IDs, or set `preserve_ids = false` to generate new IDs to avoid conflicts.
 
 ## Backward Compatibility
 
@@ -48,4 +53,3 @@ This document describes the export/import format introduced in EXPORT_VERSION=2.
 
 - `CompressionSettings` is currently unused; compression at the block level is not applied to preserve compatibility with standard IPLD tooling.
 - `next_chunk` linkage enables future streaming import with minimal refactor.
-

@@ -197,6 +197,12 @@ pub struct ConstellationExport {
 
     /// CIDs of all agent exports in this constellation
     pub agent_export_cids: Vec<(AgentId, Cid)>,
+
+    /// Membership metadata for direct constellation agents (old AgentId → membership)
+    pub agent_memberships: Vec<(
+        AgentId,
+        crate::coordination::groups::ConstellationMembership,
+    )>,
 }
 
 /// A complete group export with all relationships
@@ -207,6 +213,9 @@ pub struct GroupExport {
 
     /// CIDs of member agent exports (agents are exported separately)
     pub member_agent_cids: Vec<(AgentId, Cid)>,
+
+    /// Membership metadata for group members (old AgentId → membership)
+    pub member_memberships: Vec<(AgentId, crate::coordination::groups::GroupMembership)>,
 }
 
 /// Compression settings

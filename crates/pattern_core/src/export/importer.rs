@@ -118,7 +118,7 @@ impl Default for ImportOptions {
         Self {
             rename_to: None,
             merge_existing: false,
-            preserve_ids: false,
+            preserve_ids: true,
             owner_id: UserId::nil(),
             preserve_timestamps: true,
             import_messages: true,
@@ -384,9 +384,9 @@ where
         let memory_count = agent.memories.len();
         let message_count = agent.messages.len();
 
-        // Store the agent with all its relations
+        // Store the agent with all its relations individually to avoid payload limits
         let stored_agent = agent
-            .store_with_relations(&self.db)
+            .store_with_relations_individually(&self.db)
             .await
             .map_err(|e| CoreError::from(e))?;
 
@@ -548,18 +548,17 @@ where
                     agent.messages.clear();
                 }
 
-                // Store the agent
+                // Store the agent with relations individually to avoid payload limits
                 let stored_agent = agent
-                    .store_with_relations(&self.db)
+                    .store_with_relations_individually(&self.db)
                     .await
                     .map_err(|e| CoreError::from(e))?;
 
                 // Find and preserve the original membership data for this agent
                 let original_membership = group_export
-                    .group
-                    .members
+                    .member_memberships
                     .iter()
-                    .find(|(a, _)| a.id == original_id)
+                    .find(|(a_id, _)| a_id == &original_id)
                     .map(|(_, membership)| membership.clone());
 
                 result
@@ -609,7 +608,7 @@ where
         // Re-add members with their preserved membership data
         for (new_agent_id, mut original_membership) in imported_memberships {
             // Update the membership with new IDs
-            original_membership.id = crate::id::RelationId::generate();
+            original_membership.id = crate::id::RelationId::nil();
             original_membership.in_id = new_agent_id;
             original_membership.out_id = created_group.id.clone();
 
@@ -768,9 +767,9 @@ where
                     agent.messages.clear();
                 }
 
-                // Store the agent
+                // Store the agent with relations individually to avoid payload limits
                 let stored_agent = agent
-                    .store_with_relations(&self.db)
+                    .store_with_relations_individually(&self.db)
                     .await
                     .map_err(|e| CoreError::from(e))?;
 
@@ -879,7 +878,7 @@ where
         // Add agents to constellation using edge entities
         for (_, new_agent_id) in &result.agent_id_map {
             let membership = crate::coordination::groups::ConstellationMembership {
-                id: crate::id::RelationId::generate(),
+                id: crate::id::RelationId::nil(),
                 in_id: created_constellation.id.clone(),
                 out_id: new_agent_id.clone(),
                 joined_at: chrono::Utc::now(),
