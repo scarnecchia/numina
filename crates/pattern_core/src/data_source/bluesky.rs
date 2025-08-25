@@ -388,31 +388,7 @@ impl BlueskyPost {
                         byte_start: f.index.byte_start as usize,
                         byte_end: f.index.byte_end as usize,
                     },
-                    features: f
-                        .features
-                        .iter()
-                        .filter_map(|feat| {
-                            use atrium_api::app::bsky::richtext::facet::MainFeaturesItem;
-                            match feat {
-                                Union::Refs(MainFeaturesItem::Mention(mention)) => {
-                                    Some(FacetFeature::Mention {
-                                        did: mention.did.as_str().to_string(),
-                                    })
-                                }
-                                Union::Refs(MainFeaturesItem::Link(link)) => {
-                                    Some(FacetFeature::Link {
-                                        uri: link.uri.clone(),
-                                    })
-                                }
-                                Union::Refs(MainFeaturesItem::Tag(tag)) => {
-                                    Some(FacetFeature::Tag {
-                                        tag: tag.tag.clone(),
-                                    })
-                                }
-                                _ => None,
-                            }
-                        })
-                        .collect(),
+                    features: f.features.iter().filter_map(facet_convert).collect(),
                 })
                 .collect()
         });
@@ -421,12 +397,8 @@ impl BlueskyPost {
         let labels = record
             .labels
             .as_ref()
-            .map_or(Vec::new(), |label_refs| match label_refs {
-                Union::Refs(RecordLabelsRefs::ComAtprotoLabelDefsSelfLabels(self_labels)) => {
-                    self_labels.values.iter().map(|v| v.val.clone()).collect()
-                }
-                _ => Vec::new(),
-            });
+            .map(label_convert)
+            .unwrap_or_default();
 
         // Convert embed to EmbedInfo - note this will be minimal without hydration
         // Record embeds only have URIs/CIDs, not author info or image URLs
@@ -1168,8 +1140,6 @@ impl Default for PendingBatch {
 struct CachedThreadContext {
     context: ThreadContext,
     cached_at: Instant,
-    /// Root URI of the thread
-    thread_root: String,
 }
 
 /// Consumes Bluesky Jetstream firehose
@@ -1311,13 +1281,13 @@ impl BlueskyFirehoseSource {
         agent_did: Option<&str>,
         filter: &BlueskyFilter,
         max_depth: usize,
-    ) -> Result<ThreadContext> {
+    ) -> Result<Option<ThreadContext>> {
         // Determine the thread root - either the parent URI or the post URI itself if it's a root post
         let thread_root = parent_uri.unwrap_or(post_uri);
 
         // Check cache first
         if let Some(cached_context) = self.get_cached_thread_context(thread_root) {
-            return Ok(cached_context);
+            return Ok(Some(cached_context));
         }
         let mut context = ThreadContext {
             parent: None,
@@ -1327,39 +1297,98 @@ impl BlueskyFirehoseSource {
             agent_interactions: std::collections::HashMap::new(),
         };
 
-        // If we have a parent URI, fetch siblings
+        // If we have a parent URI, fetch the full parent chain
         if let Some(parent) = parent_uri {
-            // First, fetch the parent post itself
-            let parent_params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                uris: vec![parent.to_string()],
-            };
-            if let Ok(parent_result) = bsky_agent
-                .api
-                .app
-                .bsky
-                .feed
-                .get_posts(parent_params.into())
-                .await
-            {
-                context.parent = parent_result
-                    .posts
-                    .clone()
-                    .into_iter()
-                    .next()
-                    .and_then(|pv| BlueskyPost::from_post_view(&pv));
+            // Fetch the full parent chain and check for exclusions
+            let mut parent_chain = Vec::new();
+            let mut current_parent_uri = parent.to_string();
+            let mut checked_uris = std::collections::HashSet::new();
 
-                // Extract engagement metrics from parent
-                if let Some(parent_post) = &context.parent {
-                    context.engagement_map.insert(
-                        parent_post.uri.clone(),
-                        PostEngagement {
-                            like_count: parent_post.like_count.unwrap_or(0) as u32,
-                            reply_count: parent_post.reply_count.unwrap_or(0) as u32,
-                            repost_count: parent_post.repost_count.unwrap_or(0) as u32,
-                        },
-                    );
+            // Walk up the parent chain up to 10 levels deep to prevent infinite loops
+            for _ in 0..10 {
+                if checked_uris.contains(&current_parent_uri) {
+                    break; // Avoid loops
+                }
+                checked_uris.insert(current_parent_uri.clone());
+
+                let parent_params = atrium_api::app::bsky::feed::get_posts::ParametersData {
+                    uris: vec![current_parent_uri.clone()],
+                };
+
+                match bsky_agent
+                    .api
+                    .app
+                    .bsky
+                    .feed
+                    .get_posts(parent_params.into())
+                    .await
+                {
+                    Ok(parent_result) => {
+                        if let Some(post_view) = parent_result.posts.first() {
+                            if let Some(parent_post) = BlueskyPost::from_post_view(post_view) {
+                                // Check for exclusions at this level
+                                if filter.exclude_dids.contains(&parent_post.did) {
+                                    tracing::debug!(
+                                        "Excluding thread: contains excluded DID {} upstream",
+                                        parent_post.did
+                                    );
+                                    return Ok(None);
+                                }
+
+                                if !filter.exclude_keywords.is_empty() {
+                                    let text_lower = parent_post.text.to_lowercase();
+                                    for keyword in &filter.exclude_keywords {
+                                        if text_lower.contains(&keyword.to_lowercase()) {
+                                            tracing::debug!(
+                                                "Excluding thread: contains excluded keyword '{}' upstream",
+                                                keyword
+                                            );
+                                            return Ok(None);
+                                        }
+                                    }
+                                }
+
+                                // Check if this post has a parent to continue walking up
+                                let next_parent =
+                                    parent_post.reply.as_ref().map(|r| r.parent.uri.clone());
+
+                                // Add engagement metrics
+                                context.engagement_map.insert(
+                                    parent_post.uri.clone(),
+                                    PostEngagement {
+                                        like_count: parent_post.like_count.unwrap_or(0) as u32,
+                                        reply_count: parent_post.reply_count.unwrap_or(0) as u32,
+                                        repost_count: parent_post.repost_count.unwrap_or(0) as u32,
+                                    },
+                                );
+
+                                parent_chain.push(parent_post);
+
+                                // Continue walking up if there's a parent
+                                if let Some(next) = next_parent {
+                                    current_parent_uri = next;
+                                } else {
+                                    break; // Reached root of thread
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch parent {}: {}", current_parent_uri, e);
+                        break;
+                    }
                 }
             }
+
+            // The immediate parent is the first in the chain
+            context.parent = parent_chain.first().cloned();
+
+            // TODO: Store the full parent chain for richer context display
+            // For now we just use the immediate parent
 
             // Fetch siblings using cache-aware method
             context.siblings = self
@@ -1434,7 +1463,7 @@ impl BlueskyFirehoseSource {
         // Cache the result before returning
         self.cache_thread_context(thread_root.to_string(), context.clone());
 
-        Ok(context)
+        Ok(Some(context))
     }
 
     /// Recursively fetch replies to a post up to max_depth levels
@@ -1563,9 +1592,9 @@ impl BlueskyFirehoseSource {
             cursor_file_path: None,
             last_cursor_save: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
             pending_batch: Arc::new(PendingBatch::default()),
-            batch_window: Duration::from_secs(3), // 3 second window to collect related posts
+            batch_window: Duration::from_secs(20), // 20 second window to collect related posts
             thread_cache: Arc::new(DashMap::new()),
-            thread_cache_ttl: Duration::from_secs(300), // Cache threads for 5 minutes
+            thread_cache_ttl: Duration::from_secs(600), // Cache threads for 10 minutes
             http_client: PatternHttpClient::default(),
         }
     }
@@ -1730,7 +1759,6 @@ impl BlueskyFirehoseSource {
         let cached = CachedThreadContext {
             context: context.clone(),
             cached_at: std::time::Instant::now(),
-            thread_root: thread_root.clone(),
         };
 
         self.thread_cache.insert(thread_root.clone(), cached);
@@ -1790,7 +1818,7 @@ impl BlueskyFirehoseSource {
     }
 
     /// Get or fetch a single post with required hydration level
-    async fn get_or_fetch_post(
+    pub async fn get_or_fetch_post(
         &self,
         uri: &str,
         required_hydration: HydrationState,
@@ -1995,7 +2023,7 @@ impl BlueskyFirehoseSource {
         // Try to get cached thread context or build it
         let thread_context =
             if let Some(ctx) = self.get_cached_thread_context(&main_post.thread_root()) {
-                ctx
+                Some(ctx)
             } else if let Some(bsky_agent) = &self.bsky_agent {
                 // Build thread context if we have auth
                 match self
@@ -2010,24 +2038,33 @@ impl BlueskyFirehoseSource {
                     .await
                 {
                     Ok(ctx) => ctx,
-                    Err(_) => ThreadContext {
+                    Err(_) => Some(ThreadContext {
                         parent: None,
                         siblings: posts[..posts.len() - 1].to_vec(), // All but the last as siblings
                         replies_map: std::collections::HashMap::new(),
                         engagement_map: std::collections::HashMap::new(),
                         agent_interactions: std::collections::HashMap::new(),
-                    },
+                    }),
                 }
             } else {
                 // No auth, minimal context
-                ThreadContext {
+                Some(ThreadContext {
                     parent: None,
                     siblings: posts[..posts.len() - 1].to_vec(), // All but the last as siblings
                     replies_map: std::collections::HashMap::new(),
                     engagement_map: std::collections::HashMap::new(),
                     agent_interactions: std::collections::HashMap::new(),
-                }
+                })
             };
+
+        // If thread was excluded, don't send notification
+        let thread_context = match thread_context {
+            Some(ctx) => ctx,
+            None => {
+                tracing::debug!("Batch excluded due to upstream content");
+                return None;
+            }
+        };
 
         // Format the notification
         let mut message = String::new();
@@ -2039,7 +2076,7 @@ impl BlueskyFirehoseSource {
         ));
 
         // Format the thread tree
-        thread_context.append_thread_tree(&mut message, &main_post, agent_did);
+        thread_context.append_thread_tree(&mut message, &main_post, agent_did.as_deref());
 
         // Add reply options
         thread_context.format_reply_options(&mut message, &main_post);
@@ -2053,7 +2090,7 @@ impl BlueskyFirehoseSource {
             let mut seen_users = std::collections::HashSet::new();
             for post in &posts {
                 if seen_users.insert(post.did.clone()) {
-                    let memory_label = format!("bluesky_user_{}", post.handle.replace('.', "_"));
+                    let memory_label = format!("bluesky_user_{}", post.handle);
                     let compact_label = CompactString::from(memory_label.clone());
 
                     // Check if memory already exists
@@ -2151,6 +2188,7 @@ impl BlueskyFirehoseSource {
                 )
                 .await
                 .ok()
+                .flatten() // Flatten Option<Option<ThreadContext>> to Option<ThreadContext>
             } else {
                 None
             }
@@ -2269,7 +2307,7 @@ impl BlueskyFirehoseSource {
 
         // Add user memory block
         if let Some(ref agent_handle) = self.agent_handle {
-            let memory_label = format!("bluesky_user_{}", item.handle.replace('.', "_"));
+            let memory_label = format!("bluesky_user_{}", item.handle);
             let compact_label = CompactString::from(memory_label.clone());
 
             // Check if memory already exists
@@ -2448,75 +2486,8 @@ impl DataSource for BlueskyFirehoseSource {
             });
         }
 
-        // Spawn batch flushing task
-        let batch_pending = self.pending_batch.clone();
-        let batch_window = self.batch_window;
-        let batch_tx = tx.clone();
-
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(500)); // Check every 500ms
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                ticker.tick().await;
-
-                // Check for expired batches
-                let now = Instant::now();
-                let mut expired = Vec::new();
-
-                for entry in batch_pending.batch_timers.iter() {
-                    let (thread_root, started) = entry.pair();
-                    if now.duration_since(*started) >= batch_window {
-                        expired.push(thread_root.clone());
-                    }
-                }
-
-                for thread_root in expired {
-                    tracing::debug!("Flushing expired batch for thread: {}", thread_root);
-
-                    // Remove the batch from pending
-                    if let Some((_, mut posts)) = batch_pending.posts_by_thread.remove(&thread_root)
-                    {
-                        // Remove batch timer
-                        batch_pending.batch_timers.remove(&thread_root);
-
-                        // Clean up author groupings
-                        for post in &posts {
-                            if let Some(mut author_posts) =
-                                batch_pending.posts_by_author.get_mut(&post.did)
-                            {
-                                author_posts.retain(|p| p.uri != post.uri);
-                                if author_posts.is_empty() {
-                                    drop(author_posts);
-                                    batch_pending.posts_by_author.remove(&post.did);
-                                }
-                            }
-                        }
-
-                        // Sort posts by timestamp
-                        posts.sort_by_key(|p| p.created_at);
-
-                        // For now, just send the last post as a notification
-                        // TODO: Implement proper batch formatting
-                        if let Some(first_post) = posts.last() {
-                            let event = StreamEvent {
-                                item: first_post.clone(),
-                                cursor: BlueskyFirehoseCursor {
-                                    seq: 0, // TODO: Track actual sequence number
-                                    time_us: chrono::Utc::now().timestamp_micros() as u64,
-                                },
-                                timestamp: chrono::Utc::now(),
-                            };
-
-                            if let Err(e) = batch_tx.send(Ok(event)).await {
-                                tracing::error!("Failed to send batched notification: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        // Note: Expired batch checking is now handled in format_notification
+        // This ensures proper routing context is available for notifications
 
         // Spawn the connection manager task that handles recreating connections
         let manager_source_id = source_id;
@@ -2796,7 +2767,7 @@ impl DataSource for BlueskyFirehoseSource {
         &self,
         item: &Self::Item,
     ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
-        let start_time = std::time::Instant::now();
+        let _start_time = std::time::Instant::now();
 
         // Check if already processed
         if self.pending_batch.processed_uris.contains_key(&item.uri) {
@@ -2879,7 +2850,7 @@ impl DataSource for BlueskyFirehoseSource {
                         let post_count = posts.len();
 
                         // Flush if: batch timeout (3 seconds) OR too many posts (10+)
-                        elapsed > std::time::Duration::from_secs(3) || post_count >= 10
+                        elapsed > std::time::Duration::from_secs(30) || post_count >= 10
                     }
                     _ => false,
                 }
@@ -2890,7 +2861,26 @@ impl DataSource for BlueskyFirehoseSource {
                 return self.flush_batch(&thread_root).await;
             }
 
-            // Post is batched, no immediate notification
+            // Post is batched, but check if there are any expired batches to flush
+            // This ensures batches don't get stuck if post volume drops
+            let expired_batches = self.get_expired_batches().await;
+            if !expired_batches.is_empty() {
+                // Flush the first expired batch (we'll get called again for the rest)
+                if let Some(expired_thread) = expired_batches.first() {
+                    // Only flush if it's a different thread than the one we just added to
+                    if expired_thread != &thread_root {
+                        tracing::info!(
+                            "⏰ Flushing expired batch for thread: {} (found {} expired)",
+                            expired_thread,
+                            expired_batches.len()
+                        );
+                        if let Some(notification) = self.flush_batch(expired_thread).await {
+                            return Some(notification);
+                        }
+                    }
+                }
+            }
+
             return None;
         }
 
@@ -2903,924 +2893,6 @@ impl DataSource for BlueskyFirehoseSource {
         );
 
         self.format_single_notification(item).await
-
-        /* OLD IMPLEMENTATION - COMMENTED OUT FOR REFERENCE
-        let start_time = std::time::Instant::now();
-        tracing::debug!(
-            "🔄 format_notification started for post @{}: {}",
-            item.handle,
-            item.text.chars().take(50).collect::<String>()
-        );
-
-        // Check if this post has already been processed
-        if self.pending_batch.processed_uris.contains_key(&item.uri) {
-            tracing::debug!("Post already processed as part of a batch: {}", item.uri);
-            return None;
-        }
-
-        // Check if this post should be batched
-        if let Some(thread_root) = self.should_batch_post(item) {
-            tracing::debug!("Post will be batched with thread: {}", thread_root);
-            self.add_to_batch(item.clone(), thread_root).await;
-
-            // Don't return a notification yet - wait for batch to complete
-            return None;
-        }
-
-        // Clone the item so we can mutate it
-        let mut item = item.clone();
-
-        // Format based on post type
-        let mut message = String::new();
-        let mut reply_candidates = Vec::new();
-        let mut memory_blocks = Vec::new();
-        let mut added_memory_labels = std::collections::HashSet::<String>::new();
-
-        // Collect users for memory blocks
-        let mut thread_users: Vec<(String, String)> = Vec::new();
-
-        let mut mention_check_queue = Vec::new();
-
-        mention_check_queue.append(
-            &mut item
-                .mentioned_dids()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
-
-        // Also check mentions in quoted posts
-        if let Some(quoted) = item.quoted_post() {
-            // Add the quoted post author's DID to check
-            mention_check_queue.push(quoted.did.clone());
-
-            // TODO: Parse facets from quoted post text to extract mentions
-            // For now, do a simple @handle search in the text
-            let words: Vec<&str> = quoted.text.split_whitespace().collect();
-            for word in words {
-                if word.starts_with('@') {
-                    mention_check_queue.push(word.to_string());
-                }
-            }
-        }
-
-        // Get agent's DID from the mentions filter (it's monitoring for mentions of itself)
-        let agent_did = self.filter.mentions.first().cloned();
-
-        // Try to fetch the author's display name if we have a BskyAgent
-        if item.display_name.is_none() {
-            if let Some(bsky_agent) = &self.bsky_agent {
-                if let Ok(profile_result) = bsky_agent
-                    .api
-                    .app
-                    .bsky
-                    .actor
-                    .get_profile(
-                        atrium_api::app::bsky::actor::get_profile::ParametersData {
-                            actor: atrium_api::types::string::AtIdentifier::Did(
-                                Did::from_str(&item.did).unwrap_or_else(|_| {
-                                    Did::new("did:plc:unknown".to_string()).unwrap()
-                                }),
-                            ),
-                        }
-                        .into(),
-                    )
-                    .await
-                {
-                    item.display_name = profile_result.display_name.clone();
-                }
-            }
-        }
-
-        // Header with author
-        let author_str = if let Some(display_name) = &item.display_name {
-            format!("{} (@{})", display_name, item.handle)
-        } else {
-            format!("@{}", item.handle)
-        };
-        message.push_str(&format!("💬 {}", author_str));
-
-        // Add context for replies/mentions
-        if let Some(reply) = &item.reply {
-            message.push_str(" replied");
-
-            // If we have a BskyAgent, try to fetch thread context
-            if let Some(bsky_agent_arc) = &self.bsky_agent {
-                let bsky_agent = bsky_agent_arc.clone();
-
-                // Use constellation-enhanced thread context
-                // Build comprehensive thread context with siblings
-                let thread_context = match self
-                    .build_thread_context(
-                        &item.uri,
-                        Some(&reply.parent.uri),
-                        &bsky_agent,
-                        agent_did.as_deref(),
-                        &self.filter,
-                        3, // Max depth for sibling replies
-                    )
-                    .await
-                {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        tracing::warn!("Failed to build thread context: {}", e);
-                        // Fall back to basic context
-                        ThreadContext {
-                            parent: None,
-                            siblings: Vec::new(),
-                            replies_map: std::collections::HashMap::new(),
-                            engagement_map: std::collections::HashMap::new(),
-                            agent_interactions: std::collections::HashMap::new(),
-                        }
-                    }
-                };
-
-                // Check for excluded users and keywords in thread context - bail if any are found
-                // Check parent post author and content
-                if let Some(parent) = &thread_context.parent {
-                    if self
-                        .filter
-                        .exclude_dids
-                        .contains(&parent.did.as_str().to_string())
-                    {
-                        tracing::debug!(
-                            "❌ format_notification EXIT 1 (excluded parent user): @{} in {:?} - {}",
-                            parent.did.as_str(),
-                            start_time.elapsed(),
-                            item.text.chars().take(30).collect::<String>()
-                        );
-                        return None;
-                    }
-
-                    // Check for excluded keywords in parent content
-                    let text_lower = parent.text.to_lowercase();
-                    for keyword in &self.filter.exclude_keywords {
-                        if text_lower.contains(&keyword.to_lowercase()) {
-                            tracing::debug!(
-                                "❌ format_notification EXIT 2 (excluded keyword '{}'): in {:?} - {}",
-                                keyword,
-                                start_time.elapsed(),
-                                item.text.chars().take(30).collect::<String>()
-                            );
-                            return None;
-                        }
-                    }
-                    thread_users.push((
-                        parent.handle.as_str().to_string(),
-                        parent.did.as_str().to_string(),
-                    ));
-                }
-
-                // Check sibling post authors
-                for sibling in &thread_context.siblings {
-                    if self
-                        .filter
-                        .exclude_dids
-                        .contains(&sibling.did.as_str().to_string())
-                    {
-                        tracing::debug!(
-                            "❌ format_notification EXIT 3 (excluded sibling user): @{} in {:?} - {}",
-                            sibling.did.as_str(),
-                            start_time.elapsed(),
-                            item.text.chars().take(30).collect::<String>()
-                        );
-                        return None;
-                    }
-                    thread_users.push((
-                        sibling.handle.as_str().to_string(),
-                        sibling.did.as_str().to_string(),
-                    ));
-                }
-
-                // Check authors from replies
-                for replies in thread_context.replies_map.values() {
-                    for reply in replies {
-                        if self
-                            .filter
-                            .exclude_dids
-                            .contains(&reply.did.as_str().to_string())
-                        {
-                            tracing::debug!(
-                                "❌ format_notification EXIT 4 (excluded reply user): @{} in {:?} - {}",
-                                reply.did.as_str(),
-                                start_time.elapsed(),
-                                item.text.chars().take(30).collect::<String>()
-                            );
-                            return None;
-                        }
-                        thread_users.push((
-                            reply.handle.as_str().to_string(),
-                            reply.did.as_str().to_string(),
-                        ));
-                    }
-                }
-
-                // Walk up the thread to collect parent posts (keep existing logic for now)
-                let mut thread_posts = Vec::new();
-                let mut current_uri = Some(reply.parent.uri.clone());
-                let mut depth = 0;
-                const MAX_DEPTH: usize = 5; // Reduced since we have siblings now
-
-                while let Some(uri) = current_uri.take() {
-                    if depth >= MAX_DEPTH {
-                        break;
-                    }
-
-                    let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                        uris: vec![uri.clone()],
-                    };
-
-                    if let Ok(posts_result) =
-                        bsky_agent.api.app.bsky.feed.get_posts(params.into()).await
-                    {
-                        if let Some(post_view) = posts_result.posts.first() {
-                            if let Some((text, langs, features, alt_texts)) =
-                                extract_post_data(post_view)
-                            {
-                                let handle = post_view.author.handle.as_str().to_string();
-                                let display_name = post_view.author.display_name.clone();
-                                let mentions: Vec<_> = features
-                                    .iter()
-                                    .filter_map(|f| match f {
-                                        FacetFeature::Mention { did } => Some(format!("@{}", did)),
-                                        _ => None,
-                                    })
-                                    .collect();
-
-                                let links: Vec<_> = features
-                                    .iter()
-                                    .filter_map(|f| match f {
-                                        FacetFeature::Link { uri } => Some(uri.clone()),
-                                        _ => None,
-                                    })
-                                    .collect();
-
-                                mention_check_queue.append(&mut mentions.clone());
-
-                                let relative_time =
-                                    format!(" - {}", extract_post_relative_time(post_view));
-
-                                // Check if this is the agent's post
-                                let is_agent_post = agent_did
-                                    .as_ref()
-                                    .map(|did| post_view.author.did.as_str() == did)
-                                    .unwrap_or(false);
-
-                                // Collect user for memory block
-                                let author_did = post_view.author.did.as_str().to_string();
-                                thread_users.push((handle.clone(), author_did));
-
-                                let embed_info =
-                                    extract_embed_info(post_view, self.bsky_agent.as_ref()).await;
-
-                                thread_posts.push((
-                                    handle,
-                                    display_name,
-                                    text,
-                                    post_view.uri.clone(),
-                                    depth,
-                                    mentions,
-                                    langs,
-                                    alt_texts,
-                                    links,
-                                    relative_time,
-                                    is_agent_post,
-                                    embed_info,
-                                ));
-
-                                // Add as reply candidate
-                                reply_candidates.push(thread_post_to_candidate(post_view));
-
-                                // Continue walking up
-                                if let Ok(record_value) = serde_json::to_value(&post_view.record) {
-                                    if let Ok(post_record) =
-                                        serde_json::from_value::<
-                                            atrium_api::app::bsky::feed::post::RecordData,
-                                        >(record_value)
-                                    {
-                                        if let Some(reply_ref) = post_record.reply {
-                                            current_uri = Some(reply_ref.parent.uri.clone());
-                                            depth += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-
-                if !thread_posts.is_empty() {
-                    message.push_str(" in thread:\n\n");
-
-                    // Display thread posts in reverse order (root to leaf)
-                    for (
-                        handle,
-                        display_name,
-                        text,
-                        _uri,
-                        depth,
-                        mentions,
-                        langs,
-                        _alt_texts,
-                        links,
-                        relative_time,
-                        is_agent_post,
-                        embed_info,
-                    ) in thread_posts.iter().rev()
-                    {
-                        let indent = "  ".repeat(*depth);
-                        let bullet = if *depth == 0 { "•" } else { "└─" };
-
-                        let author_str = if let Some(name) = display_name {
-                            format!("{} (@{})", name, handle)
-                        } else {
-                            format!("@{}", handle)
-                        };
-
-                        // Mark agent's posts
-                        let prefix = if *is_agent_post { "[YOU] " } else { "" };
-
-                        message.push_str(&format!(
-                            "{}{} {}{}{}: {}\n",
-                            indent, bullet, prefix, author_str, relative_time, text
-                        ));
-                        message.push_str(&format!("{}   🔗 {}\n", indent, _uri));
-
-                        // Show mentions if any
-                        if !mentions.is_empty() {
-                            message.push_str(&format!(
-                                "{}   [mentions: {}]\n",
-                                indent,
-                                mentions.join(", ")
-                            ));
-                        }
-
-                        // Show links if any
-                        if !links.is_empty() {
-                            message.push_str(&format!(
-                                "{}   [🔗 Links: {}]\n",
-                                indent,
-                                links.join(", ")
-                            ));
-                        }
-
-                        // Show language if not English
-                        if !langs.is_empty() && !langs.contains(&"en".to_string()) {
-                            message.push_str(&format!(
-                                "{}   [langs: {}]\n",
-                                indent,
-                                langs.join(", ")
-                            ));
-                        }
-
-                        // Show embeds if any
-                        if let Some(embed) = embed_info {
-                            message.push_str(&embed.format_display(&indent));
-                        }
-                    }
-
-                    // Add siblings context if we have any
-                    if !thread_context.siblings.is_empty() {
-                        message.push_str("\n[Other replies to parent:]\n");
-
-                        for sibling in &thread_context.siblings {
-                            // Extract post data
-                            {
-                                let text = &sibling.text;
-                                let features = &sibling.facets;
-                                let embed_info = &sibling.embed;
-                                let author_str = if let Some(name) = &sibling.display_name {
-                                    format!("{} (@{})", name, sibling.handle.as_str())
-                                } else {
-                                    format!("@{}", sibling.handle.as_str())
-                                };
-
-                                // Check if this is the agent's post
-                                let is_agent = agent_did
-                                    .as_ref()
-                                    .map(|did| sibling.did.as_str() == did)
-                                    .unwrap_or(false);
-                                let prefix = if is_agent { "[YOU] " } else { "" };
-
-                                // Get engagement metrics
-                                let engagement = thread_context
-                                    .engagement_map
-                                    .get(&sibling.uri)
-                                    .map(|e| {
-                                        format!(
-                                            " [💬{} ❤️{} 🔄{}]",
-                                            e.reply_count, e.like_count, e.repost_count
-                                        )
-                                    })
-                                    .unwrap_or_default();
-
-                                let relative_time = {
-                                    let now = chrono::Utc::now();
-                                    let relative = now - sibling.created_at;
-                                    format!(
-                                        " - {} ago",
-                                        format_duration(relative.to_std().unwrap())
-                                    )
-                                };
-
-                                message.push_str(&format!(
-                                    "  └─ {}{}{}: {}{}\n",
-                                    prefix, author_str, relative_time, text, engagement
-                                ));
-                                message.push_str(&format!("│  🔗 {}\n", sibling.uri));
-
-                                // Show embeds if any
-                                if let Some(embed) = embed_info {
-                                    let embed_display = embed.format_display("  ");
-                                    // Add vertical bar prefix to each line
-                                    for line in embed_display.lines() {
-                                        if !line.is_empty() {
-                                            message.push_str(&format!("│{}\n", line));
-                                        }
-                                    }
-                                }
-
-                                // Extract mentions from facets for checking
-                                let mentions: Vec<_> = features
-                                    .iter()
-                                    .flat_map(|facet| &facet.features)
-                                    .filter_map(|feature| match feature {
-                                        FacetFeature::Mention { did } => Some(format!("@{}", did)),
-                                        _ => None,
-                                    })
-                                    .collect();
-                                mention_check_queue.append(&mut mentions.clone());
-
-                                // Add as reply candidate
-                                reply_candidates.push((
-                                    sibling.uri.clone(),
-                                    format!("@{}", sibling.handle.as_str()),
-                                ));
-
-                                // Show replies to this sibling if any
-                                if let Some(replies) = thread_context.replies_map.get(&sibling.uri)
-                                {
-                                    for reply in replies.iter().take(3) {
-                                        {
-                                            let reply_text = &reply.text;
-                                            let reply_embed_info = &reply.embed;
-                                            let reply_author =
-                                                if let Some(name) = &reply.display_name {
-                                                    format!("{} (@{})", name, reply.handle.as_str())
-                                                } else {
-                                                    format!("@{}", reply.handle.as_str())
-                                                };
-
-                                            let is_agent_reply = agent_did
-                                                .as_ref()
-                                                .map(|did| reply.did.as_str() == did)
-                                                .unwrap_or(false);
-                                            let reply_prefix =
-                                                if is_agent_reply { "[YOU] " } else { "" };
-
-                                            let relative_time = {
-                                                let now = chrono::Utc::now();
-                                                let relative = now - reply.created_at;
-                                                format!(
-                                                    " - {} ago",
-                                                    format_duration(relative.to_std().unwrap())
-                                                )
-                                            };
-
-                                            message.push_str(&format!(
-                                                "│  └─ {}{}: {}{}\n",
-                                                reply_prefix,
-                                                reply_author,
-                                                reply_text,
-                                                relative_time
-                                            ));
-
-                                            // Show embeds if any
-                                            if let Some(embed) = reply_embed_info {
-                                                let embed_display = embed.format_display("    ");
-                                                // Add vertical bar and indentation prefix to each line
-                                                for line in embed_display.lines() {
-                                                    if !line.is_empty() {
-                                                        message.push_str(&format!("│  {}\n", line));
-                                                    }
-                                                }
-                                            }
-
-                                            // Add as reply candidate
-                                            reply_candidates.push((
-                                                reply.uri.clone(),
-                                                format!("@{}", reply.handle.as_str()),
-                                            ));
-                                        }
-                                    }
-
-                                    let remaining = replies.len().saturating_sub(2);
-                                    if remaining > 0 {
-                                        message.push_str(&format!(
-                                            "│     [{} more replies...]\n",
-                                            remaining
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Mark the main post clearly
-                    message.push_str("\n>>> MAIN POST >>>\n");
-                } else {
-                    // Fallback if we can't fetch the parent
-                    message.push_str(&format!(" to {}:\n", reply.parent.uri));
-                }
-            } else {
-                // No BskyAgent available, just show the URI
-                message.push_str(&format!(" to {}:\n", reply.parent.uri));
-            }
-        } else if item.mentions(&self.source_id) {
-            message.push_str(" mentioned you:\n");
-        }
-
-        if let Some(bsky_agent) = &self.bsky_agent {
-            let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                uris: vec![item.uri.clone()],
-            };
-
-            if let Ok(posts_result) = bsky_agent.api.app.bsky.feed.get_posts(params.into()).await {
-                if let Some(post) = posts_result.data.posts.first() {
-                    if let Some((post_text, _, _, _)) = extract_post_data(post) {
-                        let post_embed_info =
-                            extract_embed_info(post, self.bsky_agent.as_ref()).await;
-                        let post_author = if let Some(name) = &post.author.display_name {
-                            format!("{} (@{})", name, post.author.handle.as_str())
-                        } else {
-                            format!("@{}", post.author.handle.as_str())
-                        };
-
-                        let is_agent_post = agent_did
-                            .as_ref()
-                            .map(|did| post.author.did.as_str() == did)
-                            .unwrap_or(false);
-                        let post_prefix = if is_agent_post { "[YOU] " } else { "" };
-
-                        let relative_time = format!(" - {}", extract_post_relative_time(post));
-
-                        message.push_str(&format!(
-                            "{}{}: {}{}\n",
-                            post_prefix, post_author, post_text, relative_time
-                        ));
-
-                        // Show embeds if any
-                        if let Some(embed) = post_embed_info {
-                            let embed_display = embed.format_display(" ");
-                            // Add vertical bar and indentation prefix to each line
-                            for line in embed_display.lines() {
-                                if !line.is_empty() {
-                                    message.push_str(&format!("│  {}\n", line));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Full post text
-            message.push_str(&format!("@{}: {}", item.handle, item.text));
-            let interval = Utc::now() - item.created_at;
-            let relative_time = format!(
-                "\n{} ago\n",
-                format_duration(interval.to_std().unwrap_or(Duration::from_secs(0)))
-            );
-            message.push_str(&relative_time);
-
-            // Extract and display embeds (including quotes)
-            if let Some(embed_info) = &item.embed {
-                // Show embeds if any
-                let embed_display = embed_info.format_display("");
-                // Add vertical bar and indentation prefix to each line
-                for line in embed_display.lines() {
-                    if !line.is_empty() {
-                        message.push_str(&format!("│  {}\n", line));
-                    }
-                }
-            }
-            // Add image indicator if present
-            if item.has_images() {
-                let alt_texts = item.image_alt_texts();
-                if !alt_texts.is_empty() {
-                    message.push_str(&format!("\n[📸 {} image(s)]", alt_texts.len()));
-                }
-                for alt_text in alt_texts {
-                    message.push_str(&format!("\n alt text: {}", alt_text));
-                }
-            }
-
-            // Extract and display links from facets
-            let mut links: Vec<_> = item
-                .facets
-                .iter()
-                .flat_map(|facet| &facet.features)
-                .filter_map(|feature| match feature {
-                    FacetFeature::Link { uri } => Some(uri.clone()),
-                    _ => None,
-                })
-                .collect();
-
-            // Also check for embedded link card
-            if let Some(embed_link) = item.embedded_link() {
-                links.push(embed_link);
-            }
-
-            if !links.is_empty() {
-                message.push_str("\n[🔗 Links:");
-                for link in &links {
-                    message.push_str(&format!(" {}", link));
-                }
-                message.push_str("]");
-            }
-
-            // Add link
-            message.push_str(&format!("\n🔗 {}", item.uri));
-        }
-
-        // Show replies to the main post using constellation
-        if self.bsky_agent.is_some() {
-            // Fetch replies to the current post
-            let http_client = PatternHttpClient::default();
-            if let Ok(reply_records) = http_client.fetch_thread_siblings(&item.uri).await {
-                // Filter replies based on our criteria
-                let filtered_replies = PatternHttpClient::filter_constellation_records(
-                    reply_records,
-                    agent_did.as_deref(),
-                    &self.filter,
-                    &item.uri,
-                );
-
-                if !filtered_replies.is_empty() {
-                    let reply_uris: Vec<String> = filtered_replies
-                        .into_iter()
-                        .take(5) // Limit to 5 replies
-                        .map(|record| record.to_at_uri())
-                        .collect();
-
-                    if let Some(bsky_agent) = &self.bsky_agent {
-                        let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                            uris: reply_uris,
-                        };
-
-                        if let Ok(replies_result) =
-                            bsky_agent.api.app.bsky.feed.get_posts(params.into()).await
-                        {
-                            if !replies_result.posts.is_empty() {
-                                message.push_str("\n<<< REPLIES <<<\n");
-
-                                for reply_post in &replies_result.posts {
-                                    if let Some((reply_text, langs, features, alt_texts)) =
-                                        extract_post_data(reply_post)
-                                    {
-                                        let author_str =
-                                            if let Some(name) = &reply_post.author.display_name {
-                                                format!(
-                                                    "{} (@{})",
-                                                    name,
-                                                    reply_post.author.handle.as_str()
-                                                )
-                                            } else {
-                                                format!("@{}", reply_post.author.handle.as_str())
-                                            };
-
-                                        // Check if this is the agent's reply
-                                        let is_agent_reply = agent_did
-                                            .as_ref()
-                                            .map(|did| reply_post.author.did.as_str() == did)
-                                            .unwrap_or(false);
-                                        let prefix = if is_agent_reply { "[YOU] " } else { "" };
-
-                                        // Get engagement metrics
-                                        let engagement = format!(
-                                            " [💬{} ❤️{} 🔄{}]",
-                                            reply_post.reply_count.unwrap_or(0),
-                                            reply_post.like_count.unwrap_or(0),
-                                            reply_post.repost_count.unwrap_or(0)
-                                        );
-
-                                        let relative_time = format!(
-                                            " - {}",
-                                            extract_post_relative_time(reply_post)
-                                        );
-
-                                        message.push_str(&format!(
-                                            "  └─ {}{}: {}{}{}\n",
-                                            prefix,
-                                            author_str,
-                                            reply_text,
-                                            engagement,
-                                            relative_time
-                                        ));
-                                        message.push_str(&format!("     🔗 {}\n", reply_post.uri));
-
-                                        // Extract mentions for checking
-                                        let mentions: Vec<_> = features
-                                            .iter()
-                                            .filter_map(|f| match f {
-                                                FacetFeature::Mention { did } => {
-                                                    Some(format!("@{}", did))
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect();
-                                        mention_check_queue.append(&mut mentions.clone());
-
-                                        // Show links if any
-                                        let links: Vec<_> = features
-                                            .iter()
-                                            .filter_map(|f| match f {
-                                                FacetFeature::Link { uri } => Some(uri.clone()),
-                                                _ => None,
-                                            })
-                                            .collect();
-
-                                        if !links.is_empty() {
-                                            message.push_str(&format!(
-                                                "     [🔗 Links: {}]\n",
-                                                links.join(", ")
-                                            ));
-                                        }
-
-                                        // Show language if not English
-                                        if !langs.is_empty() && !langs.contains(&"en".to_string()) {
-                                            message.push_str(&format!(
-                                                "     [langs: {}]\n",
-                                                langs.join(", ")
-                                            ));
-                                        }
-
-                                        // Show images if any
-                                        if !alt_texts.is_empty() {
-                                            message.push_str(&format!(
-                                                "     [📸 {} image(s)]\n",
-                                                alt_texts.len()
-                                            ));
-                                            for alt_text in &alt_texts {
-                                                message.push_str(&format!(
-                                                    "      alt text: {}\n",
-                                                    alt_text
-                                                ));
-                                            }
-                                        }
-
-                                        // Add as reply candidate
-                                        reply_candidates.push(thread_post_to_candidate(reply_post));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // First check exclusion keywords - these take highest priority
-        // Check the entire formatted message for excluded keywords
-        if !self.filter.exclude_keywords.is_empty() {
-            let message_lower = message.to_lowercase();
-            for keyword in &self.filter.exclude_keywords {
-                if message_lower.contains(&keyword.to_lowercase()) {
-                    tracing::info!(
-                        "❌ format_notification EXIT 5 (excluded keyword '{}' in message): in {:?} - {}",
-                        keyword,
-                        start_time.elapsed(),
-                        item.text.chars().take(30).collect::<String>()
-                    );
-                    return None;
-                }
-            }
-        }
-
-        // Check if post should be included based on friends list or mentions
-        // Friends bypass all mention requirements
-        let is_from_friend = self.filter.friends.contains(&item.did);
-
-        // Check if Pattern (or any watched DID) authored this post or any parent post
-        let is_from_watched_author = self.filter.mentions.contains(&item.did);
-
-        // Check if this is a reply to the agent's own post
-        let is_reply_to_self = if let Some(reply) = &item.reply {
-            self.filter
-                .mentions
-                .first()
-                .map(|agent_did| reply.parent.uri.contains(agent_did))
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        if !is_from_friend
-            && !is_from_watched_author
-            && !is_reply_to_self
-            && !self.filter.mentions.is_empty()
-        {
-            // Not from a friend, watched author, or reply to self, so check if any of the DIDs we're watching for were mentioned
-            let found_mention = self.filter.mentions.iter().any(|watched_did| {
-                // Check both with and without @ prefix since the queue has mixed format
-                mention_check_queue.contains(watched_did)
-                    || mention_check_queue.contains(&format!("@{}", watched_did))
-            });
-
-            if !found_mention {
-                tracing::debug!(
-                    "❌ format_notification EXIT 6 (no watched DID mentions): in {:?} - {}",
-                    start_time.elapsed(),
-                    item.text.chars().take(30).collect::<String>()
-                );
-                return None;
-            }
-        }
-
-        if let Some(agent_handle) = &self.agent_handle {
-            // Collect users to check/create memory blocks for
-            let mut users_to_check = vec![(item.handle.clone(), item.did.clone())];
-
-            // Add any thread users we collected
-            for (handle, did) in thread_users {
-                users_to_check.push((handle, did));
-            }
-
-            users_to_check.dedup();
-
-            // Process each user
-            for (handle, did) in users_to_check {
-                let memory_label = format!("bluesky_user_{}", handle);
-                let compact_label = CompactString::from(memory_label.clone());
-
-                // Use the new get method to check for exact label match
-                if let Ok(existing_memory) = agent_handle
-                    .get_archival_memory_by_label(&memory_label)
-                    .await
-                {
-                    if let Some(existing_block) = existing_memory {
-                        // Check if we've already added this memory block
-                        if added_memory_labels.insert(memory_label.clone()) {
-                            // Add existing block to our return list
-                            memory_blocks.push((compact_label, existing_block));
-                            message.push_str(&format!("\n\n📝 Memory exists: {}", memory_label));
-                        }
-                    } else {
-                        // Create new memory block
-                        let memory_content = if let Some(bsky_agent) = &self.bsky_agent {
-                            Self::fetch_user_profile_for_memory(&*bsky_agent, &handle, &did).await
-                        } else {
-                            create_basic_memory_content(&handle, &did)
-                        };
-
-                        // Insert into agent's archival memory
-                        if let Err(e) = agent_handle
-                            .insert_working_memory(&memory_label, &memory_content)
-                            .await
-                        {
-                            tracing::warn!("Failed to create memory block for {}: {}", handle, e);
-                        } else {
-                            // Check if we've already added this memory block
-                            if added_memory_labels.insert(memory_label.clone()) {
-                                message
-                                    .push_str(&format!("\n\n📝 Memory created: {}", memory_label));
-
-                                // Now retrieve the created block to return it
-                                if let Ok(Some(created_block)) = agent_handle
-                                    .get_archival_memory_by_label(&memory_label)
-                                    .await
-                                {
-                                    memory_blocks.push((compact_label, created_block));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Add the original post as a reply candidate too
-        reply_candidates.push((item.uri.clone(), format!("@{}", item.handle)));
-
-        // Add reply guidance at the very end
-        if !reply_candidates.is_empty() {
-            message.push_str("\n\n💭 Reply options (choose at most one):\n");
-            for (uri, handle) in &reply_candidates {
-                message.push_str(&format!("  • {} ({})\n", handle, uri));
-            }
-        }
-        message
-            .push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri of the post you want to reply to, from the above options), your response must contain under 300 characters or it will be truncated.\nAlternatively, you can 'like' the post by submitting a reply with 'like' as the sole text");
-
-        tracing::debug!(
-            "✅ format_notification SUCCESS: notification generated in {:?} for @{} - {}",
-            start_time.elapsed(),
-            item.handle,
-            item.text.chars().take(30).collect::<String>()
-        );
-        Some((message, memory_blocks))
-        */
     }
 
     fn get_buffer_stats(&self) -> Option<super::BufferStats> {
@@ -4032,274 +3104,6 @@ impl LexiconIngestor for PostIngestor {
     }
 }
 
-fn extract_post_relative_time(post_view: &atrium_api::app::bsky::feed::defs::PostView) -> String {
-    let now = Utc::now();
-    let time = post_view.indexed_at.as_ref();
-
-    let relative = now - time.to_utc();
-
-    format!("{} ago", format_duration(relative.to_std().unwrap()))
-}
-
-/// Extract post record data into our BlueskyPost format
-fn extract_post_from_record(
-    post: &atrium_api::app::bsky::feed::post::RecordData,
-) -> (String, Vec<String>, Vec<String>, Vec<Facet>) {
-    let text = post.text.clone();
-
-    // Extract languages
-    let langs = post
-        .langs
-        .as_ref()
-        .map(|l| l.iter().map(|lang| lang.as_ref().to_string()).collect())
-        .unwrap_or_default();
-
-    // Extract labels
-    let labels = post.labels.as_ref().map(label_convert).unwrap_or_default();
-
-    // Extract facets
-    let facets = post
-        .facets
-        .as_ref()
-        .map(|f| {
-            f.iter()
-                .map(|f| Facet {
-                    index: ByteSlice {
-                        byte_start: f.index.byte_start,
-                        byte_end: f.index.byte_end,
-                    },
-                    features: f.features.iter().filter_map(facet_convert).collect(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    (text, langs, labels, facets)
-}
-
-/// Extract post data from a PostView (for thread display)
-fn extract_post_data(
-    post_view: &atrium_api::app::bsky::feed::defs::PostView,
-) -> Option<(String, Vec<String>, Vec<FacetFeature>, Vec<String>)> {
-    if let Ok(post_record) =
-        atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(post_view.record.clone())
-    {
-        let (text, langs, _labels, facets) = extract_post_from_record(&post_record);
-
-        // Flatten facet features for easier access
-        let features: Vec<FacetFeature> = facets.into_iter().flat_map(|f| f.features).collect();
-
-        // Extract image alt texts from embed if present
-        let alt_texts = extract_image_alt_texts(&post_view.embed);
-
-        Some((text, langs, features, alt_texts))
-    } else {
-        None
-    }
-}
-
-fn extract_record_embed(embed: &Union<RecordEmbedRefs>) -> Option<EmbedInfo> {
-    match embed {
-        Union::Refs(RecordEmbedRefs::AppBskyEmbedExternalMain(external)) => {
-            Some(EmbedInfo::External {
-                uri: external.external.uri.clone(),
-                title: external.external.title.clone(),
-                description: external.external.description.clone(),
-            })
-        }
-        Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(images)) => Some(EmbedInfo::Images {
-            count: images.images.len(),
-            alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
-            urls: vec![], // TODO: Extract URLs when available
-        }),
-        Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordMain(quoted_record)) => {
-            Some(EmbedInfo::Quote {
-                uri: quoted_record.record.uri.clone(),
-                cid: quoted_record.record.cid.as_ref().to_string(),
-                author_handle: String::new(),
-                author_display_name: None,
-                text: String::new(),
-                created_at: None,
-            })
-        }
-        Union::Refs(RecordEmbedRefs::AppBskyEmbedRecordWithMediaMain(_record_media)) => None,
-        Union::Refs(RecordEmbedRefs::AppBskyEmbedVideoMain(_embed)) => None,
-        Union::Unknown(_unknown_data) => None,
-    }
-}
-
-async fn extract_embed(
-    embed: &Union<atrium_api::app::bsky::feed::defs::PostViewEmbedRefs>,
-
-    bsky_agent: Option<&Arc<bsky_sdk::BskyAgent>>,
-) -> Option<EmbedInfo> {
-    match embed {
-        Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => {
-            Some(EmbedInfo::Images {
-                count: images_view.images.len(),
-                alt_texts: images_view
-                    .images
-                    .iter()
-                    .map(|img| img.alt.clone())
-                    .collect(),
-                urls: vec![], // TODO: Extract URLs when available
-            })
-        }
-        Union::Refs(PostViewEmbedRefs::AppBskyEmbedExternalView(external_view)) => {
-            Some(EmbedInfo::External {
-                uri: external_view.external.uri.clone(),
-                title: external_view.external.title.clone(),
-                description: external_view.external.description.clone(),
-            })
-        }
-        Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordView(record_view)) => {
-            match &record_view.record {
-                Union::Refs(atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
-                    view_record,
-                )) => {
-                    // If we have a bsky_agent, fetch the full quote post
-                    if let Some(agent) = bsky_agent {
-                        let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                            uris: vec![view_record.uri.clone()],
-                        };
-
-                        if let Ok(posts_result) =
-                            agent.api.app.bsky.feed.get_posts(params.into()).await
-                        {
-                            if let Some(post) = posts_result.data.posts.first() {
-                                // Extract full data from the fetched post
-                                if let Some((text, _langs, _features, _alt_texts)) =
-                                    extract_post_data(post)
-                                {
-                                    return Some(EmbedInfo::Quote {
-                                        uri: view_record.uri.clone(),
-                                        cid: view_record.cid.as_ref().to_string(),
-                                        author_handle: post.author.handle.as_str().to_string(),
-                                        author_display_name: post.author.display_name.clone(),
-                                        text,
-                                        created_at: Some(
-                                            chrono::DateTime::parse_from_rfc3339(
-                                                post.indexed_at.as_str(),
-                                            )
-                                            .ok()
-                                            .map(|dt| dt.to_utc())
-                                            .unwrap_or_else(Utc::now),
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    // Fallback to using the embedded data
-                    if let Ok(quoted_record) =
-                        atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
-                            view_record.value.clone(),
-                        )
-                    {
-                        let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
-                        Some(EmbedInfo::Quote {
-                            uri: view_record.uri.clone(),
-                            cid: view_record.cid.as_ref().to_string(),
-                            author_handle: view_record.author.handle.as_str().to_string(),
-                            author_display_name: view_record.author.display_name.clone(),
-                            text: quoted_text,
-                            created_at: Some(
-                                chrono::DateTime::parse_from_rfc3339(
-                                    view_record.indexed_at.as_str(),
-                                )
-                                .ok()
-                                .map(|dt| dt.to_utc())
-                                .unwrap_or_else(Utc::now),
-                            ),
-                        })
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        }
-        Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(record_with_media)) => {
-            // Extract quote part
-            let quote_info = match &record_with_media.record.record {
-                Union::Refs(atrium_api::app::bsky::embed::record::ViewRecordRefs::ViewRecord(
-                    view_record,
-                )) => {
-                    if let Ok(quoted_record) =
-                        atrium_api::app::bsky::feed::post::RecordData::try_from_unknown(
-                            view_record.value.clone(),
-                        )
-                    {
-                        let (quoted_text, _, _, _) = extract_post_from_record(&quoted_record);
-                        Some(EmbedInfo::Quote {
-                            uri: view_record.uri.clone(),
-                            cid: view_record.cid.as_ref().to_string(),
-                            author_handle: view_record.author.handle.as_str().to_string(),
-                            author_display_name: view_record.author.display_name.clone(),
-                            text: quoted_text,
-                            created_at: Some(
-                                chrono::DateTime::parse_from_rfc3339(
-                                    view_record.indexed_at.as_str(),
-                                )
-                                .ok()
-                                .map(|dt| dt.to_utc())
-                                .unwrap_or_else(Utc::now),
-                            ),
-                        })
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-
-            // Extract media part
-            let media_info = match &record_with_media.media {
-                Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedImagesView(images)) => {
-                    Some(EmbedInfo::Images {
-                        count: images.images.len(),
-                        alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
-                        urls: vec![], // TODO: Extract URLs when available
-                    })
-                }
-                Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedExternalView(external)) => {
-                    Some(EmbedInfo::External {
-                        uri: external.external.uri.clone(),
-                        title: external.external.title.clone(),
-                        description: external.external.description.clone(),
-                    })
-                }
-                _ => None,
-            };
-
-            // Combine both
-            match (quote_info, media_info) {
-                (Some(quote), Some(media)) => Some(EmbedInfo::QuoteWithMedia {
-                    quote: Box::new(quote),
-                    media: Box::new(media),
-                }),
-                (Some(quote), None) => Some(quote),
-                (None, Some(media)) => Some(media),
-                (None, None) => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Extract full embed info from a PostView
-async fn extract_embed_info(
-    post_view: &atrium_api::app::bsky::feed::defs::PostView,
-    bsky_agent: Option<&Arc<bsky_sdk::BskyAgent>>,
-) -> Option<EmbedInfo> {
-    if let Some(embed) = &post_view.embed {
-        extract_embed(embed, bsky_agent).await
-    } else {
-        None
-    }
-}
-
 /// Info about post embeds
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EmbedInfo {
@@ -4386,54 +3190,6 @@ impl EmbedInfo {
             }
         }
     }
-
-    /// Format embed info for display with given indentation (convenience wrapper)
-    fn format_display(&self, indent: &str) -> String {
-        let mut output = String::new();
-        self.append_to_buffer(&mut output, indent);
-        output
-    }
-}
-
-/// Extract alt texts from post embed
-fn extract_image_alt_texts(
-    embed: &Option<Union<atrium_api::app::bsky::feed::defs::PostViewEmbedRefs>>,
-) -> Vec<String> {
-    use atrium_api::app::bsky::feed::defs::PostViewEmbedRefs;
-
-    if let Some(embed) = embed {
-        match embed {
-            Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => images_view
-                .images
-                .iter()
-                .map(|img| img.alt.clone())
-                .collect(),
-            Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(record_with_media)) => {
-                // Images can be in the media part of record with media
-                match &record_with_media.media {
-                    Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedImagesView(images)) => {
-                        images.images.iter()
-                            .map(|img| img.alt.clone())
-                            .collect()
-                    }
-                    _ => vec![]
-                }
-            }
-            _ => vec![],
-        }
-    } else {
-        vec![]
-    }
-}
-
-/// Convert a thread post to a reply candidate tuple
-fn thread_post_to_candidate(
-    post: &atrium_api::app::bsky::feed::defs::PostView,
-) -> (String, String) {
-    (
-        post.uri.clone(),
-        format!("@{}", post.author.handle.as_str()),
-    )
 }
 
 /// Create a basic memory content string for a user
