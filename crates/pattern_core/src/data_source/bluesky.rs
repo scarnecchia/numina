@@ -100,12 +100,11 @@ impl ThreadContext {
                     ancestor.append_as_ancestor(buf, agent_did, "    ");
 
                     // Show siblings at this level
-                    for (idx, sibling) in siblings.iter().enumerate() {
-                        // Skip if this sibling is the main post
-                        if sibling.uri == main_post.uri {
-                            continue;
-                        }
-                        let is_last = idx == siblings.len() - 1;
+                    let filtered_siblings: Vec<_> =
+                        siblings.iter().filter(|s| s.uri != main_post.uri).collect();
+
+                    for (idx, sibling) in filtered_siblings.iter().enumerate() {
+                        let is_last = idx == filtered_siblings.len() - 1;
                         sibling.append_as_sibling(buf, agent_did, "    ", is_last);
                     }
                 }
@@ -114,38 +113,20 @@ impl ThreadContext {
             }
         }
 
-        // If there's an immediate parent, show it first
-        if let Some((parent, _)) = self.parent_chain.first() {
+        // If there's an immediate parent, show it first with its siblings
+        if let Some((parent, siblings)) = self.parent_chain.first() {
             if self.root.is_none() {
                 buf.push_str("• Thread context:\n\n");
             }
             parent.append_as_parent(buf, agent_did, "        ");
-        }
 
-        // Show siblings at each level
-        for (level, (_, siblings)) in self.parent_chain.iter().enumerate() {
-            if !siblings.is_empty() {
-                for (i, sibling) in siblings.iter().enumerate() {
-                    // Skip if this sibling is the main post
-                    if sibling.uri == main_post.uri {
-                        continue;
-                    }
-                    let is_last = i == siblings.len() - 1;
-                    let indent = if level == 0 { "      " } else { "        " }; // Deeper indent for higher levels
-                    sibling.append_as_sibling(buf, agent_did, indent, is_last);
+            // Show siblings of the immediate parent (excluding main post)
+            let filtered_siblings: Vec<_> =
+                siblings.iter().filter(|s| s.uri != main_post.uri).collect();
 
-                    // Show replies to this sibling
-                    if let Some(replies) = self.replies_map.get(&sibling.uri) {
-                        for reply in replies {
-                            let reply_indent = if is_last {
-                                format!("{}  ", indent)
-                            } else {
-                                format!("{}│ ", indent)
-                            };
-                            reply.append_as_reply(buf, agent_did, &reply_indent, 1);
-                        }
-                    }
-                }
+            for (idx, sibling) in filtered_siblings.iter().enumerate() {
+                let is_last = idx == filtered_siblings.len() - 1;
+                sibling.append_as_sibling(buf, agent_did, "      ", is_last);
             }
         }
 
