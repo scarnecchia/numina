@@ -87,7 +87,7 @@ impl ThreadContext {
             // Show root if it's different from immediate parent
             let immediate_parent = self.parent_chain.first().map(|(p, _)| p);
             if immediate_parent.map_or(true, |p| p.uri != root.uri) && root.uri != main_post.uri {
-                buf.push_str("  • 💬 Thread context:\n\n");
+                buf.push_str("• Thread context:\n\n");
                 root.append_as_root(buf, agent_did, "    ");
 
                 // Show parent chain (great-grandparent, grandparent, etc.) with siblings
@@ -104,14 +104,14 @@ impl ThreadContext {
                     }
                 }
 
-                buf.push_str("    ⬇️ ⬇️ ⬇️\n\n");
+                buf.push_str("    │\n");
             }
         }
 
         // If there's an immediate parent, show it first
         if let Some((parent, _)) = self.parent_chain.first() {
             if self.root.is_none() {
-                buf.push_str("  • 💬 Thread context:\n\n");
+                buf.push_str("• Thread context:\n\n");
             }
             parent.append_as_parent(buf, agent_did, "        ");
         }
@@ -161,11 +161,11 @@ impl ThreadContext {
 
         // Show just the main post and immediate context
         if let Some((parent, _)) = self.parent_chain.first() {
-            buf.push_str("  • 💬 Recent thread activity:\n\n");
             buf.push_str(&format!(
-                "      ⬆️ Replying to: @{} - {} ago\n",
+                "⬆️ Replying to: @{} - {} ago\n   {}\n\n",
                 parent.handle,
-                parent.format_timestamp()
+                parent.format_timestamp(),
+                parent.uri
             ));
         }
 
@@ -1120,7 +1120,7 @@ impl BlueskyPost {
         let marker = if is_agent { "[YOU] " } else { "" };
 
         buf.push_str(&format!(
-            "{}🌳 ROOT: {}{} - {} ago: {}\n",
+            "{}┌─ {}{} - {} ago: {}\n",
             indent,
             marker,
             self.format_author(),
@@ -2494,7 +2494,7 @@ impl BlueskyFirehoseSource {
 
         if let Some(ctx) = thread_context {
             // This is a reply - show thread context
-            message.push_str("  • 💬 New reply in thread:\n\n");
+            message.push_str("💬 New reply in thread:\n\n");
 
             let thread_root = item.thread_root();
 
