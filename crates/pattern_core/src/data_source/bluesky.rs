@@ -135,8 +135,19 @@ impl ThreadContext {
 
         // Show replies to the main post
         if let Some(main_replies) = self.replies_map.get(&main_post.uri) {
-            for reply in main_replies {
-                reply.append_as_reply(buf, agent_did, "  ", 1);
+            if !main_replies.is_empty() {
+                // Check if agent already replied
+                let agent_replied = main_replies
+                    .iter()
+                    .any(|r| agent_did.map_or(false, |did| r.did == did));
+
+                if agent_replied {
+                    buf.push_str("\n⚠️ You already replied to this post:\n");
+                }
+
+                for reply in main_replies {
+                    reply.append_as_reply(buf, agent_did, "  ", 1);
+                }
             }
         }
     }
@@ -148,20 +159,128 @@ impl ThreadContext {
         main_post: &BlueskyPost,
         agent_did: Option<&str>,
     ) {
-        buf.push_str("📌 Thread context trimmed - full context shown recently\n\n");
+        buf.push_str("Thread context trimmed - full context shown recently\n\n");
 
-        // Show just the main post and immediate context
-        if let Some((parent, _)) = self.parent_chain.first() {
+        // Check if agent has replied anywhere in the thread
+        let mut agent_replies = Vec::new();
+
+        for (uri, replies) in &self.replies_map {
+            for reply in replies {
+                if agent_did.map_or(false, |did| reply.did == did) {
+                    // Skip if this is a reply to the main post (handled separately)
+                    if uri == &main_post.uri {
+                        continue;
+                    }
+
+                    // Find what post this is replying to and include the handle
+                    // Check immediate parent
+                    if let Some((parent, _)) = self.parent_chain.first() {
+                        if &parent.uri == uri {
+                            agent_replies.push(format!("@{}", parent.handle));
+                            continue;
+                        }
+                    }
+
+                    // Check siblings at immediate level
+                    if let Some((_, siblings)) = self.parent_chain.first() {
+                        for sibling in siblings {
+                            if &sibling.uri == uri {
+                                agent_replies.push(format!("@{}", sibling.handle));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !agent_replies.is_empty() {
             buf.push_str(&format!(
-                "⬆️ Replying to: @{} - {} ago\n   {}\n\n",
-                parent.handle,
-                parent.format_timestamp(),
-                parent.uri
+                "ℹ️ You've replied {} times in this thread (to: {})\n",
+                agent_replies.len(),
+                agent_replies.join(", ")
             ));
+        }
+
+        // Show thread root if available and different from immediate parent
+        if let Some(root) = &self.root {
+            let is_same_as_parent = self
+                .parent_chain
+                .first()
+                .map(|(p, _)| p.uri == root.uri)
+                .unwrap_or(false);
+
+            if root.uri != main_post.uri && !is_same_as_parent {
+                // Show full root post since it's different from parent
+                root.append_as_root(buf, agent_did, "  ");
+            }
+        }
+
+        // Show immediate parent with siblings
+        if let Some((parent, siblings)) = self.parent_chain.first() {
+            // Use append_as_parent to show full content
+            parent.append_as_parent(buf, agent_did, "  ");
+
+            // Show siblings of immediate parent (excluding main post)
+            let filtered_siblings: Vec<_> =
+                siblings.iter().filter(|s| s.uri != main_post.uri).collect();
+
+            if !filtered_siblings.is_empty() {
+                // Prioritize showing agent's own replies
+                let agent_siblings: Vec<_> = filtered_siblings
+                    .iter()
+                    .filter(|s| agent_did.map_or(false, |did| s.did == did))
+                    .collect();
+
+                if !agent_siblings.is_empty() {
+                    for sibling in &agent_siblings {
+                        sibling.append_as_sibling(buf, agent_did, "    ", false);
+                    }
+                }
+
+                // Show a few other siblings for context
+                let other_siblings: Vec<_> = filtered_siblings
+                    .iter()
+                    .filter(|s| !agent_did.map_or(false, |did| s.did == did))
+                    .take(2)
+                    .collect();
+
+                if !other_siblings.is_empty() {
+                    buf.push_str(&format!(
+                        "  {} other replies at this level:\n",
+                        filtered_siblings.len() - agent_siblings.len()
+                    ));
+                    for (i, sibling) in other_siblings.iter().enumerate() {
+                        let is_last = i == other_siblings.len() - 1;
+                        sibling.append_as_sibling(buf, agent_did, "    ", is_last);
+                    }
+                }
+
+                let remaining =
+                    filtered_siblings.len() - agent_siblings.len() - other_siblings.len();
+                if remaining > 0 {
+                    buf.push_str(&format!("    (+{} more)\n", remaining));
+                }
+            }
+            buf.push_str("|\n");
         }
 
         // Show the main post
         main_post.append_as_main(buf, agent_did);
+
+        // Show replies to main post if any
+        if let Some(replies) = self.replies_map.get(&main_post.uri) {
+            if !replies.is_empty() {
+                buf.push_str(&format!("   ↳ {} direct replies:\n", replies.len()));
+                // Use append_as_reply to show full reply content
+                for reply in replies.iter().take(5) {
+                    reply.append_as_reply(buf, agent_did, "     ", 1);
+                }
+                if replies.len() > 5 {
+                    buf.push_str(&format!("     (+{} more)\n", replies.len() - 5));
+                }
+            }
+        }
 
         // Show count of other context if available
         let sibling_count = self
@@ -1594,6 +1713,20 @@ impl BlueskyFirehoseSource {
                     .await;
                 }
             }
+        }
+
+        // Fetch replies to the main post itself
+        if max_depth > 0 {
+            self.fetch_replies_recursive(
+                &mut context,
+                post_uri,
+                bsky_agent,
+                agent_did,
+                filter,
+                max_depth,
+                1, // current depth
+            )
+            .await;
         }
 
         // Cache the result before returning
