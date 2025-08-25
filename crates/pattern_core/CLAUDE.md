@@ -8,52 +8,20 @@ Core agent framework, memory management, and coordination system for Pattern's m
 ## Current Status
 
 ### ✅ Complete Features
-- **Message Batching**: Snowflake IDs, atomic request/response cycles, tool pairing integrity
+- **Message Batching**: Snowflake IDs, atomic request/response cycles, tool pairing integrity, migration completed
 - **Agent Groups**: Full database operations, CLI integration, all coordination patterns working
 - **Data Sources**: Generic abstraction with file/Discord/Bluesky implementations
 - **Memory System**: MemGPT-style blocks with archival, semantic search, thread-safe access
 - **Tool System**: Multi-operation tools (context, recall, search) with automatic rule bundling
 - **Message Router**: Agent-to-agent messaging with anti-looping protection
 - **Model Configuration**: Comprehensive registry with provider-specific optimizations
+- **Bluesky Post Batching**: Thread-aware batching with 3-second windows, DashMap-based concurrent management
 
 ### 🚧 In Progress
 
-#### Message Batch Migration v2
-**Status**: Planning complete, ready to implement
-**Issue**: Current migration treats all messages globally instead of per-agent
-
-**Revised Migration Plan**:
-1. Query all agent records from database
-2. For each agent:
-   - Load full message history via `load_message_history(&db, true)`
-   - Extract just the Message objects (discard relation metadata)
-   - Scan messages chronologically:
-     - When hitting a user message (or first message):
-       - Create MessageBatch from accumulated messages if any
-       - Start new accumulator
-       - Generate snowflake for both position AND batch fields
-     - For non-user messages:
-       - Generate unique snowflake for position only  
-       - Copy batch_id from current batch being built
-       - Add to accumulator
-   - Create final batch from remaining messages
-   - MessageBatch::from_messages() handles sequencing and tool pairing
-3. Extract computed batches from MessageHistory
-4. Update database:
-   - Update each message with position, batch, sequence_num, batch_type
-   - Sync agent_messages relations with same fields
-5. Add delays between snowflake generation for proper spacing
-6. Detailed logging of batch decisions for audit before production run
-
-**Key Decisions**:
-- "User message = new batch" for migration (simple, effective heuristic)
-- First message in batch has position == batch
-- Let MessageBatch handle tool response reordering within batches
-- Verbose logging to verify correctness before production
-
-#### Other In Progress
 - **Memory Block Pass-through**: Router needs to create RELATE edges for attached blocks
 - **MCP Client Integration**: Consume external MCP tools (high priority)
+- **Thread Cache Implementation**: Utilize the CachedThreadContext structure for constellation API caching
 
 ### Future Simplifications
 - **Model Provider Refactoring**: Move model provider from DatabaseAgent into AgentContext entirely and remove the RwLock wrapper since ModelProvider methods only need `&self`. This would simplify DatabaseAgent and make the model provider more directly accessible for compression strategies.

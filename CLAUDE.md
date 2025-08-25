@@ -37,12 +37,13 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 
 ### ✅ Message Batching
 - Snowflake IDs for absolute ordering across all messages
-- Batch tracking for atomic request/response cycles
+- Batch tracking for atomic request/response cycles  
 - Tool call/response pairing maintained within batches
 - Heartbeat continuations stay in same batch as original request
 - Compression preserves batch boundaries (no splitting tool pairs)
 - Generic heartbeat processor for all consumer crates
 - Archive summaries as metadata, not fake messages
+- **Migration completed** - all agent histories properly batched
 - See `/home/booskie/pattern/docs/message-batching-design.md` for architecture
 
 ### ✅ Agent Groups
@@ -73,6 +74,9 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 - Memory block creation for users
 - Rich text processing with mentions/links
 - Reply handling and posting capabilities
+- **Post batching**: Groups related posts within 3-second windows to reduce notification spam
+- Thread-aware batching for conversations
+- DashMap-based concurrent batch management
 
 ### ✅ Data Source Framework
 - Flexible trait supporting pull/push patterns
