@@ -61,10 +61,11 @@ impl ConstellationRecord {
 /// Thread context with siblings and their replies
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
-    /// The parent post
-    pub parent: Option<BlueskyPost>,
-    /// Direct siblings (other replies to the same parent)
-    pub siblings: Vec<BlueskyPost>,
+    /// Parent chain going up from current post: (parent, siblings_of_parent)
+    /// Index 0 = immediate parent, Index 1 = grandparent, etc.
+    pub parent_chain: Vec<(BlueskyPost, Vec<BlueskyPost>)>,
+    /// The root post of the thread (if we fetched it)
+    pub root: Option<BlueskyPost>,
     /// Map of post URI to its direct replies
     pub replies_map: std::collections::HashMap<String, Vec<BlueskyPost>>,
     /// Engagement metrics for posts (likes, replies, reposts)
@@ -81,23 +82,58 @@ impl ThreadContext {
         main_post: &BlueskyPost,
         agent_did: Option<&str>,
     ) {
-        // If there's a parent, show it first
-        if let Some(parent) = &self.parent {
-            buf.push_str("  • 💬 Thread context:\n\n");
+        // Show extended parent context if available
+        if let Some(root) = &self.root {
+            // Show root if it's different from immediate parent
+            let immediate_parent = self.parent_chain.first().map(|(p, _)| p);
+            if immediate_parent.map_or(true, |p| p.uri != root.uri) && root.uri != main_post.uri {
+                buf.push_str("  • 💬 Thread context:\n\n");
+                root.append_as_root(buf, agent_did, "    ");
+
+                // Show parent chain (great-grandparent, grandparent, etc.) with siblings
+                for (level, (ancestor, siblings)) in
+                    self.parent_chain.iter().skip(1).rev().enumerate()
+                {
+                    let levels_up = self.parent_chain.len() - level; // Levels from root
+                    ancestor.append_as_ancestor(buf, agent_did, "    ", levels_up);
+
+                    // Show siblings at this level
+                    for (idx, sibling) in siblings.iter().enumerate() {
+                        let is_last = idx == siblings.len() - 1;
+                        sibling.append_as_sibling(buf, agent_did, "    ", is_last);
+                    }
+                }
+
+                buf.push_str("    ⬇️ ⬇️ ⬇️\n\n");
+            }
+        }
+
+        // If there's an immediate parent, show it first
+        if let Some((parent, _)) = self.parent_chain.first() {
+            if self.root.is_none() {
+                buf.push_str("  • 💬 Thread context:\n\n");
+            }
             parent.append_as_parent(buf, agent_did, "        ");
         }
 
-        // Show siblings (other replies to the parent)
-        if !self.siblings.is_empty() {
-            for (i, sibling) in self.siblings.iter().enumerate() {
-                let is_last = i == self.siblings.len() - 1;
-                sibling.append_as_sibling(buf, agent_did, "      ", is_last);
+        // Show siblings at each level
+        for (level, (_, siblings)) in self.parent_chain.iter().enumerate() {
+            if !siblings.is_empty() {
+                for (i, sibling) in siblings.iter().enumerate() {
+                    let is_last = i == siblings.len() - 1;
+                    let indent = if level == 0 { "      " } else { "        " }; // Deeper indent for higher levels
+                    sibling.append_as_sibling(buf, agent_did, indent, is_last);
 
-                // Show replies to this sibling
-                if let Some(replies) = self.replies_map.get(&sibling.uri) {
-                    for reply in replies {
-                        let indent = if is_last { "      " } else { "      │" };
-                        reply.append_as_reply(buf, agent_did, indent, 1);
+                    // Show replies to this sibling
+                    if let Some(replies) = self.replies_map.get(&sibling.uri) {
+                        for reply in replies {
+                            let reply_indent = if is_last {
+                                format!("{}  ", indent)
+                            } else {
+                                format!("{}│ ", indent)
+                            };
+                            reply.append_as_reply(buf, agent_did, &reply_indent, 1);
+                        }
                     }
                 }
             }
@@ -114,18 +150,61 @@ impl ThreadContext {
         }
     }
 
+    /// Append abbreviated thread tree with indicator that full context was shown recently
+    pub fn append_abbreviated_thread_tree(
+        &self,
+        buf: &mut String,
+        main_post: &BlueskyPost,
+        agent_did: Option<&str>,
+    ) {
+        buf.push_str("📌 Thread context trimmed - full context shown recently\n\n");
+
+        // Show just the main post and immediate context
+        if let Some((parent, _)) = self.parent_chain.first() {
+            buf.push_str("  • 💬 Recent thread activity:\n\n");
+            buf.push_str(&format!(
+                "      ⬆️ Replying to: @{} - {} ago\n",
+                parent.handle,
+                parent.format_timestamp()
+            ));
+        }
+
+        // Show the main post
+        main_post.append_as_main(buf, agent_did);
+
+        // Show count of other context if available
+        let sibling_count = self
+            .parent_chain
+            .iter()
+            .map(|(_, siblings)| siblings.len())
+            .sum::<usize>();
+        let parent_chain_count = self.parent_chain.len();
+        let total_replies = self.replies_map.values().map(|v| v.len()).sum::<usize>();
+
+        if parent_chain_count > 0 || sibling_count > 0 || total_replies > 0 {
+            buf.push_str(&format!(
+                "\n  ℹ️ Thread has {} ancestors, {} other replies and {} nested replies (see recent history for full context)\n",
+                parent_chain_count,
+                sibling_count,
+                total_replies
+            ));
+        }
+    }
+
     /// Format reply options for the agent
     pub fn format_reply_options(&self, buf: &mut String, main_post: &BlueskyPost) {
         buf.push_str("\n💭 Reply options (choose at most one):\n");
 
-        // Add parent as an option
-        if let Some(parent) = &self.parent {
+        // Add immediate parent as an option
+        if let Some((parent, _)) = self.parent_chain.first() {
             buf.push_str(&format!("  • @{} ({})\n", parent.handle, parent.uri));
         }
 
-        // Add siblings as options
-        for sibling in &self.siblings {
-            buf.push_str(&format!("  • @{} ({})\n", sibling.handle, sibling.uri));
+        // Add immediate siblings as options (only first level)
+        if let Some((_, siblings)) = self.parent_chain.first() {
+            for sibling in siblings {
+                buf.push_str(&format!("  • @{} ({})\n", sibling.handle, sibling.uri));
+            }
         }
 
         // Add main post as option
@@ -1034,6 +1113,64 @@ impl BlueskyPost {
 
         buf.push_str(&format!("{}     🔗 {}\n", indent, self.uri));
     }
+
+    /// Append as thread root post
+    fn append_as_root(&self, buf: &mut String, agent_did: Option<&str>, indent: &str) {
+        let is_agent = agent_did.map_or(false, |did| self.did == did);
+        let marker = if is_agent { "[YOU] " } else { "" };
+
+        buf.push_str(&format!(
+            "{}🌳 ROOT: {}{} - {} ago: {}\n",
+            indent,
+            marker,
+            self.format_author(),
+            self.format_timestamp(),
+            self.text
+        ));
+
+        // Add embed if present
+        if let Some(embed) = &self.embed {
+            let next_indent = format!("{}   ", indent);
+            embed.append_to_buffer(buf, &next_indent);
+        }
+
+        buf.push_str(&format!("{}   🔗 {}\n", indent, self.uri));
+    }
+
+    /// Append as ancestor post (grandparent, great-grandparent, etc.)
+    fn append_as_ancestor(
+        &self,
+        buf: &mut String,
+        agent_did: Option<&str>,
+        indent: &str,
+        levels_up: usize,
+    ) {
+        let is_agent = agent_did.map_or(false, |did| self.did == did);
+        let marker = if is_agent { "[YOU] " } else { "" };
+        let level_label = match levels_up {
+            2 => "GRANDPARENT",
+            3 => "GREAT-GRANDPARENT",
+            _ => &format!("ANCESTOR-{}", levels_up),
+        };
+
+        buf.push_str(&format!(
+            "{}└─ {}: {}{} - {} ago: {}\n",
+            indent,
+            level_label,
+            marker,
+            self.format_author(),
+            self.format_timestamp(),
+            self.text
+        ));
+
+        // Add embed if present
+        if let Some(embed) = &self.embed {
+            let next_indent = format!("{}   ", indent);
+            embed.append_to_buffer(buf, &next_indent);
+        }
+
+        buf.push_str(&format!("{}   🔗 {}\n", indent, self.uri));
+    }
 }
 
 /// Rich text facet for mentions, links, and hashtags
@@ -1169,6 +1306,8 @@ pub struct BlueskyFirehoseSource {
     batch_window: Duration,
     thread_cache: Arc<DashMap<String, CachedThreadContext>>,
     thread_cache_ttl: Duration,
+    // Thread display tracking for smart context trimming
+    thread_display_tracker: Arc<DashMap<String, std::time::Instant>>,
     // HTTP client for constellation API calls
     http_client: PatternHttpClient,
 }
@@ -1290,8 +1429,8 @@ impl BlueskyFirehoseSource {
             return Ok(Some(cached_context));
         }
         let mut context = ThreadContext {
-            parent: None,
-            siblings: Vec::new(),
+            parent_chain: Vec::new(),
+            root: None,
             replies_map: std::collections::HashMap::new(),
             engagement_map: std::collections::HashMap::new(),
             agent_interactions: std::collections::HashMap::new(),
@@ -1384,38 +1523,53 @@ impl BlueskyFirehoseSource {
                 }
             }
 
-            // The immediate parent is the first in the chain
-            context.parent = parent_chain.first().cloned();
+            // Store root post (last in the chain)
+            context.root = parent_chain.last().cloned();
 
-            // TODO: Store the full parent chain for richer context display
-            // For now we just use the immediate parent
+            // For each level in the parent chain, fetch siblings
+            let mut full_parent_chain = Vec::new();
 
-            // Fetch siblings using cache-aware method
-            context.siblings = self
-                .get_or_fetch_siblings(
-                    parent,
-                    agent_did,
-                    filter,
-                    post_uri,
-                    HydrationState {
-                        handle_resolved: true,
-                        profile_fetched: true,
-                        embed_enriched: true,
-                    },
-                    bsky_agent,
-                )
-                .await?;
+            for (level, parent_post) in parent_chain.iter().enumerate() {
+                // Fetch siblings for this parent (up to 3 levels deep)
+                let siblings = if level < 3 {
+                    self.get_or_fetch_siblings(
+                        parent_post
+                            .reply
+                            .as_ref()
+                            .map(|r| r.parent.uri.as_str())
+                            .unwrap_or(parent),
+                        agent_did,
+                        filter,
+                        &parent_post.uri,
+                        HydrationState {
+                            handle_resolved: true,
+                            profile_fetched: true,
+                            embed_enriched: true,
+                        },
+                        bsky_agent,
+                    )
+                    .await?
+                } else {
+                    Vec::new() // Skip sibling fetching beyond 3 levels
+                };
 
-            // Collect engagement metrics for siblings
-            for sibling in &context.siblings {
-                context.engagement_map.insert(
-                    sibling.uri.clone(),
-                    PostEngagement {
-                        like_count: sibling.like_count.unwrap_or(0) as u32,
-                        reply_count: sibling.reply_count.unwrap_or(0) as u32,
-                        repost_count: sibling.repost_count.unwrap_or(0) as u32,
-                    },
-                );
+                full_parent_chain.push((parent_post.clone(), siblings));
+            }
+
+            context.parent_chain = full_parent_chain;
+
+            // Collect engagement metrics for all siblings at all levels
+            for (_, siblings) in &context.parent_chain {
+                for sibling in siblings {
+                    context.engagement_map.insert(
+                        sibling.uri.clone(),
+                        PostEngagement {
+                            like_count: sibling.like_count.unwrap_or(0) as u32,
+                            reply_count: sibling.reply_count.unwrap_or(0) as u32,
+                            repost_count: sibling.repost_count.unwrap_or(0) as u32,
+                        },
+                    );
+                }
             }
 
             // If depth > 0, fetch replies to each sibling recursively
@@ -1424,18 +1578,21 @@ impl BlueskyFirehoseSource {
                 let mut priority_siblings = Vec::new();
                 let mut regular_siblings = Vec::new();
 
-                for sibling in &context.siblings {
-                    if let Some(agent) = agent_did {
-                        if sibling.did.as_str() == agent {
-                            priority_siblings.push(sibling.uri.clone());
-                            continue;
+                // Check all siblings across all levels
+                for (_, siblings) in &context.parent_chain {
+                    for sibling in siblings {
+                        if let Some(agent) = agent_did {
+                            if sibling.did.as_str() == agent {
+                                priority_siblings.push(sibling.uri.clone());
+                                continue;
+                            }
                         }
-                    }
 
-                    // Only fetch replies if the sibling has some
-                    if let Some(engagement) = context.engagement_map.get(&sibling.uri) {
-                        if engagement.reply_count > 0 {
-                            regular_siblings.push(sibling.uri.clone());
+                        // Only fetch replies if the sibling has some
+                        if let Some(engagement) = context.engagement_map.get(&sibling.uri) {
+                            if engagement.reply_count > 0 {
+                                regular_siblings.push(sibling.uri.clone());
+                            }
                         }
                     }
                 }
@@ -1595,6 +1752,7 @@ impl BlueskyFirehoseSource {
             batch_window: Duration::from_secs(20), // 20 second window to collect related posts
             thread_cache: Arc::new(DashMap::new()),
             thread_cache_ttl: Duration::from_secs(600), // Cache threads for 10 minutes
+            thread_display_tracker: Arc::new(DashMap::new()),
             http_client: PatternHttpClient::default(),
         }
     }
@@ -1763,6 +1921,22 @@ impl BlueskyFirehoseSource {
 
         self.thread_cache.insert(thread_root.clone(), cached);
         tracing::debug!("💾 Cached thread context for {}", thread_root);
+    }
+
+    /// Check if thread was recently shown to agent (within TTL window)
+    fn was_thread_recently_shown(&self, thread_root: &str) -> bool {
+        if let Some(last_shown) = self.thread_display_tracker.get(thread_root) {
+            let now = std::time::Instant::now();
+            now.duration_since(*last_shown) < self.thread_cache_ttl
+        } else {
+            false
+        }
+    }
+
+    /// Mark thread as shown to agent
+    fn mark_thread_as_shown(&self, thread_root: &str) {
+        self.thread_display_tracker
+            .insert(thread_root.to_string(), std::time::Instant::now());
     }
 
     /// Get cached post if it exists and meets hydration requirements
@@ -2039,8 +2213,8 @@ impl BlueskyFirehoseSource {
                 {
                     Ok(ctx) => ctx,
                     Err(_) => Some(ThreadContext {
-                        parent: None,
-                        siblings: posts[..posts.len() - 1].to_vec(), // All but the last as siblings
+                        parent_chain: Vec::new(),
+                        root: None,
                         replies_map: std::collections::HashMap::new(),
                         engagement_map: std::collections::HashMap::new(),
                         agent_interactions: std::collections::HashMap::new(),
@@ -2049,8 +2223,8 @@ impl BlueskyFirehoseSource {
             } else {
                 // No auth, minimal context
                 Some(ThreadContext {
-                    parent: None,
-                    siblings: posts[..posts.len() - 1].to_vec(), // All but the last as siblings
+                    parent_chain: Vec::new(),
+                    root: None,
                     replies_map: std::collections::HashMap::new(),
                     engagement_map: std::collections::HashMap::new(),
                     agent_interactions: std::collections::HashMap::new(),
@@ -2075,8 +2249,22 @@ impl BlueskyFirehoseSource {
             posts.len()
         ));
 
-        // Format the thread tree
-        thread_context.append_thread_tree(&mut message, &main_post, agent_did.as_deref());
+        // Format the thread tree with smart trimming
+        let thread_root = main_post.thread_root();
+
+        // Check if we should show abbreviated context for recently-seen threads
+        if self.was_thread_recently_shown(&thread_root) {
+            thread_context.append_abbreviated_thread_tree(
+                &mut message,
+                &main_post,
+                agent_did.as_deref(),
+            );
+        } else {
+            thread_context.append_thread_tree(&mut message, &main_post, agent_did.as_deref());
+        }
+
+        // Mark this thread as shown
+        self.mark_thread_as_shown(&thread_root);
 
         // Add reply options
         thread_context.format_reply_options(&mut message, &main_post);
@@ -2178,17 +2366,28 @@ impl BlueskyFirehoseSource {
             if let Some(ctx) = self.get_cached_thread_context(&item.thread_root()) {
                 Some(ctx)
             } else if let Some(bsky_agent) = &self.bsky_agent {
-                self.build_thread_context(
-                    &item.uri,
-                    Some(&reply.parent.uri),
-                    bsky_agent,
-                    agent_did,
-                    &self.filter,
-                    2,
-                )
-                .await
-                .ok()
-                .flatten() // Flatten Option<Option<ThreadContext>> to Option<ThreadContext>
+                // Try to build thread context - if it returns None, it means exclusions upstream
+                match self
+                    .build_thread_context(
+                        &item.uri,
+                        Some(&reply.parent.uri),
+                        bsky_agent,
+                        agent_did,
+                        &self.filter,
+                        2,
+                    )
+                    .await
+                {
+                    Ok(Some(ctx)) => Some(ctx),
+                    Ok(None) => {
+                        // Thread excluded due to upstream content
+                        tracing::debug!(
+                            "Individual notification excluded due to upstream exclusions"
+                        );
+                        return None;
+                    }
+                    Err(_) => None, // Error building context, continue as standalone
+                }
             } else {
                 None
             }
@@ -2207,16 +2406,25 @@ impl BlueskyFirehoseSource {
             .collect::<Vec<_>>();
 
         if let Some(ref ctx) = thread_context {
-            // Add parent DID and mentions
-            if let Some(ref parent) = ctx.parent {
+            // Add ALL parent chain DIDs for exclusion checking (aggressive filtering)
+            for (parent, siblings) in &ctx.parent_chain {
                 thread_dids.push(parent.did.clone());
-                mention_check_queue.extend(parent.mentioned_dids().iter().map(|s| s.to_string()));
+
+                // Add all sibling DIDs for exclusion checking
+                for sibling in siblings {
+                    thread_dids.push(sibling.did.clone());
+                }
             }
 
-            // Add sibling DIDs and mentions
-            for sibling in &ctx.siblings {
-                thread_dids.push(sibling.did.clone());
-                mention_check_queue.extend(sibling.mentioned_dids().iter().map(|s| s.to_string()));
+            // Add immediate parent and sibling mentions only (not all ancestors)
+            if let Some((parent, siblings)) = ctx.parent_chain.first() {
+                mention_check_queue.extend(parent.mentioned_dids().iter().map(|s| s.to_string()));
+
+                // Add immediate sibling mentions
+                for sibling in siblings {
+                    mention_check_queue
+                        .extend(sibling.mentioned_dids().iter().map(|s| s.to_string()));
+                }
             }
 
             // Add reply DIDs and mentions
@@ -2287,7 +2495,19 @@ impl BlueskyFirehoseSource {
         if let Some(ctx) = thread_context {
             // This is a reply - show thread context
             message.push_str("  • 💬 New reply in thread:\n\n");
-            ctx.append_thread_tree(&mut message, item, agent_did);
+
+            let thread_root = item.thread_root();
+
+            // Check if we should show abbreviated context for recently-seen threads
+            if self.was_thread_recently_shown(&thread_root) {
+                ctx.append_abbreviated_thread_tree(&mut message, item, agent_did);
+            } else {
+                ctx.append_thread_tree(&mut message, item, agent_did);
+            }
+
+            // Mark this thread as shown
+            self.mark_thread_as_shown(&thread_root);
+
             ctx.format_reply_options(&mut message, item);
         } else {
             // Standalone post
