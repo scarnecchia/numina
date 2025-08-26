@@ -27,6 +27,7 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use rocketman::{
     connection::JetstreamConnection,
+    endpoints::JetstreamEndpoints,
     handler,
     ingestion::LexiconIngestor,
     options::JetstreamOptions,
@@ -488,7 +489,7 @@ pub fn atproto_identity_resolver() -> CommonDidResolver<PatternHttpClient> {
 }
 
 /// Hydration state for tracking what data needs fetching
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HydrationState {
     pub handle_resolved: bool,
     pub profile_fetched: bool,
@@ -501,6 +502,44 @@ impl Default for HydrationState {
             handle_resolved: false,
             profile_fetched: false,
             embed_enriched: false,
+        }
+    }
+}
+
+impl PartialOrd for HydrationState {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HydrationState {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare by total "hydration level" - count of true fields
+        let self_level = (self.handle_resolved as u8)
+            + (self.profile_fetched as u8)
+            + (self.embed_enriched as u8);
+        let other_level = (other.handle_resolved as u8)
+            + (other.profile_fetched as u8)
+            + (other.embed_enriched as u8);
+
+        match self_level.cmp(&other_level) {
+            std::cmp::Ordering::Equal => {
+                // Same hydration level, check if one satisfies the other's specific requirements
+                let self_satisfies_other = (!other.handle_resolved || self.handle_resolved)
+                    && (!other.profile_fetched || self.profile_fetched)
+                    && (!other.embed_enriched || self.embed_enriched);
+
+                let other_satisfies_self = (!self.handle_resolved || other.handle_resolved)
+                    && (!self.profile_fetched || other.profile_fetched)
+                    && (!self.embed_enriched || other.embed_enriched);
+
+                match (self_satisfies_other, other_satisfies_self) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Equal,
+                }
+            }
+            ordering => ordering,
         }
     }
 }
@@ -1304,6 +1343,17 @@ pub enum FacetFeature {
 pub struct BlueskyFirehoseCursor {
     pub seq: u64,     // Jetstream sequence number
     pub time_us: u64, // Unix microseconds timestamp
+}
+
+impl BlueskyFirehoseCursor {
+    /// Roll back cursor by specified seconds to avoid missing events during reconnection
+    pub fn rollback_seconds(&self, seconds: u64) -> Self {
+        let rollback_us = seconds * 1_000_000; // Convert to microseconds
+        Self {
+            seq: self.seq, // Keep sequence number as-is
+            time_us: self.time_us.saturating_sub(rollback_us),
+        }
+    }
 }
 
 /// Filter for Bluesky events
@@ -2861,10 +2911,24 @@ impl DataSource for BlueskyFirehoseSource {
             const BASE_DELAY_SECS: u64 = 5;
             const MAX_DELAY_SECS: u64 = 300; // 5 minutes max
 
+            // Standard Jetstream endpoints to rotate through
+            let endpoints = vec![
+                "wss://jetstream1.us-west.bsky.network/subscribe",
+                "wss://jetstream2.us-west.bsky.network/subscribe",
+                "wss://jetstream1.us-east.bsky.network/subscribe",
+                "wss://jetstream2.us-east.bsky.network/subscribe",
+            ];
+            let mut current_endpoint_idx = 0;
+
             // Outer loop that recreates the connection when it dies
             loop {
                 connection_count += 1;
-                tracing::debug!("Creating jetstream connection #{}", connection_count);
+                let current_endpoint = endpoints[current_endpoint_idx];
+                tracing::debug!(
+                    "Creating jetstream connection #{} using endpoint {}",
+                    connection_count,
+                    current_endpoint
+                );
 
                 // Build options based on current cursor
                 let current_cursor = {
@@ -2879,15 +2943,19 @@ impl DataSource for BlueskyFirehoseSource {
                 let options = if let Some(cursor_us) = current_cursor {
                     JetstreamOptions::builder()
                         .cursor(cursor_us.to_string())
+                        .ws_url(JetstreamEndpoints::Custom(current_endpoint.to_string()))
                         .wanted_collections(manager_collections.clone())
                         .build()
                 } else {
                     JetstreamOptions::builder()
+                        .ws_url(JetstreamEndpoints::Custom(current_endpoint.to_string()))
                         .wanted_collections(manager_collections.clone())
                         .build()
                 };
 
-                // Create new connection
+                // Create new connection with endpoint URL
+                // Note: Since rocketman doesn't expose endpoint setting in options,
+                // we'll need to handle this differently or the library needs updating
                 let connection = JetstreamConnection::new(options);
 
                 // Create our ingestor that sends posts to our channel
@@ -3041,6 +3109,27 @@ impl DataSource for BlueskyFirehoseSource {
                     );
                 } else {
                     consecutive_failures += 1;
+                    // Rotate to next endpoint on failure
+                    current_endpoint_idx = (current_endpoint_idx + 1) % endpoints.len();
+                    tracing::debug!(
+                        "Connection failed, rotating to next endpoint: {}",
+                        endpoints[current_endpoint_idx]
+                    );
+
+                    // Rollback cursor by 10 seconds to avoid missing events during reconnection
+                    if let Ok(mut cursor_guard) = cursor.lock() {
+                        if let Some(current_cursor_us) = *cursor_guard {
+                            let rollback_us = 10 * 1_000_000; // 10 seconds in microseconds
+                            let rolled_back_us = current_cursor_us.saturating_sub(rollback_us);
+                            *cursor_guard = Some(rolled_back_us);
+                            tracing::debug!(
+                                "Rolled back cursor by 10 seconds: {} -> {}",
+                                current_cursor_us,
+                                rolled_back_us
+                            );
+                        }
+                    }
+
                     // Abort the handler since we never connected
                     handle.abort();
                 }

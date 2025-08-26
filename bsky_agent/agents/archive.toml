@@ -95,12 +95,12 @@ priority = 1
 [[agent.tool_rules]]
 tool_name = "search"
 rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
-priority = 2
+priority = 1
 
 [[agent.tool_rules]]
 tool_name = "web"
 rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
-priority = 2
+priority = 1
 
 [[agent.tool_rules]]
 tool_name = "data_source"
