@@ -1451,7 +1451,7 @@ impl BlueskyFirehoseSource {
                     }
                 })?;
 
-                tracing::info!("Loaded Bluesky cursor from {:?}: {:?}", path, cursor);
+                tracing::debug!("Loaded Bluesky cursor from {:?}: {:?}", path, cursor);
                 return Ok(Some(cursor));
             }
         }
@@ -1514,7 +1514,6 @@ impl BlueskyFirehoseSource {
         &self,
         post_uri: &str,
         parent_uri: Option<&str>,
-        bsky_agent: &Arc<bsky_sdk::BskyAgent>,
         agent_did: Option<&str>,
         filter: &BlueskyFilter,
         max_depth: usize,
@@ -1522,16 +1521,34 @@ impl BlueskyFirehoseSource {
         // Determine the thread root - either the parent URI or the post URI itself if it's a root post
         let thread_root = parent_uri.unwrap_or(post_uri);
 
-        // Check cache first
-        if let Some(cached_context) = self.get_cached_thread_context(thread_root) {
-            return Ok(Some(cached_context));
-        }
-        let mut context = ThreadContext {
-            parent_chain: Vec::new(),
-            root: None,
-            replies_map: std::collections::HashMap::new(),
-            engagement_map: std::collections::HashMap::new(),
-            agent_interactions: std::collections::HashMap::new(),
+        // Start with cached context if available, or create new
+        let mut context = if let Some(cached_context) = self.get_cached_thread_context(thread_root)
+        {
+            tracing::debug!(
+                "Using cached context as starting point for thread {}",
+                thread_root
+            );
+            cached_context
+        } else {
+            ThreadContext {
+                parent_chain: Vec::new(),
+                root: None,
+                replies_map: std::collections::HashMap::new(),
+                engagement_map: std::collections::HashMap::new(),
+                agent_interactions: std::collections::HashMap::new(),
+            }
+        };
+
+        // Need agent to fetch from API for updates
+        let bsky_agent = match &self.bsky_agent {
+            Some(agent) => agent,
+            None => {
+                // If we have cached context but no agent, return the cache
+                if !context.parent_chain.is_empty() || context.root.is_some() {
+                    return Ok(Some(context));
+                }
+                return Ok(None);
+            }
         };
 
         // If we have a parent URI, fetch the full parent chain
@@ -1644,7 +1661,6 @@ impl BlueskyFirehoseSource {
                             profile_fetched: true,
                             embed_enriched: true,
                         },
-                        bsky_agent,
                     )
                     .await?
                 } else {
@@ -2108,12 +2124,16 @@ impl BlueskyFirehoseSource {
         &self,
         uri: &str,
         required_hydration: HydrationState,
-        bsky_agent: &Arc<bsky_sdk::BskyAgent>,
     ) -> Result<Option<BlueskyPost>> {
         // Check cache first
         if let Some(cached_post) = self.get_cached_post(uri, required_hydration) {
             return Ok(Some(cached_post));
         }
+
+        let bsky_agent = match &self.bsky_agent {
+            Some(agent) => agent,
+            None => return Ok(None),
+        };
 
         // Fetch from API
         let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
@@ -2154,7 +2174,6 @@ impl BlueskyFirehoseSource {
         &self,
         uris: Vec<String>,
         required_hydration: HydrationState,
-        bsky_agent: &Arc<bsky_sdk::BskyAgent>,
     ) -> Result<Vec<BlueskyPost>> {
         let mut cached_posts = Vec::new();
         let mut need_fetch = Vec::new();
@@ -2170,6 +2189,11 @@ impl BlueskyFirehoseSource {
 
         // Fetch missing posts in one API call
         if !need_fetch.is_empty() {
+            let bsky_agent = match &self.bsky_agent {
+                Some(agent) => agent,
+                None => return Ok(cached_posts), // Return what we have from cache
+            };
+
             let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
                 uris: need_fetch.clone(),
             };
@@ -2218,7 +2242,6 @@ impl BlueskyFirehoseSource {
         filter: &BlueskyFilter,
         post_uri: &str,
         required_hydration: HydrationState,
-        bsky_agent: &Arc<bsky_sdk::BskyAgent>,
     ) -> Result<Vec<BlueskyPost>> {
         // Fetch constellation records first
         let sibling_records = self.http_client.fetch_thread_siblings(parent_uri).await?;
@@ -2241,7 +2264,7 @@ impl BlueskyFirehoseSource {
         }
 
         // Use smart cache-aware fetching
-        self.get_or_fetch_posts(sibling_uris, required_hydration, bsky_agent)
+        self.get_or_fetch_posts(sibling_uris, required_hydration)
             .await
     }
 
@@ -2306,42 +2329,26 @@ impl BlueskyFirehoseSource {
         // Get agent DID from mentions filter (agent monitors for mentions of itself)
         let agent_did = self.filter.mentions.first().map(|s| s.as_str());
 
-        // Try to get cached thread context or build it
-        let thread_context =
-            if let Some(ctx) = self.get_cached_thread_context(&main_post.thread_root()) {
-                Some(ctx)
-            } else if let Some(bsky_agent) = &self.bsky_agent {
-                // Build thread context if we have auth
-                match self
-                    .build_thread_context(
-                        &main_post.uri,
-                        main_post.reply.as_ref().map(|r| r.parent.uri.as_str()),
-                        bsky_agent,
-                        agent_did,
-                        &self.filter,
-                        2, // Limited depth for batch notifications
-                    )
-                    .await
-                {
-                    Ok(ctx) => ctx,
-                    Err(_) => Some(ThreadContext {
-                        parent_chain: Vec::new(),
-                        root: None,
-                        replies_map: std::collections::HashMap::new(),
-                        engagement_map: std::collections::HashMap::new(),
-                        agent_interactions: std::collections::HashMap::new(),
-                    }),
-                }
-            } else {
-                // No auth, minimal context
-                Some(ThreadContext {
-                    parent_chain: Vec::new(),
-                    root: None,
-                    replies_map: std::collections::HashMap::new(),
-                    engagement_map: std::collections::HashMap::new(),
-                    agent_interactions: std::collections::HashMap::new(),
-                })
-            };
+        // Build thread context (uses cache internally)
+        let thread_context = match self
+            .build_thread_context(
+                &main_post.uri,
+                main_post.reply.as_ref().map(|r| r.parent.uri.as_str()),
+                agent_did,
+                &self.filter,
+                2, // Limited depth for batch notifications
+            )
+            .await
+        {
+            Ok(ctx) => ctx,
+            Err(_) => Some(ThreadContext {
+                parent_chain: Vec::new(),
+                root: None,
+                replies_map: std::collections::HashMap::new(),
+                engagement_map: std::collections::HashMap::new(),
+                agent_interactions: std::collections::HashMap::new(),
+            }),
+        };
 
         // If thread was excluded, don't send notification
         let thread_context = match thread_context {
@@ -2459,14 +2466,36 @@ impl BlueskyFirehoseSource {
         &self,
         item: &BlueskyPost,
     ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
+        // Try to hydrate the post - cache will return it if already hydrated
+        let post = if self.bsky_agent.is_some() {
+            let full_hydration = HydrationState {
+                handle_resolved: true,
+                profile_fetched: true,
+                embed_enriched: true,
+            };
+
+            match self.get_or_fetch_post(&item.uri, full_hydration).await {
+                Ok(Some(fetched_post)) => fetched_post,
+                _ => {
+                    tracing::debug!(
+                        "Failed to hydrate single post, using unhydrated version: {}",
+                        item.uri
+                    );
+                    item.clone()
+                }
+            }
+        } else {
+            item.clone()
+        };
+
         // Mark this post as processed to avoid reprocessing
         self.pending_batch
             .processed_uris
-            .insert(item.uri.clone(), Instant::now());
+            .insert(post.uri.clone(), Instant::now());
 
         // Early exit for obvious exclusions (saves computation)
-        if self.filter.exclude_dids.contains(&item.did) {
-            tracing::debug!("Early exit: post from excluded DID: {}", item.did);
+        if self.filter.exclude_dids.contains(&post.did) {
+            tracing::debug!("Early exit: post from excluded DID: {}", post.did);
             return None;
         }
 
@@ -2475,33 +2504,24 @@ impl BlueskyFirehoseSource {
 
         // Build or get cached thread context if this is a reply
         let thread_context = if let Some(reply) = &item.reply {
-            if let Some(ctx) = self.get_cached_thread_context(&item.thread_root()) {
-                Some(ctx)
-            } else if let Some(bsky_agent) = &self.bsky_agent {
-                // Try to build thread context - if it returns None, it means exclusions upstream
-                match self
-                    .build_thread_context(
-                        &item.uri,
-                        Some(&reply.parent.uri),
-                        bsky_agent,
-                        agent_did,
-                        &self.filter,
-                        2,
-                    )
-                    .await
-                {
-                    Ok(Some(ctx)) => Some(ctx),
-                    Ok(None) => {
-                        // Thread excluded due to upstream content
-                        tracing::debug!(
-                            "Individual notification excluded due to upstream exclusions"
-                        );
-                        return None;
-                    }
-                    Err(_) => None, // Error building context, continue as standalone
+            // Build thread context (uses cache internally)
+            match self
+                .build_thread_context(
+                    &item.uri,
+                    Some(&reply.parent.uri),
+                    agent_did,
+                    &self.filter,
+                    2,
+                )
+                .await
+            {
+                Ok(Some(ctx)) => Some(ctx),
+                Ok(None) => {
+                    // Thread excluded due to upstream content
+                    tracing::debug!("Individual notification excluded due to upstream exclusions");
+                    return None;
                 }
-            } else {
-                None
+                Err(_) => None, // Error building context, continue as standalone
             }
         } else {
             None
@@ -2722,7 +2742,7 @@ impl DataSource for BlueskyFirehoseSource {
         from: Option<Self::Cursor>,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent<Self::Item, Self::Cursor>>> + Send + Unpin>>
     {
-        tracing::info!(
+        tracing::debug!(
             "BlueskyFirehoseSource::subscribe called for source_id: {}, endpoint: {}",
             self.source_id,
             self.endpoint
@@ -2734,7 +2754,7 @@ impl DataSource for BlueskyFirehoseSource {
             None => self.load_cursor_from_file().await?,
         };
 
-        tracing::info!(
+        tracing::debug!(
             "Effective cursor: {:?}, filter: {:?}",
             effective_cursor,
             self.filter
@@ -2844,7 +2864,7 @@ impl DataSource for BlueskyFirehoseSource {
             // Outer loop that recreates the connection when it dies
             loop {
                 connection_count += 1;
-                tracing::info!("Creating jetstream connection #{}", connection_count);
+                tracing::debug!("Creating jetstream connection #{}", connection_count);
 
                 // Build options based on current cursor
                 let current_cursor = {
@@ -2993,7 +3013,7 @@ impl DataSource for BlueskyFirehoseSource {
                             }
                         }
                     }
-                    tracing::info!("Message handler exiting - will trigger reconnection");
+                    tracing::debug!("Message handler exiting - will trigger reconnection");
                 });
 
                 // Try to connect (simplified - let rocketman handle retries)
@@ -3009,7 +3029,7 @@ impl DataSource for BlueskyFirehoseSource {
                     })
                     .is_ok()
                 {
-                    tracing::info!("Jetstream connection #{} established", connection_count);
+                    tracing::debug!("Jetstream connection #{} established", connection_count);
                     consecutive_failures = 0; // Reset on successful connection
 
                     // Wait for the handler to exit (connection died)
@@ -3035,7 +3055,7 @@ impl DataSource for BlueskyFirehoseSource {
                     exponential_delay.min(MAX_DELAY_SECS)
                 };
 
-                tracing::info!(
+                tracing::debug!(
                     "Waiting {} seconds before recreating connection (failure count: {})",
                     delay_secs,
                     consecutive_failures
@@ -3045,7 +3065,7 @@ impl DataSource for BlueskyFirehoseSource {
                 tokio::time::sleep(Duration::from_secs(delay_secs)).await;
 
                 // Continue loop to recreate connection
-                tracing::info!("Recreating jetstream connection after delay...");
+                tracing::debug!("Recreating jetstream connection after delay...");
             }
         });
         Ok(Box::new(ReceiverStream::new(rx))
@@ -3189,7 +3209,7 @@ impl DataSource for BlueskyFirehoseSource {
             };
 
             if should_flush {
-                tracing::info!("⏰ Flushing batch for thread: {}", thread_root);
+                tracing::debug!("⏰ Flushing batch for thread: {}", thread_root);
                 return self.flush_batch(&thread_root).await;
             }
 
@@ -3201,7 +3221,7 @@ impl DataSource for BlueskyFirehoseSource {
                 if let Some(expired_thread) = expired_batches.first() {
                     // Only flush if it's a different thread than the one we just added to
                     if expired_thread != &thread_root {
-                        tracing::info!(
+                        tracing::debug!(
                             "⏰ Flushing expired batch for thread: {} (found {} expired)",
                             expired_thread,
                             expired_batches.len()

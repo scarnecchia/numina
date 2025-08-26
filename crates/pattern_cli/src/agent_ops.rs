@@ -309,9 +309,9 @@ pub async fn load_model_embedding_providers(
     info!("Selected model: {} ({})", model_info.name, model_info.id);
 
     // Create embedding provider if API key is available
-    let embedding_provider = if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+    let embedding_provider = if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
         Some(Arc::new(OpenAIEmbedder::new(
-            "text-embedding-3-small".to_string(),
+            "gemini-embedding-001".to_string(),
             api_key,
             None,
         )))

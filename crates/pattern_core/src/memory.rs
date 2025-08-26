@@ -246,10 +246,7 @@ impl Memory {
             block.value = value.into();
             block.updated_at = Utc::now();
 
-            // If this block isn't new, mark it as dirty
-            if !self.new_blocks.contains(&block_id) {
-                self.dirty_blocks.insert(block_id);
-            }
+            self.dirty_blocks.insert(block_id);
 
             Ok(())
         } else {
@@ -290,10 +287,7 @@ impl Memory {
             let block_id = block.id.clone();
             let updated_block = f(key, block);
 
-            // If this block isn't new, mark it as dirty
-            if !self.new_blocks.contains(&block_id) {
-                self.dirty_blocks.insert(block_id);
-            }
+            self.dirty_blocks.insert(block_id);
 
             updated_block
         });
