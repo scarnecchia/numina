@@ -1579,6 +1579,8 @@ where
                             "Successfully persisted memory block {} to database",
                             block.label
                         );
+                        // Mark this specific block as persisted
+                        memory.mark_block_persisted(block_id);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -1586,7 +1588,7 @@ where
                             block.label,
                             e
                         );
-                        return Err(e.into());
+                        // Don't return early - continue with other blocks
                     }
                 }
             }
@@ -1601,37 +1603,39 @@ where
             {
                 tracing::debug!("Updating dirty memory block {} in database", block.label);
 
-                // Use direct upsert method for memory blocks
-                // This avoids transaction conflicts on frequently updated shared blocks
-                let record_id = block.id.to_record_id();
-
                 // Update the timestamp
                 block.updated_at = chrono::Utc::now();
 
-                // Convert to database model
-                let db_model = block.to_db_model();
-
-                // Simple upsert using the Surreal method
-                let _result: Vec<<MemoryBlock as DbEntity>::DbModel> = self
-                    .db
-                    .upsert(record_id)
-                    .content(db_model)
-                    .await
-                    .map_err(|e| crate::CoreError::DatabaseQueryFailed {
-                        query: "UPSERT memory block".to_string(),
-                        table: "mem".to_string(),
-                        cause: e,
-                    })?;
+                // Use persist_agent_memory which handles store_with_relations + retry logic
+                match ops::persist_agent_memory(
+                    &self.db,
+                    context.handle.agent_id.clone(),
+                    &block,
+                    block.permission,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        tracing::debug!("Successfully updated dirty memory block {}", block.label);
+                        // Mark this specific block as persisted
+                        memory.mark_block_persisted(block_id);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to update dirty memory block {}: {:?}",
+                            block.label,
+                            e
+                        );
+                        // Don't return early - continue with other blocks
+                    }
+                }
             }
         }
 
-        // Clear the tracking sets after successful persistence
         tracing::info!(
-            "Clearing tracking sets for {} after successful persistence",
+            "Completed memory persistence attempt for {} - blocks marked as persisted individually",
             context.handle.agent_id
         );
-        memory.clear_new_blocks();
-        memory.clear_dirty_blocks();
 
         Ok(())
     }
