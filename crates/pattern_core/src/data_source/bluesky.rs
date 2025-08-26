@@ -2553,11 +2553,11 @@ impl BlueskyFirehoseSource {
         let agent_did = self.filter.mentions.first().map(|s| s.as_str());
 
         // Build or get cached thread context if this is a reply
-        let thread_context = if let Some(reply) = &item.reply {
+        let thread_context = if let Some(reply) = &post.reply {
             // Build thread context (uses cache internally)
             match self
                 .build_thread_context(
-                    &item.uri,
+                    &post.uri,
                     Some(&reply.parent.uri),
                     agent_did,
                     &self.filter,
@@ -2580,8 +2580,8 @@ impl BlueskyFirehoseSource {
         // Now that we have full thread context, apply comprehensive filtering
 
         // Build list of all DIDs in the thread
-        let mut thread_dids = vec![item.did.clone()];
-        let mut mention_check_queue = item
+        let mut thread_dids = vec![post.did.clone()];
+        let mut mention_check_queue = post
             .mentioned_dids()
             .iter()
             .map(|s| s.to_string())
@@ -2620,7 +2620,7 @@ impl BlueskyFirehoseSource {
         }
 
         // Check if quoted post mentions anyone
-        if let Some(quoted) = item.quoted_post() {
+        if let Some(quoted) = post.quoted_post() {
             thread_dids.push(quoted.did.clone());
             mention_check_queue.push(quoted.did.clone());
         }
@@ -2637,9 +2637,9 @@ impl BlueskyFirehoseSource {
         if !self.filter.exclude_keywords.is_empty() {
             let mut temp_message = String::new();
             if let Some(ref ctx) = thread_context {
-                ctx.append_thread_tree(&mut temp_message, item, agent_did);
+                ctx.append_thread_tree(&mut temp_message, &post, agent_did);
             } else {
-                item.append_as_standalone(&mut temp_message, agent_did);
+                post.append_as_standalone(&mut temp_message, agent_did);
             }
 
             let message_lower = temp_message.to_lowercase();
@@ -2678,28 +2678,28 @@ impl BlueskyFirehoseSource {
             // This is a reply - show thread context
             message.push_str("💬 New reply in thread:\n\n");
 
-            let thread_root = item.thread_root();
+            let thread_root = post.thread_root();
 
             // Check if we should show abbreviated context for recently-seen threads
             if self.was_thread_recently_shown(&thread_root) {
-                ctx.append_abbreviated_thread_tree(&mut message, item, agent_did);
+                ctx.append_abbreviated_thread_tree(&mut message, &post, agent_did);
             } else {
-                ctx.append_thread_tree(&mut message, item, agent_did);
+                ctx.append_thread_tree(&mut message, &post, agent_did);
             }
 
             // Mark this thread as shown
             self.mark_thread_as_shown(&thread_root);
 
-            ctx.format_reply_options(&mut message, item);
+            ctx.format_reply_options(&mut message, &post);
         } else {
             // Standalone post
-            message.push_str("  • 📝 New post:\n\n");
-            item.append_as_standalone(&mut message, agent_did);
+            message.push_str("📝 New post:\n\n");
+            post.append_as_standalone(&mut message, agent_did);
 
             // Simple reply option for standalone posts
             message.push_str(&format!(
                 "\n💭 Reply option: @{} ({})\n",
-                item.handle, item.uri
+                post.handle, post.uri
             ));
             message.push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri), your response must contain under 300 characters or it will be truncated.\n");
         }
@@ -2709,7 +2709,7 @@ impl BlueskyFirehoseSource {
 
         // Add user memory block
         if let Some(ref agent_handle) = self.agent_handle {
-            let memory_label = format!("bluesky_user_{}", item.handle);
+            let memory_label = format!("bluesky_user_{}", post.handle);
             let compact_label = CompactString::from(memory_label.clone());
 
             // Check if memory already exists

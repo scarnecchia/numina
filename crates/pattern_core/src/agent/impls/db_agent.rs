@@ -158,31 +158,240 @@ where
                     return Ok(response);
                 }
                 Err(e) => {
-                    // Check if this is the Gemini empty candidates error
+                    // Check if this is the Gemini empty candidates error (match structured error)
                     let is_gemini_empty_candidates = match &e {
                         CoreError::ModelProviderError { cause, .. } => {
-                            let error_str = format!("{:?}", cause);
-                            error_str.contains("PropertyNotFound(\"/candidates/0/content/parts\")")
+                            if let genai::Error::WebModelCall { webc_error, .. } = cause {
+                                match webc_error {
+                                    genai::webc::Error::JsonValueExt(
+                                        value_ext::JsonValueExtError::PropertyNotFound(path),
+                                    ) => path == "/candidates/0/content/parts",
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            }
                         }
                         _ => false,
                     };
 
-                    // Check if this is a rate limit error (529)
-                    let is_rate_limit = match &e {
+                    // Check if this is a rate limit error (429/529) via structured error
+                    // and compute a precise wait from headers when possible.
+                    let (is_rate_limit, rate_wait_ms, rate_wait_src): (
+                        bool,
+                        Option<u64>,
+                        Option<String>,
+                    ) = match &e {
                         CoreError::ModelProviderError { cause, .. } => {
-                            let error_str = format!("{:?}", cause);
-                            error_str.contains("529")
-                                || error_str.contains("rate limit")
-                                || error_str.contains("Please retry")
-                                || error_str.contains("ResponseFailedStatus { status: 529")
+                            if let genai::Error::WebModelCall { webc_error, .. } = cause {
+                                if let genai::webc::Error::ResponseFailedStatus {
+                                    status,
+                                    headers,
+                                    ..
+                                } = webc_error
+                                {
+                                    let code = status.as_u16();
+                                    let is_rl = code == 429 || code == 529;
+                                    // Helper: parse Retry-After (seconds or HTTP-date)
+                                    let parse_retry_after =
+                                        |hdrs: &http::HeaderMap| -> Option<(u64, &'static str)> {
+                                            if let Some(raw) = hdrs
+                                                .get("retry-after")
+                                                .and_then(|v| v.to_str().ok())
+                                            {
+                                                let s = raw.trim();
+                                                // Numeric seconds
+                                                if let Ok(secs) = s.parse::<u64>() {
+                                                    return Some((
+                                                        secs * 1000
+                                                            + (rand::random::<u64>() % 1000),
+                                                        "retry-after",
+                                                    ));
+                                                }
+                                                // HTTP-date (RFC 7231 IMF-fixdate). Try RFC2822, then RFC3339.
+                                                if let Ok(dt) =
+                                                    chrono::DateTime::parse_from_rfc2822(s)
+                                                {
+                                                    let now = chrono::Utc::now();
+                                                    let dur_ms = dt
+                                                        .with_timezone(&chrono::Utc)
+                                                        .signed_duration_since(now)
+                                                        .num_milliseconds();
+                                                    if dur_ms > 0 {
+                                                        return Some((
+                                                            dur_ms as u64
+                                                                + (rand::random::<u64>() % 1000),
+                                                            "retry-after",
+                                                        ));
+                                                    }
+                                                }
+                                                if let Ok(dt) =
+                                                    chrono::DateTime::parse_from_rfc3339(s)
+                                                {
+                                                    let now = chrono::Utc::now();
+                                                    let dur_ms = dt
+                                                        .with_timezone(&chrono::Utc)
+                                                        .signed_duration_since(now)
+                                                        .num_milliseconds();
+                                                    if dur_ms > 0 {
+                                                        return Some((
+                                                            dur_ms as u64
+                                                                + (rand::random::<u64>() % 1000),
+                                                            "retry-after",
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            None
+                                        };
+
+                                    // Helper: parse provider-specific reset headers (OpenAI/Groq-like)
+                                    let parse_provider_reset =
+                                        |hdrs: &http::HeaderMap| -> Option<(u64, String)> {
+                                            let keys = [
+                                                // OpenAI and similar
+                                                "x-ratelimit-reset-requests",
+                                                "x-ratelimit-reset-tokens",
+                                                "x-ratelimit-reset-input-tokens",
+                                                "x-ratelimit-reset-output-tokens",
+                                                "x-ratelimit-reset-images-requests",
+                                                // Generic fallbacks used by some providers
+                                                "x-ratelimit-reset",
+                                                "ratelimit-reset",
+                                            ];
+                                            for k in keys.iter() {
+                                                if let Some(raw) =
+                                                    hdrs.get(*k).and_then(|v| v.to_str().ok())
+                                                {
+                                                    let s = raw.trim();
+                                                    // Try duration suffixes (ms, s, m, h)
+                                                    let dur_ms = if let Some(stripped) =
+                                                        s.strip_suffix("ms")
+                                                    {
+                                                        stripped.trim().parse::<u64>().ok()
+                                                    } else if let Some(stripped) =
+                                                        s.strip_suffix('s')
+                                                    {
+                                                        stripped
+                                                            .trim()
+                                                            .parse::<u64>()
+                                                            .ok()
+                                                            .map(|v| v * 1000)
+                                                    } else if let Some(stripped) =
+                                                        s.strip_suffix('m')
+                                                    {
+                                                        stripped
+                                                            .trim()
+                                                            .parse::<u64>()
+                                                            .ok()
+                                                            .map(|v| v * 60_000)
+                                                    } else if let Some(stripped) =
+                                                        s.strip_suffix('h')
+                                                    {
+                                                        stripped
+                                                            .trim()
+                                                            .parse::<u64>()
+                                                            .ok()
+                                                            .map(|v| v * 3_600_000)
+                                                    } else {
+                                                        None
+                                                    };
+                                                    if let Some(ms) = dur_ms {
+                                                        return Some((
+                                                            ms + (rand::random::<u64>() % 1000),
+                                                            (*k).to_string(),
+                                                        ));
+                                                    }
+
+                                                    // Try numeric: treat as seconds-until-reset (common)
+                                                    if let Ok(secs) = s.parse::<u64>() {
+                                                        return Some((
+                                                            secs * 1000
+                                                                + (rand::random::<u64>() % 1000),
+                                                            (*k).to_string(),
+                                                        ));
+                                                    }
+
+                                                    // Try RFC3339 or RFC2822 absolute times
+                                                    if let Ok(dt) =
+                                                        chrono::DateTime::parse_from_rfc3339(s)
+                                                    {
+                                                        let now = chrono::Utc::now();
+                                                        let dur_ms = dt
+                                                            .with_timezone(&chrono::Utc)
+                                                            .signed_duration_since(now)
+                                                            .num_milliseconds();
+                                                        if dur_ms > 0 {
+                                                            return Some((
+                                                                dur_ms as u64
+                                                                    + (rand::random::<u64>()
+                                                                        % 1000),
+                                                                (*k).to_string(),
+                                                            ));
+                                                        }
+                                                    }
+                                                    if let Ok(dt) =
+                                                        chrono::DateTime::parse_from_rfc2822(s)
+                                                    {
+                                                        let now = chrono::Utc::now();
+                                                        let dur_ms = dt
+                                                            .with_timezone(&chrono::Utc)
+                                                            .signed_duration_since(now)
+                                                            .num_milliseconds();
+                                                        if dur_ms > 0 {
+                                                            return Some((
+                                                                dur_ms as u64
+                                                                    + (rand::random::<u64>()
+                                                                        % 1000),
+                                                                (*k).to_string(),
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            None
+                                        };
+
+                                    let ra = parse_retry_after(headers.as_ref());
+                                    let prov = parse_provider_reset(headers.as_ref());
+                                    let wait = match (ra, prov) {
+                                        (Some((ms, src)), _) => (Some(ms), Some(src.to_string())),
+                                        (None, Some((ms, src))) => (Some(ms), Some(src)),
+                                        (None, None) => (None, None),
+                                    };
+                                    (is_rl, wait.0, wait.1)
+                                } else {
+                                    (false, None, None)
+                                }
+                            } else {
+                                (false, None, None)
+                            }
                         }
-                        _ => false,
+                        _ => (false, None, None),
                     };
 
                     let is_anthropic_5h = match &e {
                         CoreError::ModelProviderError { cause, .. } => {
-                            let error_str = format!("{:?}", cause);
-                            error_str.contains("anthropic-ratelimit-unified")
+                            if let genai::Error::WebModelCall { webc_error, .. } = cause {
+                                if let genai::webc::Error::ResponseFailedStatus {
+                                    headers, ..
+                                } = webc_error
+                                {
+                                    headers
+                                        .get("anthropic-ratelimit-unified-5h-reset")
+                                        .is_some()
+                                        || headers
+                                            .get("anthropic-ratelimit-unified-5h-status")
+                                            .is_some()
+                                        || headers
+                                            .get("anthropic-ratelimit-unified-status")
+                                            .is_some()
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
                         }
                         _ => false,
                     };
@@ -226,36 +435,115 @@ where
                     }
 
                     if is_anthropic_5h {
-                        backoff_ms = backoff_ms * 2 + 600000;
+                        // Try to extract precise reset time from headers in the underlying error
+                        let mut wait_ms: Option<u64> = None;
+                        let mut wait_src: Option<&str> = None;
+
+                        if let CoreError::ModelProviderError { cause, .. } = &e {
+                            if let genai::Error::WebModelCall { webc_error, .. } = cause {
+                                match webc_error {
+                                    genai::webc::Error::ResponseFailedStatus {
+                                        headers, ..
+                                    } => {
+                                        let hdrs = headers.as_ref();
+                                        // Prefer Anthropic unified 5h reset headers (epoch seconds)
+                                        let mut reset_epoch: Option<u64> = None;
+                                        let mut reset_src: Option<&str> = None;
+                                        if let Some(v) = hdrs
+                                            .get("anthropic-ratelimit-unified-5h-reset")
+                                            .and_then(|v| v.to_str().ok())
+                                        {
+                                            if let Ok(val) = v.trim().parse::<u64>() {
+                                                reset_epoch = Some(val);
+                                                reset_src =
+                                                    Some("anthropic-ratelimit-unified-5h-reset");
+                                            }
+                                        }
+                                        if reset_epoch.is_none() {
+                                            if let Some(v) = hdrs
+                                                .get("anthropic-ratelimit-unified-reset")
+                                                .and_then(|v| v.to_str().ok())
+                                            {
+                                                if let Ok(val) = v.trim().parse::<u64>() {
+                                                    reset_epoch = Some(val);
+                                                    reset_src =
+                                                        Some("anthropic-ratelimit-unified-reset");
+                                                }
+                                            }
+                                        }
+
+                                        if let Some(reset_epoch) = reset_epoch {
+                                            let now_epoch = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0);
+                                            if reset_epoch > now_epoch {
+                                                let mut delay = (reset_epoch - now_epoch) * 1000;
+                                                delay += rand::random::<u64>() % 2000; // jitter 0-2s
+                                                wait_ms = Some(delay);
+                                                wait_src = reset_src;
+                                            }
+                                        }
+
+                                        // Fallback to Retry-After (seconds)
+                                        if wait_ms.is_none() {
+                                            if let Some(v) = hdrs
+                                                .get("retry-after")
+                                                .and_then(|v| v.to_str().ok())
+                                            {
+                                                if let Ok(secs) = v.trim().parse::<u64>() {
+                                                    let mut delay = secs * 1000;
+                                                    delay += rand::random::<u64>() % 2000;
+                                                    wait_ms = Some(delay);
+                                                    wait_src = Some("retry-after");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        // If no precise wait computed, fall back to a conservative long backoff
+                        let delay_ms = wait_ms.unwrap_or_else(|| {
+                            // Prior behavior: exponential backoff plus 10 minutes
+                            backoff_ms = backoff_ms * 2 + 600_000;
+                            backoff_ms + (rand::random::<u64>() % 1000)
+                        });
 
                         retries += 1;
                         tracing::warn!(
-                            "Anthropic 5h limit error (attempt {}/{}), waiting {}ms before retry",
+                            "Anthropic 5h limit error (attempt {}/{}), waiting {}ms before retry (source: {})",
                             retries,
                             max_retries,
-                            backoff_ms
+                            delay_ms,
+                            wait_src.unwrap_or("backoff")
                         );
 
-                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
-
-                        backoff_ms += rand::random::<u64>() % 1000; // Add 0-1s jitter
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 
                         continue;
                     }
 
                     if is_rate_limit && retries < max_retries {
                         retries += 1;
+                        // Prefer server-provided wait (Retry-After or provider-specific), else use exponential backoff
+                        let wait_ms = rate_wait_ms.unwrap_or(backoff_ms);
+                        let wait_src = rate_wait_src.as_deref().unwrap_or("backoff");
+
                         tracing::warn!(
-                            "Rate limit error (attempt {}/{}), waiting {}ms before retry",
+                            "Rate limit error (attempt {}/{}), waiting {}ms before retry (source: {})",
                             retries,
                             max_retries,
-                            backoff_ms
+                            wait_ms,
+                            wait_src
                         );
 
-                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
 
-                        // Exponential backoff with jitter
-                        backoff_ms = (backoff_ms * 2).min(60000); // Cap at 30 seconds
+                        // Exponential backoff with jitter for subsequent retries
+                        backoff_ms = (wait_ms * 2).min(60000); // Cap at ~60 seconds
                         backoff_ms += rand::random::<u64>() % 1000; // Add 0-1s jitter
 
                         continue;
@@ -483,21 +771,7 @@ where
             }
         });
     }
-    // pub fn create(
-    //     agent_id: AgentId,
-    //     user_id: UserId,
-    //     agent_type: AgentType,
-    //     name: String,
-    //     system_prompt: String,
-    //     memory: Memory,
-    //     db: Surreal<C>,
-    //     model: Arc<RwLock<M>>,
-    //     tools: ToolRegistry,
-    //     embeddings: Option<Arc<E>>,
-    //     heartbeat_sender: HeartbeatSender,
-    // ) -> Arc<Self> {
-    // }
-    //
+
     pub async fn handle(&self) -> AgentHandle {
         self.context.read().await.handle.clone()
     }
@@ -3602,8 +3876,8 @@ where
         }
 
         if has_error {
-            Err(CoreError::model_error(
-                error_message,
+            Err(CoreError::from_genai_error(
+                "genai",
                 "",
                 genai::Error::NoChatResponse {
                     model_iden: metadata.model_iden,

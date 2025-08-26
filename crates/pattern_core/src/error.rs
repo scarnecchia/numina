@@ -121,6 +121,21 @@ pub enum CoreError {
         cause: genai::Error,
     },
 
+    #[error("Upstream provider HTTP error: {provider} {status}")]
+    #[diagnostic(
+        code(pattern_core::provider_http_error),
+        help(
+            "Request to provider '{provider}' for model '{model}' failed with HTTP status {status}. Inspect headers/body for rate limits or retry guidance."
+        )
+    )]
+    ProviderHttpError {
+        provider: String,
+        model: String,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+
     #[error("Model capability mismatch")]
     #[diagnostic(
         code(pattern_core::model_capability_mismatch),
@@ -528,6 +543,46 @@ impl CoreError {
         Self::ModelProviderError {
             provider: provider.into(),
             model: model.into(),
+            cause,
+        }
+    }
+
+    /// Prefer this over `model_error` to preserve HTTP status/headers when available.
+    /// Falls back to `ModelProviderError` if the error does not carry HTTP details.
+    pub fn from_genai_error(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        cause: genai::Error,
+    ) -> Self {
+        let provider = provider.into();
+        let model = model.into();
+        // Try to extract HTTP status/body/headers from web client error
+        if let genai::Error::WebModelCall { webc_error, .. } = &cause {
+            if let genai::webc::Error::ResponseFailedStatus {
+                status,
+                body,
+                headers,
+            } = webc_error
+            {
+                // Clone headers into a simple Vec<(String,String)> for diagnostics/serialization
+                let mut hdrs_vec: Vec<(String, String)> = Vec::new();
+                for (k, v) in headers.as_ref().iter() {
+                    let key = k.as_str().to_string();
+                    let val = v.to_str().unwrap_or("").to_string();
+                    hdrs_vec.push((key, val));
+                }
+                return Self::ProviderHttpError {
+                    provider,
+                    model,
+                    status: status.as_u16(),
+                    headers: hdrs_vec,
+                    body: body.clone(),
+                };
+            }
+        }
+        Self::ModelProviderError {
+            provider,
+            model,
             cause,
         }
     }

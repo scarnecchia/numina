@@ -10,7 +10,7 @@ use pattern_core::{
         client::DB,
         ops::{self},
     },
-    embeddings::{EmbeddingProvider, cloud::OpenAIEmbedder},
+    embeddings::{EmbeddingProvider, cloud::GeminiEmbedder, cloud::OpenAIEmbedder},
     id::{AgentId, RelationId},
     memory::{Memory, MemoryBlock},
     model::{GenAiClient, ResponseOptions},
@@ -204,7 +204,7 @@ pub async fn load_model_embedding_providers(
     enable_tools: bool,
 ) -> Result<(
     Arc<RwLock<GenAiClient>>,
-    Option<Arc<OpenAIEmbedder>>,
+    Option<Arc<GeminiEmbedder>>,
     ResponseOptions,
 )> {
     // Create model provider - use OAuth if available
@@ -310,10 +310,10 @@ pub async fn load_model_embedding_providers(
 
     // Create embedding provider if API key is available
     let embedding_provider = if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        Some(Arc::new(OpenAIEmbedder::new(
+        Some(Arc::new(GeminiEmbedder::new(
             "gemini-embedding-001".to_string(),
             api_key,
-            None,
+            Some(1536),
         )))
     } else {
         None

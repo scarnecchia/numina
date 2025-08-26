@@ -171,6 +171,29 @@ pub enum EmbeddingConfig {
         #[serde(default)]
         input_type: Option<String>,
     },
+    /// Google Gemini embeddings provider.
+    ///
+    /// - Recommended model: `gemini-embedding-001`.
+    /// - Dimensions: Defaults to 3072. Google recommends 768, 1536, or 3072 depending on storage/latency needs.
+    /// - Task type (optional): If set, optimizes embeddings for a specific use case.
+    ///   - Use `RETRIEVAL_QUERY` for search queries (default if omitted).
+    ///   - Use `RETRIEVAL_DOCUMENT` for documents/items you will retrieve.
+    ///   - Use `SEMANTIC_SIMILARITY` for general similarity comparisons.
+    ///   - Other supported values: `CLASSIFICATION`, `CLUSTERING`, `CODE_RETRIEVAL_QUERY`, `QUESTION_ANSWERING`, `FACT_VERIFICATION`.
+    #[cfg(feature = "embed-cloud")]
+    Gemini {
+        /// Gemini embedding model ID, e.g. `gemini-embedding-001`.
+        model: String,
+        /// API key for the Gemini API.
+        api_key: String,
+        /// Output dimensionality (truncation size). Defaults to 3072.
+        #[serde(default)]
+        dimensions: Option<usize>,
+        /// Optional task type that tunes embedding behavior.
+        /// Recommended: `RETRIEVAL_QUERY` (queries) or `RETRIEVAL_DOCUMENT` (documents).
+        #[serde(default)]
+        task_type: Option<String>,
+    },
     #[cfg(feature = "embed-ollama")]
     Ollama { model: String, url: String },
 }
@@ -237,6 +260,20 @@ pub async fn create_provider(config: EmbeddingConfig) -> Result<Arc<dyn Embeddin
         } => Ok(Arc::new(cloud::CohereEmbedder::new(
             model, api_key, input_type,
         ))),
+        #[cfg(feature = "embed-cloud")]
+        EmbeddingConfig::Gemini {
+            model,
+            api_key,
+            dimensions,
+            task_type,
+        } => {
+            let task = task_type
+                .as_ref()
+                .and_then(|s| cloud::GeminiEmbeddingTaskType::parse(s));
+            Ok(Arc::new(
+                cloud::GeminiEmbedder::new(model, api_key, dimensions).with_task_type(task),
+            ))
+        }
         #[cfg(feature = "embed-ollama")]
         EmbeddingConfig::Ollama { model, url } => {
             Ok(Arc::new(ollama::OllamaEmbedder::new(model, url)?))

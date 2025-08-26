@@ -2,7 +2,9 @@
 
 use super::{Embedding, EmbeddingError, EmbeddingProvider, Result, validate_input};
 use async_trait::async_trait;
+use http::HeaderMap;
 use serde::Deserialize;
+use tracing::warn;
 
 /// OpenAI embedding provider
 ///
@@ -78,30 +80,97 @@ impl EmbeddingProvider for OpenAIEmbedder {
             request_body["dimensions"] = serde_json::json!(dims);
         }
 
-        let response = client
-            .post("https://api.openai.com/v1/embeddings")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| EmbeddingError::ApiError(format!("Request failed: {}", e)))?;
+        // Retry with backoff and provider-aware headers
+        let mut retries = 0u32;
+        let max_retries = 6u32;
+        let mut backoff_ms: u64 = 1000; // 1s initial
+        let response_data: OpenAIEmbeddingResponse = loop {
+            let resp_res = client
+                .post("https://api.openai.com/v1/embeddings")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await;
 
-        if !response.status().is_success() {
-            let error_text = response
+            let resp = match resp_res {
+                Ok(r) => r,
+                Err(e) => {
+                    if retries >= max_retries {
+                        return Err(EmbeddingError::ApiError(format!("Request failed: {}", e)));
+                    }
+                    warn!(
+                        "OpenAI embed request error (attempt {}/{}): {} — backing off {}ms",
+                        retries + 1,
+                        max_retries,
+                        e,
+                        backoff_ms
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(60_000) + (rand::random::<u64>() % 500);
+                    retries += 1;
+                    continue;
+                }
+            };
+
+            if resp.status().is_success() {
+                match resp.json::<OpenAIEmbeddingResponse>().await {
+                    Ok(parsed) => break parsed,
+                    Err(e) => {
+                        if retries >= max_retries {
+                            return Err(EmbeddingError::ApiError(format!(
+                                "Failed to parse response: {}",
+                                e
+                            )));
+                        }
+                        warn!(
+                            "OpenAI embed parse error (attempt {}/{}): {} — backing off {}ms",
+                            retries + 1,
+                            max_retries,
+                            e,
+                            backoff_ms
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(60_000) + (rand::random::<u64>() % 500);
+                        retries += 1;
+                        continue;
+                    }
+                }
+            }
+
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let err_text = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(EmbeddingError::ApiError(format!(
-                "OpenAI API error: {}",
-                error_text
-            )));
-        }
 
-        let response_data: OpenAIEmbeddingResponse = response
-            .json()
-            .await
-            .map_err(|e| EmbeddingError::ApiError(format!("Failed to parse response: {}", e)))?;
+            // Rate-limit or transient errors: 429/529/503
+            if [429, 503, 529].contains(&status.as_u16()) && retries < max_retries {
+                let (wait_ms, src) = compute_wait_from_headers(&headers)
+                    .map(|ms| (ms, "headers".to_string()))
+                    .unwrap_or_else(|| (backoff_ms, "backoff".to_string()));
+                warn!(
+                    "OpenAI rate limit/status {} (attempt {}/{}), waiting {}ms before retry (source: {}) — {}",
+                    status.as_u16(),
+                    retries + 1,
+                    max_retries,
+                    wait_ms,
+                    src,
+                    err_text
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                backoff_ms = (wait_ms * 2).min(60_000) + (rand::random::<u64>() % 500);
+                retries += 1;
+                continue;
+            }
+
+            // Non-retryable or out of retries
+            return Err(EmbeddingError::ApiError(format!(
+                "OpenAI API error ({}): {}",
+                status, err_text
+            )));
+        };
 
         // Sort by index to ensure correct order
         let mut indexed_embeddings: Vec<_> = response_data.data.into_iter().collect();
@@ -125,6 +194,391 @@ impl EmbeddingProvider for OpenAIEmbedder {
 
     fn max_batch_size(&self) -> usize {
         2048 // OpenAI's batch limit
+    }
+}
+
+/// Google Gemini embedding provider (Generative Language API)
+///
+/// Task type guidance:
+/// - Use `RETRIEVAL_QUERY` when embedding search queries (default if none is set).
+/// - Use `RETRIEVAL_DOCUMENT` when embedding documents/records for your index.
+///   Pairing `RETRIEVAL_QUERY` (queries) with `RETRIEVAL_DOCUMENT` (documents) often yields better retrieval.
+/// - Use `SEMANTIC_SIMILARITY` for generic similarity comparisons between texts.
+#[derive(Clone)]
+pub struct GeminiEmbedder {
+    model: String,
+    api_key: String,
+    dimensions: Option<usize>,
+    task_type: Option<GeminiEmbeddingTaskType>,
+}
+
+impl std::fmt::Debug for GeminiEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiEmbedder")
+            .field("model", &self.model)
+            .field("dimensions", &self.dimensions)
+            .field("task_type", &self.task_type)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl GeminiEmbedder {
+    pub fn new(model: String, api_key: String, dimensions: Option<usize>) -> Self {
+        Self {
+            model,
+            api_key,
+            dimensions,
+            task_type: None,
+        }
+    }
+
+    /// Configure the task type to optimize embedding quality for a use case.
+    ///
+    /// Recommended:
+    /// - `RETRIEVAL_QUERY` for user queries (default if not provided).
+    /// - `RETRIEVAL_DOCUMENT` for the corpus/documents being searched.
+    /// - `SEMANTIC_SIMILARITY` for general-purpose similarity.
+    pub fn with_task_type(mut self, task_type: Option<GeminiEmbeddingTaskType>) -> Self {
+        self.task_type = task_type;
+        self
+    }
+
+    fn get_dimensions(&self) -> usize {
+        // Docs: gemini-embedding-001 defaults to 3072; recommend 768/1536/3072
+        self.dimensions.unwrap_or(3072)
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiEmbedder {
+    async fn embed(&self, text: &str) -> Result<Embedding> {
+        if text.trim().is_empty() {
+            return Err(EmbeddingError::EmptyInput);
+        }
+        let embeddings = self.embed_batch(&[text.to_string()]).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::GenerationFailed("No embedding returned".into()))
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
+        validate_input(texts)?;
+
+        if texts.len() > self.max_batch_size() {
+            return Err(EmbeddingError::BatchSizeTooLarge {
+                size: texts.len(),
+                max: self.max_batch_size(),
+            });
+        }
+
+        let client = reqwest::Client::new();
+        // Single endpoint embedContent supports one or many contents
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent",
+            self.model
+        );
+
+        // Build contents array of { parts: [{ text: ... }] }
+        let contents: Vec<serde_json::Value> = texts
+            .iter()
+            .map(|t| serde_json::json!({ "parts": [ { "text": t } ] }))
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": format!("models/{}", self.model),
+            "contents": contents,
+        });
+
+        // Build embedding_config
+        let mut cfg = serde_json::Map::new();
+        if let Some(dims) = self.dimensions {
+            cfg.insert("output_dimensionality".to_string(), serde_json::json!(dims));
+        }
+        // Default to RETRIEVAL_QUERY if not set
+        let tt = self
+            .task_type
+            .unwrap_or(GeminiEmbeddingTaskType::RetrievalQuery);
+        cfg.insert("task_type".to_string(), serde_json::json!(tt.as_str()));
+        body["embedding_config"] = serde_json::Value::Object(cfg);
+
+        let mut retries = 0u32;
+        let max_retries = 6u32;
+        let mut backoff_ms: u64 = 1000;
+
+        let resp_json = loop {
+            let resp_res = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("x-goog-api-key", &self.api_key)
+                .json(&body)
+                .send()
+                .await;
+
+            let resp = match resp_res {
+                Ok(r) => r,
+                Err(e) => {
+                    if retries >= max_retries {
+                        return Err(EmbeddingError::ApiError(format!("Request failed: {}", e)));
+                    }
+                    warn!(
+                        "Gemini embed request error (attempt {}/{}): {} — backing off {}ms",
+                        retries + 1,
+                        max_retries,
+                        e,
+                        backoff_ms
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(60_000) + (rand::random::<u64>() % 500);
+                    retries += 1;
+                    continue;
+                }
+            };
+
+            if resp.status().is_success() {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) => break v,
+                    Err(e) => {
+                        if retries >= max_retries {
+                            return Err(EmbeddingError::ApiError(format!(
+                                "Failed to parse response: {}",
+                                e
+                            )));
+                        }
+                        warn!(
+                            "Gemini embed parse error (attempt {}/{}): {} — backing off {}ms",
+                            retries + 1,
+                            max_retries,
+                            e,
+                            backoff_ms
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(60_000) + (rand::random::<u64>() % 500);
+                        retries += 1;
+                        continue;
+                    }
+                }
+            }
+
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let err_text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+
+            if [429, 503, 529].contains(&status.as_u16()) && retries < max_retries {
+                let (wait_ms, src) = compute_wait_from_headers(&headers)
+                    .map(|ms| (ms, "headers".to_string()))
+                    .unwrap_or_else(|| (backoff_ms, "backoff".to_string()));
+                warn!(
+                    "Gemini rate limit/status {} (attempt {}/{}), waiting {}ms before retry (source: {}) — {}",
+                    status.as_u16(),
+                    retries + 1,
+                    max_retries,
+                    wait_ms,
+                    src,
+                    err_text
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                backoff_ms = (wait_ms * 2).min(60_000) + (rand::random::<u64>() % 500);
+                retries += 1;
+                continue;
+            }
+
+            return Err(EmbeddingError::ApiError(format!(
+                "Gemini API error ({}): {}",
+                status, err_text
+            )));
+        };
+
+        // Extract embeddings from JSON shape (support both single and multi)
+        let embeddings: Vec<Vec<f32>> =
+            if let Some(arr) = resp_json.get("embeddings").and_then(|v| v.as_array()) {
+                // { embeddings: [ { values: [...] }, ... ] }
+                arr.iter()
+                    .map(|item| {
+                        item.get("values")
+                            .and_then(|v| v.as_array())
+                            .ok_or_else(|| EmbeddingError::ApiError("Missing values".into()))
+                            .and_then(|arr| collect_f32(arr))
+                    })
+                    .collect::<std::result::Result<_, _>>()?
+            } else if let Some(emb) = resp_json
+                .get("embedding")
+                .and_then(|v| v.get("values"))
+                .and_then(|v| v.as_array())
+            {
+                vec![collect_f32(emb)?]
+            } else {
+                return Err(EmbeddingError::ApiError(
+                    "Missing embeddings in response".into(),
+                ));
+            };
+
+        Ok(embeddings
+            .into_iter()
+            .map(|vals| Embedding::new(vals, self.model.clone()))
+            .collect())
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+    fn dimensions(&self) -> usize {
+        self.get_dimensions()
+    }
+    fn max_batch_size(&self) -> usize {
+        100
+    }
+}
+
+fn collect_f32(arr: &[serde_json::Value]) -> Result<Vec<f32>> {
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        match v.as_f64() {
+            Some(n) => out.push(n as f32),
+            None => {
+                return Err(EmbeddingError::ApiError(
+                    "Non-numeric embedding value".into(),
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+// Shared helper: compute wait duration from classic headers
+fn compute_wait_from_headers(headers: &HeaderMap) -> Option<u64> {
+    // Retry-After seconds or HTTP-date
+    if let Some(raw) = headers.get("retry-after").and_then(|v| v.to_str().ok()) {
+        let s = raw.trim();
+        if let Ok(secs) = s.parse::<u64>() {
+            return Some(secs * 1000 + (rand::random::<u64>() % 500));
+        }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+            let now = chrono::Utc::now();
+            let ms = dt
+                .with_timezone(&chrono::Utc)
+                .signed_duration_since(now)
+                .num_milliseconds();
+            if ms > 0 {
+                return Some(ms as u64 + (rand::random::<u64>() % 500));
+            }
+        }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            let now = chrono::Utc::now();
+            let ms = dt
+                .with_timezone(&chrono::Utc)
+                .signed_duration_since(now)
+                .num_milliseconds();
+            if ms > 0 {
+                return Some(ms as u64 + (rand::random::<u64>() % 500));
+            }
+        }
+    }
+
+    // Provider-specific resets (OpenAI/Groq-like)
+    let keys = [
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-reset-tokens",
+        "x-ratelimit-reset-input-tokens",
+        "x-ratelimit-reset-output-tokens",
+        "x-ratelimit-reset-images-requests",
+        "x-ratelimit-reset",
+        "ratelimit-reset",
+    ];
+    for k in keys.iter() {
+        if let Some(raw) = headers.get(*k).and_then(|v| v.to_str().ok()) {
+            let s = raw.trim();
+            if let Some(stripped) = s.strip_suffix("ms") {
+                if let Ok(v) = stripped.trim().parse::<u64>() {
+                    return Some(v + (rand::random::<u64>() % 500));
+                }
+            }
+            if let Some(stripped) = s.strip_suffix('s') {
+                if let Ok(v) = stripped.trim().parse::<u64>() {
+                    return Some(v * 1000 + (rand::random::<u64>() % 500));
+                }
+            }
+            if let Some(stripped) = s.strip_suffix('m') {
+                if let Ok(v) = stripped.trim().parse::<u64>() {
+                    return Some(v * 60_000 + (rand::random::<u64>() % 500));
+                }
+            }
+            if let Some(stripped) = s.strip_suffix('h') {
+                if let Ok(v) = stripped.trim().parse::<u64>() {
+                    return Some(v * 3_600_000 + (rand::random::<u64>() % 500));
+                }
+            }
+            if let Ok(secs) = s.parse::<u64>() {
+                return Some(secs * 1000 + (rand::random::<u64>() % 500));
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                let now = chrono::Utc::now();
+                let ms = dt
+                    .with_timezone(&chrono::Utc)
+                    .signed_duration_since(now)
+                    .num_milliseconds();
+                if ms > 0 {
+                    return Some(ms as u64 + (rand::random::<u64>() % 500));
+                }
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+                let now = chrono::Utc::now();
+                let ms = dt
+                    .with_timezone(&chrono::Utc)
+                    .signed_duration_since(now)
+                    .num_milliseconds();
+                if ms > 0 {
+                    return Some(ms as u64 + (rand::random::<u64>() % 500));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Gemini embedding task types (per Google docs)
+#[derive(Debug, Clone, Copy)]
+pub enum GeminiEmbeddingTaskType {
+    SemanticSimilarity,
+    Classification,
+    Clustering,
+    RetrievalDocument,
+    RetrievalQuery,
+    CodeRetrievalQuery,
+    QuestionAnswering,
+    FactVerification,
+}
+
+impl GeminiEmbeddingTaskType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SemanticSimilarity => "SEMANTIC_SIMILARITY",
+            Self::Classification => "CLASSIFICATION",
+            Self::Clustering => "CLUSTERING",
+            Self::RetrievalDocument => "RETRIEVAL_DOCUMENT",
+            Self::RetrievalQuery => "RETRIEVAL_QUERY",
+            Self::CodeRetrievalQuery => "CODE_RETRIEVAL_QUERY",
+            Self::QuestionAnswering => "QUESTION_ANSWERING",
+            Self::FactVerification => "FACT_VERIFICATION",
+        }
+    }
+
+    pub fn parse<S: AsRef<str>>(s: S) -> Option<Self> {
+        match s.as_ref().to_ascii_uppercase().as_str() {
+            "SEMANTIC_SIMILARITY" => Some(Self::SemanticSimilarity),
+            "CLASSIFICATION" => Some(Self::Classification),
+            "CLUSTERING" => Some(Self::Clustering),
+            "RETRIEVAL_DOCUMENT" => Some(Self::RetrievalDocument),
+            "RETRIEVAL_QUERY" => Some(Self::RetrievalQuery),
+            "CODE_RETRIEVAL_QUERY" => Some(Self::CodeRetrievalQuery),
+            "QUESTION_ANSWERING" => Some(Self::QuestionAnswering),
+            "FACT_VERIFICATION" => Some(Self::FactVerification),
+            _ => None,
+        }
     }
 }
 

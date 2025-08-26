@@ -60,6 +60,7 @@ sha2 = "0.10"
 url = "2.5"
 urlencoding = "2.1"
 serde_urlencoded = "0.7"
+value-ext = "0.1.2"
 
 # DAG-CBOR and CAR archive support
 serde_cbor = { workspace = true }
