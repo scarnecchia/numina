@@ -248,33 +248,18 @@ impl GeminiEmbedder {
         // Docs: gemini-embedding-001 defaults to 3072; recommend 768/1536/3072
         self.dimensions.unwrap_or(3072)
     }
-}
 
-#[async_trait]
-impl EmbeddingProvider for GeminiEmbedder {
-    async fn embed(&self, text: &str) -> Result<Embedding> {
-        if text.trim().is_empty() {
-            return Err(EmbeddingError::EmptyInput);
-        }
-        let embeddings = self.embed_batch(&[text.to_string()]).await?;
-        embeddings
-            .into_iter()
-            .next()
-            .ok_or_else(|| EmbeddingError::GenerationFailed("No embedding returned".into()))
-    }
-
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
-        validate_input(texts)?;
-
-        if texts.len() > self.max_batch_size() {
-            return Err(EmbeddingError::BatchSizeTooLarge {
-                size: texts.len(),
-                max: self.max_batch_size(),
-            });
+    /// Build the correct endpoint URL and request body for Gemini embeddings.
+    /// Emits a warning if the configured model doesn't look like an embedding model,
+    /// suggesting `gemini-embedding-001`.
+    fn build_request(&self, texts: &[String]) -> (String, serde_json::Value) {
+        if !self.model.to_lowercase().contains("embedding") {
+            tracing::warn!(
+                "Gemini embedding model '{}' does not look like an embedding model. Consider 'gemini-embedding-001' for best results.",
+                self.model
+            );
         }
 
-        let client = reqwest::Client::new();
-        // Choose endpoint based on batch size
         let single = texts.len() == 1;
         let url = if single {
             format!(
@@ -288,12 +273,10 @@ impl EmbeddingProvider for GeminiEmbedder {
             )
         };
 
-        // Default to RETRIEVAL_QUERY if not set
         let tt = self
             .task_type
             .unwrap_or(GeminiEmbeddingTaskType::RetrievalQuery);
 
-        // Build request body with correct camelCase fields
         let body = if single {
             let mut obj = serde_json::json!({
                 "model": format!("models/{}", self.model),
@@ -321,6 +304,36 @@ impl EmbeddingProvider for GeminiEmbedder {
                 "requests": requests,
             })
         };
+
+        (url, body)
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiEmbedder {
+    async fn embed(&self, text: &str) -> Result<Embedding> {
+        if text.trim().is_empty() {
+            return Err(EmbeddingError::EmptyInput);
+        }
+        let embeddings = self.embed_batch(&[text.to_string()]).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::GenerationFailed("No embedding returned".into()))
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
+        validate_input(texts)?;
+
+        if texts.len() > self.max_batch_size() {
+            return Err(EmbeddingError::BatchSizeTooLarge {
+                size: texts.len(),
+                max: self.max_batch_size(),
+            });
+        }
+
+        let client = reqwest::Client::new();
+        let (url, body) = self.build_request(texts);
 
         let mut retries = 0u32;
         let max_retries = 6u32;
@@ -598,6 +611,58 @@ impl GeminiEmbeddingTaskType {
             "FACT_VERIFICATION" => Some(Self::FactVerification),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(texts: &[&str], dims: Option<usize>) -> (GeminiEmbedder, Vec<String>) {
+        let emb = GeminiEmbedder::new(
+            "gemini-embedding-001".to_string(),
+            "test_key".to_string(),
+            dims,
+        )
+        .with_task_type(Some(GeminiEmbeddingTaskType::RetrievalQuery));
+        let batch = texts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        (emb, batch)
+    }
+
+    #[test]
+    fn build_request_single_has_content_and_camelcase() {
+        let (emb, batch) = mk(&["hello"], Some(1536));
+        let (url, body) = emb.build_request(&batch);
+        assert!(url.ends_with(":embedContent"));
+        assert_eq!(
+            body["model"],
+            serde_json::json!("models/gemini-embedding-001")
+        );
+        assert!(body.get("content").is_some());
+        assert!(body.get("contents").is_none());
+        assert_eq!(body["taskType"], serde_json::json!("RETRIEVAL_QUERY"));
+        assert_eq!(body["outputDimensionality"], serde_json::json!(1536));
+        // content.parts[0].text == "hello"
+        assert_eq!(
+            body["content"]["parts"][0]["text"],
+            serde_json::json!("hello")
+        );
+    }
+
+    #[test]
+    fn build_request_batch_has_requests_array() {
+        let (emb, batch) = mk(&["a", "b"], None);
+        let (url, body) = emb.build_request(&batch);
+        assert!(url.ends_with(":batchEmbedContents"));
+        assert!(body.get("requests").is_some());
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(
+            reqs[0]["content"]["parts"][0]["text"],
+            serde_json::json!("a")
+        );
+        assert_eq!(reqs[0]["taskType"], serde_json::json!("RETRIEVAL_QUERY"));
+        assert!(reqs[0].get("outputDimensionality").is_none());
     }
 }
 

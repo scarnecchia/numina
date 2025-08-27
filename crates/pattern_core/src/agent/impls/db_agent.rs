@@ -4298,14 +4298,10 @@ where
             context.handle.agent_id.clone()
         };
 
-        use surrealdb::opt::PatchOp;
-        // Use SurrealDB's own Value type rather than serde_json::Value
-        let _: Option<surrealdb::sql::Value> = db
-            .update(surrealdb::RecordId::from(&agent_id))
-            .patch(PatchOp::replace(
-                "/last_active",
-                surrealdb::Datetime::from(chrono::Utc::now()),
-            ))
+        let _ = db
+            .query("UPDATE agent SET last_active = $last_active WHERE id = $id")
+            .bind(("id", surrealdb::RecordId::from(&agent_id)))
+            .bind(("last_active", surrealdb::Datetime::from(chrono::Utc::now())))
             .await
             .map_err(|e| {
                 crate::log_error!("Failed to persist agent last_active update", e);
