@@ -149,12 +149,13 @@ impl WebTool {
     /// Search using Kagi with session cookies and auth header
     async fn search_kagi(&self, query: &str, limit: usize) -> Result<WebOutput> {
         // Get auth credentials from environment
-        let kagi_session =
-            std::env::var("KAGI_SESSION").map_err(|_| CoreError::ToolExecutionFailed {
-                tool_name: "web".to_string(),
-                cause: "KAGI_SESSION environment variable not set".to_string(),
-                parameters: serde_json::json!({ "query": query }),
-            })?;
+        let kagi_session = std::env::var("KAGI_SESSION").map_err(|e| {
+            CoreError::tool_exec_msg(
+                "web",
+                serde_json::json!({ "query": query }),
+                format!("KAGI_SESSION environment variable not set: {}", e),
+            )
+        })?;
 
         let kagi_search = std::env::var("KAGI_SEARCH").unwrap_or_default(); // Optional, may not be needed
 
@@ -186,31 +187,21 @@ impl WebTool {
             request = request.header("X-Kagi-Authorization", kagi_auth);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| CoreError::ToolExecutionFailed {
-                tool_name: "web".to_string(),
-                cause: format!("Kagi search request failed: {}", e),
-                parameters: serde_json::json!({ "query": query }),
-            })?;
+        let response = request.send().await.map_err(|e| {
+            CoreError::tool_exec_error("web", serde_json::json!({ "query": query }), e)
+        })?;
 
         if !response.status().is_success() {
-            return Err(CoreError::ToolExecutionFailed {
-                tool_name: "web".to_string(),
-                cause: format!("Kagi returned status: {}", response.status()),
-                parameters: serde_json::json!({ "query": query }),
-            });
+            return Err(CoreError::tool_exec_msg(
+                "web",
+                serde_json::json!({ "query": query }),
+                format!("Kagi returned status: {}", response.status()),
+            ));
         }
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| CoreError::ToolExecutionFailed {
-                tool_name: "web".to_string(),
-                cause: format!("Failed to read Kagi response: {}", e),
-                parameters: serde_json::json!({ "query": query }),
-            })?;
+        let html = response.text().await.map_err(|e| {
+            CoreError::tool_exec_error("web", serde_json::json!({ "query": query }), e)
+        })?;
 
         // Parse Kagi HTML results with scraper
         let document = scraper::Html::parse_document(&html);

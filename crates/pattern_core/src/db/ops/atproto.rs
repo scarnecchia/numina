@@ -20,7 +20,17 @@ pub async fn upsert_atproto_identity<C: Connection>(
     debug!("Upserting ATProto identity for DID: {}", identity.id);
 
     // First, check if this DID is already linked to a different user
-    let existing = get_entity::<AtprotoIdentity, _>(db, &identity.id).await?;
+    let existing = get_entity::<AtprotoIdentity, _>(db, &identity.id)
+        .await
+        .map_err(|e| {
+            CoreError::from(e).with_db_context(
+                format!(
+                    "SELECT * FROM atproto_identity WHERE id = '{}'",
+                    identity.id
+                ),
+                "atproto_identity",
+            )
+        })?;
 
     if let Some(existing) = existing {
         if existing.user_id != identity.user_id {
@@ -59,11 +69,14 @@ pub async fn get_atproto_identity_by_did<C: Connection>(
 ) -> Result<Option<AtprotoIdentity>> {
     debug!("Looking up ATProto identity for DID: {}", did);
 
+    let select_by_did = "SELECT * FROM atproto_identity WHERE id = $did LIMIT 1";
     let mut result = db
-        .query("SELECT * FROM atproto_identity WHERE id = $did LIMIT 1")
+        .query(select_by_did)
         .bind(("did", RecordId::from(did)))
         .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .map_err(|e| {
+            crate::CoreError::database_query_error(select_by_did, "atproto_identity", e)
+        })?;
 
     println!("result {:?}", result);
     // Query by DID field directly
@@ -85,13 +98,16 @@ pub async fn get_user_atproto_identities<C: Connection>(
 ) -> Result<Vec<AtprotoIdentity>> {
     debug!("Getting ATProto identities for user: {}", user_id);
 
+    let select_by_user = "SELECT * FROM atproto_identity WHERE user_id = $user_id";
     let identities: Vec<<AtprotoIdentity as DbEntity>::DbModel> = db
-        .query("SELECT * FROM atproto_identity WHERE user_id = $user_id")
+        .query(select_by_user)
         .bind(("user_id", RecordId::from(user_id)))
         .await
-        .map_err(DatabaseError::QueryFailed)?
+        .map_err(|e| crate::CoreError::database_query_error(select_by_user, "atproto_identity", e))?
         .take(0)
-        .map_err(DatabaseError::QueryFailed)?;
+        .map_err(|e| {
+            crate::CoreError::database_query_error("take results", "atproto_identity", e.into())
+        })?;
 
     Ok(identities
         .into_iter()
@@ -129,7 +145,9 @@ pub async fn update_atproto_tokens<C: Connection>(
         .update(("atproto_identity", updated.id().to_record_id()))
         .content(updated.to_db_model())
         .await
-        .map_err(DatabaseError::QueryFailed)?;
+        .map_err(|e| {
+            crate::CoreError::database_query_error("update atproto_identity", "atproto_identity", e)
+        })?;
 
     println!("saved {:?}", saved);
 

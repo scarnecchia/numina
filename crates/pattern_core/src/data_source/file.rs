@@ -108,14 +108,13 @@ impl FileDataSource {
     }
 
     async fn read_file(&self, path: &Path) -> Result<FileItem> {
-        let metadata =
-            fs::metadata(path)
-                .await
-                .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "file_data_source".to_string(),
-                    cause: format!("Failed to read metadata: {}", e),
-                    parameters: serde_json::json!({ "path": path }),
-                })?;
+        let metadata = fs::metadata(path).await.map_err(|e| {
+            crate::CoreError::tool_exec_error(
+                "file_data_source",
+                serde_json::json!({ "path": path }),
+                e,
+            )
+        })?;
 
         let file_metadata = FileMetadata {
             size_bytes: metadata.len() as i64,
@@ -135,86 +134,85 @@ impl FileDataSource {
         // Check filter
         if let Some(max_size) = self.filter.max_size_bytes {
             if metadata.len() as i64 > max_size {
-                return Err(crate::CoreError::ToolExecutionFailed {
-                    tool_name: "file_data_source".to_string(),
-                    cause: format!("File too large: {} bytes", metadata.len()),
-                    parameters: serde_json::json!({ "path": path, "size": metadata.len() }),
-                });
+                return Err(crate::CoreError::tool_exec_msg(
+                    "file_data_source",
+                    serde_json::json!({ "path": path, "size": metadata.len() }),
+                    format!("File too large: {} bytes", metadata.len()),
+                ));
             }
         }
 
         // Read content
-        let content =
-            match &self.storage_mode {
-                FileStorageMode::Ephemeral => {
-                    let text = fs::read_to_string(path).await.map_err(|e| {
-                        crate::CoreError::ToolExecutionFailed {
-                            tool_name: "file_data_source".to_string(),
-                            cause: format!("Failed to read file: {}", e),
-                            parameters: serde_json::json!({ "path": path }),
-                        }
-                    })?;
-                    FileContent::Text(text)
-                }
-                FileStorageMode::Indexed { chunk_size, .. } => {
-                    // Read in chunks for indexing
-                    let file = fs::File::open(path).await.map_err(|e| {
-                        crate::CoreError::ToolExecutionFailed {
-                            tool_name: "file_data_source".to_string(),
-                            cause: format!("Failed to open file: {}", e),
-                            parameters: serde_json::json!({ "path": path }),
-                        }
-                    })?;
+        let content = match &self.storage_mode {
+            FileStorageMode::Ephemeral => {
+                let text = fs::read_to_string(path).await.map_err(|e| {
+                    crate::CoreError::tool_exec_error(
+                        "file_data_source",
+                        serde_json::json!({ "path": path }),
+                        e,
+                    )
+                })?;
+                FileContent::Text(text)
+            }
+            FileStorageMode::Indexed { chunk_size, .. } => {
+                // Read in chunks for indexing
+                let file = fs::File::open(path).await.map_err(|e| {
+                    crate::CoreError::tool_exec_error(
+                        "file_data_source",
+                        serde_json::json!({ "path": path }),
+                        e,
+                    )
+                })?;
 
-                    let reader = BufReader::new(file);
-                    let mut lines = reader.lines();
-                    let mut chunks = Vec::new();
-                    let mut current_chunk = Vec::new();
-                    let mut line_num = 0;
+                let reader = BufReader::new(file);
+                let mut lines = reader.lines();
+                let mut chunks = Vec::new();
+                let mut current_chunk = Vec::new();
+                let mut line_num = 0;
 
-                    while let Some(line) = lines.next_line().await.map_err(|e| {
-                        crate::CoreError::ToolExecutionFailed {
-                            tool_name: "file_data_source".to_string(),
-                            cause: format!("Failed to read line: {}", e),
-                            parameters: serde_json::json!({ "path": path, "line": line_num }),
-                        }
-                    })? {
-                        current_chunk.push(line);
-                        line_num += 1;
+                while let Some(line) = lines.next_line().await.map_err(|e| {
+                    crate::CoreError::tool_exec_error(
+                        "file_data_source",
+                        serde_json::json!({ "path": path, "line": line_num }),
+                        e,
+                    )
+                })? {
+                    current_chunk.push(line);
+                    line_num += 1;
 
-                        if current_chunk.len() as i64 >= *chunk_size {
-                            let text = current_chunk.join("\n");
-                            chunks.push(FileContent::Chunk {
-                                text,
-                                start_line: line_num - current_chunk.len() as i64,
-                                end_line: line_num - 1,
-                            });
-                            current_chunk.clear();
-                        }
-                    }
-
-                    // Last chunk
-                    if !current_chunk.is_empty() {
+                    if current_chunk.len() as i64 >= *chunk_size {
                         let text = current_chunk.join("\n");
                         chunks.push(FileContent::Chunk {
                             text,
                             start_line: line_num - current_chunk.len() as i64,
                             end_line: line_num - 1,
                         });
+                        current_chunk.clear();
                     }
-
-                    // For now, return as lines
-                    FileContent::Lines(
-                        chunks
-                            .into_iter()
-                            .map(|c| match c {
-                                FileContent::Chunk { text, .. } => text,
-                                _ => String::new(),
-                            })
-                            .collect(),
-                    )
                 }
-            };
+
+                // Last chunk
+                if !current_chunk.is_empty() {
+                    let text = current_chunk.join("\n");
+                    chunks.push(FileContent::Chunk {
+                        text,
+                        start_line: line_num - current_chunk.len() as i64,
+                        end_line: line_num - 1,
+                    });
+                }
+
+                // For now, return as lines
+                FileContent::Lines(
+                    chunks
+                        .into_iter()
+                        .map(|c| match c {
+                            FileContent::Chunk { text, .. } => text,
+                            _ => String::new(),
+                        })
+                        .collect(),
+                )
+            }
+        };
 
         Ok(FileItem {
             path: path.to_path_buf(),

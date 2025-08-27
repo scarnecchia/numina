@@ -10,7 +10,7 @@ use pattern_core::{
         client::DB,
         ops::{self},
     },
-    embeddings::{EmbeddingProvider, cloud::GeminiEmbedder, cloud::OpenAIEmbedder},
+    embeddings::{EmbeddingProvider, cloud::GeminiEmbedder},
     id::{AgentId, RelationId},
     memory::{Memory, MemoryBlock},
     model::{GenAiClient, ResponseOptions},

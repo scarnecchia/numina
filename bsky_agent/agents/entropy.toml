@@ -13,9 +13,9 @@ enable_thinking = true
 
 # Compression strategy for handling chaos
 [context.compression_strategy]
-type = "importance_based"
-keep_recent = 30
-keep_important = 20
+type = "recursive_summarization"
+chunk_size = 30
+summarization_model = "claude-3-5-haiku-20241022"
 
 [model]
 provider = "Anthropic"

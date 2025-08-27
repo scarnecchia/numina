@@ -90,8 +90,18 @@ where
 
         // Load the agent record
         let mut agent = AgentRecord::load_with_relations(&self.db, &agent_id)
-            .await?
-            .ok_or_else(|| CoreError::agent_not_found(agent_id.to_string()))?;
+            .await
+            .map_err(|e| {
+                CoreError::from(e).with_db_context(
+                    format!("SELECT * FROM agent WHERE id = '{}'", agent_id),
+                    "agent",
+                )
+            })?
+            .ok_or_else(|| CoreError::AgentGroupError {
+                group_name: "export".to_string(),
+                operation: "load_agent".to_string(),
+                cause: format!("Agent '{}' not found", agent_id),
+            })?;
 
         // Load message history and memory blocks (like CLI does)
         let (messages_result, memories_result) = tokio::join!(
@@ -867,7 +877,11 @@ where
         // First get the basic constellation
         let mut constellation = get_entity::<Constellation, _>(&self.db, constellation_id)
             .await?
-            .ok_or_else(|| CoreError::agent_not_found(constellation_id.to_string()))?;
+            .ok_or_else(|| CoreError::AgentGroupError {
+                group_name: "export".to_string(),
+                operation: "load_constellation".to_string(),
+                cause: format!("Constellation '{}' not found", constellation_id),
+            })?;
 
         let mut all_agents = Vec::new();
         let mut all_groups = Vec::new();
@@ -1063,7 +1077,11 @@ where
         // Get the base group
         let mut group = get_entity::<AgentGroup, _>(&self.db, group_id)
             .await?
-            .ok_or_else(|| CoreError::agent_not_found(group_id.to_string()))?;
+            .ok_or_else(|| CoreError::AgentGroupError {
+                group_name: "export".to_string(),
+                operation: "load_group".to_string(),
+                cause: format!("Group '{}' not found", group_id),
+            })?;
 
         // Load members via group_members edge
         let query = r#"

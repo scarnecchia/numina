@@ -10,6 +10,7 @@ use surrealdb::Surreal;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::CoreError;
 use crate::agent::AgentRecord;
 use crate::atproto_identity::resolve_handle_to_pds;
 use crate::db::{client, ops};
@@ -311,28 +312,31 @@ impl AgentMessageRouter {
             .query(query)
             .bind(("name", name_to_resolve.clone()))
             .await
-            .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                tool_name: "send_message".to_string(),
-                cause: format!("Failed to resolve agent name: {:?}", e),
-                parameters: serde_json::json!({ "target": target }),
+            .map_err(|e| {
+                crate::CoreError::tool_exec_error(
+                    "send_message",
+                    serde_json::json!({ "target": target }),
+                    e,
+                )
             })?;
 
-        let agent_ids: Vec<surrealdb::RecordId> =
-            response
-                .take("id")
-                .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "send_message".to_string(),
-                    cause: format!("Failed to extract agent ID: {:?}", e),
-                    parameters: serde_json::json!({ "target": target }),
-                })?;
+        let agent_ids: Vec<surrealdb::RecordId> = response.take("id").map_err(|e| {
+            crate::CoreError::tool_exec_error(
+                "send_message",
+                serde_json::json!({ "target": target }),
+                e,
+            )
+        })?;
 
         let id = agent_ids
             .first()
             .map(|id| AgentId::from_record(id.clone()))
-            .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                tool_name: "send_message".to_string(),
-                cause: format!("Agent '{}' not found", name_to_resolve),
-                parameters: serde_json::json!({ "target": target }),
+            .ok_or_else(|| {
+                crate::CoreError::tool_exec_msg(
+                    "send_message",
+                    serde_json::json!({ "target": target }),
+                    format!("Agent '{}' not found", name_to_resolve),
+                )
             })?;
 
         Ok(id)
@@ -349,28 +353,31 @@ impl AgentMessageRouter {
             .query(query)
             .bind(("name", name_to_resolve.clone()))
             .await
-            .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                tool_name: "send_message".to_string(),
-                cause: format!("Failed to resolve agent name: {:?}", e),
-                parameters: serde_json::json!({ "target": target }),
+            .map_err(|e| {
+                crate::CoreError::tool_exec_error(
+                    "send_message",
+                    serde_json::json!({ "target": target }),
+                    e,
+                )
             })?;
 
-        let agent_ids: Vec<surrealdb::RecordId> =
-            response
-                .take("id")
-                .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "send_message".to_string(),
-                    cause: format!("Failed to extract agent ID: {:?}", e),
-                    parameters: serde_json::json!({ "target": target }),
-                })?;
+        let agent_ids: Vec<surrealdb::RecordId> = response.take("id").map_err(|e| {
+            crate::CoreError::tool_exec_error(
+                "send_message",
+                serde_json::json!({ "target": target }),
+                e,
+            )
+        })?;
 
         let id = agent_ids
             .first()
             .map(|id| GroupId::from_record(id.clone()))
-            .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                tool_name: "send_message".to_string(),
-                cause: format!("Agent '{}' not found", name_to_resolve),
-                parameters: serde_json::json!({ "target": target }),
+            .ok_or_else(|| {
+                crate::CoreError::tool_exec_msg(
+                    "send_message",
+                    serde_json::json!({ "target": target }),
+                    format!("Agent '{}' not found", name_to_resolve),
+                )
             })?;
 
         Ok(id)
@@ -416,11 +423,11 @@ impl AgentMessageRouter {
                         self.resolve_name(target_str, &target).await?
                     }
                 } else {
-                    return Err(crate::CoreError::ToolExecutionFailed {
-                        tool_name: "send_message".to_string(),
-                        cause: "Agent name or ID required for agent target".to_string(),
-                        parameters: serde_json::json!({ "target": target }),
-                    });
+                    return Err(crate::CoreError::tool_exec_msg(
+                        "send_message",
+                        serde_json::json!({ "target": target }),
+                        "Agent name or ID required for agent target",
+                    ));
                 };
 
                 self.send_to_agent(agent_id, content, metadata, origin)
@@ -449,11 +456,11 @@ impl AgentMessageRouter {
                         self.resolve_group(target_str, &target).await?
                     }
                 } else {
-                    return Err(crate::CoreError::ToolExecutionFailed {
-                        tool_name: "send_message".to_string(),
-                        cause: "Group name or ID required for group target".to_string(),
-                        parameters: serde_json::json!({ "target": target }),
-                    });
+                    return Err(crate::CoreError::tool_exec_msg(
+                        "send_message",
+                        serde_json::json!({ "target": target }),
+                        "Group name or ID required for group target",
+                    ));
                 };
                 self.send_to_group(group_id, content, metadata, origin)
                     .await
@@ -820,7 +827,14 @@ impl MessageEndpoint for QueueEndpoint {
 pub async fn create_router_with_global_db(agent_id: AgentId) -> Result<AgentMessageRouter> {
     // Clone the global DB instance
     let db = client::DB.clone();
-    let agent = ops::get_entity::<AgentRecord, _>(&db, &agent_id).await?;
+    let agent = ops::get_entity::<AgentRecord, _>(&db, &agent_id)
+        .await
+        .map_err(|e| {
+            CoreError::from(e).with_db_context(
+                format!("SELECT * FROM agent WHERE id = '{}'", agent_id),
+                "agent",
+            )
+        })?;
     let name = if let Some(agent) = agent {
         agent.name
     } else {

@@ -45,32 +45,32 @@ impl PromptTemplate {
         // Create a fresh environment for each render
         let mut env = Environment::new();
         env.add_template(&self.name, &self.template).map_err(|e| {
-            crate::CoreError::ToolExecutionFailed {
-                tool_name: "prompt_template".to_string(),
-                cause: format!("Template error: {}", e),
-                parameters: serde_json::json!({"name": &self.name}),
-            }
+            crate::CoreError::tool_exec_error(
+                "prompt_template",
+                serde_json::json!({"name": &self.name}),
+                e,
+            )
         })?;
 
         // Convert context to minijinja Value - from_serialize returns the value directly
         let jinja_context = minijinja::value::Value::from_serialize(context);
 
         // Get template and render
-        let tmpl =
-            env.get_template(&self.name)
-                .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "prompt_template".to_string(),
-                    cause: format!("Template not found: {}", e),
-                    parameters: serde_json::json!({"name": &self.name}),
-                })?;
+        let tmpl = env.get_template(&self.name).map_err(|e| {
+            crate::CoreError::tool_exec_error(
+                "prompt_template",
+                serde_json::json!({"name": &self.name}),
+                e,
+            )
+        })?;
 
-        let rendered =
-            tmpl.render(jinja_context)
-                .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "prompt_template".to_string(),
-                    cause: format!("Render error: {}", e),
-                    parameters: serde_json::json!({"context": context}),
-                })?;
+        let rendered = tmpl.render(jinja_context).map_err(|e| {
+            crate::CoreError::tool_exec_error(
+                "prompt_template",
+                serde_json::json!({"context": context}),
+                e,
+            )
+        })?;
 
         Ok(rendered)
     }

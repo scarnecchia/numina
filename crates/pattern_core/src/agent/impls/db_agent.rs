@@ -370,7 +370,24 @@ where
                         _ => (false, None, None),
                     };
 
-                    let is_anthropic_5h = match &e {
+                    // Augment with CoreError helpers
+                    let mut is_rate_limit = is_rate_limit;
+                    let mut rate_wait_ms = rate_wait_ms;
+                    let mut rate_wait_src = rate_wait_src;
+                    if let Some((status, _headers, _body)) = e.provider_http_parts() {
+                        if status == 429 || status == 529 {
+                            is_rate_limit = true;
+                        }
+                    }
+                    if rate_wait_ms.is_none() {
+                        if let Some(dur) = e.rate_limit_hint() {
+                            let jitter = rand::random::<u64>() % 1000;
+                            rate_wait_ms = Some(dur.as_millis() as u64 + jitter);
+                            rate_wait_src = Some("rate_limit_hint".to_string());
+                        }
+                    }
+
+                    let mut is_anthropic_5h = match &e {
                         CoreError::ModelProviderError { cause, .. } => {
                             if let genai::Error::WebModelCall { webc_error, .. } = cause {
                                 if let genai::webc::Error::ResponseFailedStatus {
@@ -395,6 +412,20 @@ where
                         }
                         _ => false,
                     };
+                    if !is_anthropic_5h {
+                        if let Some((_status, headers, _body)) = e.provider_http_parts() {
+                            for (k, _v) in headers.iter() {
+                                let lk = k.to_ascii_lowercase();
+                                if lk == "anthropic-ratelimit-unified-5h-reset"
+                                    || lk == "anthropic-ratelimit-unified-5h-status"
+                                    || lk == "anthropic-ratelimit-unified-status"
+                                {
+                                    is_anthropic_5h = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
                     // Handle Gemini empty candidates error with prompt modification
                     if is_gemini_empty_candidates && retries < max_retries {
@@ -3830,7 +3861,6 @@ where
         let mut reasoning: Option<String> = None;
         let mut metadata = ResponseMetadata::default();
         let mut has_error = false;
-        let mut error_message = String::new();
 
         while let Some(event) = stream.next().await {
             match event {
@@ -3862,13 +3892,9 @@ where
                 } => {
                     metadata = event_metadata;
                 }
-                ResponseEvent::Error {
-                    message,
-                    recoverable,
-                } => {
+                ResponseEvent::Error { recoverable, .. } => {
                     if !recoverable {
                         has_error = true;
-                        error_message = message;
                     }
                 }
                 _ => {} // Ignore other events for backward compatibility

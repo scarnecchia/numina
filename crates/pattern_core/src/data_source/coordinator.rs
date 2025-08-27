@@ -515,11 +515,11 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
             handle.source.set_notifications_enabled(false);
             Ok(())
         } else {
-            Err(crate::CoreError::ToolExecutionFailed {
-                tool_name: "data_ingestion".to_string(),
-                cause: format!("Source '{}' not found", source_id),
-                parameters: serde_json::json!({ "source_id": source_id }),
-            })
+            Err(crate::CoreError::tool_exec_msg(
+                "data_ingestion",
+                serde_json::json!({ "source_id": source_id }),
+                format!("Source '{}' not found", source_id),
+            ))
         }
     }
 
@@ -531,11 +531,11 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
             handle.source.set_notifications_enabled(true);
             Ok(())
         } else {
-            Err(crate::CoreError::ToolExecutionFailed {
-                tool_name: "data_ingestion".to_string(),
-                cause: format!("Source '{}' not found", source_id),
-                parameters: serde_json::json!({ "source_id": source_id }),
-            })
+            Err(crate::CoreError::tool_exec_msg(
+                "data_ingestion",
+                serde_json::json!({ "source_id": source_id }),
+                format!("Source '{}' not found", source_id),
+            ))
         }
     }
 
@@ -557,11 +557,11 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
                 }))
             }
         } else {
-            Err(crate::CoreError::ToolExecutionFailed {
-                tool_name: "data_ingestion".to_string(),
-                cause: format!("Source '{}' not found", source_id),
-                parameters: serde_json::json!({ "source_id": source_id }),
-            })
+            Err(crate::CoreError::tool_exec_msg(
+                "data_ingestion",
+                serde_json::json!({ "source_id": source_id }),
+                format!("Source '{}' not found", source_id),
+            ))
         }
     }
 
@@ -577,11 +577,11 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
         if let Some(handle) = sources.get_mut(source_id) {
             handle.source.pull(limit, cursor).await
         } else {
-            Err(crate::CoreError::ToolExecutionFailed {
-                tool_name: "data_ingestion".to_string(),
-                cause: format!("Source '{}' not found", source_id),
-                parameters: serde_json::json!({ "source_id": source_id }),
-            })
+            Err(crate::CoreError::tool_exec_msg(
+                "data_ingestion",
+                serde_json::json!({ "source_id": source_id }),
+                format!("Source '{}' not found", source_id),
+            ))
         }
     }
 
@@ -627,11 +627,11 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
                 }
             } else {
                 tracing::error!("Source '{}' not found in sources map", source_id);
-                return Err(crate::CoreError::ToolExecutionFailed {
-                    tool_name: "data_ingestion".to_string(),
-                    cause: format!("Source '{}' not found", source_id),
-                    parameters: serde_json::json!({ "source_id": source_id }),
-                });
+                return Err(crate::CoreError::tool_exec_msg(
+                    "data_ingestion",
+                    serde_json::json!({ "source_id": source_id }),
+                    format!("Source '{}' not found", source_id),
+                ));
             }
         }
 
@@ -652,11 +652,11 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
 
             Ok(())
         } else {
-            Err(crate::CoreError::ToolExecutionFailed {
-                tool_name: "data_ingestion".to_string(),
-                cause: format!("Source '{}' not found", source_id),
-                parameters: serde_json::json!({ "source_id": source_id }),
-            })
+            Err(crate::CoreError::tool_exec_msg(
+                "data_ingestion",
+                serde_json::json!({ "source_id": source_id }),
+                format!("Source '{}' not found", source_id),
+            ))
         }
     }
 }

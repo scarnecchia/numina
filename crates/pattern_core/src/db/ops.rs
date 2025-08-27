@@ -45,7 +45,12 @@ pub async fn create_entity<E: DbEntity, C: Connection>(
         .create((E::table_name(), entity.record_key()))
         .content(db_model)
         .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?
+        .map_err(|e| {
+            DatabaseError::QueryFailed(e).with_context(
+                format!("CREATE {} [{}]", E::table_name(), entity.record_key()),
+                E::table_name(),
+            )
+        })?
         .expect("SurrealDB should return created entity");
 
     E::from_db_model(created).map_err(DatabaseError::from)
@@ -56,10 +61,19 @@ pub async fn get_entity<E: DbEntity, C: Connection>(
     conn: &Surreal<C>,
     id: &E::Id,
 ) -> Result<Option<E::Domain>> {
-    let result: Option<E::DbModel> = conn
-        .select((E::table_name(), id.to_key()))
-        .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+    let result: Option<E::DbModel> =
+        conn.select((E::table_name(), id.to_key()))
+            .await
+            .map_err(|e| {
+                DatabaseError::QueryFailed(e).with_context(
+                    format!(
+                        "SELECT * FROM {} WHERE id = '{}'",
+                        E::table_name(),
+                        id.to_key()
+                    ),
+                    E::table_name(),
+                )
+            })?;
 
     match result {
         Some(db_model) => Ok(Some(E::from_db_model(db_model)?)),
@@ -77,7 +91,16 @@ pub async fn update_entity<E: DbEntity, C: Connection>(
         .update((E::table_name(), entity.id().to_key()))
         .merge(db_model)
         .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+        .map_err(|e| {
+            DatabaseError::QueryFailed(e).with_context(
+                format!(
+                    "UPDATE {} WHERE id = '{}'",
+                    E::table_name(),
+                    entity.id().to_key()
+                ),
+                E::table_name(),
+            )
+        })?;
 
     match updated {
         Some(db_model) => E::from_db_model(db_model).map_err(DatabaseError::from),
@@ -93,10 +116,19 @@ pub async fn delete_entity<E: DbEntity, C: Connection, I>(
     conn: &Surreal<C>,
     id: &E::Id,
 ) -> Result<()> {
-    let _deleted: Option<E::DbModel> = conn
-        .delete((E::table_name(), id.to_key()))
-        .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+    let _deleted: Option<E::DbModel> =
+        conn.delete((E::table_name(), id.to_key()))
+            .await
+            .map_err(|e| {
+                DatabaseError::QueryFailed(e).with_context(
+                    format!(
+                        "DELETE FROM {} WHERE id = '{}'",
+                        E::table_name(),
+                        id.to_key()
+                    ),
+                    E::table_name(),
+                )
+            })?;
 
     Ok(())
 }
@@ -105,10 +137,12 @@ pub async fn delete_entity<E: DbEntity, C: Connection, I>(
 pub async fn list_entities<E: DbEntity, C: Connection>(
     conn: &Surreal<C>,
 ) -> Result<Vec<E::Domain>> {
-    let results: Vec<E::DbModel> = conn
-        .select(E::table_name())
-        .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+    let results: Vec<E::DbModel> = conn.select(E::table_name()).await.map_err(|e| {
+        DatabaseError::QueryFailed(e).with_context(
+            format!("SELECT * FROM {}", E::table_name()),
+            E::table_name(),
+        )
+    })?;
 
     results
         .into_iter()
@@ -125,14 +159,14 @@ pub async fn query_entities<E: DbEntity, C: Connection>(
     let query = format!("SELECT * FROM {} WHERE {}", E::table_name(), where_clause);
 
     let mut response = conn
-        .query(query)
+        .query(&query)
         .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+        .map_err(|e| DatabaseError::QueryFailed(e).with_context(query.clone(), E::table_name()))?;
 
     // SurrealDB returns results wrapped in a response structure
-    let results: Vec<E::DbModel> = response
-        .take::<Vec<E::DbModel>>(0)
-        .map_err(|e| DatabaseError::QueryFailed(e.into()))?;
+    let results: Vec<E::DbModel> = response.take::<Vec<E::DbModel>>(0).map_err(|e| {
+        DatabaseError::QueryFailed(e.into()).with_context("take results", E::table_name())
+    })?;
 
     results
         .into_iter()

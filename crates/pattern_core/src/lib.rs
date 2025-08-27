@@ -30,6 +30,9 @@ pub mod tool;
 pub mod users;
 pub mod utils;
 
+#[cfg(test)]
+pub mod test_helpers;
+
 // Macros are automatically available at crate root due to #[macro_export]
 
 pub use crate::agent::SnowflakePosition;

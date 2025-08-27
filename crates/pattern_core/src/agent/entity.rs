@@ -436,10 +436,20 @@ impl AgentRecord {
         message_id: &crate::MessageId,
         message_type: crate::message::MessageRelationType,
     ) -> Result<(), crate::db::DatabaseError> {
+        // Generate relation position at attach time
         let position = get_position_generator()
             .try_next_id_async()
             .await
             .expect("for now we are assuming this succeeds");
+
+        // Attempt to load the message to copy batch sequencing metadata
+        let (batch, sequence_num, batch_type) = if let Some(msg) =
+            crate::message::Message::load_with_relations(db, message_id).await?
+        {
+            (msg.batch, msg.sequence_num, msg.batch_type)
+        } else {
+            (None, None, None)
+        };
 
         // Create the relation using the edge entity
         let relation = crate::message::AgentMessageRelation {
@@ -449,9 +459,9 @@ impl AgentRecord {
             message_type,
             position: Some(SnowflakePosition(position)),
             added_at: chrono::Utc::now(),
-            batch: None, // Will be populated from message when available
-            sequence_num: None,
-            batch_type: None,
+            batch,
+            sequence_num,
+            batch_type,
         };
 
         // Use create_relation_typed to store the edge entity
@@ -508,6 +518,7 @@ mod tests {
     async fn test_agent_message_relationships() {
         use crate::db::client;
         use crate::message::{Message, MessageRelationType};
+        use crate::test_helpers::messages::simple_user_assistant_batch;
 
         let db = client::create_test_db().await.unwrap();
 
@@ -520,10 +531,16 @@ mod tests {
         };
         let stored_agent = agent.store_with_relations(&db).await.unwrap();
 
-        // Create some messages
-        let msg1 = Message::user("First message");
-        let msg2 = Message::agent("Agent response");
+        // Create messages within a batch so relations get batch/sequence
+        let (msg1, mut msg2, _batch_id) =
+            simple_user_assistant_batch("First message", "Agent response");
+        // Keep msg3 archived and separate
         let msg3 = Message::user("Another message");
+
+        // Ensure batch_type is set for assistant if needed
+        if msg2.batch_type.is_none() {
+            msg2.batch_type = Some(crate::message::BatchType::UserRequest);
+        }
 
         let stored_msg1 = msg1.store_with_relations(&db).await.unwrap();
         let stored_msg2 = msg2.store_with_relations(&db).await.unwrap();

@@ -4,7 +4,7 @@ use crate::{
     embeddings::EmbeddingError,
 };
 use compact_str::CompactString;
-use miette::Diagnostic;
+use miette::{Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -29,19 +29,6 @@ pub enum ConfigError {
 
 #[derive(Error, Diagnostic, Debug)]
 pub enum CoreError {
-    #[error("Agent not found")]
-    #[diagnostic(
-        code(pattern_core::agent_not_found),
-        help("Check that the agent ID is correct and the agent has been created")
-    )]
-    AgentNotFound {
-        #[source_code]
-        src: String,
-        #[label("agent ID: {id}")]
-        span: (usize, usize),
-        id: String,
-    },
-
     #[error("Agent initialization failed")]
     #[diagnostic(
         code(pattern_core::agent_init_failed),
@@ -58,18 +45,6 @@ pub enum CoreError {
         agent_id: String,
         block_name: String,
         available_blocks: Vec<CompactString>,
-    },
-
-    #[error("Memory operation failed")]
-    #[diagnostic(
-        code(pattern_core::memory_operation_failed),
-        help("Check database connectivity and permissions")
-    )]
-    MemoryOperationFailed {
-        operation: String,
-        agent_id: String,
-        #[source]
-        cause: DatabaseError,
     },
 
     #[error("Tool not found")]
@@ -136,19 +111,6 @@ pub enum CoreError {
         body: String,
     },
 
-    #[error("Model capability mismatch")]
-    #[diagnostic(
-        code(pattern_core::model_capability_mismatch),
-        help(
-            "Model '{model}' doesn't support {required_capability}. Consider using a model with {required_capability} capability"
-        )
-    )]
-    ModelCapabilityMismatch {
-        model: String,
-        required_capability: String,
-        available_capabilities: Vec<String>,
-    },
-
     #[error("Database connection failed")]
     #[diagnostic(
         code(pattern_core::database_connection_failed),
@@ -205,55 +167,6 @@ pub enum CoreError {
         cause: String,
     },
 
-    #[error("Constellation not found")]
-    #[diagnostic(
-        code(pattern_core::constellation_not_found),
-        help("No constellation found for user {user_id}")
-    )]
-    ConstellationNotFound {
-        user_id: String,
-        available_constellations: Vec<String>,
-    },
-
-    #[error("Invalid agent state")]
-    #[diagnostic(
-        code(pattern_core::invalid_agent_state),
-        help(
-            "Agent {agent_id} is in state '{current_state}' but operation requires state '{required_state}'"
-        )
-    )]
-    InvalidAgentState {
-        agent_id: String,
-        current_state: String,
-        required_state: String,
-        operation: String,
-    },
-
-    #[error("Context window exceeded")]
-    #[diagnostic(
-        code(pattern_core::context_window_exceeded),
-        help(
-            "Message history exceeds model's context window. Consider summarizing older messages"
-        )
-    )]
-    ContextWindowExceeded {
-        model: String,
-        token_count: usize,
-        max_tokens: usize,
-        message_count: usize,
-    },
-
-    #[error("Real-time subscription failed")]
-    #[diagnostic(
-        code(pattern_core::realtime_subscription_failed),
-        help("Failed to establish LIVE query subscription")
-    )]
-    RealtimeSubscriptionFailed {
-        query: String,
-        #[source]
-        cause: surrealdb::Error,
-    },
-
     #[error("Vector search failed")]
     #[diagnostic(
         code(pattern_core::vector_search_failed),
@@ -277,43 +190,6 @@ pub enum CoreError {
         cause: String,
     },
 
-    #[error("Permission denied")]
-    #[diagnostic(
-        code(pattern_core::permission_denied),
-        help("User {user_id} doesn't have permission to {action} on {resource}")
-    )]
-    PermissionDenied {
-        user_id: String,
-        action: String,
-        resource: String,
-        required_permission: String,
-    },
-
-    #[error("Rate limit exceeded")]
-    #[diagnostic(
-        code(pattern_core::rate_limit_exceeded),
-        help("Wait {retry_after_seconds} seconds before retrying")
-    )]
-    RateLimitExceeded {
-        service: String,
-        limit: usize,
-        window_seconds: usize,
-        retry_after_seconds: usize,
-    },
-
-    #[error("Resource exhausted")]
-    #[diagnostic(
-        code(pattern_core::resource_exhausted),
-        help(
-            "System resource '{resource}' is exhausted. Current usage: {current_usage}, limit: {limit}"
-        )
-    )]
-    ResourceExhausted {
-        resource: String,
-        current_usage: String,
-        limit: String,
-    },
-
     #[error("OAuth authentication error: {operation} failed for {provider}")]
     #[diagnostic(
         code(pattern_core::oauth_error),
@@ -334,17 +210,6 @@ pub enum CoreError {
         source_name: String,
         operation: String,
         cause: String,
-    },
-
-    #[error("Export error: {operation} failed")]
-    #[diagnostic(
-        code(pattern_core::export_error),
-        help("Check export configuration and file permissions")
-    )]
-    ExportError {
-        operation: String,
-        #[source]
-        cause: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[error("DAG-CBOR encoding error")]
@@ -402,31 +267,25 @@ impl From<DatabaseError> for CoreError {
                 table: "unknown".to_string(),
                 cause: e,
             },
+            DatabaseError::QueryFailedContext {
+                query,
+                table,
+                cause,
+            } => Self::DatabaseQueryFailed {
+                query,
+                table,
+                cause,
+            },
 
             DatabaseError::SerdeProblem(e) => Self::SerializationError {
                 data_type: "database record".to_string(),
                 cause: e,
             },
-            DatabaseError::NotFound { entity_type, id } => {
-                // Only convert to AgentNotFound if it's actually an agent
-                if entity_type == "agent" {
-                    Self::AgentNotFound {
-                        src: format!("database: {} with id {}", entity_type, id),
-                        span: (10, 10 + id.len()),
-                        id,
-                    }
-                } else {
-                    // For other entity types, create a more generic database error
-                    Self::DatabaseQueryFailed {
-                        query: format!("UPDATE {} WHERE id = '{}'", entity_type, id),
-                        table: entity_type.clone(),
-                        cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
-                            "{} with id '{}' not found in database",
-                            entity_type, id
-                        ))),
-                    }
-                }
-            }
+            DatabaseError::NotFound { entity_type, id } => Self::DatabaseQueryFailed {
+                query: format!("SELECT * FROM {} WHERE id = '{}'", entity_type, id),
+                table: entity_type,
+                cause: surrealdb::Error::Db(surrealdb::error::Db::Tx("not found".to_string())),
+            },
             DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
                 collection: "unknown".to_string(),
                 dimension_mismatch: None,
@@ -494,15 +353,6 @@ impl From<EntityError> for CoreError {
 
 // Helper functions for creating common errors with context
 impl CoreError {
-    pub fn agent_not_found(id: impl Into<String>) -> Self {
-        let id = id.into();
-        Self::AgentNotFound {
-            src: format!("agent_id: {}", id),
-            span: (10, 10 + id.len()),
-            id,
-        }
-    }
-
     pub fn memory_not_found(
         agent_id: &AgentId,
         block_name: impl Into<String>,
@@ -532,6 +382,34 @@ impl CoreError {
         Self::DatabaseConnectionFailed {
             connection_string: connection_string.into(),
             cause,
+        }
+    }
+
+    /// Create a DatabaseQueryFailed with explicit context.
+    pub fn database_query_error(
+        operation_or_query: impl Into<String>,
+        table: impl Into<String>,
+        cause: surrealdb::Error,
+    ) -> Self {
+        Self::DatabaseQueryFailed {
+            query: operation_or_query.into(),
+            table: table.into(),
+            cause,
+        }
+    }
+
+    /// Builder-style: attach query/table context to an existing DatabaseQueryFailed.
+    /// Returns self unchanged for other variants.
+    pub fn with_db_context(mut self, query: impl Into<String>, table: impl Into<String>) -> Self {
+        match &mut self {
+            CoreError::DatabaseQueryFailed {
+                query: q, table: t, ..
+            } => {
+                *q = query.into();
+                *t = table.into();
+                self
+            }
+            _ => self,
         }
     }
 
@@ -587,20 +465,6 @@ impl CoreError {
         }
     }
 
-    pub fn context_exceeded(
-        model: impl Into<String>,
-        token_count: usize,
-        max_tokens: usize,
-        message_count: usize,
-    ) -> Self {
-        Self::ContextWindowExceeded {
-            model: model.into(),
-            token_count,
-            max_tokens,
-            message_count,
-        }
-    }
-
     pub fn tool_validation_error(tool_name: impl Into<String>, error: impl Into<String>) -> Self {
         let tool_name = tool_name.into();
         Self::InvalidToolParameters {
@@ -618,21 +482,219 @@ impl CoreError {
             parameters: serde_json::Value::Null,
         }
     }
+
+    /// Construct a ToolExecutionFailed from a concrete error. The error is wrapped
+    /// as a miette::Report and formatted with Debug ({:?}) to preserve rich context
+    /// while keeping a single string field in the variant.
+    pub fn tool_exec_error<E>(
+        tool_name: impl Into<String>,
+        parameters: serde_json::Value,
+        err: E,
+    ) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        // Use IntoDiagnostic to build a rich miette::Report from a non-Diagnostic error,
+        // then format with {:?} for a readable, contextual message.
+        let report = Err::<(), E>(err).into_diagnostic().unwrap_err();
+        let cause = format!("{:?}", report);
+        Self::ToolExecutionFailed {
+            tool_name: tool_name.into(),
+            cause,
+            parameters,
+        }
+    }
+
+    /// Variant of tool_exec_error that sets parameters to Null.
+    pub fn tool_exec_error_simple(
+        tool_name: impl Into<String>,
+        err: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::tool_exec_error(tool_name, serde_json::Value::Null, err)
+    }
+
+    /// Construct a ToolExecutionFailed from a free-form message. Useful for
+    /// deterministic user-facing causes (e.g., validation failures) while still
+    /// attaching parameters for tool context.
+    pub fn tool_exec_msg(
+        tool_name: impl Into<String>,
+        parameters: serde_json::Value,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::ToolExecutionFailed {
+            tool_name: tool_name.into(),
+            cause: message.into(),
+            parameters,
+        }
+    }
+
+    /// Construct ToolExecutionFailed from an existing miette::Report.
+    pub fn tool_exec_report(
+        tool_name: impl Into<String>,
+        parameters: serde_json::Value,
+        report: miette::Report,
+    ) -> Self {
+        let cause = format!("{:?}", report);
+        Self::ToolExecutionFailed {
+            tool_name: tool_name.into(),
+            cause,
+            parameters,
+        }
+    }
+
+    /// Construct ToolExecutionFailed from a Diagnostic, preserving its context.
+    /// Prefer this when the error type already implements `Diagnostic`.
+    pub fn tool_exec_diagnostic(
+        tool_name: impl Into<String>,
+        parameters: serde_json::Value,
+        diag: impl Diagnostic + Send + Sync + 'static,
+    ) -> Self {
+        // Build a miette report directly to preserve Diagnostic details, then format
+        // with {:?} for a readable multi-line message with spans/help.
+        let report = miette::Report::new(diag);
+        let cause = format!("{:?}", report);
+        Self::ToolExecutionFailed {
+            tool_name: tool_name.into(),
+            cause,
+            parameters,
+        }
+    }
+
+    /// If this error came from an upstream provider HTTP failure, return
+    /// borrowed parts: (status, headers, body).
+    pub fn provider_http_parts(&self) -> Option<(u16, &[(String, String)], &str)> {
+        match self {
+            CoreError::ProviderHttpError {
+                status,
+                headers,
+                body,
+                ..
+            } => Some((*status, headers.as_slice(), body.as_str())),
+            _ => None,
+        }
+    }
+
+    /// Suggest a wait duration for rate limits or service busy errors based on
+    /// known headers. Returns None if not applicable.
+    pub fn rate_limit_hint(&self) -> Option<std::time::Duration> {
+        let (_, headers, _) = self.provider_http_parts()?;
+        // Create a lowercase lookup map
+        let mut map = std::collections::HashMap::<String, String>::new();
+        for (k, v) in headers.iter() {
+            map.insert(k.to_ascii_lowercase(), v.clone());
+        }
+
+        // Retry-After seconds or HTTP-date
+        if let Some(raw) = map.get("retry-after").map(|s| s.as_str()) {
+            let s = raw.trim();
+            if let Ok(secs) = s.parse::<u64>() {
+                return Some(std::time::Duration::from_millis(secs * 1000));
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+                let now = chrono::Utc::now();
+                let ms = dt
+                    .with_timezone(&chrono::Utc)
+                    .signed_duration_since(now)
+                    .num_milliseconds();
+                if ms > 0 {
+                    return Some(std::time::Duration::from_millis(ms as u64));
+                }
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                let now = chrono::Utc::now();
+                let ms = dt
+                    .with_timezone(&chrono::Utc)
+                    .signed_duration_since(now)
+                    .num_milliseconds();
+                if ms > 0 {
+                    return Some(std::time::Duration::from_millis(ms as u64));
+                }
+            }
+        }
+
+        // Anthropic reset epoch
+        if let Some(raw) = map
+            .get("anthropic-ratelimit-unified-5h-reset")
+            .or_else(|| map.get("anthropic-ratelimit-unified-reset"))
+            .map(|s| s.as_str())
+        {
+            if let Ok(epoch) = raw.trim().parse::<u64>() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                if epoch > now {
+                    return Some(std::time::Duration::from_millis((epoch - now) * 1000));
+                }
+            }
+        }
+
+        // Provider-specific reset durations (OpenAI/Groq-like)
+        let keys = [
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-reset-tokens",
+            "x-ratelimit-reset-input-tokens",
+            "x-ratelimit-reset-output-tokens",
+            "x-ratelimit-reset-images-requests",
+            "x-ratelimit-reset",
+            "ratelimit-reset",
+        ];
+        for k in keys.iter() {
+            if let Some(raw) = map.get(*k).map(|s| s.as_str()) {
+                let s = raw.trim();
+                if let Some(stripped) = s.strip_suffix("ms") {
+                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                        return Some(std::time::Duration::from_millis(v));
+                    }
+                }
+                if let Some(stripped) = s.strip_suffix('s') {
+                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                        return Some(std::time::Duration::from_millis(v * 1000));
+                    }
+                }
+                if let Some(stripped) = s.strip_suffix('m') {
+                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                        return Some(std::time::Duration::from_millis(v * 60_000));
+                    }
+                }
+                if let Some(stripped) = s.strip_suffix('h') {
+                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                        return Some(std::time::Duration::from_millis(v * 3_600_000));
+                    }
+                }
+                if let Ok(secs) = s.parse::<u64>() {
+                    return Some(std::time::Duration::from_millis(secs * 1000));
+                }
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                    let now = chrono::Utc::now();
+                    let ms = dt
+                        .with_timezone(&chrono::Utc)
+                        .signed_duration_since(now)
+                        .num_milliseconds();
+                    if ms > 0 {
+                        return Some(std::time::Duration::from_millis(ms as u64));
+                    }
+                }
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
+                    let now = chrono::Utc::now();
+                    let ms = dt
+                        .with_timezone(&chrono::Utc)
+                        .signed_duration_since(now)
+                        .num_milliseconds();
+                    if ms > 0 {
+                        return Some(std::time::Duration::from_millis(ms as u64));
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use miette::Report;
-
-    #[test]
-    fn test_agent_not_found_error() {
-        let error = CoreError::agent_not_found("test_agent_123");
-        let report = Report::new(error);
-        let output = format!("{:?}", report);
-        assert!(output.contains("agent_not_found"));
-        assert!(output.contains("test_agent_123"));
-    }
 
     #[test]
     fn test_tool_not_found_with_suggestions() {

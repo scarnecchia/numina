@@ -134,11 +134,13 @@ impl AgentHandle {
         _fuzzy_level: Option<u8>,
     ) -> Result<Vec<ScoredMemoryBlock>> {
         let db = self.db.as_ref().ok_or_else(|| {
-            crate::db::DatabaseError::QueryFailed(surrealdb::Error::Api(
-                surrealdb::error::Api::InvalidParams(
+            CoreError::database_query_error(
+                "archival_search_init",
+                "mem",
+                surrealdb::Error::Api(surrealdb::error::Api::InvalidParams(
                     "No database connection available for archival search".into(),
-                ),
-            ))
+                )),
+            )
         })?;
 
         // Use @1@ to identify this search for scoring functions
@@ -165,10 +167,7 @@ impl AgentHandle {
             .bind(("search_term", query.to_string()))
             .bind(("limit_multiplier", limit * 10)) // Get more results since we'll filter
             .await
-            .map_err(|e| {
-                crate::log_error!("Search query failed", e);
-                crate::db::DatabaseError::QueryFailed(e)
-            })?;
+            .map_err(|e| CoreError::database_query_error("archival_search_mem", "mem", e))?;
 
         tracing::debug!("search results: {:#?}", result);
 
@@ -212,7 +211,7 @@ impl AgentHandle {
         let mut agent_mem_result = db
             .query(&agent_mem_sql)
             .await
-            .map_err(DatabaseError::from)?;
+            .map_err(|e| CoreError::database_query_error(&agent_mem_sql, "agent_memories", e))?;
 
         let out_records: Vec<OutRecord> = agent_mem_result.take(0).map_err(DatabaseError::from)?;
 

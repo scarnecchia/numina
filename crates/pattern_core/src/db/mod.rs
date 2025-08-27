@@ -37,6 +37,15 @@ pub enum DatabaseError {
     #[diagnostic(help("Check the query syntax and table schema"))]
     QueryFailed(#[source] surrealdb::Error),
 
+    #[error("Query failed: {query} on {table}")]
+    #[diagnostic(help("Check the query syntax, parameters, and table schema"))]
+    QueryFailedContext {
+        query: String,
+        table: String,
+        #[source]
+        cause: surrealdb::Error,
+    },
+
     #[error("Serde problem: {0}")]
     #[diagnostic(help("Check the query syntax and table schema"))]
     SerdeProblem(#[from] serde_json::Error),
@@ -117,6 +126,21 @@ impl From<surrealdb::Error> for DatabaseError {
             }
         } else {
             DatabaseError::QueryFailed(err)
+        }
+    }
+}
+
+impl DatabaseError {
+    /// Attach query/table context to a low-level query error.
+    /// If this error is not a query error, returns self unchanged.
+    pub fn with_context(self, query: impl Into<String>, table: impl Into<String>) -> Self {
+        match self {
+            DatabaseError::QueryFailed(e) => DatabaseError::QueryFailedContext {
+                query: query.into(),
+                table: table.into(),
+                cause: e,
+            },
+            other => other,
         }
     }
 }

@@ -108,14 +108,16 @@ impl AiTool for ContextTool {
         match params.operation {
             CoreMemoryOperationType::Append => {
                 let name = params.name.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"append"}),
                         "append operation requires 'name' field",
                     )
                 })?;
                 let content = params.content.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"append"}),
                         "append operation requires 'content' field",
                     )
                 })?;
@@ -123,20 +125,23 @@ impl AiTool for ContextTool {
             }
             CoreMemoryOperationType::Replace => {
                 let name = params.name.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"replace"}),
                         "replace operation requires 'name' field",
                     )
                 })?;
                 let old_content = params.old_content.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"replace"}),
                         "replace operation requires 'old_content' field",
                     )
                 })?;
                 let new_content = params.new_content.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"replace"}),
                         "replace operation requires 'new_content' field",
                     )
                 })?;
@@ -144,8 +149,9 @@ impl AiTool for ContextTool {
             }
             CoreMemoryOperationType::Archive => {
                 let name = params.name.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"archive"}),
                         "archive operation requires 'name' field",
                     )
                 })?;
@@ -153,8 +159,9 @@ impl AiTool for ContextTool {
             }
             CoreMemoryOperationType::Load => {
                 let archival_label = params.archival_label.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"load"}),
                         "load operation requires 'archival_label' field",
                     )
                 })?;
@@ -164,14 +171,16 @@ impl AiTool for ContextTool {
             }
             CoreMemoryOperationType::Swap => {
                 let archive_name = params.archive_name.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"swap"}),
                         "swap operation requires 'archive_name' field",
                     )
                 })?;
                 let archival_label = params.archival_label.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "context",
+                        serde_json::json!({"operation":"swap"}),
                         "swap operation requires 'archival_label' field",
                     )
                 })?;

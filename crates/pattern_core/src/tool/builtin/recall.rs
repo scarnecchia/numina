@@ -101,8 +101,9 @@ impl AiTool for RecallTool {
         match params.operation {
             ArchivalMemoryOperationType::Insert => {
                 let content = params.content.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "recall",
+                        serde_json::json!({"operation":"insert"}),
                         "insert operation requires 'content' field",
                     )
                 })?;
@@ -110,14 +111,16 @@ impl AiTool for RecallTool {
             }
             ArchivalMemoryOperationType::Append => {
                 let label = params.label.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "recall",
+                        serde_json::json!({"operation":"append"}),
                         "append operation requires 'label' field",
                     )
                 })?;
                 let content = params.content.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "recall",
+                        serde_json::json!({"operation":"append"}),
                         "append operation requires 'content' field",
                     )
                 })?;
@@ -125,8 +128,9 @@ impl AiTool for RecallTool {
             }
             ArchivalMemoryOperationType::Read => {
                 let label = params.label.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "recall",
+                        serde_json::json!({"operation":"read"}),
                         "read operation requires 'label' field",
                     )
                 })?;
@@ -134,8 +138,9 @@ impl AiTool for RecallTool {
             }
             ArchivalMemoryOperationType::Delete => {
                 let label = params.label.ok_or_else(|| {
-                    crate::CoreError::tool_execution_error(
+                    crate::CoreError::tool_exec_msg(
                         "recall",
+                        serde_json::json!({"operation":"delete"}),
                         "delete operation requires 'label' field",
                     )
                 })?;

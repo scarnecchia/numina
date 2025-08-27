@@ -287,7 +287,12 @@ impl ConstellationManager {
             }
             Ok(())
         } else {
-            Err(CoreError::agent_not_found(id.to_string()))
+            Err(CoreError::CoordinationFailed {
+                group: "constellations".to_string(),
+                pattern: "manager".to_string(),
+                participating_agents: vec![],
+                cause: format!("Constellation '{}' not found", id),
+            })
         }
     }
 }

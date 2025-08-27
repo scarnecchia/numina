@@ -32,10 +32,13 @@ surrealdb = { workspace = true }
 # AI/LLM
 genai = { workspace = true }
 
-# HTTP client (for embeddings)
-reqwest = { workspace = true, optional = true }
+# HTTP client (for embeddings and HomeAssistant)
+reqwest = { workspace = true }
 reqwest-middleware = { version = "0.4", optional = true }
 http = { version = "1.1", optional = true }
+
+# WebSocket support for HomeAssistant
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # Candle for local embeddings
 candle-core = { version = "0.9", optional = true }
@@ -109,7 +112,7 @@ miette = { workspace = true, features = ["fancy"] }
 default = ["surreal-embedded", "embed-candle", "embed-cloud", "file-watch"]
 nd = []                                                                     # Enable neurodivergent features when pattern-nd is ready
 export = ["zstd"]                                                           # Agent export/import with compression
-oauth = ["reqwest", "reqwest-middleware", "http"]                           # OAuth authentication support
+oauth = ["reqwest-middleware", "http"]                                      # OAuth authentication support
 file-watch = ["notify"]                                                     # File watching for data sources
 
 # Database backends
@@ -124,8 +127,8 @@ embed-candle = [
     "hf-hub",
     "tokenizers",
 ]
-embed-cloud = ["reqwest", "reqwest-middleware", "http"]
-embed-ollama = ["reqwest", "reqwest-middleware", "http"]
+embed-cloud = ["reqwest-middleware", "http"]
+embed-ollama = ["reqwest-middleware", "http"]
 
 
 [lints]

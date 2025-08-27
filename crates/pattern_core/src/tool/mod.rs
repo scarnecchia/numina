@@ -185,7 +185,7 @@ where
 
         // Serialize the output back to JSON
         serde_json::to_value(output)
-            .map_err(|e| crate::CoreError::tool_execution_error(self.name(), e.to_string()))
+            .map_err(|e| crate::CoreError::tool_exec_error_simple(self.name(), e))
     }
 
     fn examples(&self) -> Vec<DynamicToolExample> {

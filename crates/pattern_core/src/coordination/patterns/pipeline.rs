@@ -212,7 +212,11 @@ impl PipelineManager {
         let awm = agents
             .iter()
             .find(|awm| &awm.agent.as_ref().id() == agent_id)
-            .ok_or_else(|| CoreError::agent_not_found(agent_id.to_string()))?;
+            .ok_or_else(|| CoreError::AgentGroupError {
+                group_name: group_name.clone(),
+                operation: format!("stage_{}", stage.name),
+                cause: format!("Agent '{}' not found", agent_id),
+            })?;
 
         if !awm.membership.is_active {
             return Err(CoreError::AgentGroupError {
@@ -309,7 +313,11 @@ impl PipelineManager {
                 let awm = agents
                     .iter()
                     .find(|awm| &awm.agent.as_ref().id() == agent_id)
-                    .ok_or_else(|| CoreError::agent_not_found(agent_id.to_string()))?;
+                    .ok_or_else(|| CoreError::AgentGroupError {
+                        group_name: "pipeline".to_string(),
+                        operation: format!("stage_{}_fallback", stage.name),
+                        cause: format!("Fallback agent '{}' not found", agent_id),
+                    })?;
 
                 if !awm.membership.is_active {
                     return Err(CoreError::AgentGroupError {
