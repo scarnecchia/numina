@@ -230,6 +230,28 @@ db.query(
  .await?;
 ```
 
+## Agent Naming, Roles, and Defaults
+
+- Agent names are arbitrary: features no longer depend on specific names like "Pattern", "Anchor", or "Archive".
+- Group roles drive behavior:
+  - Supervisor: acts as orchestrator; data sources (e.g., Bluesky/Jetstream) route through the Supervisor by default.
+  - Specialist with domain "system_integrity": gets the SystemIntegrityTool.
+  - Specialist with domain "memory_management": gets the ConstellationSearchTool.
+- Sleeptime prompts are role/domain-based:
+  - Supervisor uses the former orchestrator prompt; specialists use prompts matching their domain.
+- Discord defaults:
+  - Default agent selection prefers the Supervisor when an agent isn’t specified.
+  - Bot self-mentions resolve to the Supervisor agent’s name when available.
+- CLI sender labels by origin:
+  - Agent: agent name
+  - Bluesky: `@handle`
+  - Discord: `Discord`
+  - DataSource: `source_id`
+  - CLI: `CLI`
+  - API: `API`
+  - Other: `origin_type`
+  - None/unknown: `Runtime`
+
 ## Error Handling
 
 ```rust

@@ -90,6 +90,12 @@ fn select_agent_group(content: &str) -> AgentGroup {
 }
 ```
 
+### Defaults and Naming
+- Agent names are arbitrary; behavior is driven by group roles:
+  - Supervisor: preferred default for slash commands when no agent is specified.
+  - Specialist domains: `system_integrity` and `memory_management` map to specific tool availability.
+- Bot self-mentions are rewritten to `@<supervisor_name>` when a supervisor is present in the current group context.
+
 ## Implementation Features
 
 ### Message Queue System

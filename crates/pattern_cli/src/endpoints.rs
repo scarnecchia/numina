@@ -65,14 +65,20 @@ impl MessageEndpoint for CliEndpoint {
             self.output
                 .status(&format!("📤 Message from {}", origin.description()));
 
-            // Extract the agent name from the origin if it's an agent
+            // Choose a reasonable short sender label per origin type
             match origin {
                 MessageOrigin::Agent { name, .. } => name.clone(),
-                _ => "Pattern".to_string(),
+                MessageOrigin::Bluesky { handle, .. } => format!("@{}", handle),
+                MessageOrigin::Discord { .. } => "Discord".to_string(),
+                MessageOrigin::DataSource { source_id, .. } => source_id.clone(),
+                MessageOrigin::Cli { .. } => "CLI".to_string(),
+                MessageOrigin::Api { .. } => "API".to_string(),
+                MessageOrigin::Other { origin_type, .. } => origin_type.clone(),
+                _ => "Runtime".to_string(),
             }
         } else {
             self.output.status("📤 Sending message to user:");
-            "Pattern".to_string()
+            "Runtime".to_string()
         };
 
         // Add a tiny delay to let reasoning chunks finish printing

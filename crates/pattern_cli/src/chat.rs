@@ -295,7 +295,7 @@ pub async fn chat_with_group(
 pub struct GroupSetup {
     pub group: AgentGroup,
     pub agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
-    pub pattern_agent: Option<Arc<dyn Agent>>,
+    pub supervisor_agent: Option<Arc<dyn Agent>>,
     pub agent_tools: Vec<ToolRegistry>, // Each agent's tool registry
     pub pattern_manager: Arc<dyn GroupManager + Send + Sync>,
     #[allow(dead_code)] // Used during agent creation, kept for potential future use
@@ -513,7 +513,7 @@ pub async fn setup_group(
     tracing::info!("Group has {} members to load", group.members.len());
     let mut agents = Vec::new();
     let mut agent_tools = Vec::new(); // Track each agent's tool registry
-    let mut pattern_agent_index = None;
+    let mut supervisor_agent_index = None;
 
     // Find the group config to get member config_paths
     let group_config = config.groups.iter().find(|g| g.name == group_name).cloned();
@@ -528,7 +528,7 @@ pub async fn setup_group(
     }
 
     // First pass: create all agents WITHOUT data sources
-    for (i, (mut agent_record, _membership)) in group.members.clone().into_iter().enumerate() {
+    for (i, (mut agent_record, membership)) in group.members.clone().into_iter().enumerate() {
         output.section(&format!(
             "Loading agent {}/{}: {}",
             i + 1,
@@ -539,10 +539,11 @@ pub async fn setup_group(
         // Load memories and messages for the agent
         load_agent_memories_and_messages(&mut agent_record, output).await?;
 
-        // Check if this is the Pattern agent
-        if agent_record.name == "Pattern" {
-            pattern_agent_index = Some(i);
-        }
+        // Check if this agent has Supervisor role (DB) or in config
+        let is_supervisor_db = matches!(
+            membership.role,
+            pattern_core::coordination::types::GroupMemberRole::Supervisor
+        );
 
         // Find the member config for this agent
         let member_config = group_config.as_ref().and_then(|gc| {
@@ -626,11 +627,28 @@ pub async fn setup_group(
             config.clone()
         };
 
-        // Create agent with its own tool registry
+        // Decide special tools based on role/domain instead of hardcoded names
         let tools = ToolRegistry::new();
-        let agent = if agent_record.name == "Anchor" && !no_tools {
+        // Determine specialist domain from DB membership or config
+        let specialist_domain_cfg = member_config.as_ref().and_then(|m| match m.role {
+            pattern_core::config::GroupMemberRoleConfig::Specialist { ref domain } => {
+                Some(domain.clone())
+            }
+            _ => None,
+        });
+        let specialist_domain_db = match &membership.role {
+            pattern_core::coordination::types::GroupMemberRole::Specialist { domain } => {
+                Some(domain.clone())
+            }
+            _ => None,
+        };
+        let effective_specialist_domain = specialist_domain_db
+            .or(specialist_domain_cfg)
+            .unwrap_or_default();
+
+        let agent = if effective_specialist_domain == "system_integrity" && !no_tools {
             let tools = ToolRegistry::new();
-            // Create Anchor agent with its own tools
+            // Create specialist agent with SystemIntegrityTool
             let agent = create_agent_from_record_with_tracker(
                 agent_record.clone(),
                 model.clone(),
@@ -643,20 +661,20 @@ pub async fn setup_group(
             )
             .await?;
 
-            // Add SystemIntegrityTool only to Anchor's registry
+            // Add SystemIntegrityTool only to this specialist's registry
             use pattern_core::tool::builtin::SystemIntegrityTool;
             let handle = agent.handle().await;
             let integrity_tool = SystemIntegrityTool::new(handle);
             tools.register(integrity_tool);
             output.success(&format!(
-                "Emergency halt tool registered for {} agent",
-                "Anchor".bright_red()
+                "Emergency halt tool registered for specialist (domain: {})",
+                "system_integrity".bright_red()
             ));
 
             agent
-        } else if agent_record.name == "Archive" && !no_tools {
+        } else if effective_specialist_domain == "memory_management" && !no_tools {
             let tools = ToolRegistry::new();
-            // Create Archive agent with its own tools
+            // Create specialist agent with ConstellationSearchTool
             let agent = create_agent_from_record_with_tracker(
                 agent_record.clone(),
                 model.clone(),
@@ -669,14 +687,14 @@ pub async fn setup_group(
             )
             .await?;
 
-            // Add SystemIntegrityTool only to Anchor's registry
+            // Add ConstellationSearchTool only to this specialist's registry
             use pattern_core::tool::builtin::ConstellationSearchTool;
             let handle = agent.handle().await;
-            let integrity_tool = ConstellationSearchTool::new(handle);
-            tools.register(integrity_tool);
+            let search_tool = ConstellationSearchTool::new(handle);
+            tools.register(search_tool);
             output.success(&format!(
-                "Memory specialist search tool registered for {} agent",
-                "Archive".bright_cyan()
+                "Memory specialist search tool registered for specialist (domain: {})",
+                "memory_management".bright_cyan()
             ));
 
             agent
@@ -697,6 +715,20 @@ pub async fn setup_group(
 
         agents.push(agent);
         agent_tools.push(tools);
+
+        // Save supervisor index if DB membership or config indicates supervisor
+        let is_supervisor_cfg = member_config
+            .as_ref()
+            .map(|m| {
+                matches!(
+                    m.role,
+                    pattern_core::config::GroupMemberRoleConfig::Supervisor
+                )
+            })
+            .unwrap_or(false);
+        if is_supervisor_db || is_supervisor_cfg {
+            supervisor_agent_index = Some(i);
+        }
     }
 
     if agents.is_empty() {
@@ -708,16 +740,16 @@ pub async fn setup_group(
         return Err(miette::miette!("No agents in group"));
     }
 
-    if pattern_agent_index.is_none() {
-        output.warning("Pattern agent not found in group - Jetstream routing unavailable");
+    if supervisor_agent_index.is_none() {
+        output.warning("Supervisor not found in group - Jetstream routing unavailable");
         output.info(
             "Hint:",
-            "Add Pattern agent with: pattern-cli group add-member <group> Pattern",
+            "Ensure a supervisor-role agent is added to this group",
         );
     }
 
     // Save pattern agent reference
-    let pattern_agent = pattern_agent_index.map(|idx| agents[idx].clone());
+    let supervisor_agent = supervisor_agent_index.map(|idx| agents[idx].clone());
 
     // Create the appropriate pattern manager based on the group's coordination pattern
     use pattern_core::coordination::selectors::DefaultSelectorRegistry;
@@ -870,7 +902,7 @@ pub async fn setup_group(
     Ok(GroupSetup {
         group,
         agents_with_membership,
-        pattern_agent,
+        supervisor_agent,
         agent_tools,
         pattern_manager,
         constellation_tracker,
@@ -1251,7 +1283,7 @@ pub async fn chat_with_group_and_jetstream(
     let GroupSetup {
         group,
         agents_with_membership,
-        pattern_agent,
+        supervisor_agent,
         agent_tools,
         pattern_manager,
         constellation_tracker: _,
@@ -1260,8 +1292,8 @@ pub async fn chat_with_group_and_jetstream(
     } = group_setup;
     tracing::info!("chat_with_group_and_jetstream group setup complete");
 
-    // Now that group endpoint is registered, set up data sources if we have Pattern agent
-    if let Some(pattern_agent) = pattern_agent {
+    // Now that group endpoint is registered, set up data sources if we have a Supervisor agent
+    if let Some(pattern_agent) = supervisor_agent {
         if config.bluesky.is_some() {
             output.info("Jetstream:", "Setting up data source routing to group...");
 

@@ -223,7 +223,7 @@ impl AgentSelector for SupervisorSelector {
                 cause: "Supervisor decision channel closed unexpectedly".to_string(),
             })?;
 
-        tracing::info!(
+        tracing::debug!(
             "Supervisor {} response: text='{}', parsed_names={:?}",
             supervisor.agent.name(),
             response_text.trim(),
@@ -236,7 +236,7 @@ impl AgentSelector for SupervisorSelector {
             _ => true,
         };
 
-        tracing::info!(
+        tracing::debug!(
             "Supervisor decision: is_direct_response={}, can_select_self={}, role={:?}",
             is_direct_response,
             can_select_self,
@@ -275,7 +275,7 @@ impl AgentSelector for SupervisorSelector {
                     continue;
                 }
                 selected.push(awm);
-                tracing::info!("Selected agent: {}", awm.agent.name());
+                tracing::debug!("Selected agent: {}", awm.agent.name());
             } else {
                 tracing::warn!("Agent name '{}' not found in group", name);
             }

@@ -145,7 +145,7 @@ pub async fn run_discord_bot_with_group(
     let GroupSetup {
         group,
         agents_with_membership,
-        pattern_agent,
+        supervisor_agent,
         agent_tools,
         pattern_manager,
         constellation_tracker: _,
@@ -157,8 +157,8 @@ pub async fn run_discord_bot_with_group(
     output.info("Group:", &group.name.bright_cyan().to_string());
     output.info("Pattern:", &format!("{:?}", group.coordination_pattern));
 
-    // Set up data sources if we have Pattern agent (similar to jetstream)
-    if let Some(ref pattern_agent) = pattern_agent {
+    // Set up data sources if we have a Supervisor agent (similar to jetstream)
+    if let Some(ref pattern_agent) = supervisor_agent {
         tracing::info!("Discord group mode: Checking for Bluesky config");
         if config.bluesky.is_some() {
             tracing::info!("Discord group mode: Bluesky config found, setting up data sources");

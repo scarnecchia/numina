@@ -272,11 +272,14 @@ pub async fn handle_memory_command(
     } else {
         // Use default agent (Pattern or first)
         agents.and_then(|agents| {
-            agents
-                .iter()
-                .find(|a| a.agent.name() == "Pattern")
-                .or_else(|| agents.first())
-                .map(|a| &a.agent)
+            // Prefer supervisor-role agent as default, else first
+            let supervisor = agents.iter().find(|a| {
+                matches!(
+                    a.membership.role,
+                    pattern_core::coordination::types::GroupMemberRole::Supervisor
+                )
+            });
+            supervisor.or_else(|| agents.first()).map(|a| &a.agent)
         })
     };
 
@@ -400,11 +403,14 @@ pub async fn handle_archival_command(
         })
     } else {
         agents.and_then(|agents| {
-            agents
-                .iter()
-                .find(|a| a.agent.name() == "Pattern")
-                .or_else(|| agents.first())
-                .map(|a| &a.agent)
+            // Prefer supervisor-role agent as default, else first
+            let supervisor = agents.iter().find(|a| {
+                matches!(
+                    a.membership.role,
+                    pattern_core::coordination::types::GroupMemberRole::Supervisor
+                )
+            });
+            supervisor.or_else(|| agents.first()).map(|a| &a.agent)
         })
     };
 

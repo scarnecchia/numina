@@ -1389,6 +1389,37 @@ pub async fn get_group_members<C: Connection>(
     Ok(group.members)
 }
 
+/// Get all group memberships for a given agent
+pub async fn get_agent_memberships<C: Connection>(
+    conn: &Surreal<C>,
+    agent_id: &crate::id::AgentId,
+) -> Result<Vec<crate::coordination::groups::GroupMembership>> {
+    // Query all memberships where this agent is the inbound node
+    let query = r#"
+        SELECT * FROM group_members
+        WHERE `in` = $agent_id
+        ORDER BY joined_at ASC
+    "#;
+
+    let mut result = conn
+        .query(query)
+        .bind(("agent_id", surrealdb::RecordId::from(agent_id)))
+        .await
+        .map_err(|e| DatabaseError::from(e).with_context(query, "group_members"))?;
+
+    // Take the DB models for GroupMembership
+    let membership_db_models: Vec<<GroupMembership as DbEntity>::DbModel> =
+        result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+    // Convert DB models to domain types
+    let memberships: Vec<GroupMembership> = membership_db_models
+        .into_iter()
+        .map(|db_model| GroupMembership::from_db_model(db_model).map_err(DatabaseError::from))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(memberships)
+}
+
 /// Update group state
 pub async fn update_group_state<C: Connection>(
     conn: &Surreal<C>,
