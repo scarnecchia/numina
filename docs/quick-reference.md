@@ -119,6 +119,14 @@ Target types: `user`, `agent`, `group`, `discord`, `bluesky`
 // Thread-safe with Arc<DashMap>
 let memory = Memory::with_owner(user_id);
 
+## ID Tips (to_key vs to_string)
+
+- Use `id.to_key()` for persistence (raw record key) and `RecordId::from(&id)` for query binds.
+- Use `id.to_string()` only for human-readable output (often includes a table prefix like `agent:` or `group:`).
+- Example: deriving a `MemoryId` or tracker key from a `GroupId` should use `group_id.to_key()`, not `group_id.to_string()`.
+
+Caveat (rare acceptable `to_string()`): some IDs (e.g., `Did`, `MessageId`) display as their raw key without a table prefix. In those cases `to_string()` can be acceptable if you explicitly need the raw key string. Prefer `to_key()` when unsure.
+
 // Core memory blocks
 memory.create_block("persona", "I am Pattern")?;
 memory.create_block("human", "User info here")?;

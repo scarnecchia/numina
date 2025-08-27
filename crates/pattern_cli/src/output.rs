@@ -26,7 +26,16 @@ impl Output {
         skin.code_block
             .set_bg(termimad::crossterm::style::Color::Black);
         skin.code_block.set_fg(termimad::ansi(15)); // bright white text
-        Self { skin, writer: None }
+        // If a global SharedWriter is available (when chat has initialized
+        // the readline UI), use it to avoid cursor glitches
+        if let Some(shared) = crate::tracing_writer::get_shared_writer() {
+            Self {
+                skin,
+                writer: Some(shared),
+            }
+        } else {
+            Self { skin, writer: None }
+        }
     }
 
     pub fn with_writer(self, writer: SharedWriter) -> Self {

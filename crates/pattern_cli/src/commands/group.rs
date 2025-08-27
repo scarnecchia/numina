@@ -407,6 +407,7 @@ pub async fn initialize_from_config(
                 true, // enable_tools
                 heartbeat_sender.clone(),
                 Some(config),
+                &output,
             )
             .await?;
 

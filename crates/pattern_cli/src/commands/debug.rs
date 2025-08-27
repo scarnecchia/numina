@@ -1045,6 +1045,7 @@ pub async fn show_context(agent_name: &str, config: &PatternConfig) -> Result<()
             true, // Enable tools
             &config,
             heartbeat_sender,
+            &output,
         )
         .await
         {

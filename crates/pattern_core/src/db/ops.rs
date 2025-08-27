@@ -245,7 +245,10 @@ pub async fn create_relation_typed<E: DbEntity, C: Connection>(
         .query(&existing_query)
         .bind(("from", from.clone()))
         .bind(("to", to.clone()))
-        .await?;
+        .await
+        .map_err(|e| {
+            DatabaseError::from(e).with_context(existing_query.clone(), E::table_name())
+        })?;
 
     // Check if we already have this relation
     let existing: Vec<E::DbModel> = existing_result.take(0).unwrap_or_default();
@@ -285,9 +288,9 @@ pub async fn create_relation_typed<E: DbEntity, C: Connection>(
     }
 
     let mut response = conn
-        .query(query)
+        .query(query.clone())
         .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+        .map_err(|e| DatabaseError::from(e).with_context(query.clone(), E::table_name()))?;
 
     // Extract the created edge entity
     let created: Vec<E::DbModel> = response
@@ -331,9 +334,9 @@ pub async fn create_relation<C: Connection>(
     }
 
     let mut response = conn
-        .query(query)
+        .query(query.clone())
         .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+        .map_err(|e| DatabaseError::from(e).with_context(query.clone(), relation_name))?;
     tracing::trace!("Query response: {:#?}", response);
 
     let mut output = json!({});
@@ -1250,7 +1253,7 @@ pub async fn get_group_by_name<C: Connection>(
         .query(query)
         .bind(("name", group_name.to_string()))
         .await
-        .map_err(|e| DatabaseError::QueryFailed(e))?;
+        .map_err(|e| DatabaseError::from(e).with_context(query, "group"))?;
 
     let db_groups: Vec<<AgentGroup as DbEntity>::DbModel> =
         result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
@@ -1272,7 +1275,7 @@ pub async fn get_group_by_name<C: Connection>(
             .query(query)
             .bind(("group_id", surrealdb::RecordId::from(&group.id)))
             .await
-            .map_err(DatabaseError::QueryFailed)?;
+            .map_err(|e| DatabaseError::from(e).with_context(query, "group_members"))?;
 
         // Take the DB models for GroupMembership
         let membership_db_models: Vec<<GroupMembership as DbEntity>::DbModel> =

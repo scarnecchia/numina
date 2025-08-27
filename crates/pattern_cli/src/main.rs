@@ -720,6 +720,7 @@ async fn main() -> Result<()> {
                     !*no_tools,
                     &config,
                     heartbeat_sender,
+                    &output,
                 )
                 .await?;
                 chat::chat_with_agent(agent, heartbeat_receiver).await?;

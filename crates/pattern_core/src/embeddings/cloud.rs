@@ -274,34 +274,53 @@ impl EmbeddingProvider for GeminiEmbedder {
         }
 
         let client = reqwest::Client::new();
-        // Single endpoint embedContent supports one or many contents
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent",
-            self.model
-        );
+        // Choose endpoint based on batch size
+        let single = texts.len() == 1;
+        let url = if single {
+            format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent",
+                self.model
+            )
+        } else {
+            format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents",
+                self.model
+            )
+        };
 
-        // Build contents array of { parts: [{ text: ... }] }
-        let contents: Vec<serde_json::Value> = texts
-            .iter()
-            .map(|t| serde_json::json!({ "parts": [ { "text": t } ] }))
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": format!("models/{}", self.model),
-            "contents": contents,
-        });
-
-        // Build embedding_config
-        let mut cfg = serde_json::Map::new();
-        if let Some(dims) = self.dimensions {
-            cfg.insert("output_dimensionality".to_string(), serde_json::json!(dims));
-        }
         // Default to RETRIEVAL_QUERY if not set
         let tt = self
             .task_type
             .unwrap_or(GeminiEmbeddingTaskType::RetrievalQuery);
-        cfg.insert("task_type".to_string(), serde_json::json!(tt.as_str()));
-        body["embedding_config"] = serde_json::Value::Object(cfg);
+
+        // Build request body with correct camelCase fields
+        let body = if single {
+            let mut obj = serde_json::json!({
+                "model": format!("models/{}", self.model),
+                "content": { "parts": [ { "text": &texts[0] } ] },
+                "taskType": tt.as_str(),
+            });
+            if let Some(dims) = self.dimensions {
+                obj["outputDimensionality"] = serde_json::json!(dims);
+            }
+            obj
+        } else {
+            let mut requests: Vec<serde_json::Value> = Vec::with_capacity(texts.len());
+            for t in texts.iter() {
+                let mut req = serde_json::json!({
+                    "content": { "parts": [ { "text": t } ] },
+                    "taskType": tt.as_str(),
+                });
+                if let Some(dims) = self.dimensions {
+                    req["outputDimensionality"] = serde_json::json!(dims);
+                }
+                requests.push(req);
+            }
+            serde_json::json!({
+                "model": format!("models/{}", self.model),
+                "requests": requests,
+            })
+        };
 
         let mut retries = 0u32;
         let max_retries = 6u32;

@@ -6,7 +6,7 @@
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
-    Agent, ToolRegistry,
+    Agent, IdType, ToolRegistry,
     agent::ResponseEvent,
     config::PatternConfig,
     context::heartbeat::{self, HeartbeatReceiver, HeartbeatSender},
@@ -306,6 +306,92 @@ pub struct GroupSetup {
     pub heartbeat_receiver: HeartbeatReceiver,
 }
 
+/// Create a group from config (with members) and return the fresh record
+async fn create_group_from_config(
+    group_config: &pattern_core::config::GroupConfig,
+    model: Option<String>,
+    no_tools: bool,
+    config: &PatternConfig,
+    output: &Output,
+    heartbeat_sender: HeartbeatSender,
+) -> Result<AgentGroup> {
+    // Convert pattern from config to coordination pattern
+    let coordination_pattern = crate::commands::group::convert_pattern_config(
+        &group_config.pattern,
+        &config.user.id,
+        &group_config.members,
+    )
+    .await?;
+
+    // Create the group
+    let new_group = pattern_core::coordination::groups::AgentGroup {
+        id: group_config
+            .id
+            .clone()
+            .unwrap_or_else(pattern_core::id::GroupId::generate),
+        name: group_config.name.clone(),
+        description: group_config.description.clone(),
+        coordination_pattern,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        is_active: true,
+        state: pattern_core::coordination::types::GroupState::RoundRobin {
+            current_index: 0,
+            last_rotation: chrono::Utc::now(),
+        },
+        members: vec![],
+    };
+
+    // Create group in database
+    let created = ops::create_group_for_user(&DB, &config.user.id, &new_group).await?;
+    output.success(&format!("Created group: {}", created.name));
+
+    // Add members from config
+    for member_config in &group_config.members {
+        output.status(&format!("Adding member: {}", member_config.name));
+
+        // Load or create agent from member config
+        let agent = crate::agent_ops::load_or_create_agent_from_member(
+            member_config,
+            &config.user.id,
+            model.clone(),
+            !no_tools,
+            heartbeat_sender.clone(),
+            Some(config),
+            output,
+        )
+        .await?;
+
+        // Convert role
+        let role = crate::commands::group::convert_role_config(&member_config.role);
+
+        // Create membership
+        let membership = pattern_core::coordination::groups::GroupMembership {
+            id: pattern_core::id::RelationId::nil(),
+            in_id: agent.id().clone(),
+            out_id: created.id.clone(),
+            joined_at: chrono::Utc::now(),
+            role,
+            is_active: true,
+            capabilities: member_config.capabilities.clone(),
+        };
+
+        // Add to group
+        ops::add_agent_to_group(&DB, &membership).await?;
+        output.success(&format!(
+            "Added member: {} ({:?})",
+            member_config.name, membership.role
+        ));
+    }
+
+    // Reload the group with members
+    let group = ops::get_group_by_name(&DB, &config.user.id, &group_config.name)
+        .await?
+        .ok_or_else(|| miette::miette!("Failed to reload created group"))?;
+
+    Ok(group)
+}
+
 /// Set up a group with all necessary components
 pub async fn setup_group(
     group_name: &str,
@@ -316,85 +402,20 @@ pub async fn setup_group(
 ) -> Result<GroupSetup> {
     // Load the group from database or create from config
     let group = ops::get_group_by_name(&DB, &config.user.id, group_name).await?;
-    let group = match group {
+    let mut group = match group {
         Some(g) => g,
         None => {
-            // Check if group is defined in config
             if let Some(group_config) = config.groups.iter().find(|g| g.name == group_name) {
                 output.status(&format!("Creating group '{}' from config...", group_name));
-
-                // Convert pattern from config to coordination pattern
-                let coordination_pattern = crate::commands::group::convert_pattern_config(
-                    &group_config.pattern,
-                    &config.user.id,
-                    &group_config.members,
+                create_group_from_config(
+                    group_config,
+                    model.clone(),
+                    no_tools,
+                    config,
+                    output,
+                    heartbeat::heartbeat_channel().0,
                 )
-                .await?;
-
-                // Create the group
-                let new_group = pattern_core::coordination::groups::AgentGroup {
-                    id: group_config
-                        .id
-                        .clone()
-                        .unwrap_or_else(pattern_core::id::GroupId::generate),
-                    name: group_config.name.clone(),
-                    description: group_config.description.clone(),
-                    coordination_pattern,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                    is_active: true,
-                    state: pattern_core::coordination::types::GroupState::RoundRobin {
-                        current_index: 0,
-                        last_rotation: chrono::Utc::now(),
-                    },
-                    members: vec![],
-                };
-
-                // Create group in database
-                let created = ops::create_group_for_user(&DB, &config.user.id, &new_group).await?;
-                output.success(&format!("Created group: {}", created.name));
-
-                // Add members from config
-                for member_config in &group_config.members {
-                    output.status(&format!("Adding member: {}", member_config.name));
-
-                    // Load or create agent from member config
-                    let agent = crate::agent_ops::load_or_create_agent_from_member(
-                        member_config,
-                        &config.user.id,
-                        model.clone(),
-                        !no_tools,
-                        heartbeat::heartbeat_channel().0, // temporary sender for member creation
-                        Some(config),
-                    )
-                    .await?;
-
-                    // Convert role
-                    let role = crate::commands::group::convert_role_config(&member_config.role);
-
-                    // Create membership
-                    let membership = pattern_core::coordination::groups::GroupMembership {
-                        id: pattern_core::id::RelationId::nil(),
-                        in_id: agent.id().clone(),
-                        out_id: created.id.clone(),
-                        joined_at: chrono::Utc::now(),
-                        role,
-                        is_active: true,
-                        capabilities: member_config.capabilities.clone(),
-                    };
-
-                    // Add to group
-                    ops::add_agent_to_group(&DB, &membership).await?;
-                    output.success(&format!(
-                        "Added member: {} ({:?})",
-                        member_config.name, membership.role
-                    ));
-                }
-
-                // Reload the group with members
-                ops::get_group_by_name(&DB, &config.user.id, group_name)
-                    .await?
-                    .ok_or_else(|| miette::miette!("Failed to reload created group"))?
+                .await?
             } else {
                 output.error(&format!(
                     "Group '{}' not found in database or config",
@@ -405,11 +426,81 @@ pub async fn setup_group(
         }
     };
 
+    // Ensure configured members are present: add any missing ones even if some already exist
+    if let Some(group_config) = config.groups.iter().find(|g| g.name == group_name) {
+        let mut added = 0usize;
+        for member_config in &group_config.members {
+            // Determine if this configured member is already in the group
+            let already_present = if let Some(agent_id) = &member_config.agent_id {
+                group
+                    .members
+                    .iter()
+                    .any(|(agent_rec, _)| &agent_rec.id == agent_id)
+            } else {
+                // Fallback: match by name if no explicit id in config
+                group
+                    .members
+                    .iter()
+                    .any(|(agent_rec, _)| agent_rec.name == member_config.name)
+            };
+
+            if already_present {
+                continue;
+            }
+
+            output.status(&format!(
+                "Adding missing member from config: {}",
+                member_config.name
+            ));
+
+            // Load or create agent from member config
+            let agent = crate::agent_ops::load_or_create_agent_from_member(
+                member_config,
+                &config.user.id,
+                model.clone(),
+                !no_tools,
+                heartbeat::heartbeat_channel().0, // temporary sender for member creation
+                Some(config),
+                output,
+            )
+            .await?;
+
+            // Convert role
+            let role = crate::commands::group::convert_role_config(&member_config.role);
+
+            // Create membership
+            let membership = pattern_core::coordination::groups::GroupMembership {
+                id: pattern_core::id::RelationId::nil(),
+                in_id: agent.id().clone(),
+                out_id: group.id.clone(),
+                joined_at: chrono::Utc::now(),
+                role,
+                is_active: true,
+                capabilities: member_config.capabilities.clone(),
+            };
+
+            // Add to group
+            ops::add_agent_to_group(&DB, &membership).await?;
+            output.success(&format!(
+                "Added member: {} ({:?})",
+                member_config.name, membership.role
+            ));
+            added += 1;
+        }
+
+        if added > 0 {
+            // Reload the group with updated members
+            group = ops::get_group_by_name(&DB, &config.user.id, group_name)
+                .await?
+                .ok_or_else(|| miette::miette!("Failed to reload group after adding members"))?;
+        }
+    }
+
     // Create heartbeat channel for agents
     let (heartbeat_sender, heartbeat_receiver) = heartbeat::heartbeat_channel();
 
     // Create a shared constellation activity tracker for the group
-    let group_id_str = group.id.to_string();
+    let group_id_str = group.id.to_key();
     let tracker_memory_id = pattern_core::MemoryId(group_id_str);
     let constellation_tracker = Arc::new(
         pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
@@ -673,9 +764,28 @@ pub async fn setup_group(
                     );
 
                     // Load the sleeptime group from DB to get proper IDs and coordination pattern
-                    if let Some(sleeptime_group) =
-                        ops::get_group_by_name(&DB, &config.user.id, &group_config.name).await?
-                    {
+                    let mut maybe_sleeptime_group =
+                        ops::get_group_by_name(&DB, &config.user.id, &group_config.name).await?;
+
+                    // If the sleeptime group doesn't exist yet, create it from config and populate members
+                    if maybe_sleeptime_group.is_none() {
+                        output.status(&format!(
+                            "Creating sleeptime group '{}' from config...",
+                            group_config.name
+                        ));
+                        let created = create_group_from_config(
+                            &group_config,
+                            model.clone(),
+                            no_tools,
+                            config,
+                            output,
+                            heartbeat_sender.clone(),
+                        )
+                        .await?;
+                        maybe_sleeptime_group = Some(created);
+                    }
+
+                    if let Some(sleeptime_group) = maybe_sleeptime_group {
                         // Use members directly from the loaded group
                         let sleeptime_members = &sleeptime_group.members;
 

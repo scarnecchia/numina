@@ -185,6 +185,30 @@ impl User {
     // Store entity with all relations (upserts if exists)
     pub async fn store_with_relations(&self, db: &Surreal<Db>) -> Result<Self, DatabaseError>;
 }
+
+## ID Handling and Record Keys
+
+Pattern’s ID types implement a Display that is human-friendly (e.g., `agent:abcd…`, `group:ef01…`). This is great for logs and CLI output, but must not be used when persisting or constructing record keys for the database.
+
+- Use `id.to_key()` when you need the raw record key (just the UUID-like portion) for persistence or composing IDs stored in other entities.
+- Use `RecordId::from(&id)` when binding IDs in SurrealDB queries (`.bind(("agent_id", RecordId::from(&agent_id)))`).
+- Avoid `id.to_string()` for any database-bound value. Display includes the table prefix, which can break UUID validations or schema expectations.
+
+Common pitfalls and fixes:
+- Tracker or cursor IDs derived from other IDs should use `.to_key()` rather than `.to_string()`.
+- When storing string keys (e.g., `MemoryId`, cursor keys), prefer the raw key: `let key = some_id.to_key();`.
+
+Caveat (rare acceptable `to_string()`):
+- Some IDs are intentionally not table-prefixed and their Display equals the raw key (for example `Did`, and `MessageId` where the key is an arbitrary string). In those specific cases, `to_string()` may be acceptable if and only if you expect the raw key string. When in doubt, prefer `.to_key()` or `RecordId::from(&id)`.
+
+Quick checklist:
+- Persistence: `to_key()` or `RecordId::from(&id)`
+- Display/logging: `to_string()`
+- Never concatenate Display-form IDs into other record keys
+
+Code review checklist:
+- Are any IDs converted with `.to_string()` and then used in DB paths, record keys, or binds? If yes, replace with `.to_key()` or `RecordId::from(&id)` unless it’s one of the rare exceptions above.
+- Are tuple APIs used correctly? Always pass `(table, id.to_key())` or `(table, id.to_record_id())`, not `(table, id.to_string())`.
 ```
 
 ### Associated Functions

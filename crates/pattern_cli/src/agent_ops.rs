@@ -69,8 +69,9 @@ pub async fn load_or_create_agent(
     enable_tools: bool,
     config: &PatternConfig,
     heartbeat_sender: heartbeat::HeartbeatSender,
+    output: &crate::output::Output,
 ) -> Result<Arc<dyn Agent>> {
-    let output = Output::new();
+    let output = output.clone();
 
     // First, try to find an existing agent with this name
     let query = "SELECT id FROM agent WHERE name = $name LIMIT 1";
@@ -129,7 +130,7 @@ pub async fn load_or_create_agent(
     };
 
     // Set up Bluesky endpoint if configured
-    let output = Output::new();
+    let output = output.clone();
     setup_bluesky_endpoint(&agent, config, &output)
         .await
         .inspect_err(|e| {
@@ -284,24 +285,49 @@ pub async fn load_model_embedding_providers(
         };
 
         selected_model.ok_or_else(|| {
-            if let Some(config_model) = &config.model.model {
-                let available: Vec<_> = models
-                    .iter()
-                    .filter(|m| m.provider == config.model.provider.to_string())
-                    .map(|m| m.id.as_str())
-                    .collect();
+            // Build a more helpful message depending on auth mode and what's available
+            let provider_name = config.model.provider.to_lowercase();
+            let available_for_provider: Vec<_> = models
+                .iter()
+                .filter(|m| m.provider.to_lowercase() == provider_name)
+                .map(|m| m.id.as_str())
+                .collect();
 
-                if available.is_empty() {
-                    miette::miette!("No models available. Please set API keys in your .env file")
+            #[cfg(feature = "oauth")]
+            {
+                // If OAuth is enabled and no models are available for Anthropic,
+                // suggest logging in instead of only env keys.
+                if provider_name == "anthropic" && available_for_provider.is_empty() {
+                    return miette::miette!(
+                        "No Anthropic models available. Run 'pattern-cli auth login' to authenticate, or set ANTHROPIC_API_KEY in your environment."
+                    );
+                }
+            }
+
+            if let Some(config_model) = &config.model.model {
+                if available_for_provider.is_empty() {
+                    miette::miette!(
+                        "No models available for provider '{}'. Ensure correct authentication (OAuth login or API key).",
+                        config.model.provider
+                    )
                 } else {
                     miette::miette!(
-                        "Model '{}' not found. Available: {:?}",
+                        "Model '{}' not found for provider '{}'. Available: {:?}",
                         config_model,
-                        available
+                        config.model.provider,
+                        available_for_provider
                     )
                 }
+            } else if available_for_provider.is_empty() {
+                miette::miette!(
+                    "No models available. Configure OAuth (e.g., 'pattern-cli auth login' for Anthropic) or set provider API keys in .env."
+                )
             } else {
-                miette::miette!("No models available. Please set API keys in your .env file")
+                miette::miette!(
+                    "No suitable model selected. Available for '{}': {:?}",
+                    config.model.provider,
+                    available_for_provider
+                )
             }
         })?
     };
@@ -1110,21 +1136,292 @@ pub async fn load_or_create_agent_from_member(
     enable_tools: bool,
     heartbeat_sender: heartbeat::HeartbeatSender,
     main_config: Option<&PatternConfig>,
+    out: &crate::output::Output,
 ) -> Result<Arc<dyn Agent>> {
-    let output = Output::new();
+    let output = out.clone();
 
-    // If member has an agent_id, load that agent
-    if let Some(agent_id) = &member.agent_id {
+    // If member has an agent_id, load that agent; if missing, create it using provided config
+    if let Some(orig_agent_id) = &member.agent_id {
+        // Normalize potential "agent:<uuid>" strings from configs into raw key form
+        let mut agent_id = orig_agent_id.clone();
+        if let Some((prefix, key)) = agent_id.0.split_once(':') {
+            if prefix != "agent" {
+                output.warning(&format!(
+                    "Agent ID prefix '{}' unexpected; expected 'agent'. Using key '{}'",
+                    prefix, key
+                ));
+            }
+            agent_id.0 = key.to_string();
+        }
         output.status(&format!(
             "Loading existing agent {} for group member",
             agent_id.to_string().dimmed()
         ));
 
         // Load the existing agent
-        let mut agent_record = match AgentRecord::load_with_relations(&DB, agent_id).await {
-            Ok(Some(agent)) => agent,
-            Ok(None) => return Err(miette::miette!("Agent {} not found", agent_id)),
-            Err(e) => return Err(miette::miette!("Failed to load agent {}: {}", agent_id, e)),
+        let agent_record = match AgentRecord::load_with_relations(&DB, &agent_id).await {
+            Ok(Some(agent)) => Some(agent),
+            Ok(None) => {
+                output.warning(&format!(
+                    "Agent {} not found. Creating it from config...",
+                    agent_id
+                ));
+
+                // Choose a base agent config: prefer config_path, then inline, otherwise minimal
+                let mut agent_cfg = if let Some(config_path) = &member.config_path {
+                    match pattern_core::config::AgentConfig::load_from_file(config_path).await {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            output.warning(&format!(
+                                "Failed to load config from {}: {}. Using minimal config.",
+                                config_path.display(),
+                                e
+                            ));
+                            pattern_core::config::AgentConfig {
+                                id: None,
+                                name: member.name.clone(),
+                                system_prompt: None,
+                                system_prompt_path: None,
+                                persona: None,
+                                persona_path: None,
+                                instructions: None,
+                                memory: Default::default(),
+                                bluesky_handle: main_config
+                                    .and_then(|cfg| cfg.agent.bluesky_handle.clone()),
+                                tool_rules: Vec::new(),
+                                tools: Vec::new(),
+                                model: None,
+                                context: None,
+                            }
+                        }
+                    }
+                } else if let Some(inline) = &member.agent_config {
+                    let mut cfg = inline.clone();
+                    if cfg.bluesky_handle.is_none() {
+                        if let Some(main_cfg) = main_config {
+                            cfg.bluesky_handle = main_cfg.agent.bluesky_handle.clone();
+                        }
+                    }
+                    cfg
+                } else {
+                    pattern_core::config::AgentConfig {
+                        id: None,
+                        name: member.name.clone(),
+                        system_prompt: None,
+                        system_prompt_path: None,
+                        persona: None,
+                        persona_path: None,
+                        instructions: None,
+                        memory: Default::default(),
+                        bluesky_handle: main_config
+                            .and_then(|cfg| cfg.agent.bluesky_handle.clone()),
+                        tool_rules: Vec::new(),
+                        tools: Vec::new(),
+                        model: None,
+                        context: None,
+                    }
+                };
+
+                // Force the desired ID into the agent config so creation uses it
+                agent_cfg.id = Some(agent_id.clone());
+
+                // Pick a model config: inline > main > default
+                let model_cfg = if let Some(m) = &agent_cfg.model {
+                    m.clone()
+                } else if let Some(main_cfg) = main_config {
+                    main_cfg.model.clone()
+                } else {
+                    pattern_core::config::ModelConfig {
+                        provider: "Gemini".to_string(),
+                        model: model_name.clone(),
+                        temperature: None,
+                        settings: Default::default(),
+                    }
+                };
+
+                // Build a temporary PatternConfig for creation
+                let tmp_cfg = PatternConfig {
+                    user: pattern_core::config::UserConfig {
+                        id: user_id.clone(),
+                        name: None,
+                        settings: Default::default(),
+                    },
+                    agent: agent_cfg,
+                    model: model_cfg,
+                    database: Default::default(),
+                    groups: vec![],
+                    bluesky: None,
+                };
+
+                // Create the agent with the specified ID
+                // Create and note if an agent with the same name exists under a different id
+                let check_name = tmp_cfg.agent.name.clone();
+                if let Ok(mut resp) = DB
+                    .query("SELECT id FROM agent WHERE name = $name LIMIT 1")
+                    .bind(("name", check_name))
+                    .await
+                    .into_diagnostic()
+                {
+                    if let Ok(existing_ids) = resp
+                        .take::<Vec<surrealdb::RecordId>>("id")
+                        .into_diagnostic()
+                    {
+                        if let Some(existing) = existing_ids.first() {
+                            let existing_id = AgentId::from_record(existing.clone());
+                            if existing_id != agent_id {
+                                output.warning(&format!(
+                                    "An agent named '{}' already exists with a different id ({}). Creating new agent with specified id ({}).",
+                                    tmp_cfg.agent.name,
+                                    existing_id,
+                                    agent_id
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                let _created = load_or_create_agent(
+                    &tmp_cfg.agent.name,
+                    tmp_cfg.agent.model.as_ref().and_then(|m| m.model.clone()),
+                    enable_tools,
+                    &tmp_cfg,
+                    heartbeat_sender.clone(),
+                    &output,
+                )
+                .await?;
+
+                // Load the freshly created AgentRecord for downstream init
+                match AgentRecord::load_with_relations(&DB, &agent_id).await {
+                    Ok(Some(agent)) => Some(agent),
+                    other => {
+                        return Err(miette::miette!(
+                            "Failed to load newly created agent {}: {:?}",
+                            agent_id,
+                            other
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                output.warning(&format!(
+                    "Failed to load agent {}: {}. Creating it from config...",
+                    agent_id, e
+                ));
+
+                // Choose a base agent config: prefer config_path, then inline, otherwise minimal
+                let mut agent_cfg = if let Some(config_path) = &member.config_path {
+                    match pattern_core::config::AgentConfig::load_from_file(config_path).await {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            output.warning(&format!(
+                                "Failed to load config from {}: {}. Using minimal config.",
+                                config_path.display(),
+                                e
+                            ));
+                            pattern_core::config::AgentConfig {
+                                id: None,
+                                name: member.name.clone(),
+                                system_prompt: None,
+                                system_prompt_path: None,
+                                persona: None,
+                                persona_path: None,
+                                instructions: None,
+                                memory: Default::default(),
+                                bluesky_handle: main_config
+                                    .and_then(|cfg| cfg.agent.bluesky_handle.clone()),
+                                tool_rules: Vec::new(),
+                                tools: Vec::new(),
+                                model: None,
+                                context: None,
+                            }
+                        }
+                    }
+                } else if let Some(inline) = &member.agent_config {
+                    let mut cfg = inline.clone();
+                    if cfg.bluesky_handle.is_none() {
+                        if let Some(main_cfg) = main_config {
+                            cfg.bluesky_handle = main_cfg.agent.bluesky_handle.clone();
+                        }
+                    }
+                    cfg
+                } else {
+                    pattern_core::config::AgentConfig {
+                        id: None,
+                        name: member.name.clone(),
+                        system_prompt: None,
+                        system_prompt_path: None,
+                        persona: None,
+                        persona_path: None,
+                        instructions: None,
+                        memory: Default::default(),
+                        bluesky_handle: main_config
+                            .and_then(|cfg| cfg.agent.bluesky_handle.clone()),
+                        tool_rules: Vec::new(),
+                        tools: Vec::new(),
+                        model: None,
+                        context: None,
+                    }
+                };
+
+                // Force the desired ID into the agent config so creation uses it
+                agent_cfg.id = Some(agent_id.clone());
+
+                // Pick a model config: inline > main > default
+                let model_cfg = if let Some(m) = &agent_cfg.model {
+                    m.clone()
+                } else if let Some(main_cfg) = main_config {
+                    main_cfg.model.clone()
+                } else {
+                    pattern_core::config::ModelConfig {
+                        provider: "Gemini".to_string(),
+                        model: model_name.clone(),
+                        temperature: None,
+                        settings: Default::default(),
+                    }
+                };
+
+                // Build a temporary PatternConfig for creation
+                let tmp_cfg = PatternConfig {
+                    user: pattern_core::config::UserConfig {
+                        id: user_id.clone(),
+                        name: None,
+                        settings: Default::default(),
+                    },
+                    agent: agent_cfg,
+                    model: model_cfg,
+                    database: Default::default(),
+                    groups: vec![],
+                    bluesky: None,
+                };
+
+                // Create the agent with the specified ID
+                let _created = load_or_create_agent(
+                    &tmp_cfg.agent.name,
+                    tmp_cfg.agent.model.as_ref().and_then(|m| m.model.clone()),
+                    enable_tools,
+                    &tmp_cfg,
+                    heartbeat_sender.clone(),
+                    &output,
+                )
+                .await?;
+
+                // Load the freshly created AgentRecord for downstream init
+                match AgentRecord::load_with_relations(&DB, &agent_id).await {
+                    Ok(Some(agent)) => Some(agent),
+                    other => {
+                        return Err(miette::miette!(
+                            "Failed to load newly created agent {}: {:?}",
+                            agent_id,
+                            other
+                        ));
+                    }
+                }
+            }
+        };
+
+        let mut agent_record = match agent_record {
+            Some(a) => a,
+            None => return Err(miette::miette!("Agent {} could not be created", agent_id)),
         };
 
         // Load memories and messages
@@ -1267,6 +1564,7 @@ pub async fn load_or_create_agent_from_member(
             enable_tools,
             &config,
             heartbeat_sender,
+            &output,
         )
         .await;
     }
@@ -1331,6 +1629,7 @@ pub async fn load_or_create_agent_from_member(
             enable_tools,
             &config,
             heartbeat_sender,
+            &output,
         )
         .await;
     }

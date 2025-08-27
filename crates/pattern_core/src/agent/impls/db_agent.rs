@@ -4291,22 +4291,26 @@ where
             metadata.last_active = chrono::Utc::now();
         }
 
-        // Persist the state update in background
+        // Persist only the last_active timestamp. The 'state' field is no longer stored on AgentRecord.
         let db = self.db.clone();
         let agent_id = {
             let context = self.context.read().await;
             context.handle.agent_id.clone()
         };
 
-        let _ = db
-            .query("UPDATE agent SET state = $state, last_active = $last_active WHERE id = $id")
-            .bind(("id", surrealdb::RecordId::from(&agent_id)))
-            .bind(("state", serde_json::to_value(&state).unwrap()))
-            .bind(("last_active", surrealdb::Datetime::from(chrono::Utc::now())))
+        use surrealdb::opt::PatchOp;
+        // Use SurrealDB's own Value type rather than serde_json::Value
+        let _: Option<surrealdb::sql::Value> = db
+            .update(surrealdb::RecordId::from(&agent_id))
+            .patch(PatchOp::replace(
+                "/last_active",
+                surrealdb::Datetime::from(chrono::Utc::now()),
+            ))
             .await
-            .inspect_err(|e| {
-                crate::log_error!("Failed to persist agent state update", e);
-            });
+            .map_err(|e| {
+                crate::log_error!("Failed to persist agent last_active update", e);
+                crate::CoreError::from(crate::db::DatabaseError::QueryFailed(e))
+            })?;
 
         Ok(())
     }

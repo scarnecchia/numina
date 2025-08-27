@@ -5,7 +5,7 @@ use crate::{
     atproto_identity::{AtprotoAuthState, AtprotoIdentity},
     db::{DatabaseError, DbEntity},
     error::{CoreError, Result},
-    id::UserId,
+    id::{IdType, UserId},
 };
 use surrealdb::{Connection, RecordId, Surreal};
 use tracing::{debug, info};
@@ -189,7 +189,7 @@ pub async fn delete_atproto_identity<C: Connection>(
 
     // Delete the identity
     let _: Option<<AtprotoIdentity as DbEntity>::DbModel> = db
-        .delete(("atproto_identity", identity.id.to_string()))
+        .delete(("atproto_identity", identity.id.to_key()))
         .await
         .map_err(DatabaseError::QueryFailed)?;
 

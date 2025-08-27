@@ -91,6 +91,13 @@ pub fn get_tracing_writer() -> Option<TracingWriter> {
     TRACING_WRITER.lock().ok()?.clone()
 }
 
+/// Get the currently configured SharedWriter (if any)
+pub fn get_shared_writer() -> Option<SharedWriter> {
+    let guard = TRACING_WRITER.lock().ok()?;
+    let tw = guard.as_ref()?;
+    tw.writer.clone()
+}
+
 /// Implement MakeWriter for TracingWriter
 impl<'a> MakeWriter<'a> for TracingWriter {
     type Writer = TracingWriter;
