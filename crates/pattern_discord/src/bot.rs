@@ -124,10 +124,10 @@ impl DiscordBot {
         let public_key = std::env::var("PUBLIC_KEY").ok();
 
         if let Some(ref id) = app_id {
-            info!("Discord App ID: {}", id);
+            debug!("Discord App ID: {}", id);
         }
         if public_key.is_some() {
-            info!("Discord Public Key: configured");
+            debug!("Discord Public Key: configured");
         }
 
         Self {
@@ -179,11 +179,8 @@ impl DiscordBot {
 #[async_trait]
 impl EventHandler for DiscordBot {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        info!("{} is connected!", ready.user.name);
-        info!(
-            "Bot user ID: {} (set DISCORD_USER_ID={} to ignore own messages)",
-            ready.user.id, ready.user.id
-        );
+        debug!("{} is connected!", ready.user.name);
+        debug!("Bot user ID: {}", ready.user.id);
 
         // Register slash commands using the new comprehensive implementations
         let commands = crate::slash_commands::create_commands();
@@ -191,7 +188,7 @@ impl EventHandler for DiscordBot {
         for command in commands {
             match Command::create_global_command(&ctx.http, command).await {
                 Ok(cmd) => {
-                    info!("Registered command: {}", cmd.name);
+                    debug!("Registered command: {}", cmd.name);
                 }
                 Err(e) => {
                     error!("Failed to register command: {}", e);
@@ -389,7 +386,7 @@ impl EventHandler for DiscordBot {
         }
 
         // Log reaction for debugging
-        info!(
+        debug!(
             "Reaction added: {} on message {} by user {:?}",
             reaction.emoji, reaction.message_id, reaction.user_id
         );
@@ -400,14 +397,14 @@ impl EventHandler for DiscordBot {
             .get_message(reaction.channel_id, reaction.message_id)
             .await
         {
-            info!(
+            debug!(
                 "Retrieved message for reaction - author: {}, bot check starting",
                 msg.author.name
             );
 
             // Check if the message was from our bot
             if let Ok(current_user) = ctx.http.get_current_user().await {
-                info!(
+                debug!(
                     "Current bot user: {}, message author: {}",
                     current_user.name, msg.author.name
                 );

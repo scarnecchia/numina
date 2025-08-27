@@ -376,7 +376,7 @@ impl MessageBatch {
                 msg = Some(self.insert_tool_response_at(pos, response));
                 resp_pos = pos + 1;
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     "Received tool response with call_id {} but no matching tool call found in batch",
                     response.call_id
                 );
@@ -466,7 +466,7 @@ impl MessageBatch {
         } else {
             // No matching tool call found - this is an error condition
             // Log it but don't add an unpaired response
-            tracing::warn!(
+            tracing::debug!(
                 "Received tool response with call_id {} but no matching tool call found in batch",
                 response.call_id
             );

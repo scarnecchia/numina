@@ -214,6 +214,7 @@ impl ThreadContext {
             if root.uri != main_post.uri && !is_same_as_parent {
                 // Show full root post since it's different from parent
                 root.append_as_root(buf, agent_did, "  ");
+                buf.push_str("\n------------------\n...\n------------------\n\n");
             }
         }
 
