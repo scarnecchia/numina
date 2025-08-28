@@ -53,7 +53,7 @@ enum Commands {
     /// Interactive chat with agents
     Chat {
         /// Agent name to chat with
-        #[arg(long, default_value = "Pattern", conflicts_with = "group")]
+        #[arg(long, default_value = "Lasa", conflicts_with = "group")]
         agent: String,
 
         /// Group name to chat with

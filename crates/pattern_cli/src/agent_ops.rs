@@ -722,7 +722,7 @@ pub async fn register_data_sources_with_target<M, E>(
     let config = config.clone();
 
     // hardcoding so that only pattern gets messages initially
-    if agent.name() == "Pattern" {
+    if agent.name() == "Lasa" {
         tracing::info!("Setting up Bluesky monitoring for Pattern agent");
         tokio::spawn(async move {
             tracing::info!("Inside Bluesky setup spawn for Pattern agent");

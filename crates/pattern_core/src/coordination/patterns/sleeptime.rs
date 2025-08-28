@@ -396,7 +396,7 @@ impl SleeptimeManager {
         let now = chrono::Local::now();
 
         let prompt = match agent_name {
-            "Pattern" => {
+            "Lasa" => {
                 "\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis. Self-check for reflexive validation in past interactions and correct if required.\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Entropy" => {
@@ -405,13 +405,13 @@ impl SleeptimeManager {
             "Flux" => {
                 "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
-            "Archive" => {
+            "Chronicler" => {
                 "\n\nReview memory coherence and pattern recognition. Any important context that needs preservation? Patterns across conversations that should be noted?\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             "Momentum" => {
                 "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
-            "Anchor" => {
+            "Guardian" => {
                 "\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?  Self-check for reflexive validation in past interactions and correct constellation members or your partner if required.\n\nProvide brief status updates, or message the facet or partner if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
             _ => {

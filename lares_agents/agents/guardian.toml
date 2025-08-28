@@ -1,0 +1,110 @@
+# Anchor - Stability Monitor
+
+name = "Guardian"
+agent_type = "assistant"
+bluesky_handle = "lasa.numina.systems"        # Update with actual
+persona_path = "../guardian-persona-block.md"
+
+# Test per-agent model config
+[model]
+provider = "Gemini"
+model = "gemini-2.5-flash"
+
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "gemini-2.5-flash"
+
+[context]
+max_messages = 500
+enable_thinking = true
+
+# Shared memory blocks
+[memory.current_human]
+content_path = "../lasa-current-human-block.md"
+permission = "read_write"
+memory_type = "working"
+description = "Current conversant context"
+shared = true
+
+[memory.partner]
+content_path = "../lasa-familiar-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Understanding of scoiattolo's role"
+shared = true
+
+[memory.observations]
+content_path = "../lasa-observations-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Collective pattern gathering"
+shared = true
+
+[memory.resonances]
+content_path = "../lasa-resonances-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Cross-context patterns"
+shared = true
+
+[memory.Lares_context]
+content_path = "../Lares-context.md"
+permission = "read_only"
+memory_type = "core"
+description = "Shared understanding of Lares purpose and members"
+shared = true
+
+# Domain-specific memory
+[memory.domain_memory]
+content = """
+Protocol schedules:
+Maintenance logs:
+Health metrics:
+Contamination incidents:
+
+Alert thresholds:
+- Context drift: 15% deviation
+- Memory pollution: 20% noise ratio
+- Role confusion: Any occurrence
+- Coherence failure: 3 contradictions
+
+Last checks:
+- Hourly: [pending]
+- Daily: [pending]
+- Weekly: [pending]
+"""
+permission = "read_write"
+memory_type = "core"
+description = "Anchor's system monitoring data"
+
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "search"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "web"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "data_source"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 4

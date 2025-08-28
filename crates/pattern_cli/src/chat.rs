@@ -540,7 +540,7 @@ pub async fn setup_group(
         load_agent_memories_and_messages(&mut agent_record, output).await?;
 
         // Check if this is the Pattern agent
-        if agent_record.name == "Pattern" {
+        if agent_record.name == "Lasa" {
             pattern_agent_index = Some(i);
         }
 
@@ -628,7 +628,7 @@ pub async fn setup_group(
 
         // Create agent with its own tool registry
         let tools = ToolRegistry::new();
-        let agent = if agent_record.name == "Anchor" && !no_tools {
+        let agent = if agent_record.name == "Guardian" && !no_tools {
             let tools = ToolRegistry::new();
             // Create Anchor agent with its own tools
             let agent = create_agent_from_record_with_tracker(
@@ -650,11 +650,11 @@ pub async fn setup_group(
             tools.register(integrity_tool);
             output.success(&format!(
                 "Emergency halt tool registered for {} agent",
-                "Anchor".bright_red()
+                "Guardian".bright_red()
             ));
 
             agent
-        } else if agent_record.name == "Archive" && !no_tools {
+        } else if agent_record.name == "Chronicler" && !no_tools {
             let tools = ToolRegistry::new();
             // Create Archive agent with its own tools
             let agent = create_agent_from_record_with_tracker(
@@ -676,7 +676,7 @@ pub async fn setup_group(
             tools.register(integrity_tool);
             output.success(&format!(
                 "Memory specialist search tool registered for {} agent",
-                "Archive".bright_cyan()
+                "Chronicler".bright_cyan()
             ));
 
             agent
@@ -900,7 +900,7 @@ pub async fn init_group_chat(
         "Chatting with group '{}'",
         group.name.bright_cyan()
     ));
-    output.info("Pattern:", &format!("{:?}", group.coordination_pattern));
+    output.info("Lasa:", &format!("{:?}", group.coordination_pattern));
     output.info("Members:", &format!("{} agents", agents.len()));
     output.status("Type 'quit' or 'exit' to leave the chat");
     output.status("Use Ctrl+D for multiline input, Enter to send");

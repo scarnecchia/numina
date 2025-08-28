@@ -68,11 +68,11 @@ impl MessageEndpoint for CliEndpoint {
             // Extract the agent name from the origin if it's an agent
             match origin {
                 MessageOrigin::Agent { name, .. } => name.clone(),
-                _ => "Pattern".to_string(),
+                _ => "Lasa".to_string(),
             }
         } else {
             self.output.status("📤 Sending message to user:");
-            "Pattern".to_string()
+            "Lasa".to_string()
         };
 
         // Add a tiny delay to let reasoning chunks finish printing

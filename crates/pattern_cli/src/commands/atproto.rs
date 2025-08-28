@@ -137,7 +137,7 @@ pub async fn app_password_login(
     // We would need to make a separate getProfile call to get it
 
     output.success("─────────────────────────────────────────────");
-    output.success("You can now use your Bluesky account with Pattern!");
+    output.success("You can now use your Bluesky account with Lasa!");
 
     Ok(())
 }

@@ -111,7 +111,7 @@ pub async fn create(
 
     output.success(&format!("Created group '{}'", created.name));
     output.kv("ID", &created.id.to_string());
-    output.kv("Pattern", &format_pattern(&created.coordination_pattern));
+    output.kv("Lasa", &format_pattern(&created.coordination_pattern));
 
     output.info(
         "Next:",
@@ -237,7 +237,7 @@ pub async fn status(name: &str, config: &PatternConfig) -> Result<()> {
     // Basic info
     output.kv("ID", &group.id.to_string());
     output.kv("Description", &group.description);
-    output.kv("Pattern", &format_pattern(&group.coordination_pattern));
+    output.kv("Lasa", &format_pattern(&group.coordination_pattern));
     output.kv("Active", if group.is_active { "yes" } else { "no" });
     output.kv(
         "Created",
