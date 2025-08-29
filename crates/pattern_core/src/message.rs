@@ -2220,7 +2220,7 @@ impl Message {
     ///
     /// Uses the approximation of ~4 characters per token
     pub fn estimate_tokens(&self) -> usize {
-        self.display_content().len() / 4
+        self.display_content().len() / 5
     }
 }
 

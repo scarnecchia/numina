@@ -188,7 +188,7 @@ impl Default for ModelAdjustments {
             native_thinking: false,
             use_xml_tags: true,
             max_context_tokens: Some(128_000),
-            token_multiplier: 3.0, // Rough estimate: 1 token ≈ 0.75 words
+            token_multiplier: 1.0, // Rough estimate: 1 token ≈ 0.75 words
         }
     }
 }
@@ -721,16 +721,15 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
     fn estimate_tokens(&self, system_prompt: &str, messages: &[Message]) -> Option<usize> {
         if let Some(max_tokens) = self.config.model_adjustments.max_context_tokens {
             // Very rough estimation
-            let system_chars = system_prompt.chars().count();
-            let message_chars: usize = messages
+            let system_tokens = system_prompt.chars().count() / 5;
+            let message_tokens: usize = messages
                 .iter()
-                .map(|m| m.estimate_tokens() * 4) // Convert back to rough char count
+                .map(|m| m.estimate_tokens()) // Convert back to rough char count
                 .sum();
 
-            let total_chars = system_chars + message_chars;
-            let estimated_tokens = (total_chars as f32 / 4.0
-                * self.config.model_adjustments.token_multiplier)
-                as usize;
+            let total_tokens = system_tokens + message_tokens;
+            let estimated_tokens =
+                (total_tokens as f32 * self.config.model_adjustments.token_multiplier) as usize;
 
             Some(estimated_tokens.min(max_tokens))
         } else {
