@@ -1317,8 +1317,7 @@ pub async fn list_groups_for_user<C: Connection>(
     conn: &Surreal<C>,
     _user_id: &UserId,
 ) -> Result<Vec<AgentGroup>> {
-    // For now, just return all groups
-    // TODO: Add constellation filtering once we fix the relation queries
+    // For now, list all groups (user filtering TBD) and load members explicitly
     let query = r#"
         SELECT * FROM group
     "#;
@@ -1331,12 +1330,51 @@ pub async fn list_groups_for_user<C: Connection>(
     let db_groups: Vec<<AgentGroup as DbEntity>::DbModel> =
         result.take(0).map_err(|e| DatabaseError::QueryFailed(e))?;
 
-    let groups: Result<Vec<_>> = db_groups
-        .into_iter()
-        .map(|db_model| AgentGroup::from_db_model(db_model).map_err(DatabaseError::from))
-        .collect();
+    // Convert DB models and then load members for each group
+    let mut groups: Vec<AgentGroup> = Vec::new();
+    for db_model in db_groups {
+        let mut group = AgentGroup::from_db_model(db_model)?;
 
-    groups
+        // Load memberships for this group
+        let query = r#"
+            SELECT * FROM group_members
+            WHERE out = $group_id
+            ORDER BY joined_at ASC
+        "#;
+
+        let mut member_result = conn
+            .query(query)
+            .bind(("group_id", surrealdb::RecordId::from(&group.id)))
+            .await
+            .map_err(|e| DatabaseError::from(e).with_context(query, "group_members"))?;
+
+        let membership_db_models: Vec<<GroupMembership as DbEntity>::DbModel> =
+            member_result.take(0).map_err(DatabaseError::QueryFailed)?;
+
+        let memberships: Vec<GroupMembership> = membership_db_models
+            .into_iter()
+            .map(|db_model| GroupMembership::from_db_model(db_model).map_err(DatabaseError::from))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Load agents for each membership
+        let mut members = Vec::new();
+        for membership in memberships {
+            if let Some(agent) = AgentRecord::load_with_relations(conn, &membership.in_id).await? {
+                members.push((agent, membership));
+            } else {
+                tracing::warn!(
+                    "Agent {:?} not found for group membership in group {:?}",
+                    membership.in_id,
+                    group.id
+                );
+            }
+        }
+
+        group.members = members;
+        groups.push(group);
+    }
+
+    Ok(groups)
 }
 
 /// Add an agent to a group

@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use crate::context::AgentHandle;
 use crate::db::DbEntity;
 use crate::id::RelationId;
+use crate::memory::MemoryType;
 use crate::message::{
     BatchType, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
 };
@@ -135,7 +136,10 @@ where
                 }; // Guard is dropped here!
 
                 if should_remove {
-                    handle.memory.remove_block(label);
+                    if let Some(mut block) = handle.memory.get_block_mut(label) {
+                        block.memory_type = MemoryType::Archival;
+                    }
+
                     tracing::debug!("🗑️ Removed temporary memory block: {}", label);
                 }
             }

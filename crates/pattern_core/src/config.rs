@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 
 use serde::{Deserialize, Serialize};
 
@@ -690,6 +691,16 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
         }
     })?;
 
+    // Check whether the file explicitly provided a user.id key
+    let parsed_value: toml::Value =
+        toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
+            config_path: path.display().to_string(),
+            field: "content".to_string(),
+            expected: "valid TOML configuration".to_string(),
+            cause: crate::error::ConfigError::TomlParse(e.to_string()),
+        })?;
+    let user_id_explicit = parsed_value.get("user").and_then(|u| u.get("id")).is_some();
+
     let mut config: PatternConfig =
         toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
             config_path: path.display().to_string(),
@@ -716,6 +727,11 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
             }
         }
     }
+
+    // Ensure a stable user id:
+    // - If the config explicitly specified a user.id, sync the stable-id file to it.
+    // - If not specified, load (or create) a stable id and set it on the config, then persist the config back.
+    ensure_stable_user_id(&mut config, Some(path), user_id_explicit).await?;
 
     Ok(config)
 }
@@ -907,8 +923,14 @@ pub async fn load_config_from_standard_locations() -> Result<PatternConfig> {
         }
     }
 
-    // No config found, return default
-    Ok(PatternConfig::default())
+    // No config found, create default with a stable user id and save it
+    let mut config = PatternConfig::default();
+    // Provide no explicit path; ensure will save to standard location via PatternConfig::save()
+    ensure_stable_user_id(&mut config, None, false).await?;
+    // Persist a new config file so the user id remains stable across runs
+    config.save().await?;
+
+    Ok(config)
 }
 
 impl PatternConfig {
@@ -967,6 +989,104 @@ impl PatternConfig {
     pub fn set_agent_tool_rules(&mut self, rules: &[ToolRule]) {
         self.agent.set_tool_rules(rules);
     }
+}
+
+/// Determine the standard base configuration directory (usually ~/.config/pattern)
+fn standard_config_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pattern")
+}
+
+/// Path to the stable user-id file used as a fallback when no user.id is specified in config
+fn stable_user_id_path() -> PathBuf {
+    standard_config_dir().join("user_id")
+}
+
+/// Ensure `config.user.id` is stable across runs by syncing with a file in the config directory.
+/// - If `user_id_explicit` is true (config file had user.id), the stable file is set to this value.
+/// - If false, we load from the stable file if present; otherwise, generate, store, and set it.
+/// If `config_path_opt` is provided and user id was not explicit, we also persist the updated config back to disk.
+async fn ensure_stable_user_id(
+    config: &mut PatternConfig,
+    config_path_opt: Option<&Path>,
+    user_id_explicit: bool,
+) -> Result<()> {
+    let path = stable_user_id_path();
+
+    // Make sure the directory exists
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            crate::CoreError::ConfigurationError {
+                config_path: parent.display().to_string(),
+                field: "directory".to_string(),
+                expected: "writable directory".to_string(),
+                cause: crate::error::ConfigError::Io(e.to_string()),
+            }
+        })?;
+    }
+
+    if user_id_explicit {
+        // Sync stable file to the config's user id
+        let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
+            crate::CoreError::ConfigurationError {
+                config_path: path.display().to_string(),
+                field: "user_id".to_string(),
+                expected: "writable file".to_string(),
+                cause: crate::error::ConfigError::Io(e.to_string()),
+            }
+        })?;
+        file.write_all(config.user.id.0.as_bytes())
+            .await
+            .map_err(|e| crate::CoreError::ConfigurationError {
+                config_path: path.display().to_string(),
+                field: "user_id".to_string(),
+                expected: "writable file".to_string(),
+                cause: crate::error::ConfigError::Io(e.to_string()),
+            })?;
+        return Ok(());
+    }
+
+    // Not explicit: try to read existing stable id
+    let stable = tokio::fs::read_to_string(&path)
+        .await
+        .ok()
+        .map(|s| s.trim().to_string());
+    if let Some(stable_id) = stable {
+        config.user.id = crate::id::UserId(stable_id);
+        // If we loaded from a config file path, write back to persist the id
+        if let Some(cfg_path) = config_path_opt {
+            let _ = save_config(config, cfg_path).await; // best-effort
+        }
+        return Ok(());
+    }
+
+    // No stable id yet: generate one and store it
+    let generated = config.user.id.clone();
+    let mut file =
+        tokio::fs::File::create(&path)
+            .await
+            .map_err(|e| crate::CoreError::ConfigurationError {
+                config_path: path.display().to_string(),
+                field: "user_id".to_string(),
+                expected: "writable file".to_string(),
+                cause: crate::error::ConfigError::Io(e.to_string()),
+            })?;
+    file.write_all(generated.0.as_bytes()).await.map_err(|e| {
+        crate::CoreError::ConfigurationError {
+            config_path: path.display().to_string(),
+            field: "user_id".to_string(),
+            expected: "writable file".to_string(),
+            cause: crate::error::ConfigError::Io(e.to_string()),
+        }
+    })?;
+
+    // Persist id into config file too if we loaded from a path
+    if let Some(cfg_path) = config_path_opt {
+        let _ = save_config(config, cfg_path).await; // best-effort
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
