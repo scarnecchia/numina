@@ -25,7 +25,10 @@ use pattern_core::{
     tool::builtin::DataSourceTool,
 };
 #[cfg(feature = "discord")]
-use pattern_discord::{bot::DiscordBot, endpoints::DiscordEndpoint};
+use pattern_discord::{
+    bot::{DiscordBot, DiscordBotConfig, DiscordEventHandler},
+    endpoints::DiscordEndpoint,
+};
 #[cfg(feature = "discord")]
 use std::sync::Arc;
 
@@ -274,8 +277,14 @@ pub async fn run_discord_bot_with_group(
         // Don't create Arc yet, we'll update it with bot reference
         let mut discord_endpoint_base = discord_endpoint;
 
+        // Create Discord bot config
+        let config = DiscordBotConfig::new(
+            std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
+        );
+
         // Create the Discord bot in CLI mode (wrapped in Arc for sharing)
         let bot = Arc::new(DiscordBot::new_cli_mode(
+            config,
             agents_with_membership.clone(),
             group.clone(),
             pattern_manager.clone(),
@@ -309,7 +318,7 @@ pub async fn run_discord_bot_with_group(
 
         // Extract bot from Arc - we need to consume it for event_handler
         // But we already gave it to the endpoint, so we need to clone the Arc's contents
-        let bot_for_handler = Arc::try_unwrap(bot.clone()).unwrap_or_else(|arc| (*arc).clone());
+        let bot_for_handler = DiscordEventHandler::new(bot.clone());
         let mut client_builder =
             Client::builder(&discord_token, intents).event_handler(bot_for_handler);
 
@@ -323,8 +332,6 @@ pub async fn run_discord_bot_with_group(
             }
         }
 
-        let mut client = client_builder.await.into_diagnostic()?;
-
         // If CLI is enabled, spawn Discord bot in background and run CLI in foreground
         if enable_cli {
             output.status("Starting Discord bot in background...");
@@ -332,6 +339,7 @@ pub async fn run_discord_bot_with_group(
 
             // Spawn Discord bot in background
             let discord_handle = tokio::spawn(async move {
+                let mut client = client_builder.await.unwrap();
                 if let Err(why) = client.start().await {
                     tracing::error!("Discord bot error: {:?}", why);
                 }
@@ -357,6 +365,7 @@ pub async fn run_discord_bot_with_group(
             // This is a bit heavy-handed but ensures clean shutdown
             std::process::exit(0);
         } else {
+            let mut client = client_builder.await.into_diagnostic()?;
             // Run Discord bot in foreground (blocking)
             output.status("Discord bot starting... Press Ctrl+C to stop.");
 
