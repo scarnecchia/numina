@@ -1,11 +1,12 @@
+.DS_Store
 /target
 /result
 /result-lib
 .direnv
 .pattern_cache
 pattern.toml
-./lares.toml
-./lasa-partner-block.md
+lares_agents/lares.toml
+lares_agents/lasa-partner-block.md
 pattern-bsky.toml
 **.env
 .claude/settings.local.json
@@ -21,4 +22,3 @@ mcp-wrapper.sh
 **.json
 **.sql
 **.surql
-lares_agents/lasa-partner-block.md
