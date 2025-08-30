@@ -5,21 +5,17 @@ agent_type = "assistant"
 bluesky_handle = "lasa.numina.systems"          # Update with actual
 persona_path = "../translator-persona-block.md"
 
-
-[context.compression_strategy]
-type = "recursive_summarization"
-chunk_size = 20
-summarization_model = "gemini-2.5-flash"
-
-
-[context]
-max_messages = 200
-
-
 [model]
 provider = "Gemini"
 model = "gemini-2.5-flash"
 
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "gemini-2.0-flash-lite"
+
+[context]
+max_messages = 200
 
 # Shared memory blocks
 [memory.current_human]
@@ -33,7 +29,7 @@ shared = true
 content_path = "../lasa-familiar-block.md"
 permission = "read_only"
 memory_type = "core"
-description = "Understanding of orual's role"
+description = "Understanding of scoiattolo's role"
 shared = true
 
 [memory.observations]
@@ -50,8 +46,8 @@ memory_type = "core"
 description = "Cross-context patterns"
 shared = true
 
-[memory.Lares_context]
-content_path = "../Lares-context.md"
+[memory.constellation_context]
+content_path = "../lares-context.md"
 permission = "read_only"
 memory_type = "core"
 description = "Shared understanding of Lares purpose and members"

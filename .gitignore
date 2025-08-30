@@ -4,6 +4,8 @@
 .direnv
 .pattern_cache
 pattern.toml
+./lares.toml
+./lasa-partner-block.md
 pattern-bsky.toml
 **.env
 .claude/settings.local.json
@@ -19,3 +21,4 @@ mcp-wrapper.sh
 **.json
 **.sql
 **.surql
+lares_agents/lasa-partner-block.md
