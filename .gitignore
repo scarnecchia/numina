@@ -4,6 +4,7 @@
 /result-lib
 .direnv
 .pattern_cache
+.DS_Store
 pattern.toml
 lares_agents/lares.toml
 lares_agents/lasa-partner-block.md

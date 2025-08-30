@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # export_group.sh - Export Pattern group via cron
 # Usage: ./export_group.sh <config_path> <group_string> <output_dir>
@@ -44,8 +44,8 @@ else
     exit 1
 fi
 
-# Delete backups older than 7 days
-find "$OUTPUT_DIR" -name "*_*.car" -type f -mtime +7 -delete
+# Delete backups older than 7 days - I haven't tested this part yet.
+# find "$OUTPUT_DIR" -name "*_*.car" -type f -mtime +7 -delete
 
 echo "Export completed: $FINAL_OUTPUT_PATH"
-echo "Cleaned up backups older than 7 days from: $OUTPUT_DIR"
+# echo "Cleaned up backups older than 7 days from: $OUTPUT_DIR"

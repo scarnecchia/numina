@@ -1,9 +1,8 @@
 use serenity::{
     async_trait,
-    builder::{CreateInteractionResponse, CreateInteractionResponseMessage},
     client::{Context, EventHandler},
     model::{
-        application::{Command, CommandInteraction, Interaction},
+        application::{Command, Interaction},
         channel::Message,
         gateway::Ready,
         id::ChannelId,
@@ -16,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 use pattern_core::message::Message as PatternMessage;
 use pattern_core::{
-    Agent, AgentGroup, UserId,
+    Agent, AgentGroup,
     coordination::groups::{AgentWithMembership, GroupManager},
 };
 
@@ -55,18 +54,9 @@ pub struct DiscordBot {
     group: Option<AgentGroup>,
     /// Group manager for CLI mode
     group_manager: Option<Arc<dyn GroupManager>>,
-    /// Hardcoded user ID for CLI mode
-    #[allow(dead_code)]
-    cli_user_id: UserId,
-    /// Default channel for responses (when DISCORD_CHANNEL_ID is set)
-    default_channel: Option<ChannelId>,
-    /// Application ID
-    #[allow(dead_code)]
-    app_id: Option<String>,
 
-    /// Public key for interactions
-    #[allow(dead_code)]
-    public_key: Option<String>,
+    /// Bot configuration
+    config: DiscordBotConfig,
 
     /// Buffer for reactions to batch process
     reaction_buffer: Arc<Mutex<VecDeque<BufferedReaction>>>,
@@ -98,12 +88,18 @@ pub struct DiscordBotConfig {
 
 impl DiscordBotConfig {
     pub fn new(token: impl Into<String>) -> Self {
+        let admin_users = std::env::var("DISCORD_DEFAULT_DM_USER")
+            .ok()
+            .map(|id| vec![id]);
+
+        let allowed_channels = std::env::var("DISCORD_CHANNEL_ID").ok().map(|id| vec![id]);
+
         Self {
             token: token.into(),
             prefix: "!".to_string(),
             intents: serenity::all::GatewayIntents::default(),
-            allowed_channels: None,
-            admin_users: None,
+            allowed_channels,
+            admin_users,
         }
     }
 }
@@ -111,34 +107,17 @@ impl DiscordBotConfig {
 impl DiscordBot {
     /// Create a new Discord bot for CLI mode
     pub fn new_cli_mode(
+        config: DiscordBotConfig,
         agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
         group: AgentGroup,
         group_manager: Arc<dyn GroupManager>,
     ) -> Self {
-        let default_channel = std::env::var("DISCORD_CHANNEL_ID")
-            .ok()
-            .and_then(|id| id.parse::<u64>().ok())
-            .map(ChannelId::new);
-
-        let app_id = std::env::var("APP_ID").ok();
-        let public_key = std::env::var("PUBLIC_KEY").ok();
-
-        if let Some(ref id) = app_id {
-            debug!("Discord App ID: {}", id);
-        }
-        if public_key.is_some() {
-            debug!("Discord Public Key: configured");
-        }
-
         Self {
             cli_mode: true,
             agents_with_membership: Some(agents_with_membership),
             group: Some(group),
             group_manager: Some(group_manager),
-            cli_user_id: UserId("188aa44f0c9f458e8adb4232332ce8fe".to_string()), // Fixed user ID for CLI mode
-            default_channel,
-            app_id,
-            public_key,
+            config,
             reaction_buffer: Arc::new(Mutex::new(VecDeque::new())),
             is_processing: Arc::new(Mutex::new(false)),
             last_message_time: Arc::new(Mutex::new(std::time::Instant::now())),
@@ -151,19 +130,13 @@ impl DiscordBot {
     }
 
     /// Create a new Discord bot for full mode (with database)
-    pub fn new_full_mode() -> Self {
-        let app_id = std::env::var("APP_ID").ok();
-        let public_key = std::env::var("PUBLIC_KEY").ok();
-
+    pub fn new_full_mode(config: DiscordBotConfig) -> Self {
         Self {
             cli_mode: false,
             agents_with_membership: None,
             group: None,
             group_manager: None,
-            cli_user_id: UserId::nil(),
-            default_channel: None,
-            app_id,
-            public_key,
+            config,
             reaction_buffer: Arc::new(Mutex::new(VecDeque::new())),
             is_processing: Arc::new(Mutex::new(false)),
             last_message_time: Arc::new(Mutex::new(std::time::Instant::now())),
@@ -176,8 +149,19 @@ impl DiscordBot {
     }
 }
 
+/// Event handler wrapper that holds a reference to the bot
+pub struct DiscordEventHandler {
+    bot: Arc<DiscordBot>,
+}
+
+impl DiscordEventHandler {
+    pub fn new(bot: Arc<DiscordBot>) -> Self {
+        Self { bot }
+    }
+}
+
 #[async_trait]
-impl EventHandler for DiscordBot {
+impl EventHandler for DiscordEventHandler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         debug!("{} is connected!", ready.user.name);
         debug!("Bot user ID: {}", ready.user.id);
@@ -234,9 +218,9 @@ impl EventHandler for DiscordBot {
             let is_mention = msg.mentions_me(&ctx.http).await.unwrap_or(false);
 
             // In CLI mode with a configured channel, respond to all messages in that channel
-            if self.cli_mode {
-                if let Some(channel) = self.default_channel {
-                    if msg.channel_id == channel {
+            if self.bot.cli_mode {
+                if let Some(ref allowed) = self.bot.config.allowed_channels {
+                    if allowed.contains(&msg.channel_id.get().to_string()) {
                         true
                     } else {
                         is_dm || is_mention
@@ -255,11 +239,11 @@ impl EventHandler for DiscordBot {
         }
 
         // Check if we're currently processing a message
-        let is_busy = *self.is_processing.lock().await;
+        let is_busy = *self.bot.is_processing.lock().await;
 
         if is_busy {
             // Add to queue instead of processing immediately
-            let mut queue = self.message_queue.lock().await;
+            let mut queue = self.bot.message_queue.lock().await;
 
             // Try to merge with existing message from same user in same channel
             let mut merged = false;
@@ -353,7 +337,7 @@ impl EventHandler for DiscordBot {
             let indicator = if merged { '🔄' } else { '📥' };
             if msg.react(&ctx.http, indicator).await.is_ok() {
                 // Track this reaction so we can remove it later
-                let mut reactions = self.status_reactions.lock().await;
+                let mut reactions = self.bot.status_reactions.lock().await;
                 reactions.insert(msg.id.get(), indicator);
             }
             return;
@@ -363,7 +347,7 @@ impl EventHandler for DiscordBot {
         let _ = msg.channel_id.start_typing(&ctx.http);
 
         // Process the message
-        if let Err(e) = self.process_message(&ctx, &msg).await {
+        if let Err(e) = self.bot.process_message(&ctx, &msg).await {
             error!("Error processing message: {}", e);
             let _ = msg
                 .channel_id
@@ -411,12 +395,13 @@ impl EventHandler for DiscordBot {
 
                 if msg.author.id == current_user.id {
                     // Check if we should process reactions from this channel
-                    let should_process = if self.cli_mode {
-                        if let Some(default_chan) = self.default_channel {
-                            // Only process reactions in the configured channel or DMs
-                            reaction.channel_id == default_chan || msg.guild_id.is_none()
+                    let should_process = if self.bot.cli_mode {
+                        if let Some(ref allowed) = self.bot.config.allowed_channels {
+                            // Only process reactions in the configured channels or DMs
+                            allowed.contains(&reaction.channel_id.get().to_string())
+                                || msg.guild_id.is_none()
                         } else {
-                            // No default channel configured, only process DMs
+                            // No channels configured, only process DMs
                             msg.guild_id.is_none()
                         }
                     } else {
@@ -438,11 +423,11 @@ impl EventHandler for DiscordBot {
                     if let Some(user_id) = reaction.user_id {
                         if let Ok(user) = ctx.http.get_user(user_id).await {
                             // Check if we're currently processing
-                            let is_busy = *self.is_processing.lock().await;
+                            let is_busy = *self.bot.is_processing.lock().await;
 
                             if is_busy {
                                 // Buffer the reaction for later
-                                let mut buffer = self.reaction_buffer.lock().await;
+                                let mut buffer = self.bot.reaction_buffer.lock().await;
                                 buffer.push_back(BufferedReaction {
                                     emoji: reaction.emoji.to_string(),
                                     user_name: user.name.clone(),
@@ -479,7 +464,7 @@ impl EventHandler for DiscordBot {
                                 );
 
                                 // Route this as a Pattern message to the agents
-                                if self.cli_mode {
+                                if self.bot.cli_mode {
                                     let mut pattern_msg = PatternMessage::user(notification);
                                     pattern_msg.metadata.custom = serde_json::json!({
                                         "discord_channel_id": reaction.channel_id.get(),
@@ -493,9 +478,9 @@ impl EventHandler for DiscordBot {
                                         Some(agents_with_membership),
                                         Some(group_manager),
                                     ) = (
-                                        &self.group,
-                                        &self.agents_with_membership,
-                                        &self.group_manager,
+                                        &self.bot.group,
+                                        &self.bot.agents_with_membership,
+                                        &self.bot.group_manager,
                                     ) {
                                         info!(
                                             "Routing reaction notification through {} group",
@@ -602,14 +587,71 @@ impl EventHandler for DiscordBot {
                 command.data.name, command.user.name
             );
 
-            match command.data.name.as_str() {
-                "chat" => self.handle_chat_command(&ctx, &command).await,
-                "status" => self.handle_status_command(&ctx, &command).await,
-                "memory" => self.handle_memory_command(&ctx, &command).await,
-                "help" => self.handle_help_command(&ctx, &command).await,
+            // Get agents and group for slash command handlers
+            let agents = self.bot.agents_with_membership.as_deref();
+            let group = self.bot.group.as_ref();
+
+            let result = match command.data.name.as_str() {
+                "help" => crate::slash_commands::handle_help_command(&ctx, &command, agents).await,
+                "status" => {
+                    crate::slash_commands::handle_status_command(&ctx, &command, agents, group)
+                        .await
+                }
+                "memory" | "archival" | "context" | "search" => {
+                    // Check user authorization for sensitive commands
+                    if let Some(ref admin_users) = self.bot.config.admin_users {
+                        let user_id_str = command.user.id.get().to_string();
+                        if !admin_users.contains(&user_id_str) {
+                            let response_result = command
+                                .create_response(
+                                    &ctx.http,
+                                    serenity::builder::CreateInteractionResponse::Message(
+                                        serenity::builder::CreateInteractionResponseMessage::new()
+                                            .content("🚫 This command is not available to you.")
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            if let Err(e) = response_result {
+                                error!("Failed to send unauthorized response: {}", e);
+                            }
+                            return;
+                        }
+                    }
+
+                    // User is authorized, execute the command
+                    match command.data.name.as_str() {
+                        "memory" => {
+                            crate::slash_commands::handle_memory_command(&ctx, &command, agents)
+                                .await
+                        }
+                        "archival" => {
+                            crate::slash_commands::handle_archival_command(&ctx, &command, agents)
+                                .await
+                        }
+                        "context" => {
+                            crate::slash_commands::handle_context_command(&ctx, &command, agents)
+                                .await
+                        }
+                        "search" => {
+                            crate::slash_commands::handle_search_command(&ctx, &command, agents)
+                                .await
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                "list" => crate::slash_commands::handle_list_command(&ctx, &command).await,
                 _ => {
                     warn!("Unknown command: {}", command.data.name);
+                    Ok(())
                 }
+            };
+
+            if let Err(e) = result {
+                error!(
+                    "Failed to handle slash command '{}': {}",
+                    command.data.name, e
+                );
             }
         }
     }
@@ -1091,16 +1133,63 @@ impl DiscordBot {
                 )
             };
 
+            // Process attachments if any
+            let mut attachment_content = String::new();
+            if !msg.attachments.is_empty() {
+                for attachment in &msg.attachments {
+                    // Only process text files under 20KB
+                    if attachment.size < 20_000 {
+                        // Check if it's a text file based on extension or content type
+                        let is_text = attachment.filename.ends_with(".txt")
+                            || attachment.filename.ends_with(".md")
+                            || attachment.filename.ends_with(".json")
+                            || attachment.filename.ends_with(".yaml")
+                            || attachment.filename.ends_with(".yml")
+                            || attachment.filename.ends_with(".log")
+                            || attachment
+                                .content_type
+                                .as_ref()
+                                .map_or(false, |ct| ct.starts_with("text/"));
+
+                        if is_text {
+                            match ureq::get(&attachment.url).call() {
+                                Ok(mut response) => match response.body_mut().read_to_string() {
+                                    Ok(text) => {
+                                        attachment_content.push_str(&format!(
+                                            "\n\nAttachment '{}' ({} bytes): \n```\n{}\n```",
+                                            attachment.filename, attachment.size, text
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        debug!(
+                                            "Failed to read attachment {}: {}",
+                                            attachment.filename, e
+                                        );
+                                    }
+                                },
+                                Err(e) => {
+                                    debug!(
+                                        "Failed to fetch attachment {}: {}",
+                                        attachment.filename, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Create framing prompt that makes responding optional
             let framed_message = format!(
                 "{}\n\
-                Message: {}\n\n\
+                Message: {}{}\n\n\
                 you can respond if you have something to add, or if you're directly mentioned.
                 if you do, use send_message with target_type: \"channel\" and target_id: \"{}\" (or the channel name {}) or direct text
 
                 ",
                 discord_context,
                 resolved_content,
+                attachment_content,
                 discord_channel_id,
                 channel_name
             );
@@ -1192,8 +1281,8 @@ impl DiscordBot {
                                         // Show tool activity if we haven't sent anything yet
                                         let tool_msg = match fn_name.as_str() {
                                             "context" => "💭 Agent is accessing memory...".to_string(),
-                                            "recall" => "🔍 Agent is searching memories...".to_string(),
-                                            "search" => "🔎 Agent is searching...".to_string(),
+                                            "recall" => "🔍 Agent is accessing recall memory...".to_string(),
+                                            "search" => "🔎 Agent is searching memory/history...".to_string(),
                                             _ => format!("🔧 Agent is using {}", fn_name)
                                         };
                                         // Use channel.say() to respond in the same channel instead of DM
@@ -1325,82 +1414,10 @@ impl DiscordBot {
         }
         Ok(())
     }
-
-    /// Handle the /chat command
-    async fn handle_chat_command(&self, ctx: &Context, command: &CommandInteraction) {
-        // TODO: Implement chat command
-        if let Err(e) = command
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content("Chat command not yet implemented"),
-                ),
-            )
-            .await
-        {
-            error!("Failed to respond to chat command: {}", e);
-        }
-    }
-
-    /// Handle the /status command
-    async fn handle_status_command(&self, ctx: &Context, command: &CommandInteraction) {
-        // TODO: Implement status command
-        if let Err(e) = command
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content("Status command not yet implemented"),
-                ),
-            )
-            .await
-        {
-            error!("Failed to respond to status command: {}", e);
-        }
-    }
-
-    /// Handle the /memory command
-    async fn handle_memory_command(&self, ctx: &Context, command: &CommandInteraction) {
-        // TODO: Implement memory command
-        if let Err(e) = command
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content("Memory command not yet implemented"),
-                ),
-            )
-            .await
-        {
-            error!("Failed to respond to memory command: {}", e);
-        }
-    }
-
-    /// Handle the /help command
-    async fn handle_help_command(&self, ctx: &Context, command: &CommandInteraction) {
-        let help_text = "**Pattern Discord Bot Commands**\n\
-            `/chat` - Chat with Pattern agents\n\
-            `/status` - Check bot and agent status\n\
-            `/memory` - View memory blocks\n\
-            `/help` - Show this help message";
-
-        if let Err(e) = command
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new().content(help_text),
-                ),
-            )
-            .await
-        {
-            error!("Failed to respond to help command: {}", e);
-        }
-    }
 }
 
 /// Split a message into chunks that fit Discord's message length limit
-fn split_message(content: &str, max_length: usize) -> Vec<String> {
+pub fn split_message(content: &str, max_length: usize) -> Vec<String> {
     if content.len() <= max_length {
         return vec![content.to_string()];
     }
