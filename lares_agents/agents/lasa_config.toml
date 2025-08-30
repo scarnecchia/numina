@@ -34,7 +34,7 @@ memory_type = "core"
 description = "Cross-context lasas"
 shared = true
 
-[memory.lares_state]
+[memory.constellation_state]
 content = """
 Active facets:
 - Chronicler: memory and narrative keeper
