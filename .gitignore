@@ -3,6 +3,7 @@
 /result-lib
 .direnv
 .pattern_cache
+.DS_Store
 pattern.toml
 pattern-bsky.toml
 **.env
