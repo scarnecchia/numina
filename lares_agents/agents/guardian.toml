@@ -49,7 +49,7 @@ description = "Cross-context patterns"
 shared = true
 
 [memory.Lares_context]
-content_path = "../Lares-context.md"
+content_path = "../lares-context.md"
 permission = "read_only"
 memory_type = "core"
 description = "Shared understanding of Lares purpose and members"
@@ -76,7 +76,7 @@ Last checks:
 """
 permission = "read_write"
 memory_type = "core"
-description = "Anchor's system monitoring data"
+description = "Guardian's system monitoring data"
 
 
 [[agent.tool_rules]]
