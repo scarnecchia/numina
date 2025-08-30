@@ -148,6 +148,22 @@ where
         self.processing_queue.as_mut()?.pop_front()
     }
 
+    /// Requeue an item to the front of the processing queue (used on backpressure)
+    pub fn requeue_front_for_processing(&mut self, event: StreamEvent<T, C>) -> bool {
+        if let Some(queue) = &mut self.processing_queue {
+            // If we're at capacity, drop the oldest from the back to make room
+            if let Some(max_size) = self.max_queue_size {
+                if queue.len() >= max_size {
+                    queue.pop_back();
+                }
+            }
+            queue.push_front(event);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get the current queue size
     pub fn queue_len(&self) -> usize {
         self.processing_queue.as_ref().map(|q| q.len()).unwrap_or(0)

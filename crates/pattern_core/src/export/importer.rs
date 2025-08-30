@@ -31,7 +31,7 @@ fn reconstruct_agent_from_export(
         let chunk: MemoryChunk =
             decode_dag_cbor(data).map_err(|e| CoreError::DagCborDecodingError {
                 data_type: "MemoryChunk".to_string(),
-                details: e.to_string(),
+                details: format!("CID: {}, Error: {:?}", cid, e),
             })?;
         memories.extend(chunk.memories);
     }
@@ -49,7 +49,7 @@ fn reconstruct_agent_from_export(
         let chunk: MessageChunk =
             decode_dag_cbor(data).map_err(|e| CoreError::DagCborDecodingError {
                 data_type: "MessageChunk".to_string(),
-                details: e.to_string(),
+                details: format!("CID: {}, Error: {:?}", cid, e),
             })?;
         messages.extend(chunk.messages);
     }
@@ -330,14 +330,14 @@ where
                 let meta: AgentRecordExport =
                     decode_dag_cbor(meta_block).map_err(|e| CoreError::DagCborDecodingError {
                         data_type: "AgentRecordExport".to_string(),
-                        details: e.to_string(),
+                        details: format!("Meta CID: {}, Error: {:?}", meta_cid, e),
                     })?;
                 reconstruct_agent_from_export(&meta, &blocks)?
             } else {
                 // Legacy fallback: decode directly as AgentRecord if present
                 decode_dag_cbor(agent_export_data).map_err(|e| CoreError::DagCborDecodingError {
                     data_type: "AgentRecord".to_string(),
-                    details: e.to_string(),
+                    details: format!("{:?}", e),
                 })?
             };
 
