@@ -223,7 +223,7 @@ pub enum CoreError {
         cause: serde_ipld_dagcbor::error::EncodeError<std::collections::TryReserveError>,
     },
 
-    #[error("Failed to decode DAG-CBOR data for {data_type}")]
+    #[error("Failed to decode DAG-CBOR data for {data_type}:\n {details}")]
     #[diagnostic(
         code(pattern_core::dagcbor_decoding_error),
         help("Failed to decode data from DAG-CBOR: {details}")

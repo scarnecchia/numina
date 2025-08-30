@@ -846,7 +846,11 @@ pub struct Message {
     pub batch_type: Option<BatchType>,
 
     // Embeddings - loaded selectively via custom methods
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        deserialize_with = "crate::memory::deserialize_f32_vec_flexible",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub embedding: Option<Vec<f32>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2220,7 +2224,7 @@ impl Message {
     ///
     /// Uses the approximation of ~4 characters per token
     pub fn estimate_tokens(&self) -> usize {
-        self.display_content().len() / 5
+        self.display_content().len() / 4
     }
 }
 

@@ -721,7 +721,7 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
     fn estimate_tokens(&self, system_prompt: &str, messages: &[Message]) -> Option<usize> {
         if let Some(max_tokens) = self.config.model_adjustments.max_context_tokens {
             // Very rough estimation
-            let system_tokens = system_prompt.chars().count() / 5;
+            let system_tokens = system_prompt.chars().count() / 4;
             let message_tokens: usize = messages
                 .iter()
                 .map(|m| m.estimate_tokens()) // Convert back to rough char count

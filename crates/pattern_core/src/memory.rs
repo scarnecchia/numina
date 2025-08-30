@@ -2,7 +2,7 @@ use chrono::Utc;
 use compact_str::CompactString;
 use dashmap::{DashMap, DashSet};
 use pattern_macros::Entity;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -11,6 +11,66 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 
 use crate::{MemoryId, Result, UserId};
+
+/// Custom deserializer that handles both f32 and f64 values
+/// This is needed because serde_ipld_dagcbor serializes f32 as f64
+/// but doesn't deserialize f64 back to f32 automatically
+pub fn deserialize_f32_vec_flexible<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<f32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+
+    struct F32VecVisitor;
+
+    impl<'de> Visitor<'de> for F32VecVisitor {
+        type Value = Option<Vec<f32>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("null or an array of numbers")
+        }
+
+        fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_seq(self)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut vec = Vec::new();
+
+            while let Some(value) = seq.next_element::<serde_json::Value>()? {
+                let f = if let Some(f) = value.as_f64() {
+                    f as f32 // Convert f64 to f32
+                } else if let Some(i) = value.as_i64() {
+                    i as f32 // Handle integer values
+                } else if let Some(u) = value.as_u64() {
+                    u as f32 // Handle unsigned integer values
+                } else {
+                    return Err(de::Error::custom("Expected numeric value in embedding"));
+                };
+                vec.push(f);
+            }
+
+            Ok(Some(vec))
+        }
+    }
+
+    deserializer.deserialize_option(F32VecVisitor)
+}
 
 /// Permission levels for memory operations (most to least restrictive)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,6 +166,11 @@ pub struct MemoryBlock {
     /// The embedding model used to generate embeddings for this block (if any)
     pub embedding_model: Option<String>,
 
+    #[serde(
+        deserialize_with = "deserialize_f32_vec_flexible",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub embedding: Option<Vec<f32>>,
     /// When this memory block was created
     pub created_at: chrono::DateTime<chrono::Utc>,
