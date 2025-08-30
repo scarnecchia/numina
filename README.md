@@ -270,7 +270,6 @@ cargo run --bin pattern-cli -- chat --agent Archive
 # or with the default from the config file
 cargo run --bin pattern-cli -- chat
 
-
 # Show agent status
 cargo run --bin pattern-cli -- agent status Pattern
 
@@ -320,6 +319,18 @@ Pattern looks for configuration in these locations (first found wins):
 4. `~/.pattern/config.toml` (fallback)
 
 See `pattern.toml.example` for all available options.
+
+#### Running a Pattern Agent / Constellation from a Custom Location
+
+Pattern can be run from a custom location by specifying the path to the `pattern.toml` file using the `-c` flag.
+
+```bash
+# Invoke the CLI with a custom configuration file
+cargo run --bin pattern-cli -- -c path/to/pattern.toml chat --group "Lares Cluster"
+
+# Subsequent commands should be invoked with the same configuration file
+cargo run --bin pattern-cli -- -c path/to/pattern.toml db query "SELECT * from mem"
+```
 
 ## Development
 
