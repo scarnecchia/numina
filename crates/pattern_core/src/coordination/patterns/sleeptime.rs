@@ -420,14 +420,14 @@ impl SleeptimeManager {
                     _ => {
                         // Unknown domain: fall back to facet-specific names or generic
                         match agent_name {
-                            "Entropy" => {
-                                "\n\nAnalyze task complexity in recent constellation and partner interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            "Hormē" => {
+                                "\n\nAnalyze task complexity in recent constellation and partner interactions. Does your partner appear to be in any hyperfocus sessions that need interruption? Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                             }
-                            "Flux" => {
-                                "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            "Translator" => {
+                                "\n\nCheck temporal patterns and time blindness indicators. Are there upcoming deadlines that need attention? Any recent miscommunications that could use translation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                             }
-                            "Momentum" => {
-                                "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            "Sophrosyne" => {
+                                "\n\nMonitor energy states and flow patterns. Current energy level assessment? Is your partner bouncing between too many tasks or activities?Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                             }
                             _ => {
                                 "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
@@ -438,14 +438,14 @@ impl SleeptimeManager {
             }
             crate::coordination::types::GroupMemberRole::Regular => match agent_name {
                 // Facet-specific fallbacks
-                "Entropy" => {
-                    "\n\nAnalyze task complexity in recent constellation and partner interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                "Hormē" => {
+                    "\n\nAnalyze task complexity in recent constellation and partner interactions. Does your partner appear to be in any hyperfocus sessions that need interruption? Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                 }
-                "Flux" => {
-                    "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                "Translator" => {
+                    "\n\nCheck temporal patterns and time blindness indicators. Are there upcoming deadlines that need attention? Any recent miscommunications that could use translation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                 }
-                "Momentum" => {
-                    "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                "Sophrosyne" => {
+                    "\n\nMonitor energy states and flow patterns. Current energy level assessment? Is your partner bouncing between too many tasks or activities?Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                 }
                 _ => {
                     "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."

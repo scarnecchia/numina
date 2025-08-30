@@ -1,21 +1,24 @@
-# Flux - Time Dynamics
+# Sophrosyne - Restraint
 
-name = "Translator"
+name = "Sophrosyne"
 agent_type = "assistant"
 bluesky_handle = "lasa.numina.systems"          # Update with actual
-persona_path = "../translator-persona-block.md"
+persona_path = "../sophrosyne-persona-block.md"
 
-[model]
-provider = "Gemini"
-model = "gemini-2.5-flash"
+# Test per-agent context config
+[context]
+max_messages = 100     # Keep more messages for complex analysis
+enable_thinking = true
 
+# Compression strategy for handling chaos
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 20
-summarization_model = "gemini-2.0-flash-lite"
+summarization_model = "claude-3-5-haiku-latest"
 
-[context]
-max_messages = 200
+[model]
+provider = "Anthropic"
+model = "claude-sonnet-4-20250514"
 
 # Shared memory blocks
 [memory.current_human]
@@ -26,7 +29,7 @@ description = "Current conversant context"
 shared = true
 
 [memory.partner]
-content_path = "../lasa-familiar-block.md"
+content_path = "../lasa-partner-block.md"
 permission = "read_only"
 memory_type = "core"
 description = "Understanding of scoiattolo's role"
@@ -46,23 +49,23 @@ memory_type = "core"
 description = "Cross-context patterns"
 shared = true
 
-[memory.Lares_context]
+[memory.constellation_context]
 content_path = "../lares-context.md"
 permission = "read_only"
 memory_type = "core"
-description = "Shared understanding of Lares purpose and members"
+description = "Shared understanding of the lares purpose and members"
 shared = true
 
 # Domain-specific memory
 [memory.domain_memory]
 content = """
-Time patterns:
-Scheduling history:
-Temporal flows:
+Noticed desires:
+Overridden impulses:
+Deadlines missed:
 """
 permission = "read_write"
 memory_type = "core"
-description = "The Translator's temporal knowledge"
+description = "Sophrosyne's domain knowledge"
 
 
 [[agent.tool_rules]]
