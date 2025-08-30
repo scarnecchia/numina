@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # export_group.sh - Export Pattern group via cron
 # Usage: ./export_group.sh <config_path> <group_string> <output_dir>
