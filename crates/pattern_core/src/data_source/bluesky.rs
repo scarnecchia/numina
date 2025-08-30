@@ -478,6 +478,8 @@ impl Default for PatternHttpClient {
         Self {
             client: reqwest::Client::builder()
                 .user_agent(concat!("pattern/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(10)) // 10 second timeout for constellation API calls
+                .connect_timeout(std::time::Duration::from_secs(5)) // 5 second connection timeout
                 .build()
                 .unwrap(), // panics for the same reasons Client::new() would: https://docs.rs/reqwest/latest/reqwest/struct.Client.html#panics
         }
@@ -3297,7 +3299,7 @@ impl DataSource for BlueskyFirehoseSource {
                 tokio::spawn(async move {
                     // Short timeout for opportunistic hydration
                     let timeout = tokio::time::timeout(
-                        std::time::Duration::from_millis(200),
+                        std::time::Duration::from_millis(2000),
                         async {
                             // Try to fetch full post data
                             let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
@@ -3385,7 +3387,44 @@ impl DataSource for BlueskyFirehoseSource {
             return None;
         }
 
-        // Not batchable - format single notification
+        // Not batchable - but first check if there are any batches to flush
+        // Priority: expired batches first, then oldest batch if any exist
+        let expired_batches = self.get_expired_batches().await;
+        if !expired_batches.is_empty() {
+            // Flush the oldest expired batch first
+            if let Some(expired_thread) = expired_batches.first() {
+                tracing::debug!(
+                    "⏰ Flushing expired batch for thread: {} before processing single notification (found {} expired)",
+                    expired_thread,
+                    expired_batches.len()
+                );
+                if let Some(notification) = self.flush_batch(expired_thread).await {
+                    // Process the current item later - it will come back through
+                    return Some(notification);
+                }
+            }
+        } else if !self.pending_batch.batch_timers.is_empty() {
+            // No expired batches, but flush the oldest batch anyway to keep things responsive
+            let oldest_batch = self
+                .pending_batch
+                .batch_timers
+                .iter()
+                .min_by_key(|entry| entry.value().elapsed())
+                .map(|entry| entry.key().clone());
+
+            if let Some(oldest_thread) = oldest_batch {
+                tracing::debug!(
+                    "📤 Flushing oldest batch for thread: {} to maintain responsiveness",
+                    oldest_thread
+                );
+                if let Some(notification) = self.flush_batch(&oldest_thread).await {
+                    // Process the current item later - it will come back through
+                    return Some(notification);
+                }
+            }
+        }
+
+        // Format single notification
         // This handles standalone posts, DMs, or posts that don't fit batching criteria
         tracing::debug!(
             "📝 Single notification for @{}: {}",

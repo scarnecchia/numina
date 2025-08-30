@@ -313,7 +313,7 @@ impl MessageCompressor {
     ) -> Result<CompressionResult> {
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 5 / 6)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
         } else {
             None
         };
@@ -424,7 +424,7 @@ impl MessageCompressor {
 
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 5 / 6)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
         } else {
             None
         };

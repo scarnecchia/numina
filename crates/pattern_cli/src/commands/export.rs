@@ -19,6 +19,7 @@ use crate::output::Output;
 pub async fn export_agent(
     name: &str,
     output: Option<PathBuf>,
+    exclude_embeddings: bool,
     config: &PatternConfig,
 ) -> Result<()> {
     let output_handler = Output::new();
@@ -51,6 +52,7 @@ pub async fn export_agent(
         include_messages: true,
         chunk_size: 1000,
         messages_since: None,
+        exclude_embeddings,
         ..Default::default()
     };
 
@@ -78,6 +80,7 @@ pub async fn export_agent(
 pub async fn export_group(
     name: &str,
     output: Option<PathBuf>,
+    exclude_embeddings: bool,
     config: &PatternConfig,
 ) -> Result<()> {
     let output_handler = Output::new();
@@ -111,6 +114,7 @@ pub async fn export_group(
         include_messages: true,
         chunk_size: 1000,
         messages_since: None,
+        exclude_embeddings,
         ..Default::default()
     };
 
@@ -131,7 +135,11 @@ pub async fn export_group(
 }
 
 /// Export a constellation to a CAR file
-pub async fn export_constellation(output: Option<PathBuf>, config: &PatternConfig) -> Result<()> {
+pub async fn export_constellation(
+    output: Option<PathBuf>,
+    exclude_embeddings: bool,
+    config: &PatternConfig,
+) -> Result<()> {
     let output_handler = Output::new();
 
     // Get user from config
@@ -157,6 +165,7 @@ pub async fn export_constellation(output: Option<PathBuf>, config: &PatternConfi
         include_messages: true,
         chunk_size: 1000,
         messages_since: None,
+        exclude_embeddings,
         ..Default::default()
     };
 

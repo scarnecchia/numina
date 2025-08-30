@@ -291,6 +291,9 @@ enum ExportCommands {
         /// Output file path (defaults to <name>.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+        /// Exclude embeddings from export to reduce file size
+        #[arg(long)]
+        exclude_embeddings: bool,
     },
     /// Export a group with all member agents to a CAR file
     Group {
@@ -299,12 +302,18 @@ enum ExportCommands {
         /// Output file path (defaults to <name>.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+        /// Exclude embeddings from export to reduce file size
+        #[arg(long)]
+        exclude_embeddings: bool,
     },
     /// Export entire constellation to a CAR file
     Constellation {
         /// Output file path (defaults to constellation.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+        /// Exclude embeddings from export to reduce file size
+        #[arg(long)]
+        exclude_embeddings: bool,
     },
 }
 
@@ -1002,14 +1011,28 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Export { cmd } => match cmd {
-            ExportCommands::Agent { name, output } => {
-                commands::export::export_agent(name, output.clone(), &config).await?
+            ExportCommands::Agent {
+                name,
+                output,
+                exclude_embeddings,
+            } => {
+                commands::export::export_agent(name, output.clone(), *exclude_embeddings, &config)
+                    .await?
             }
-            ExportCommands::Group { name, output } => {
-                commands::export::export_group(name, output.clone(), &config).await?
+            ExportCommands::Group {
+                name,
+                output,
+                exclude_embeddings,
+            } => {
+                commands::export::export_group(name, output.clone(), *exclude_embeddings, &config)
+                    .await?
             }
-            ExportCommands::Constellation { output } => {
-                commands::export::export_constellation(output.clone(), &config).await?
+            ExportCommands::Constellation {
+                output,
+                exclude_embeddings,
+            } => {
+                commands::export::export_constellation(output.clone(), *exclude_embeddings, &config)
+                    .await?
             }
         },
         Commands::Import {

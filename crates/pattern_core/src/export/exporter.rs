@@ -40,6 +40,9 @@ pub struct ExportOptions {
     /// Whether to compress the output
     #[cfg(feature = "export")]
     pub compress: bool,
+
+    /// Whether to exclude embeddings from export (reduces file size significantly)
+    pub exclude_embeddings: bool,
 }
 
 impl Default for ExportOptions {
@@ -50,6 +53,7 @@ impl Default for ExportOptions {
             messages_since: None,
             #[cfg(feature = "export")]
             compress: false,
+            exclude_embeddings: false,
         }
     }
 }
@@ -69,6 +73,60 @@ where
     /// Create a new exporter
     pub fn new(db: Surreal<C>) -> Self {
         Self { db }
+    }
+
+    /// Strip embeddings from memory blocks if requested
+    fn maybe_strip_memory_embeddings(
+        &self,
+        memories: &[(
+            crate::memory::MemoryBlock,
+            crate::agent::AgentMemoryRelation,
+        )],
+        options: &ExportOptions,
+    ) -> Vec<(
+        crate::memory::MemoryBlock,
+        crate::agent::AgentMemoryRelation,
+    )> {
+        if options.exclude_embeddings {
+            memories
+                .iter()
+                .map(|(mem, rel)| {
+                    let mut mem_copy = mem.clone();
+                    mem_copy.embedding = None;
+                    mem_copy.embedding_model = None;
+                    (mem_copy, rel.clone())
+                })
+                .collect()
+        } else {
+            memories.to_vec()
+        }
+    }
+
+    /// Strip embeddings from messages if requested  
+    fn maybe_strip_message_embeddings(
+        &self,
+        messages: &[(
+            crate::message::Message,
+            crate::message::AgentMessageRelation,
+        )],
+        options: &ExportOptions,
+    ) -> Vec<(
+        crate::message::Message,
+        crate::message::AgentMessageRelation,
+    )> {
+        if options.exclude_embeddings {
+            messages
+                .iter()
+                .map(|(msg, rel)| {
+                    let mut msg_copy = msg.clone();
+                    msg_copy.embedding = None;
+                    msg_copy.embedding_model = None;
+                    (msg_copy, rel.clone())
+                })
+                .collect()
+        } else {
+            messages.to_vec()
+        }
     }
 
     /// Helper to create a CID from serialized data
@@ -281,9 +339,24 @@ where
                 crate::agent::AgentMemoryRelation,
             )>|
              -> Result<usize> {
+                // Strip embeddings if requested to get accurate size estimate
+                let processed_items = if options.exclude_embeddings {
+                    items
+                        .iter()
+                        .map(|(mem, rel)| {
+                            let mut mem_copy = mem.clone();
+                            mem_copy.embedding = None;
+                            mem_copy.embedding_model = None;
+                            (mem_copy, rel.clone())
+                        })
+                        .collect()
+                } else {
+                    items.clone()
+                };
+
                 let chunk = MemoryChunk {
                     chunk_id,
-                    memories: items.clone(),
+                    memories: processed_items,
                     next_chunk: None,
                 };
                 let data =
@@ -333,9 +406,10 @@ where
             let mut finalized_cids_rev: Vec<Cid> = Vec::new();
             let mut cid_chunk_id = (pending_chunks.len() as u32).saturating_sub(1);
             for items in pending_chunks.iter().rev() {
+                let processed_items = self.maybe_strip_memory_embeddings(items, options);
                 let chunk = MemoryChunk {
                     chunk_id: cid_chunk_id,
-                    memories: items.clone(),
+                    memories: processed_items,
                     next_chunk: next,
                 };
                 let data =
@@ -386,6 +460,21 @@ where
                     |chunk_id: u32,
                      items: &Vec<(Message, crate::message::AgentMessageRelation)>|
                      -> Result<usize> {
+                        // Strip embeddings if requested to get accurate size estimate
+                        let processed_items = if options.exclude_embeddings {
+                            items
+                                .iter()
+                                .map(|(msg, rel)| {
+                                    let mut msg_copy = msg.clone();
+                                    msg_copy.embedding = None;
+                                    msg_copy.embedding_model = None;
+                                    (msg_copy, rel.clone())
+                                })
+                                .collect()
+                        } else {
+                            items.clone()
+                        };
+
                         let chunk = MessageChunk {
                             chunk_id,
                             start_position: items
@@ -398,7 +487,7 @@ where
                                 .and_then(|(_, rel)| rel.position.as_ref())
                                 .map(|p| p.to_string())
                                 .unwrap_or_default(),
-                            messages: items.clone(),
+                            messages: processed_items,
                             next_chunk: None,
                         };
                         let data = encode_dag_cbor(&chunk).map_err(|e| {
@@ -460,7 +549,7 @@ where
                             .and_then(|(_, rel)| rel.position.as_ref())
                             .map(|p| p.to_string())
                             .unwrap_or_default(),
-                        messages: items.clone(),
+                        messages: self.maybe_strip_message_embeddings(items, options),
                         next_chunk: next,
                     };
                     let data =
