@@ -288,7 +288,13 @@ pub async fn run_discord_bot_with_group(
         // Register on all agents in the group
         for awm in &agents_with_membership {
             awm.agent
-                .register_endpoint("discord".to_string(), discord_endpoint.clone())
+                .register_endpoint(
+                    "cli".to_string(),
+                    Arc::new(CliEndpoint::new(output.clone())),
+                )
+                .await?;
+            awm.agent
+                .set_default_user_endpoint(discord_endpoint.clone())
                 .await?;
         }
         output.success("✓ Discord endpoint registered on all agents");
