@@ -721,11 +721,11 @@ pub async fn register_data_sources_with_target<M, E>(
 {
     let config = config.clone();
 
-    // hardcoding so that only pattern gets messages initially
-    if agent.name() == "Lasa" {
-        tracing::info!("Setting up Bluesky monitoring for Pattern agent");
+    // Only register Bluesky monitoring for the supervisor role agent
+    if agent_is_supervisor(&agent, &config).await {
+        tracing::info!("Setting up Bluesky monitoring for supervisor agent");
         tokio::spawn(async move {
-            tracing::info!("Inside Bluesky setup spawn for Pattern agent");
+            tracing::info!("Inside Bluesky setup spawn for supervisor agent");
             let filter = config
                 .bluesky
                 .as_ref()
@@ -774,6 +774,55 @@ pub async fn register_data_sources_with_target<M, E>(
             tools.register(DataSourceTool::new(Arc::new(data_sources)));
         });
     }
+}
+
+/// Determine if this agent should act as the group's supervisor based on
+/// database group memberships or, as a fallback, on the config file.
+async fn agent_is_supervisor<M, E>(agent: &Arc<DatabaseAgent<M, E>>, config: &PatternConfig) -> bool
+where
+    E: EmbeddingProvider + Clone + 'static,
+    M: ModelProvider + 'static,
+{
+    // First, check DB memberships for Supervisor role
+    match pattern_core::db::ops::get_agent_memberships(&DB, &agent.id()).await {
+        Ok(memberships) => {
+            if memberships.iter().any(|m| {
+                matches!(
+                    m.role,
+                    pattern_core::coordination::types::GroupMemberRole::Supervisor
+                )
+            }) {
+                return true;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load memberships for agent {}: {}", agent.id(), e);
+        }
+    }
+
+    // Fallback: Check config groups for a supervisor assignment referencing this agent
+    let agent_id = agent.id();
+    let agent_name = agent.name();
+    for group in &config.groups {
+        for member in &group.members {
+            let id_matches = member
+                .agent_id
+                .as_ref()
+                .map(|id| id == &agent_id)
+                .unwrap_or(false);
+            let name_matches = member.name == agent_name;
+            if (id_matches || name_matches)
+                && matches!(
+                    member.role,
+                    pattern_core::config::GroupMemberRoleConfig::Supervisor
+                )
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Create an agent with the specified configuration

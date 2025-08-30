@@ -213,6 +213,12 @@ impl MessageCompressor {
             0
         };
 
+        tracing::info!(
+            "tokens before compression: {} of max {:?}",
+            original_tokens,
+            max_tokens
+        );
+
         // Check if we're within both limits
         let within_message_limit = original_count <= max_messages;
         let within_token_limit = max_tokens.map_or(true, |max| original_tokens <= max);
@@ -293,31 +299,6 @@ impl MessageCompressor {
             MessageContent::Blocks(blocks) => blocks
                 .iter()
                 .any(|block| matches!(block, ContentBlock::ToolUse { .. })),
-            _ => false,
-        }
-    }
-
-    /// Check if a message contains tool result blocks
-    #[allow(dead_code)]
-    fn has_tool_result_blocks(&self, message: &Message) -> bool {
-        match &message.content {
-            MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolResult { .. })),
-            _ => false,
-        }
-    }
-
-    /// Check if a message contains thinking blocks
-    #[allow(dead_code)]
-    fn has_thinking_blocks(&self, message: &Message) -> bool {
-        match &message.content {
-            MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
-                matches!(
-                    block,
-                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-                )
-            }),
             _ => false,
         }
     }
@@ -553,7 +534,7 @@ impl MessageCompressor {
         }
 
         // Process batches recursively, including previous summaries in each request
-        const MAX_TOKENS_PER_REQUEST: usize = 150_000; // Conservative limit for safety
+        const MAX_TOKENS_PER_REQUEST: usize = 128_000; // Conservative limit for safety
 
         let mut accumulated_summaries = Vec::new();
         let mut batch_index = 0;
@@ -1053,53 +1034,9 @@ impl MessageCompressor {
             .sum()
     }
 
-    /// Helper to convert messages back to batches (temporary during refactor)
-    /// Creates a single batch containing all messages
-    #[allow(dead_code)]
-    fn messages_to_single_batch(&self, messages: Vec<Message>) -> crate::message::MessageBatch {
-        use crate::agent::get_next_message_position_sync;
-        use crate::message::{BatchType, MessageBatch};
-
-        let batch_id = get_next_message_position_sync();
-        let mut batch = MessageBatch::from_messages(
-            batch_id,
-            BatchType::UserRequest, // Default type
-            messages,
-        );
-        batch.is_complete = true; // Mark as complete since it's archived
-        batch
-    }
-
-    /// Parse importance scores from LLM response
-    #[allow(dead_code)]
-    fn parse_importance_scores(&self, response: &str, count: usize) -> Vec<f32> {
-        let mut scores = Vec::new();
-
-        // Try to parse JSON array first
-        if let Ok(parsed) = serde_json::from_str::<Vec<f32>>(response) {
-            return parsed;
-        }
-
-        // Otherwise, look for numbers in the text
-        for line in response.lines() {
-            if let Some(score_str) = line.split(':').nth(1) {
-                if let Ok(score) = score_str.trim().parse::<f32>() {
-                    scores.push(score.clamp(0.0, 10.0));
-                }
-            }
-        }
-
-        // If we didn't get enough scores, pad with defaults
-        while scores.len() < count {
-            scores.push(5.0); // Default middle importance
-        }
-
-        scores
-    }
-
     /// Estimate tokens for accumulated summaries
     fn estimate_summary_tokens(&self, summaries: &[String]) -> usize {
-        summaries.iter().map(|s| s.len() / 4).sum() // Rough estimate: 4 chars per token
+        summaries.iter().map(|s| s.len() / 5).sum() // Rough estimate: 4 chars per token
     }
 
     /// Generate summary including previous summaries for recursive approach

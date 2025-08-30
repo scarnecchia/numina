@@ -287,6 +287,30 @@ cargo run -- chat
 
 The CLI stores its database in `./pattern.db` by default. You can override this with `--db-path` or in the config file.
 
+#### Agent Naming, Roles, and Defaults
+
+- Agent names are arbitrary; behavior is driven by group roles.
+  - Supervisor: orchestrates and is the default for data-source routing (e.g., Bluesky/Jetstream).
+  - Specialist domains:
+    - `system_integrity` → receives the SystemIntegrityTool.
+    - `memory_management` → receives the ConstellationSearchTool.
+- Sleeptime prompts use role/domain mappings (Supervisor/system_integrity/memory_management) rather than specific names.
+- Discord integration:
+  - Default agent selection in slash commands prefers the Supervisor when no agent is specified.
+  - Bot self-mentions are rewritten to `@<supervisor_name>` when a supervisor is present.
+
+#### CLI Sender Labels (Origins)
+
+When the CLI prints messages, the sender label is chosen from the message origin:
+- Agent: agent name
+- Bluesky: `@handle`
+- Discord: `Discord`
+- DataSource: `source_id`
+- CLI: `CLI`
+- API: `API`
+- Other: `origin_type`
+- None/unknown: `Runtime`
+
 ### Configuration
 
 Pattern looks for configuration in these locations (first found wins):

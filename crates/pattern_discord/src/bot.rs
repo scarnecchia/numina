@@ -628,90 +628,6 @@ impl DiscordBot {
         *current
     }
 
-    /// Select the appropriate group based on message content
-    #[allow(dead_code)]
-    fn select_group_for_message(&self, message: &str) -> String {
-        let message_lower = message.to_lowercase();
-
-        // Crisis detection - urgent/panic language
-        if self.is_crisis_message(&message_lower) {
-            return "crisis".to_string();
-        }
-
-        // Planning detection - task/organization keywords
-        if self.is_planning_message(&message_lower) {
-            return "planning".to_string();
-        }
-
-        // Memory/recall detection
-        if self.is_memory_message(&message_lower) {
-            return "memory".to_string();
-        }
-
-        // Default to main group
-        "Pattern Cluster".to_string()
-    }
-
-    fn is_crisis_message(&self, message: &str) -> bool {
-        let crisis_keywords = [
-            "help",
-            "panic",
-            "spiral",
-            "can't",
-            "overwhelming",
-            "freaking out",
-            "emergency",
-            "crisis",
-            "meltdown",
-            "losing it",
-            "falling apart",
-            "too much",
-            "stuck",
-        ];
-
-        crisis_keywords.iter().any(|&kw| message.contains(kw))
-    }
-
-    fn is_planning_message(&self, message: &str) -> bool {
-        let planning_keywords = [
-            "plan",
-            "organize",
-            "schedule",
-            "prioritize",
-            "break down",
-            "todo",
-            "task",
-            "project",
-            "deadline",
-            "steps",
-            "how do i",
-            "where do i start",
-            "need to",
-        ];
-
-        planning_keywords.iter().any(|&kw| message.contains(kw))
-    }
-
-    fn is_memory_message(&self, message: &str) -> bool {
-        let memory_keywords = [
-            "remember",
-            "recall",
-            "forgot",
-            "what was",
-            "what did",
-            "last time",
-            "yesterday",
-            "earlier",
-            "before",
-            "previous",
-            "working on",
-            "talked about",
-            "mentioned",
-        ];
-
-        memory_keywords.iter().any(|&kw| message.contains(kw))
-    }
-
     /// Process queued messages (without recursion)
     async fn process_message_queue(&self, ctx: &Context) {
         // Wait a bit before processing queue
@@ -1077,7 +993,7 @@ impl DiscordBot {
         let processing_start = std::time::Instant::now();
 
         if self.cli_mode {
-            // Create Pattern message with Discord metadata
+            // Create message with Discord metadata for group routing
             let discord_channel_id = msg.channel_id.get();
 
             // Resolve mentions to usernames
@@ -1090,13 +1006,30 @@ impl DiscordBot {
                     .replace(&alt_mention_pattern, &format!("@{}", user.name));
             }
 
-            // Get current bot user for self-mentions
+            // Get current bot user for self-mentions, map to the supervisor agent name when available
             if let Ok(current_user) = ctx.http.get_current_user().await {
                 let bot_mention = format!("<@{}>", current_user.id);
                 let bot_alt_mention = format!("<@!{}>", current_user.id);
-                resolved_content = resolved_content
-                    .replace(&bot_mention, "@Pattern")
-                    .replace(&bot_alt_mention, "@Pattern");
+
+                // Determine supervisor agent name if we have group context
+                let supervisor_name = self.agents_with_membership.as_ref().and_then(|agents| {
+                    agents
+                        .iter()
+                        .find(|a| {
+                            matches!(
+                                a.membership.role,
+                                pattern_core::coordination::types::GroupMemberRole::Supervisor
+                            )
+                        })
+                        .map(|a| a.agent.name())
+                });
+
+                if let Some(name) = supervisor_name {
+                    let replacement = format!("@{}", name);
+                    resolved_content = resolved_content
+                        .replace(&bot_mention, &replacement)
+                        .replace(&bot_alt_mention, &replacement);
+                }
             }
 
             // Get channel name if possible (moved outside to be accessible)

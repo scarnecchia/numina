@@ -321,7 +321,7 @@ pub async fn handle_slash_command(
 
                     // Search recent messages without a query to get context
                     match handle
-                        .search_conversations(None, None, None, None, 20)
+                        .search_conversations(None, None, None, None, 100)
                         .await
                     {
                         Ok(messages) => {

@@ -551,6 +551,7 @@ default_filter = { nsids = [
     "did:plc:ap56m7pvnz4lnrtaguxiuawm", # random spammer
     "did:plc:boia3kqcyo3qnjw5fmqknib4", # jo wynter cannot stop pushing buttons
     "did:plc:vszw3ess46odfhnzdsy4huae", # se gyges got got one too many times
+    "did:plc:lw7hallqsgrhwumgudkph44j",
 ] }
 auto_connect_firehose = true # Control when to connect
 

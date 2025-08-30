@@ -74,6 +74,18 @@ enum Commands {
 - Structured message formatting
 - Error display with context
 
+#### Sender Labels and Origins
+- Sender name shown in the CLI is derived from the message origin:
+  - Agent: agent name
+  - Bluesky: `@handle`
+  - Discord: `Discord`
+  - DataSource: `source_id`
+  - CLI: `CLI`
+  - API: `API`
+  - Other: `origin_type`
+  - None/unknown: `Runtime`
+- Note: “Pattern” refers to the framework name; coordination is displayed as a “Coordination Pattern”. Agent names are not special.
+
 ## Testing Guidelines
 
 ### Quick Test Commands
@@ -130,6 +142,5 @@ pattern-cli dq "SELECT * FROM agent"
 
 ## Known Issues
 
-- CAR export may not capture full message history
 - Some terminal emulators have issues with colors
 - Large exports can be memory intensive

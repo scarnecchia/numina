@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use crate::context::AgentHandle;
 use crate::db::DbEntity;
 use crate::id::RelationId;
+use crate::memory::MemoryType;
 use crate::message::{
     BatchType, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
 };
@@ -135,7 +136,10 @@ where
                 }; // Guard is dropped here!
 
                 if should_remove {
-                    handle.memory.remove_block(label);
+                    if let Some(mut block) = handle.memory.get_block_mut(label) {
+                        block.memory_type = MemoryType::Archival;
+                    }
+
                     tracing::debug!("🗑️ Removed temporary memory block: {}", label);
                 }
             }
@@ -1798,11 +1802,6 @@ where
         let context = self.context.read().await;
         let memory = &context.handle.memory;
 
-        tracing::info!(
-            "persist_memory_changes called for agent {}",
-            context.handle.agent_id
-        );
-
         // Update constellation activity memory block if we have a tracker
         if let Some(tracker) = &context.constellation_tracker {
             let updated_content = tracker.format_as_memory_content().await;
@@ -1840,7 +1839,7 @@ where
                 .into_iter()
                 .find(|b| &b.id == block_id)
             {
-                tracing::info!(
+                tracing::debug!(
                     "  NEW block to persist: {} (type: {:?})",
                     block.label,
                     block.memory_type
@@ -1853,7 +1852,7 @@ where
                 .into_iter()
                 .find(|b| &b.id == block_id)
             {
-                tracing::info!(
+                tracing::debug!(
                     "  DIRTY block to persist: {} (type: {:?})",
                     block.label,
                     block.memory_type
@@ -1880,7 +1879,7 @@ where
                 .await
                 {
                     Ok(_) => {
-                        tracing::info!(
+                        tracing::debug!(
                             "Successfully persisted memory block {} to database",
                             block.label
                         );
@@ -1937,7 +1936,7 @@ where
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Completed memory persistence attempt for {} - blocks marked as persisted individually",
             context.handle.agent_id
         );
@@ -2082,7 +2081,7 @@ where
 
                 // Check if we should exit after this tool
                 if rule_engine.should_exit_loop() {
-                    tracing::info!("🛑 Tool {} triggered exit loop rule", call.fn_name);
+                    tracing::info!("Tool {} triggered exit loop rule", call.fn_name);
                     break;
                 }
             }
@@ -2100,7 +2099,7 @@ where
             return Ok(Vec::new());
         }
 
-        tracing::info!("🎯 Executing {} start constraint tools", start_tools.len());
+        tracing::info!("Executing {} start constraint tools", start_tools.len());
 
         // Create tool calls for start constraint tools
         let start_calls: Vec<crate::message::ToolCall> = start_tools
@@ -2130,7 +2129,7 @@ where
             return Ok(Vec::new());
         }
 
-        tracing::info!("🏁 Executing {} required exit tools", exit_tools.len());
+        tracing::info!("Executing {} required exit tools", exit_tools.len());
 
         // Create tool calls for exit tools
         let exit_calls: Vec<crate::message::ToolCall> = exit_tools
@@ -2338,7 +2337,7 @@ where
                             let handle = handle.await;
                             match handle.insert_working_memory(&label, &value).await {
                                 Ok(_) => {
-                                    tracing::info!(
+                                    tracing::debug!(
                                         "Added memory block {} as working memory",
                                         label
                                     );
@@ -2755,7 +2754,7 @@ where
                                                             metadata: None,
                                                         };
 
-                                                        tracing::info!(
+                                                        tracing::debug!(
                                                             "Adding tool execution event to constellation tracker"
                                                         );
                                                         tracker.add_event(event).await;

@@ -179,8 +179,11 @@ impl GroupManager for SleeptimeManager {
                             }
                             context
                         } else {
-                            // No triggers fired, just periodic check - customize per agent
-                            Self::get_agent_specific_context_sync(&agent_name)
+                            // No triggers fired, just periodic check - customize per role/domain or facet name
+                            Self::get_agent_specific_context_sync(
+                                &agent_name,
+                                &intervention_agent.membership.role,
+                            )
                         };
 
                         // Create intervention message
@@ -391,33 +394,63 @@ impl GroupManager for SleeptimeManager {
 }
 
 impl SleeptimeManager {
-    /// Get agent-specific context sync prompt
-    fn get_agent_specific_context_sync(agent_name: &str) -> String {
+    /// Get agent-specific context sync prompt based on role/domain (with name fallback)
+    fn get_agent_specific_context_sync(
+        agent_name: &str,
+        role: &crate::coordination::types::GroupMemberRole,
+    ) -> String {
         let now = chrono::Local::now();
 
-        let prompt = match agent_name {
-            "Lasa" => {
+        // Prefer role/domain mapping first
+        let prompt = match role {
+            crate::coordination::types::GroupMemberRole::Supervisor => {
+                // Formerly mapped to the "Pattern" agent
                 "\n\nReview constellation coordination state. Check if any facets need attention or if there are emerging patterns across the constellation that need synthesis. Self-check for reflexive validation in past interactions and correct if required.\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
             }
-            "Entropy" => {
-                "\n\nAnalyze task complexity in recent constellation and partner interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+            crate::coordination::types::GroupMemberRole::Specialist { domain } => {
+                match domain.as_str() {
+                    // Formerly "Archive"
+                    "memory_management" => {
+                        "\n\nReview memory coherence and pattern recognition. Any important context that needs preservation? Patterns across conversations that should be noted?\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                    }
+                    // Formerly "Anchor"
+                    "system_integrity" => {
+                        "\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?  Self-check for reflexive validation in past interactions and correct constellation members or your partner if required.\n\nProvide brief status updates, or message the facet or partner if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                    }
+                    _ => {
+                        // Unknown domain: fall back to facet-specific names or generic
+                        match agent_name {
+                            "Entropy" => {
+                                "\n\nAnalyze task complexity in recent constellation and partner interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            }
+                            "Flux" => {
+                                "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            }
+                            "Momentum" => {
+                                "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            }
+                            _ => {
+                                "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                            }
+                        }
+                    }
+                }
             }
-            "Flux" => {
-                "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
-            }
-            "Chronicler" => {
-                "\n\nReview memory coherence and pattern recognition. Any important context that needs preservation? Patterns across conversations that should be noted?\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
-            }
-            "Momentum" => {
-                "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
-            }
-            "Guardian" => {
-                "\n\nSystem integrity check. Any contamination detected? Physical needs being neglected? Safety protocols that need activation?  Self-check for reflexive validation in past interactions and correct constellation members or your partner if required.\n\nProvide brief status updates, or message the facet or partner if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
-            }
-            _ => {
-                // Generic prompt for unknown agents
-                "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
-            }
+            crate::coordination::types::GroupMemberRole::Regular => match agent_name {
+                // Facet-specific fallbacks
+                "Entropy" => {
+                    "\n\nAnalyze task complexity in recent constellation and partner interactions. Are there overwhelming tasks that need breakdown? Any patterns of complexity that are blocking progress?\n\nProvide brief status updates or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                }
+                "Flux" => {
+                    "\n\nCheck temporal patterns and time blindness indicators. Does your partner appear to be in any hyperfocus sessions that need interruption? Upcoming deadlines that need attention?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                }
+                "Momentum" => {
+                    "\n\nMonitor energy states and flow patterns. Current energy level assessment? Any signs of burnout or need for state transition in your partner or the constellation?\n\nProvide brief status updates and/or intervene by sending a message to the facet or partner if needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                }
+                _ => {
+                    "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
+                }
+            },
         };
 
         format!("[Periodic Context Sync] {}{}", now, prompt)
