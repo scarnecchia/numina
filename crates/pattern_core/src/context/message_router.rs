@@ -1028,8 +1028,14 @@ impl MessageEndpoint for BlueskyEndpoint {
         &self,
         message: Message,
         metadata: Option<Value>,
-        _origin: Option<&MessageOrigin>,
+        origin: Option<&MessageOrigin>,
     ) -> Result<Option<String>> {
+        let agent_name = origin.and_then(|o| match o {
+            MessageOrigin::Bluesky { handle, .. } => Some(handle.clone()),
+            MessageOrigin::Agent { name, .. } => Some(name.clone()),
+            MessageOrigin::Other { source_id, .. } => Some(source_id.clone()),
+            _ => None,
+        });
         let text = match &message.content {
             MessageContent::Text(t) => t.clone(),
             MessageContent::Parts(parts) => {
@@ -1099,6 +1105,10 @@ impl MessageEndpoint for BlueskyEndpoint {
                 cause: format!("Failed to detect facets: {}", e),
                 parameters: serde_json::json!({ "text": &text }),
             })?;
+        let mut tags = vec!["pattern_post".to_string(), "llm_bot".to_string()];
+        if let Some(agent_name) = agent_name {
+            tags.push(agent_name);
+        }
 
         // Create the post
         let agent = &self.agent;
@@ -1113,7 +1123,7 @@ impl MessageEndpoint for BlueskyEndpoint {
                 facets: rich_text.facets,
                 labels: None,
                 langs: None,
-                tags: Some(vec!["pattern_post".to_string(), "llm_bot".to_string()]),
+                tags: Some(tags),
             })
             .await
             .map_err(|e| crate::CoreError::ToolExecutionFailed {

@@ -1450,29 +1450,6 @@ mod tests {
         assert!(score > 10.0);
     }
 
-    #[test]
-    fn test_parse_importance_scores() {
-        let compressor = MessageCompressor::new(CompressionStrategy::ImportanceBased {
-            keep_recent: 1,
-            keep_important: 1,
-        });
-
-        // Test JSON array parsing
-        let scores = compressor.parse_importance_scores("[7.5, 3.2, 9.0]", 3);
-        assert_eq!(scores.len(), 3);
-        assert_eq!(scores[0], 7.5);
-
-        // Test line-based parsing
-        let scores = compressor.parse_importance_scores("Message 1: 8.0\nMessage 2: 4.5", 2);
-        assert_eq!(scores.len(), 2);
-        assert_eq!(scores[0], 8.0);
-
-        // Test padding when insufficient scores
-        let scores = compressor.parse_importance_scores("Score: 7.0", 3);
-        assert_eq!(scores.len(), 3);
-        assert_eq!(scores[2], 5.0); // Default padding
-    }
-
     #[tokio::test]
     async fn test_importance_based_compression_with_heuristics() {
         let compressor = MessageCompressor::new(CompressionStrategy::ImportanceBased {

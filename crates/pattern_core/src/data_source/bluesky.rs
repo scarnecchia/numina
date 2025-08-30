@@ -127,7 +127,7 @@ impl ThreadContext {
 
             for (idx, sibling) in filtered_siblings.iter().enumerate() {
                 let is_last = idx == filtered_siblings.len() - 1;
-                sibling.append_as_sibling(buf, agent_did, "      ", is_last);
+                sibling.append_as_sibling(buf, agent_did, "  ", is_last);
             }
         }
 
@@ -147,7 +147,7 @@ impl ThreadContext {
                 }
 
                 for reply in main_replies {
-                    reply.append_as_reply(buf, agent_did, "  ", 1);
+                    reply.append_as_reply(buf, agent_did, "", 1);
                 }
             }
         }
@@ -224,8 +224,9 @@ impl ThreadContext {
             parent.append_as_parent(buf, agent_did, "  ");
 
             // Show siblings of immediate parent (excluding main post)
-            let filtered_siblings: Vec<_> =
+            let mut filtered_siblings: Vec<_> =
                 siblings.iter().filter(|s| s.uri != main_post.uri).collect();
+            filtered_siblings.sort_by_key(|p| p.created_at);
 
             if !filtered_siblings.is_empty() {
                 // Prioritize showing agent's own replies
@@ -244,7 +245,7 @@ impl ThreadContext {
                 let other_siblings: Vec<_> = filtered_siblings
                     .iter()
                     .filter(|s| !agent_did.map_or(false, |did| s.did == did))
-                    .take(2)
+                    .take(3)
                     .collect();
 
                 if !other_siblings.is_empty() {
@@ -264,19 +265,20 @@ impl ThreadContext {
                     buf.push_str(&format!("    (+{} more)\n", remaining));
                 }
             }
-            buf.push_str("|\n");
+            buf.push_str("  |\n");
         }
 
         // Show the main post
         main_post.append_as_main(buf, agent_did);
 
         // Show replies to main post if any
-        if let Some(replies) = self.replies_map.get(&main_post.uri) {
+        if let Some(mut replies) = self.replies_map.get(&main_post.uri).cloned() {
             if !replies.is_empty() {
                 buf.push_str(&format!("   ↳ {} direct replies:\n", replies.len()));
                 // Use append_as_reply to show full reply content
+                replies.sort_by_key(|p| p.created_at);
                 for reply in replies.iter().take(5) {
-                    reply.append_as_reply(buf, agent_did, "     ", 1);
+                    reply.append_as_reply(buf, agent_did, "", 1);
                 }
                 if replies.len() > 5 {
                     buf.push_str(&format!("     (+{} more)\n", replies.len() - 5));
@@ -1443,6 +1445,8 @@ pub struct BlueskyFirehoseSource {
     bsky_agent: Option<Arc<bsky_sdk::BskyAgent>>,
     // Rate limiting
     last_send_time: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
+    // Watchdog: last successful downstream activity (sent to channel)
+    last_activity_time: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
     posts_per_second: f64,
     // Cursor persistence
     cursor_save_interval: std::time::Duration,
@@ -1921,6 +1925,9 @@ impl BlueskyFirehoseSource {
             agent_handle,
             bsky_agent: None,
             last_send_time: std::sync::Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
+            last_activity_time: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::time::Instant::now(),
+            )),
             posts_per_second: 1.0, // Default to 1 posts every second max
             cursor_save_interval: std::time::Duration::from_secs(60), // Save every minute
             cursor_save_threshold: 100, // Save every 100 events
@@ -2845,6 +2852,7 @@ impl DataSource for BlueskyFirehoseSource {
             let queue_tx = tx.clone();
             let posts_per_second = self.posts_per_second;
             let queue_last_send_time = self.last_send_time.clone();
+            let queue_last_activity_time = self.last_activity_time.clone();
 
             tokio::spawn(async move {
                 let interval = std::time::Duration::from_secs_f64(1.0 / posts_per_second);
@@ -2877,11 +2885,27 @@ impl DataSource for BlueskyFirehoseSource {
                         };
 
                         if let Some(event) = event {
-                            if let Err(e) = queue_tx.send(Ok(event)).await {
-                                tracing::error!("Failed to send queued event: {}", e);
-                                break;
-                            } else {
-                                tracing::debug!("Sent queued post from processing queue");
+                            match queue_tx.try_send(Ok(event.clone())) {
+                                Ok(_) => {
+                                    tracing::debug!("Sent queued post from processing queue");
+                                    let mut act = queue_last_activity_time.lock().await;
+                                    *act = std::time::Instant::now();
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    // Backpressure: requeue at front and try next tick
+                                    let mut buf = queue_buffer.lock();
+                                    if !buf.requeue_front_for_processing(event) {
+                                        tracing::warn!(
+                                            "Processing queue disabled; dropping backpressured event"
+                                        );
+                                    }
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    tracing::error!(
+                                        "Output channel closed while sending queued event; stopping queue worker"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
@@ -2899,6 +2923,7 @@ impl DataSource for BlueskyFirehoseSource {
         let manager_buffer = buffer;
         let manager_collections = collections;
         let manager_last_send_time = self.last_send_time.clone();
+        let manager_last_activity_time = self.last_activity_time.clone();
         let manager_cursor_file = self.cursor_file_path.clone();
         let manager_cursor_save_interval = self.cursor_save_interval;
         let manager_cursor_save_threshold = self.cursor_save_threshold;
@@ -2966,6 +2991,7 @@ impl DataSource for BlueskyFirehoseSource {
                     buffer: manager_buffer.clone(),
                     resolver: atproto_identity_resolver(),
                     last_send_time: manager_last_send_time.clone(),
+                    last_activity_time: manager_last_activity_time.clone(),
                     min_interval: std::time::Duration::from_secs_f64(
                         1.0 / manager_posts_per_second,
                     ),
@@ -3052,12 +3078,18 @@ impl DataSource for BlueskyFirehoseSource {
                                         break;
                                     }
 
-                                    let _ =
-                                        ingestor_tx.send(Err(crate::CoreError::DataSourceError {
+                                    if let Err(e2) = ingestor_tx.try_send(Err(
+                                        crate::CoreError::DataSourceError {
                                             source_name: c_source_id.clone(),
                                             operation: "process".to_string(),
                                             cause: e.to_string(),
-                                        }));
+                                        },
+                                    )) {
+                                        tracing::debug!(
+                                            "Could not forward processing error to channel: {:?}",
+                                            e2
+                                        );
+                                    }
                                 }
                             }
                             Ok(Err(e)) => {
@@ -3100,6 +3132,33 @@ impl DataSource for BlueskyFirehoseSource {
                 {
                     tracing::debug!("Jetstream connection #{} established", connection_count);
                     consecutive_failures = 0; // Reset on successful connection
+
+                    // Start watchdog for downstream inactivity
+                    let watchdog_alive = connection_alive.clone();
+                    let watchdog_activity = manager_last_activity_time.clone();
+                    tokio::spawn(async move {
+                        const IDLE_LIMIT_SECS: u64 = 60; // no processed events for 60s => unhealthy
+                        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+                        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            ticker.tick().await;
+                            if !watchdog_alive.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            let idle = {
+                                let act = watchdog_activity.lock().await;
+                                act.elapsed()
+                            };
+                            if idle.as_secs() >= IDLE_LIMIT_SECS {
+                                tracing::error!(
+                                    "Watchdog: no downstream activity for {:?}; marking connection dead to force reconnect",
+                                    idle
+                                );
+                                watchdog_alive.store(false, std::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    });
 
                     // Wait for the handler to exit (connection died)
                     let _ = handle.await;
@@ -3398,6 +3457,8 @@ struct PostIngestor {
     resolver: atrium_identity::did::CommonDidResolver<PatternHttpClient>,
     // Rate limiting
     last_send_time: Arc<tokio::sync::Mutex<std::time::Instant>>,
+    // Watchdog activity marker updated when we successfully emit downstream
+    last_activity_time: Arc<tokio::sync::Mutex<std::time::Instant>>,
     min_interval: std::time::Duration,
     // Cursor persistence
     cursor_file_path: Option<std::path::PathBuf>,
@@ -3475,19 +3536,40 @@ impl LexiconIngestor for PostIngestor {
                 } else {
                     // Can send immediately
                     tracing::debug!("📤 Sending post to channel: @{}", post_to_filter.handle);
-                    if let Err(e) = self.tx.send(Ok(event.clone())).await {
-                        tracing::error!(
-                            "Failed to send post to channel: {}. Channel likely closed, triggering reconnection.",
-                            e
-                        );
-                        return Err(anyhow::anyhow!("Channel closed: {}", e));
-                    }
-
-                    *last_send = std::time::Instant::now();
-
-                    if let Some(buffer) = &self.buffer {
-                        let mut buffer_guard = buffer.lock();
-                        buffer_guard.push(event);
+                    match self.tx.try_send(Ok(event.clone())) {
+                        Ok(_) => {
+                            *last_send = std::time::Instant::now();
+                            // Mark activity for watchdog
+                            let mut act = self.last_activity_time.lock().await;
+                            *act = std::time::Instant::now();
+                            if let Some(buffer) = &self.buffer {
+                                let mut buffer_guard = buffer.lock();
+                                buffer_guard.push(event);
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            // Downstream backpressure: queue for rate-limited processing instead
+                            if let Some(buffer) = &self.buffer {
+                                let mut buffer_guard = buffer.lock();
+                                if buffer_guard.queue_for_processing(event.clone()) {
+                                    tracing::warn!(
+                                        "Backpressure: queued post for later processing (channel full)"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "Backpressure: processing queue full; dropping post from {}",
+                                        post_to_filter.handle
+                                    );
+                                }
+                                buffer_guard.push(event);
+                            }
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::error!(
+                                "Output channel closed while sending post; triggering reconnection"
+                            );
+                            return Err(anyhow::anyhow!("Channel closed"));
+                        }
                     }
                 }
 
