@@ -295,17 +295,34 @@ impl DiscordEndpoint {
             }
         })?;
 
-        // Send the message
-        dm_channel.say(&self.http, &content).await.map_err(|e| {
-            pattern_core::CoreError::ToolExecutionFailed {
-                tool_name: "discord_endpoint".to_string(),
-                cause: format!("Failed to send DM: {}", e),
-                parameters: serde_json::json!({
-                    "user_id": user_id.get(),
-                    "content_length": content.len()
-                }),
+        if content.len() >= 8192 {
+            let messages = crate::bot::split_message(&content, 8192);
+            for message in messages {
+                // Send the message
+                dm_channel.say(&self.http, &message).await.map_err(|e| {
+                    pattern_core::CoreError::ToolExecutionFailed {
+                        tool_name: "discord_endpoint".to_string(),
+                        cause: format!("Failed to send DM: {}", e),
+                        parameters: serde_json::json!({
+                            "user_id": user_id.get(),
+                            "content_length": content.len()
+                        }),
+                    }
+                })?;
             }
-        })?;
+        } else {
+            // Send the message
+            dm_channel.say(&self.http, &content).await.map_err(|e| {
+                pattern_core::CoreError::ToolExecutionFailed {
+                    tool_name: "discord_endpoint".to_string(),
+                    cause: format!("Failed to send DM: {}", e),
+                    parameters: serde_json::json!({
+                        "user_id": user_id.get(),
+                        "content_length": content.len()
+                    }),
+                }
+            })?;
+        }
 
         info!("Sent DM to Discord user {}", user_id);
         Ok(())

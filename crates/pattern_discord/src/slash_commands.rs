@@ -9,7 +9,7 @@ use pattern_core::{
 };
 use serenity::{
     builder::{
-        CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedFooter,
+        CreateAttachment, CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedFooter,
         CreateInteractionResponse, CreateInteractionResponseMessage,
     },
     client::Context,
@@ -38,8 +38,9 @@ pub fn create_commands() -> Vec<CreateCommand> {
                 .required(false),
             ),
         CreateCommand::new("memory")
-            .description("View or search memory blocks")
+            .description("View or search memory blocks (DMs only)")
             .dm_permission(true)
+            .default_member_permissions(serenity::model::permissions::Permissions::empty())
             .add_option(
                 CreateCommandOption::new(CommandOptionType::String, "agent", "Name of the agent")
                     .required(false),
@@ -53,8 +54,9 @@ pub fn create_commands() -> Vec<CreateCommand> {
                 .required(false),
             ),
         CreateCommand::new("archival")
-            .description("Search archival memory")
+            .description("Search archival memory (DMs only)")
             .dm_permission(true)
+            .default_member_permissions(serenity::model::permissions::Permissions::empty())
             .add_option(
                 CreateCommandOption::new(CommandOptionType::String, "agent", "Name of the agent")
                     .required(false),
@@ -64,15 +66,17 @@ pub fn create_commands() -> Vec<CreateCommand> {
                     .required(false),
             ),
         CreateCommand::new("context")
-            .description("Show recent conversation context")
+            .description("Show recent conversation context (DMs only)")
             .dm_permission(true)
+            .default_member_permissions(serenity::model::permissions::Permissions::empty())
             .add_option(
                 CreateCommandOption::new(CommandOptionType::String, "agent", "Name of the agent")
                     .required(false),
             ),
         CreateCommand::new("search")
-            .description("Search conversation history")
+            .description("Search conversation history (DMs only)")
             .dm_permission(true)
+            .default_member_permissions(serenity::model::permissions::Permissions::empty())
             .add_option(
                 CreateCommandOption::new(CommandOptionType::String, "query", "Search query")
                     .required(true),
@@ -242,6 +246,21 @@ pub async fn handle_memory_command(
     command: &CommandInteraction,
     agents: Option<&[AgentWithMembership<Arc<dyn Agent>>]>,
 ) -> Result<()> {
+    // Check if command is in DM - reject if not
+    if command.guild_id.is_some() {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🔒 This command is only available in DMs for privacy.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .map_err(|e| miette::miette!("Failed to send DM-only response: {}", e))?;
+        return Ok(());
+    }
     // Get parameters
     let agent_name = command
         .data
@@ -300,14 +319,32 @@ pub async fn handle_memory_command(
                         embed = embed.field("Description", desc, false);
                     }
 
-                    // Truncate content for Discord
-                    let content = if block.value.len() > 1000 {
-                        format!("{}...", &block.value[..1000])
-                    } else {
-                        block.value.clone()
-                    };
+                    // Handle long content with file attachment
+                    if block.value.len() > 800 {
+                        // Create file attachment for long content
+                        let filename = format!("{}-{}.txt", agent.name(), block.label);
+                        let attachment = CreateAttachment::bytes(block.value.as_bytes(), &filename);
 
-                    embed = embed.field("Content", format!("```\n{}\n```", content), false);
+                        embed = embed.field("Content", "📎 See attached file", false);
+
+                        command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .embed(embed)
+                                        .add_file(attachment)
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await
+                            .map_err(|e| {
+                                miette::miette!("Failed to send memory response: {}", e)
+                            })?;
+                        return Ok(());
+                    } else {
+                        embed = embed.field("Content", format!("```\n{}\n```", block.value), false);
+                    }
                 }
                 Ok(None) => {
                     embed = embed
@@ -374,6 +411,21 @@ pub async fn handle_archival_command(
     command: &CommandInteraction,
     agents: Option<&[AgentWithMembership<Arc<dyn Agent>>]>,
 ) -> Result<()> {
+    // Check if command is in DM - reject if not
+    if command.guild_id.is_some() {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🔒 This command is only available in DMs for privacy.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .map_err(|e| miette::miette!("Failed to send DM-only response: {}", e))?;
+        return Ok(());
+    }
     // Get parameters
     let agent_name = command
         .data
@@ -503,6 +555,21 @@ pub async fn handle_context_command(
     command: &CommandInteraction,
     agents: Option<&[AgentWithMembership<Arc<dyn Agent>>]>,
 ) -> Result<()> {
+    // Check if command is in DM - reject if not
+    if command.guild_id.is_some() {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🔒 This command is only available in DMs for privacy.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .map_err(|e| miette::miette!("Failed to send DM-only response: {}", e))?;
+        return Ok(());
+    }
     // Get agent name
     let agent_name = command
         .data
@@ -537,7 +604,7 @@ pub async fn handle_context_command(
 
         let handle = agent.handle().await;
         match handle
-            .search_conversations(None, None, None, None, 10)
+            .search_conversations(None, None, None, None, 100)
             .await
         {
             Ok(messages) => {
@@ -546,19 +613,52 @@ pub async fn handle_context_command(
                 } else {
                     embed = embed.field("Recent Messages", messages.len().to_string(), true);
 
-                    // Show last few messages
-                    for (i, msg) in messages.iter().rev().enumerate().take(5) {
-                        let role = format!("{:?}", msg.role);
-                        let content = msg
-                            .text_content()
-                            .unwrap_or_else(|| "(no text content)".to_string());
-                        let preview = if content.len() > 200 {
-                            format!("{}...", &content[..200])
-                        } else {
-                            content
-                        };
+                    // Handle large message lists with file attachment
+                    if messages.len() > 10 {
+                        // Create file attachment for full context
+                        let mut content_lines = Vec::new();
+                        for (i, msg) in messages.iter().rev().enumerate() {
+                            let role = format!("{:?}", msg.role);
+                            let content = msg.display_content();
+                            content_lines.push(format!("{}. [{}] {}", i + 1, role, content));
+                        }
 
-                        embed = embed.field(format!("{}. [{}]", i + 1, role), preview, false);
+                        let filename = format!("{}-context.txt", agent.name());
+                        let content = content_lines.join("\n\n");
+                        let attachment = CreateAttachment::bytes(content.as_bytes(), &filename);
+
+                        embed =
+                            embed.field("Context", "📎 See attached file for full context", false);
+
+                        command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .embed(embed)
+                                        .add_file(attachment)
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await
+                            .map_err(|e| {
+                                miette::miette!("Failed to send context response: {}", e)
+                            })?;
+                        return Ok(());
+                    } else {
+                        // Show last few messages inline
+                        for (i, msg) in messages.iter().rev().enumerate().take(10) {
+                            let role = format!("{:?}", msg.role);
+                            let content = msg.display_content();
+                            let preview = if content.len() > 200 {
+                                let content: String = content.chars().take(200).collect();
+                                format!("{}...", content)
+                            } else {
+                                content
+                            };
+
+                            embed = embed.field(format!("{}. [{}]", i + 1, role), preview, false);
+                        }
                     }
                 }
             }
@@ -595,6 +695,21 @@ pub async fn handle_search_command(
     command: &CommandInteraction,
     agents: Option<&[AgentWithMembership<Arc<dyn Agent>>]>,
 ) -> Result<()> {
+    // Check if command is in DM - reject if not
+    if command.guild_id.is_some() {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🔒 This command is only available in DMs for privacy.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .map_err(|e| miette::miette!("Failed to send DM-only response: {}", e))?;
+        return Ok(());
+    }
     // Get parameters
     let query = command
         .data
@@ -650,34 +765,74 @@ pub async fn handle_search_command(
                 } else {
                     embed = embed.field("Results", messages.len().to_string(), true);
 
-                    for (i, msg) in messages.iter().enumerate().take(3) {
-                        let role = format!("{:?}", msg.role);
-                        let content = msg
-                            .text_content()
-                            .unwrap_or_else(|| "(no text content)".to_string());
-                        let preview = if content.len() > 200 {
-                            format!("{}...", &content[..200])
-                        } else {
-                            content
-                        };
-
-                        embed = embed.field(
-                            format!(
-                                "{}. [{}] - {}",
+                    // Handle large result sets with file attachment
+                    if messages.len() > 5 {
+                        // Create file attachment for full search results
+                        let mut content_lines = Vec::new();
+                        for (i, msg) in messages.iter().enumerate() {
+                            let role = format!("{:?}", msg.role);
+                            let content = msg
+                                .text_content()
+                                .unwrap_or_else(|| "(no text content)".to_string());
+                            content_lines.push(format!(
+                                "{}. [{}] - {}\n{}",
                                 i + 1,
                                 role,
-                                msg.created_at.format("%Y-%m-%d %H:%M")
-                            ),
-                            preview,
+                                msg.created_at.format("%Y-%m-%d %H:%M"),
+                                content
+                            ));
+                        }
+
+                        let filename =
+                            format!("{}-search-{}.txt", agent.name(), query.replace(" ", "_"));
+                        let content = content_lines.join("\n\n---\n\n");
+                        let attachment = CreateAttachment::bytes(content.as_bytes(), &filename);
+
+                        embed = embed.field(
+                            "Search Results",
+                            "📎 See attached file for full results",
                             false,
                         );
-                    }
 
-                    if messages.len() > 3 {
-                        embed = embed.footer(CreateEmbedFooter::new(format!(
-                            "... and {} more results",
-                            messages.len() - 3
-                        )));
+                        command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .embed(embed)
+                                        .add_file(attachment)
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await
+                            .map_err(|e| {
+                                miette::miette!("Failed to send search response: {}", e)
+                            })?;
+                        return Ok(());
+                    } else {
+                        // Show results inline
+                        for (i, msg) in messages.iter().enumerate().take(5) {
+                            let role = format!("{:?}", msg.role);
+                            let content = msg
+                                .text_content()
+                                .unwrap_or_else(|| "(no text content)".to_string());
+                            let preview = if content.len() > 200 {
+                                format!("{}...", &content[..200])
+                            } else {
+                                content
+                            };
+
+                            embed = embed.field(
+                                format!(
+                                    "{}. [{}] - {}",
+                                    i + 1,
+                                    role,
+                                    msg.created_at.format("%Y-%m-%d %H:%M")
+                                ),
+                                preview,
+                                false,
+                            );
+                        }
                     }
                 }
             }

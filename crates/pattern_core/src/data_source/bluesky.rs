@@ -2526,6 +2526,14 @@ impl BlueskyFirehoseSource {
         &self,
         item: &BlueskyPost,
     ) -> Option<(String, Vec<(CompactString, MemoryBlock)>)> {
+        // Don't notify agent about their own posts
+        if let Some(agent_did) = self.filter.mentions.first() {
+            if item.did.contains(agent_did) {
+                tracing::debug!("Skipping notification for agent's own post: {}", item.uri);
+                return None;
+            }
+        }
+
         // Try to hydrate the post - cache will return it if already hydrated
         let post = if self.bsky_agent.is_some() {
             let full_hydration = HydrationState {
@@ -3819,13 +3827,37 @@ async fn should_include_post(
         }
     }
 
-    // 2. REPLIES TO SELF - always see replies to our own posts
+    // 2. THREAD PARTICIPATION - always see posts in threads where agent is involved
     if let Some(reply) = &post.reply {
-        // Extract agent's DID from mentions field (should be the only entry)
         if let Some(agent_did) = filter.mentions.first() {
-            // Check if this is a reply to the agent's own post
+            // Skip agent's own posts - they shouldn't generate notifications for themselves
+            if post.did.contains(agent_did) {
+                post.resolve_handle(resolver).await;
+                return true;
+            }
+
+            // Case B: This is someone replying TO a post by the agent (reply TO agent)
             if reply.parent.uri.contains(agent_did) {
-                // This is a reply to the agent - always include it
+                post.resolve_handle(resolver).await;
+                return true;
+            }
+
+            // Case C: This might be part of a longer thread - check root
+            if reply.root.uri.contains(agent_did) {
+                post.resolve_handle(resolver).await;
+                return true;
+            }
+        }
+
+        // Case D: Check if this is a reply to someone on friends list or regular allowlist
+        for friend_did in &filter.friends {
+            if reply.parent.uri.contains(friend_did) {
+                post.resolve_handle(resolver).await;
+                return true;
+            }
+        }
+        for allowed_did in &filter.dids {
+            if reply.parent.uri.contains(allowed_did) {
                 post.resolve_handle(resolver).await;
                 return true;
             }

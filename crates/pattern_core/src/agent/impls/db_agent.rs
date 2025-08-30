@@ -2738,17 +2738,122 @@ where
                                                             response.content.clone()
                                                         };
 
+                                                        // Special handling for send_message to show the actual message
+                                                        let action = if call.fn_name
+                                                            == "send_message"
+                                                        {
+                                                            // Try to extract the message content from the tool call
+                                                            if let Ok(params) =
+                                                                serde_json::from_value::<
+                                                                    serde_json::Value,
+                                                                >(
+                                                                    call.fn_arguments.clone()
+                                                                )
+                                                            {
+                                                                let message_text = params
+                                                                    .get("content")
+                                                                    .and_then(|m| m.as_str())
+                                                                    .unwrap_or("<no content>");
+
+                                                                // Extract target info
+                                                                let target_info = if let Some(
+                                                                    target,
+                                                                ) =
+                                                                    params.get("target")
+                                                                {
+                                                                    if let Some(target_type) =
+                                                                        target
+                                                                            .get("target_type")
+                                                                            .and_then(|t| {
+                                                                                t.as_str()
+                                                                            })
+                                                                    {
+                                                                        let target_id = target
+                                                                            .get("target_id")
+                                                                            .and_then(|i| {
+                                                                                i.as_str()
+                                                                            });
+                                                                        match target_type {
+                                                                            "user" => " to user"
+                                                                                .to_string(),
+                                                                            "agent" => {
+                                                                                if let Some(id) =
+                                                                                    target_id
+                                                                                {
+                                                                                    format!(
+                                                                                        " to agent: {}",
+                                                                                        id
+                                                                                    )
+                                                                                } else {
+                                                                                    " to agent"
+                                                                                        .to_string()
+                                                                                }
+                                                                            }
+                                                                            "group" => {
+                                                                                if let Some(id) =
+                                                                                    target_id
+                                                                                {
+                                                                                    format!(
+                                                                                        " to group: {}",
+                                                                                        id
+                                                                                    )
+                                                                                } else {
+                                                                                    " to group"
+                                                                                        .to_string()
+                                                                                }
+                                                                            }
+                                                                            "channel" => {
+                                                                                if let Some(id) =
+                                                                                    target_id
+                                                                                {
+                                                                                    format!(
+                                                                                        " to channel: {}",
+                                                                                        id
+                                                                                    )
+                                                                                } else {
+                                                                                    " to channel"
+                                                                                        .to_string()
+                                                                                }
+                                                                            }
+                                                                            "bluesky" => {
+                                                                                " to bluesky"
+                                                                                    .to_string()
+                                                                            }
+                                                                            _ => format!(
+                                                                                " to {}",
+                                                                                target_type
+                                                                            ),
+                                                                        }
+                                                                    } else {
+                                                                        "".to_string()
+                                                                    }
+                                                                } else {
+                                                                    "".to_string()
+                                                                };
+
+                                                                format!(
+                                                                    "Sent{}: \"{}\"",
+                                                                    target_info, message_text
+                                                                )
+                                                            } else {
+                                                                format!("Success")
+                                                            }
+                                                        } else if response
+                                                            .content
+                                                            .starts_with("Error:")
+                                                        {
+                                                            format!("Failed: {}", truncated)
+                                                        } else {
+                                                            format!("Success")
+                                                        };
+
                                                         let event = ConstellationEvent {
                                                             timestamp: chrono::Utc::now(),
                                                             agent_id: agent_id.clone(),
                                                             agent_name: self_clone.name().to_string(),
                                                             event_type: ConstellationEventType::ToolExecuted {
                                                                 tool_name: call.fn_name.clone(),
-                                                                action: if response.content.starts_with("Error:") {
-                                                                    format!("Failed: {}", truncated)
-                                                                } else {
-                                                                    format!("Success")
-                                                                },
+                                                                action,
                                                             },
                                                             description: format!("Executed tool: {}", call.fn_name),
                                                             metadata: None,

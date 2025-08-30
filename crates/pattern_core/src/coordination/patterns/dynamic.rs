@@ -101,6 +101,14 @@ impl GroupManager for DynamicManager {
                 _ => None,
             };
 
+            // Check for @all broadcast
+            let is_broadcast_to_all = if let Some(text) = message_text {
+                let lower_text = text.to_lowercase();
+                lower_text.contains("@all")
+            } else {
+                false
+            };
+
             // Check for direct agent addressing (e.g., "entropy, ..." or "@entropy" or "hey entropy")
             let directly_addressed_agent = if let Some(text) = message_text {
                 let lower_text = text.to_lowercase();
@@ -139,39 +147,48 @@ impl GroupManager for DynamicManager {
                 agent_capabilities,
             };
 
-            // Log direct addressing check
-            if let Some(addressed) = directly_addressed_agent {
+            // Log addressing detection
+            if is_broadcast_to_all {
+                tracing::info!("@all broadcast detected - will route to all active agents");
+            } else if let Some(addressed) = directly_addressed_agent {
                 tracing::info!(
                     "Direct addressing detected for agent: {}",
                     addressed.agent.name()
                 );
             }
 
-            // Use the actual selector to select agents, unless directly addressed
-            let (selected_agents, selector_response) =
-                if let Some(addressed_agent) = directly_addressed_agent {
-                    // Bypass selector for directly addressed agents
-                    tracing::info!("Bypassing selector due to direct addressing");
-                    (vec![addressed_agent], None)
-                } else {
-                    tracing::info!("Using {} selector for agent selection", selector_name);
-                    match selector
-                        .select_agents(&agents, &context, &selector_config)
-                        .await
-                    {
-                        Ok(result) => (result.agents, result.selector_response),
-                        Err(e) => {
-                            let _ = tx
-                                .send(GroupResponseEvent::Error {
-                                    agent_id: None,
-                                    message: e.to_string(),
-                                    recoverable: false,
-                                })
-                                .await;
-                            return;
-                        }
+            // Use the actual selector to select agents, unless directly addressed or broadcasting to all
+            let (selected_agents, selector_response) = if is_broadcast_to_all {
+                // Broadcast to all active agents
+                tracing::info!("Broadcasting to all active agents due to @all addressing");
+                let all_active_agents = agents
+                    .iter()
+                    .filter(|awm| awm.membership.is_active)
+                    .collect::<Vec<_>>();
+                (all_active_agents, None)
+            } else if let Some(addressed_agent) = directly_addressed_agent {
+                // Bypass selector for directly addressed agents
+                tracing::info!("Bypassing selector due to direct addressing");
+                (vec![addressed_agent], None)
+            } else {
+                tracing::info!("Using {} selector for agent selection", selector_name);
+                match selector
+                    .select_agents(&agents, &context, &selector_config)
+                    .await
+                {
+                    Ok(result) => (result.agents, result.selector_response),
+                    Err(e) => {
+                        let _ = tx
+                            .send(GroupResponseEvent::Error {
+                                agent_id: None,
+                                message: e.to_string(),
+                                recoverable: false,
+                            })
+                            .await;
+                        return;
                     }
-                };
+                }
+            };
 
             if selected_agents.is_empty() {
                 let _ = tx

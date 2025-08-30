@@ -13,7 +13,7 @@ pub mod helpers;
 pub mod routing;
 pub mod slash_commands;
 
-pub use bot::{DiscordBot, DiscordBotConfig};
+pub use bot::{DiscordBot, DiscordBotConfig, DiscordEventHandler};
 pub use commands::{Command, CommandHandler, SlashCommand};
 pub use context::{DiscordContext, MessageContext, UserContext};
 pub use error::{DiscordError, Result};
