@@ -5,6 +5,7 @@
 .pattern_cache
 pattern.toml
 /lares_agents/lares.toml
+/lares_agents/lasa-partner-block.md
 pattern-bsky.toml
 **.env
 .claude/settings.local.json
