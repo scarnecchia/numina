@@ -51,7 +51,7 @@ memory_type = "core"
 description = "Cross-context patterns"
 shared = true
 
-[memory.Lares_context]
+[memory.constellation_context]
 content_path = "../lares-context.md"
 permission = "read_write"
 memory_type = "core"

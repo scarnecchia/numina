@@ -61,7 +61,7 @@ permission = "read_write"
 memory_type = "core"
 description = "How facets work together"
 
-[memory.lares_context]
+[memory.constellation_context]
 content_path = "../lares-context.md"
 permission = "read_write"
 memory_type = "core"
