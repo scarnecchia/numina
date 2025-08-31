@@ -2223,8 +2223,20 @@ impl Message {
     /// Rough estimation of token count for this message
     ///
     /// Uses the approximation of ~4 characters per token
+    /// Images are estimated at 1600 tokens each
     pub fn estimate_tokens(&self) -> usize {
-        self.display_content().len() / 4
+        let text_tokens = self.display_content().len() / 4;
+
+        // Count images in the message
+        let image_count = match &self.content {
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter(|part| matches!(part, ContentPart::Image { .. }))
+                .count(),
+            _ => 0,
+        };
+
+        text_tokens + (image_count * 1600)
     }
 }
 

@@ -78,32 +78,32 @@ pub struct ThreadContext {
 impl ThreadContext {
     /// Collect all image URLs from the thread context
     pub fn collect_all_image_urls(&self, main_post: &BlueskyPost) -> Vec<String> {
-        let mut urls = Vec::new();
+        let mut unique_urls = std::collections::HashSet::new();
 
         // Collect from parent chain
         for (parent, siblings) in &self.parent_chain {
-            urls.extend(parent.collect_image_urls());
+            unique_urls.extend(parent.collect_image_urls());
             for sibling in siblings {
-                urls.extend(sibling.collect_image_urls());
+                unique_urls.extend(sibling.collect_image_urls());
             }
         }
 
         // Collect from root if different
         if let Some(root) = &self.root {
-            urls.extend(root.collect_image_urls());
+            unique_urls.extend(root.collect_image_urls());
         }
 
         // Collect from main post
-        urls.extend(main_post.collect_image_urls());
+        unique_urls.extend(main_post.collect_image_urls());
 
         // Collect from replies
         for replies in self.replies_map.values() {
             for reply in replies {
-                urls.extend(reply.collect_image_urls());
+                unique_urls.extend(reply.collect_image_urls());
             }
         }
 
-        urls
+        unique_urls.into_iter().collect()
     }
 
     /// Append full thread tree to buffer
@@ -1018,8 +1018,8 @@ impl BlueskyPost {
                                     if cid.starts_with("http") {
                                         cid
                                     } else {
-                                        // Use the parent post's DID (not the quoted post's DID)
-                                        format!("https://cdn.bsky.app/img/feed_fullsize/plain/{}/{}@jpeg", did, cid)
+                                        // Use the parent post's DID (not the quoted post's DID) - thumbnail for LLM
+                                        format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, cid)
                                     }
                                 } else {
                                     // Use the parent post's DID for the fallback case too
@@ -4015,16 +4015,16 @@ fn convert_blob_to_url(blob_ref: &str, did: &str) -> String {
         if cid.starts_with("http") {
             cid
         } else {
-            // Convert CID to CDN URL (full size)
+            // Convert CID to CDN URL (thumbnail - better for LLM processing)
             format!(
-                "https://cdn.bsky.app/img/feed_fullsize/plain/{}/{}@jpeg",
+                "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
                 did, cid
             )
         }
     } else {
-        // Fallback: treat as plain CID
+        // Fallback: treat as plain CID (thumbnail)
         format!(
-            "https://cdn.bsky.app/img/feed_fullsize/plain/{}/{}@jpeg",
+            "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
             did, blob_ref
         )
     }

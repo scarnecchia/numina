@@ -115,7 +115,7 @@ chunk_size = 30
 summarization_model = "claude-3-5-haiku-20241022"
 
 [context]
-max_messages = 250
+max_messages = 200
 
 
 # Bluesky configuration for the constellation
