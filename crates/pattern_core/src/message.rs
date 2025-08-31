@@ -2832,3 +2832,90 @@ mod tests {
         );
     }
 }
+
+/// Parse text content for multimodal markers and convert to ContentParts
+///
+/// Looks for [IMAGE: url] markers in text and converts them to proper ContentPart::Image entries.
+/// Takes only the last 4 images to avoid token bloat.
+pub fn parse_multimodal_markers(text: &str) -> Option<Vec<ContentPart>> {
+    // Regex to find [IMAGE: url] markers
+    let image_pattern = regex::Regex::new(r"\[IMAGE:\s*([^\]]+)\]").ok()?;
+
+    let mut parts = Vec::new();
+    let mut last_end = 0;
+    let mut image_markers = Vec::new();
+
+    // Collect all image markers with their positions
+    for cap in image_pattern.captures_iter(text) {
+        let full_match = cap.get(0)?;
+        let url = cap.get(1)?.as_str().trim();
+
+        image_markers.push((full_match.start(), full_match.end(), url.to_string()));
+    }
+
+    // If no images found, return None to keep original text format
+    if image_markers.is_empty() {
+        return None;
+    }
+
+    // Take only the last 4 images
+    let selected_images: Vec<_> = image_markers.iter().rev().take(4).rev().cloned().collect();
+
+    // Build parts, including only selected images
+    for (start, end, url) in &image_markers {
+        // Add text before this marker
+        if *start > last_end {
+            let text_part = text[last_end..*start].trim();
+            if !text_part.is_empty() {
+                parts.push(ContentPart::Text(text_part.to_string()));
+            }
+        }
+
+        // Only add image if it's in our selected set
+        if selected_images.iter().any(|(_, _, u)| u == url) {
+            // Determine if this is base64 or URL
+            let source = if url.starts_with("data:") || url.starts_with("base64:") {
+                // Extract base64 data
+                let data = if let Some(comma_pos) = url.find(',') {
+                    &url[comma_pos + 1..]
+                } else {
+                    url
+                };
+                ImageSource::Base64(Arc::from(data))
+            } else {
+                ImageSource::Url(url.clone())
+            };
+
+            // Try to infer content type
+            let content_type = if url.contains(".png") || url.contains("image/png") {
+                "image/png"
+            } else if url.contains(".gif") || url.contains("image/gif") {
+                "image/gif"
+            } else if url.contains(".webp") || url.contains("image/webp") {
+                "image/webp"
+            } else {
+                "image/jpeg" // Default to JPEG
+            }
+            .to_string();
+
+            parts.push(ContentPart::Image {
+                content_type,
+                source,
+            });
+        }
+
+        last_end = *end;
+    }
+
+    // Add any remaining text after the last marker
+    if last_end < text.len() {
+        let text_part = text[last_end..].trim();
+        if !text_part.is_empty() {
+            parts.push(ContentPart::Text(text_part.to_string()));
+        }
+    }
+
+    // Only return Parts if we actually added images
+    let has_images = parts.iter().any(|p| matches!(p, ContentPart::Image { .. }));
+    if has_images { Some(parts) } else { None }
+}

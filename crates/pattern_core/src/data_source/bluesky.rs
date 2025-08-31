@@ -76,6 +76,36 @@ pub struct ThreadContext {
 }
 
 impl ThreadContext {
+    /// Collect all image URLs from the thread context
+    pub fn collect_all_image_urls(&self, main_post: &BlueskyPost) -> Vec<String> {
+        let mut urls = Vec::new();
+
+        // Collect from parent chain
+        for (parent, siblings) in &self.parent_chain {
+            urls.extend(parent.collect_image_urls());
+            for sibling in siblings {
+                urls.extend(sibling.collect_image_urls());
+            }
+        }
+
+        // Collect from root if different
+        if let Some(root) = &self.root {
+            urls.extend(root.collect_image_urls());
+        }
+
+        // Collect from main post
+        urls.extend(main_post.collect_image_urls());
+
+        // Collect from replies
+        for replies in self.replies_map.values() {
+            for reply in replies {
+                urls.extend(reply.collect_image_urls());
+            }
+        }
+
+        urls
+    }
+
     /// Append full thread tree to buffer
     pub fn append_thread_tree(
         &self,
@@ -592,6 +622,21 @@ pub struct QuotedPost {
 }
 
 impl BlueskyPost {
+    /// Collect image URLs from this post's embeds
+    pub fn collect_image_urls(&self) -> Vec<String> {
+        match &self.embed {
+            Some(EmbedInfo::Images { urls, .. }) => urls.clone(),
+            Some(EmbedInfo::QuoteWithMedia { media, .. }) => {
+                if let EmbedInfo::Images { urls, .. } = media.as_ref() {
+                    urls.clone()
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Get the thread root URI for this post
     pub fn thread_root(&self) -> String {
         if let Some(reply) = &self.reply {
@@ -1388,6 +1433,15 @@ pub struct BlueskyFilter {
     /// DIDs to exclude - never show posts from these (takes precedence over all inclusion filters)
     #[serde(default)]
     pub exclude_dids: Vec<String>,
+
+    /// Only show threads where agent is actively participating (default: true)
+    #[serde(default = "default_true")]
+    pub require_agent_participation: bool,
+}
+
+/// Helper for serde default
+fn default_true() -> bool {
+    true
 }
 
 /// Source statistics
@@ -1800,6 +1854,81 @@ impl BlueskyFirehoseSource {
                 1, // current depth
             )
             .await;
+        }
+
+        // Check if agent is actually participating in this thread (if configured)
+        // If not, return None to avoid unnecessary notifications
+        // BUT: Always show if agent is directly mentioned in the current post
+        if filter.require_agent_participation {
+            if let Some(agent_did) = agent_did {
+                // Check if the agent is mentioned in current post, its parent, or root
+                // If so, always include it regardless of thread participation
+                let mut agent_mentioned_in_chain = false;
+
+                // Find and check the current post
+                let all_posts = context
+                    .replies_map
+                    .values()
+                    .flatten()
+                    .chain(
+                        context
+                            .parent_chain
+                            .iter()
+                            .flat_map(|(p, siblings)| std::iter::once(p).chain(siblings.iter())),
+                    )
+                    .chain(context.root.iter());
+
+                for post in all_posts {
+                    if post.uri == post_uri {
+                        // Check current post for mentions
+                        if post.mentioned_dids().contains(&agent_did) {
+                            agent_mentioned_in_chain = true;
+                            break;
+                        }
+
+                        // Check if parent or root post URI contains agent DID (indicating reply TO agent)
+                        if let Some(reply) = &post.reply {
+                            if reply.parent.uri.contains(agent_did)
+                                || reply.root.uri.contains(agent_did)
+                            {
+                                agent_mentioned_in_chain = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Always check the root for mentions
+                if let Some(root) = &context.root {
+                    if root.mentioned_dids().contains(&agent_did) {
+                        agent_mentioned_in_chain = true;
+                    }
+                }
+
+                // Check if agent is participating in the thread
+                let agent_in_thread = context
+                    .root
+                    .as_ref()
+                    .map_or(false, |root| root.did.contains(agent_did))
+                    || context.parent_chain.iter().any(|(parent, siblings)| {
+                        parent.did.contains(agent_did)
+                            || siblings.iter().any(|s| s.did.contains(agent_did))
+                    })
+                    || context
+                        .replies_map
+                        .values()
+                        .flatten()
+                        .any(|reply| reply.did.contains(agent_did));
+
+                if !agent_in_thread && !agent_mentioned_in_chain {
+                    tracing::debug!(
+                        "Agent {} not participating in thread {}, filtering out (require_agent_participation=true)",
+                        agent_did,
+                        thread_root
+                    );
+                    return Ok(None);
+                }
+            }
         }
 
         // Cache the result before returning
@@ -2448,6 +2577,14 @@ impl BlueskyFirehoseSource {
         // Add reply options
         thread_context.format_reply_options(&mut message, &main_post);
 
+        // Collect and append image URLs as markers (take last 4)
+        let all_image_urls = thread_context.collect_all_image_urls(&main_post);
+        let selected_urls: Vec<_> = all_image_urls.iter().rev().take(4).rev().collect();
+
+        for url in selected_urls {
+            message.push_str(&format!("\n[IMAGE: {}]", url));
+        }
+
         // Collect memory blocks
         let mut memory_blocks = Vec::new();
         let mut added_memory_labels = std::collections::HashSet::new();
@@ -2709,6 +2846,14 @@ impl BlueskyFirehoseSource {
             self.mark_thread_as_shown(&thread_root);
 
             ctx.format_reply_options(&mut message, &post);
+
+            // Collect and append image URLs as markers (take last 4)
+            let all_image_urls = ctx.collect_all_image_urls(&post);
+            let selected_urls: Vec<_> = all_image_urls.iter().rev().take(4).rev().collect();
+
+            for url in selected_urls {
+                message.push_str(&format!("\n[IMAGE: {}]", url));
+            }
         } else {
             // Standalone post
             message.push_str("📝 New post:\n\n");
@@ -3708,12 +3853,20 @@ impl EmbedInfo {
     fn append_to_buffer(&self, buf: &mut String, indent: &str) {
         match self {
             EmbedInfo::Images {
-                count, alt_texts, ..
+                count,
+                alt_texts,
+                urls,
+                ..
             } => {
                 buf.push_str(&format!("{}   [📸 {} image(s)]\n", indent, count));
-                for alt_text in alt_texts {
-                    if !alt_text.is_empty() {
-                        buf.push_str(&format!("{}    alt: {}\n", indent, alt_text));
+                // Show URLs for each image
+                for (i, url) in urls.iter().enumerate() {
+                    buf.push_str(&format!("{}    [IMAGE: {}]\n", indent, url));
+                    // Show alt text if available
+                    if let Some(alt) = alt_texts.get(i) {
+                        if !alt.is_empty() {
+                            buf.push_str(&format!("{}    alt: {}\n", indent, alt));
+                        }
                     }
                 }
             }

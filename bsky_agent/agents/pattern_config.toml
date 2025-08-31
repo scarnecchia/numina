@@ -428,7 +428,7 @@ default_filter = { nsids = [
     "did:plc:bnqkww7bjxaacajzvu5gswdf", # shreyan
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
-], exclude_keywords = [
+], require_agent_participation = false, exclude_keywords = [
     # Keywords to exclude (takes precedence)
     # Example: "crypto", "nft", "airdrop"
     "patternstop",
