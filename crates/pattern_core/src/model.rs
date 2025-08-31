@@ -353,6 +353,11 @@ impl ModelProvider for GenAiClient {
     async fn complete(&self, options: &ResponseOptions, mut request: Request) -> Result<Response> {
         let (model_info, chat_options) = options.to_chat_options_tuple();
 
+        // Convert URL images to base64 for Gemini models
+        if model_info.id.starts_with("gemini") {
+            self.convert_urls_to_base64_for_gemini(&mut request).await?;
+        }
+
         // Log the full request
         let chat_request = request.as_chat_request()?;
         tracing::debug!("Chat Request:\n{:#?}", chat_request);
@@ -387,6 +392,79 @@ impl ModelProvider for GenAiClient {
     /// Estimate token count for a prompt
     async fn count_tokens(&self, _model: &str, content: &str) -> Result<usize> {
         Ok(content.len() / 4 as usize)
+    }
+}
+
+impl GenAiClient {
+    /// Convert URL images to base64 for Gemini compatibility
+    async fn convert_urls_to_base64_for_gemini(&self, request: &mut Request) -> Result<()> {
+        use crate::message::{ContentPart, ImageSource, MessageContent};
+        use std::sync::Arc;
+
+        for message in &mut request.messages {
+            if let MessageContent::Parts(ref mut parts) = message.content {
+                for part in parts.iter_mut() {
+                    if let ContentPart::Image { source, .. } = part {
+                        if let ImageSource::Url(url) = source {
+                            match self.fetch_image_to_base64(url).await {
+                                Ok(base64_data) => {
+                                    tracing::debug!(
+                                        "Converted URL image to base64 for Gemini: {}",
+                                        url
+                                    );
+                                    *source = ImageSource::Base64(Arc::from(base64_data));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to fetch image for Gemini ({}): {}",
+                                        url,
+                                        e
+                                    );
+                                    // Keep the URL, let Gemini handle the error gracefully
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetch image from URL and convert to base64
+    async fn fetch_image_to_base64(&self, url: &str) -> Result<String> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| crate::CoreError::DataSourceError {
+                source_name: "image_fetch".to_string(),
+                operation: "create_http_client".to_string(),
+                cause: e.to_string(),
+            })?;
+
+        let response =
+            client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| crate::CoreError::DataSourceError {
+                    source_name: "image_fetch".to_string(),
+                    operation: format!("fetch_image_url: {}", url),
+                    cause: e.to_string(),
+                })?;
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| crate::CoreError::DataSourceError {
+                source_name: "image_fetch".to_string(),
+                operation: format!("read_image_bytes: {}", url),
+                cause: e.to_string(),
+            })?;
+
+        Ok(STANDARD.encode(&bytes))
     }
 }
 
