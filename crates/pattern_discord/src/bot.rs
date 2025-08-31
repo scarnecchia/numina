@@ -1135,7 +1135,7 @@ impl DiscordBot {
 
             // Process attachments if any
             let mut attachment_content = String::new();
-            let mut image_markers = Vec::new();
+            let mut unique_image_urls = std::collections::HashSet::new();
             if !msg.attachments.is_empty() {
                 for attachment in &msg.attachments {
                     // Check if it's an image file
@@ -1150,8 +1150,8 @@ impl DiscordBot {
                             .map_or(false, |ct| ct.starts_with("image/"));
 
                     if is_image {
-                        // Add image marker for multimodal processing
-                        image_markers.push(format!("[IMAGE: {}]", attachment.url));
+                        // Add unique image URL for multimodal processing
+                        unique_image_urls.insert(attachment.url.clone());
                         attachment_content.push_str(&format!(
                             "\n\n[Image attachment: {} ({} bytes)]",
                             attachment.filename, attachment.size
@@ -1197,13 +1197,13 @@ impl DiscordBot {
                 }
             }
 
-            // Take only last 4 images to avoid token bloat
-            let selected_images: Vec<_> =
-                image_markers.iter().rev().take(4).rev().cloned().collect();
+            // Convert to vec and take only last 4 images to avoid token bloat
+            let all_images: Vec<String> = unique_image_urls.into_iter().collect();
+            let selected_images: Vec<_> = all_images.iter().rev().take(4).rev().cloned().collect();
 
             // Append image markers to attachment content
-            for image_marker in &selected_images {
-                attachment_content.push_str(&format!("\n{}", image_marker));
+            for image_url in &selected_images {
+                attachment_content.push_str(&format!("\n[IMAGE: {}]", image_url));
             }
 
             // Create framing prompt that makes responding optional

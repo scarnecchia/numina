@@ -78,32 +78,32 @@ pub struct ThreadContext {
 impl ThreadContext {
     /// Collect all image URLs from the thread context
     pub fn collect_all_image_urls(&self, main_post: &BlueskyPost) -> Vec<String> {
-        let mut urls = Vec::new();
+        let mut unique_urls = std::collections::HashSet::new();
 
         // Collect from parent chain
         for (parent, siblings) in &self.parent_chain {
-            urls.extend(parent.collect_image_urls());
+            unique_urls.extend(parent.collect_image_urls());
             for sibling in siblings {
-                urls.extend(sibling.collect_image_urls());
+                unique_urls.extend(sibling.collect_image_urls());
             }
         }
 
         // Collect from root if different
         if let Some(root) = &self.root {
-            urls.extend(root.collect_image_urls());
+            unique_urls.extend(root.collect_image_urls());
         }
 
         // Collect from main post
-        urls.extend(main_post.collect_image_urls());
+        unique_urls.extend(main_post.collect_image_urls());
 
         // Collect from replies
         for replies in self.replies_map.values() {
             for reply in replies {
-                urls.extend(reply.collect_image_urls());
+                unique_urls.extend(reply.collect_image_urls());
             }
         }
 
-        urls
+        unique_urls.into_iter().collect()
     }
 
     /// Append full thread tree to buffer
@@ -626,6 +626,10 @@ impl BlueskyPost {
     pub fn collect_image_urls(&self) -> Vec<String> {
         match &self.embed {
             Some(EmbedInfo::Images { urls, .. }) => urls.clone(),
+            Some(EmbedInfo::External {
+                thumb: Some(thumb_url),
+                ..
+            }) => vec![thumb_url.clone()],
             Some(EmbedInfo::QuoteWithMedia { media, .. }) => {
                 if let EmbedInfo::Images { urls, .. } = media.as_ref() {
                     urls.clone()
@@ -687,6 +691,20 @@ impl BlueskyPost {
                         uri: external.external.uri.clone(),
                         title: external.external.title.clone(),
                         description: external.external.description.clone(),
+                        thumb: external.external.thumb.as_ref().and_then(|thumb| {
+                            if let Ok(thumb_json) = serde_json::to_string(thumb) {
+                                if let Some(cid) = extract_cid_from_blob(&thumb_json) {
+                                    Some(format!(
+                                        "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+                                        did, cid
+                                    ))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }),
                     })
                 }
                 Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(images)) => {
@@ -746,6 +764,7 @@ impl BlueskyPost {
                                 uri: external.external.uri.clone(),
                                 title: external.external.title.clone(),
                                 description: external.external.description.clone(),
+                                thumb: None, // Not available from record
                             })
                         }
                         _ => return None,
@@ -862,7 +881,7 @@ impl BlueskyPost {
 
         // Convert PostView embed to enriched EmbedInfo (has more data than record embeds)
         if let Some(embed) = &post_view.embed {
-            if let Some(enriched_embed) = Self::convert_postview_embed(embed) {
+            if let Some(enriched_embed) = Self::convert_postview_embed(embed, &post.did) {
                 post.embed = Some(enriched_embed);
                 post.hydration.embed_enriched = true;
             }
@@ -871,7 +890,7 @@ impl BlueskyPost {
         Some(post)
     }
     /// Convert PostView embed to EmbedInfo without network calls
-    fn convert_postview_embed(embed: &Union<PostViewEmbedRefs>) -> Option<EmbedInfo> {
+    fn convert_postview_embed(embed: &Union<PostViewEmbedRefs>, did: &str) -> Option<EmbedInfo> {
         match embed {
             Union::Refs(PostViewEmbedRefs::AppBskyEmbedImagesView(images_view)) => {
                 // PostView has image thumbnails but not full URLs
@@ -885,7 +904,26 @@ impl BlueskyPost {
                     urls: images_view
                         .images
                         .iter()
-                        .map(|img| img.thumb.clone()) // Use thumb URLs for now
+                        .map(|img| {
+                            // Try fullsize first, fallback to thumb with appropriate CDN format
+                            if img.fullsize.is_empty() {
+                                // Fallback to thumbnail - extract CID from blob JSON and use thumbnail CDN format
+                                if img.thumb.starts_with("http") {
+                                    img.thumb.clone()
+                                } else if let Some(cid) = extract_cid_from_blob(&img.thumb) {
+                                    if cid.starts_with("http") {
+                                        cid
+                                    } else {
+                                        format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, cid)
+                                    }
+                                } else {
+                                    // Final fallback: treat as plain CID
+                                    format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, img.thumb)
+                                }
+                            } else {
+                                convert_blob_to_url(&img.fullsize, did)
+                            }
+                        })
                         .collect(),
                 })
             }
@@ -894,6 +932,11 @@ impl BlueskyPost {
                     uri: external_view.external.uri.clone(),
                     title: external_view.external.title.clone(),
                     description: external_view.external.description.clone(),
+                    thumb: external_view
+                        .external
+                        .thumb
+                        .as_ref()
+                        .map(|thumb| convert_blob_to_url(thumb, did)),
                 })
             }
             Union::Refs(PostViewEmbedRefs::AppBskyEmbedRecordView(record_view)) => {
@@ -968,7 +1011,21 @@ impl BlueskyPost {
                         Box::new(EmbedInfo::Images {
                             count: images.images.len(),
                             alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
-                            urls: images.images.iter().map(|img| img.thumb.clone()).collect(),
+                            urls: images.images.iter().map(|img| {
+                                if img.fullsize.starts_with("http") {
+                                    img.fullsize.clone()
+                                } else if let Some(cid) = extract_cid_from_blob(&img.fullsize) {
+                                    if cid.starts_with("http") {
+                                        cid
+                                    } else {
+                                        // Use the parent post's DID (not the quoted post's DID) - thumbnail for LLM
+                                        format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, cid)
+                                    }
+                                } else {
+                                    // Use the parent post's DID for the fallback case too
+                                    format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, img.thumb)
+                                }
+                            }).collect(),
                         })
                     }
                     Union::Refs(atrium_api::app::bsky::embed::record_with_media::ViewMediaRefs::AppBskyEmbedExternalView(external)) => {
@@ -976,6 +1033,7 @@ impl BlueskyPost {
                             uri: external.external.uri.clone(),
                             title: external.external.title.clone(),
                             description: external.external.description.clone(),
+                            thumb: external.external.thumb.as_ref().map(|thumb| convert_blob_to_url(thumb, did)),
                         })
                     }
                     _ => return None,
@@ -3832,6 +3890,7 @@ pub enum EmbedInfo {
         uri: String,
         title: String,
         description: String,
+        thumb: Option<String>,
     },
     Quote {
         uri: String,
@@ -3859,9 +3918,9 @@ impl EmbedInfo {
                 ..
             } => {
                 buf.push_str(&format!("{}   [📸 {} image(s)]\n", indent, count));
-                // Show URLs for each image
+                // Show URLs for each image (using format that won't trigger multimodal parsing)
                 for (i, url) in urls.iter().enumerate() {
-                    buf.push_str(&format!("{}    [IMAGE: {}]\n", indent, url));
+                    buf.push_str(&format!("{}    (img: {})\n", indent, url));
                     // Show alt text if available
                     if let Some(alt) = alt_texts.get(i) {
                         if !alt.is_empty() {
@@ -3874,8 +3933,12 @@ impl EmbedInfo {
                 uri,
                 title,
                 description,
+                thumb,
             } => {
                 buf.push_str(&format!("{}   [🔗 Link Card]\n", indent));
+                if let Some(thumb_url) = thumb {
+                    buf.push_str(&format!("{}    (thumb: {})\n", indent, thumb_url));
+                }
                 if !title.is_empty() {
                     buf.push_str(&format!("{}    {}\n", indent, title));
                 }
@@ -3924,6 +3987,47 @@ fn create_basic_memory_content(handle: &str, did: &str) -> String {
         did,
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     )
+}
+
+/// Extract CID from a blob JSON string like {"$type":"blob","ref":{"$link":"bafkreihirce..."},"mimeType":"image/jpeg","size":125235}
+fn extract_cid_from_blob(blob_json: &str) -> Option<String> {
+    use serde_json::Value;
+
+    if let Ok(blob) = serde_json::from_str::<Value>(blob_json) {
+        blob.get("ref")
+            .and_then(|r| r.get("$link"))
+            .and_then(|link| link.as_str())
+            .map(|s| s.to_string())
+    } else {
+        // If it's not JSON, assume it's already a CID or URL
+        Some(blob_json.to_string())
+    }
+}
+
+/// Convert a Bluesky blob CID to a CDN image URL
+/// If the image is already an HTTP URL, returns it as-is
+/// If it's a blob reference JSON, extracts the CID and converts to cdn.bsky.app URL using fullsize format
+fn convert_blob_to_url(blob_ref: &str, did: &str) -> String {
+    if blob_ref.starts_with("http") {
+        // Already an HTTP URL
+        blob_ref.to_string()
+    } else if let Some(cid) = extract_cid_from_blob(blob_ref) {
+        if cid.starts_with("http") {
+            cid
+        } else {
+            // Convert CID to CDN URL (thumbnail - better for LLM processing)
+            format!(
+                "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+                did, cid
+            )
+        }
+    } else {
+        // Fallback: treat as plain CID (thumbnail)
+        format!(
+            "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+            did, blob_ref
+        )
+    }
 }
 
 fn label_convert(l: &Union<RecordLabelsRefs>) -> Vec<String> {

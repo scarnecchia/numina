@@ -2223,8 +2223,20 @@ impl Message {
     /// Rough estimation of token count for this message
     ///
     /// Uses the approximation of ~4 characters per token
+    /// Images are estimated at 1600 tokens each
     pub fn estimate_tokens(&self) -> usize {
-        self.display_content().len() / 4
+        let text_tokens = self.display_content().len() / 4;
+
+        // Count images in the message
+        let image_count = match &self.content {
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter(|part| matches!(part, ContentPart::Image { .. }))
+                .count(),
+            _ => 0,
+        };
+
+        text_tokens + (image_count * 1600)
     }
 }
 
@@ -2873,6 +2885,9 @@ pub fn parse_multimodal_markers(text: &str) -> Option<Vec<ContentPart>> {
 
         // Only add image if it's in our selected set
         if selected_images.iter().any(|(_, _, u)| u == url) {
+            // Debug log the URL being processed
+            tracing::debug!("Processing image URL: {}", url);
+
             // Determine if this is base64 or URL
             let source = if url.starts_with("data:") || url.starts_with("base64:") {
                 // Extract base64 data
@@ -2881,8 +2896,10 @@ pub fn parse_multimodal_markers(text: &str) -> Option<Vec<ContentPart>> {
                 } else {
                     url
                 };
+                tracing::debug!("Creating Base64 ImageSource from URL: {}", url);
                 ImageSource::Base64(Arc::from(data))
             } else {
+                tracing::debug!("Creating URL ImageSource from URL: {}", url);
                 ImageSource::Url(url.clone())
             };
 
