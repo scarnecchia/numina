@@ -2271,6 +2271,20 @@ where
             let incoming_message_id = message.id.clone();
             let incoming_message_role = message.role.clone();
 
+            // Transform text content with image markers into multimodal parts
+            if let crate::message::MessageContent::Text(ref text) = message.content {
+                if let Some(parts) = crate::message::parse_multimodal_markers(text) {
+                    tracing::info!(
+                        "📸 Transforming text with {} image markers into multimodal content",
+                        parts
+                            .iter()
+                            .filter(|p| matches!(p, crate::message::ContentPart::Image { .. }))
+                            .count()
+                    );
+                    message.content = crate::message::MessageContent::Parts(parts);
+                }
+            }
+
             // Extract message text for user messages only
             let incoming_message_summary = if matches!(message.role, crate::message::ChatRole::User)
             {

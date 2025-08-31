@@ -1135,11 +1135,29 @@ impl DiscordBot {
 
             // Process attachments if any
             let mut attachment_content = String::new();
+            let mut image_markers = Vec::new();
             if !msg.attachments.is_empty() {
                 for attachment in &msg.attachments {
-                    // Only process text files under 20KB
-                    if attachment.size < 20_000 {
-                        // Check if it's a text file based on extension or content type
+                    // Check if it's an image file
+                    let is_image = attachment.filename.ends_with(".png")
+                        || attachment.filename.ends_with(".jpg")
+                        || attachment.filename.ends_with(".jpeg")
+                        || attachment.filename.ends_with(".gif")
+                        || attachment.filename.ends_with(".webp")
+                        || attachment
+                            .content_type
+                            .as_ref()
+                            .map_or(false, |ct| ct.starts_with("image/"));
+
+                    if is_image {
+                        // Add image marker for multimodal processing
+                        image_markers.push(format!("[IMAGE: {}]", attachment.url));
+                        attachment_content.push_str(&format!(
+                            "\n\n[Image attachment: {} ({} bytes)]",
+                            attachment.filename, attachment.size
+                        ));
+                    } else if attachment.size < 20_000 {
+                        // Only process text files under 20KB
                         let is_text = attachment.filename.ends_with(".txt")
                             || attachment.filename.ends_with(".md")
                             || attachment.filename.ends_with(".json")
@@ -1177,6 +1195,15 @@ impl DiscordBot {
                         }
                     }
                 }
+            }
+
+            // Take only last 4 images to avoid token bloat
+            let selected_images: Vec<_> =
+                image_markers.iter().rev().take(4).rev().cloned().collect();
+
+            // Append image markers to attachment content
+            for image_marker in &selected_images {
+                attachment_content.push_str(&format!("\n{}", image_marker));
             }
 
             // Create framing prompt that makes responding optional
