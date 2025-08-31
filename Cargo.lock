@@ -2850,7 +2850,7 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.4.0-alpha.8-WIP"
-source = "git+https://github.com/orual/rust-genai#e543fe58c2ad472f0e91e6b47c89d8a07c6b7d05"
+source = "git+https://github.com/orual/rust-genai#df2740c5c7207a44ea461978e1663eb760167232"
 dependencies = [
  "bytes",
  "derive_more 2.0.1",

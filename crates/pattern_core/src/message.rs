@@ -2873,6 +2873,9 @@ pub fn parse_multimodal_markers(text: &str) -> Option<Vec<ContentPart>> {
 
         // Only add image if it's in our selected set
         if selected_images.iter().any(|(_, _, u)| u == url) {
+            // Debug log the URL being processed
+            tracing::debug!("Processing image URL: {}", url);
+
             // Determine if this is base64 or URL
             let source = if url.starts_with("data:") || url.starts_with("base64:") {
                 // Extract base64 data
@@ -2881,8 +2884,10 @@ pub fn parse_multimodal_markers(text: &str) -> Option<Vec<ContentPart>> {
                 } else {
                     url
                 };
+                tracing::debug!("Creating Base64 ImageSource from URL: {}", url);
                 ImageSource::Base64(Arc::from(data))
             } else {
+                tracing::debug!("Creating URL ImageSource from URL: {}", url);
                 ImageSource::Url(url.clone())
             };
 

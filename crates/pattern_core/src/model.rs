@@ -354,12 +354,29 @@ impl ModelProvider for GenAiClient {
         let (model_info, chat_options) = options.to_chat_options_tuple();
 
         // Convert URL images to base64 for Gemini models
+        tracing::debug!(
+            "Model ID: {}, checking if it starts with 'gemini'",
+            model_info.id
+        );
         if model_info.id.starts_with("gemini") {
+            tracing::debug!(
+                "Converting URLs to base64 for Gemini model: {}",
+                model_info.id
+            );
             self.convert_urls_to_base64_for_gemini(&mut request).await?;
+        } else {
+            tracing::debug!(
+                "Skipping base64 conversion for non-Gemini model: {}",
+                model_info.id
+            );
         }
+
+        // Validate image URLs are accessible (to avoid anthropic's terrible error handling)
+        self.validate_image_urls(&mut request).await;
 
         // Log the full request
         let chat_request = request.as_chat_request()?;
+
         tracing::debug!("Chat Request:\n{:#?}", chat_request);
 
         let response = match self
@@ -396,6 +413,57 @@ impl ModelProvider for GenAiClient {
 }
 
 impl GenAiClient {
+    /// Validate that image URLs are accessible, remove broken ones
+    async fn validate_image_urls(&self, request: &mut Request) {
+        use crate::message::{ContentPart, ImageSource, MessageContent};
+
+        for message in &mut request.messages {
+            if let MessageContent::Parts(ref mut parts) = message.content {
+                let mut indices_to_remove = Vec::new();
+
+                for (i, part) in parts.iter().enumerate() {
+                    if let ContentPart::Image { source, .. } = part {
+                        if let ImageSource::Url(url) = source {
+                            // Quick HEAD request to check if URL is accessible
+                            let client = reqwest::Client::builder()
+                                .timeout(std::time::Duration::from_secs(2))
+                                .build()
+                                .ok();
+
+                            if let Some(client) = client {
+                                match client.head(url).send().await {
+                                    Ok(response) => {
+                                        if !response.status().is_success() {
+                                            tracing::warn!(
+                                                "Image URL returned {}: {}, removing from request",
+                                                response.status(),
+                                                url
+                                            );
+                                            indices_to_remove.push(i);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to validate image URL {}: {}, removing from request",
+                                            url,
+                                            e
+                                        );
+                                        indices_to_remove.push(i);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Remove broken images in reverse order to maintain indices
+                for &i in indices_to_remove.iter().rev() {
+                    parts.remove(i);
+                }
+            }
+        }
+    }
+
     /// Convert URL images to base64 for Gemini compatibility
     async fn convert_urls_to_base64_for_gemini(&self, request: &mut Request) -> Result<()> {
         use crate::message::{ContentPart, ImageSource, MessageContent};
