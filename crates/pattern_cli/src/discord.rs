@@ -208,7 +208,7 @@ pub async fn run_discord_bot_with_group(
                         group_target,
                     )
                     .await
-                    .map_err(|e| miette::miette!("Failed to build data sources: {}", e))?;
+                    .map_err(|e| miette::miette!("Failed to build data sources: {:?}", e))?;
 
                 // NOTE: Monitoring is already started during agent loading via register_data_sources
                 // Calling start_monitoring again here can cause write lock contention and deadlocks

@@ -1344,7 +1344,7 @@ pub async fn chat_with_group_and_jetstream(
                         group_target,
                     )
                     .await
-                    .map_err(|e| miette::miette!("Failed to build data sources: {}", e))?;
+                    .map_err(|e| miette::miette!("Failed to build data sources: {:?}", e))?;
 
                 // Note: We'll register endpoints on the data source's router after creating it
 
