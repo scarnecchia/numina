@@ -313,7 +313,7 @@ impl MessageCompressor {
     ) -> Result<CompressionResult> {
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 2 / 3)
         } else {
             None
         };
@@ -424,7 +424,7 @@ impl MessageCompressor {
 
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 2 / 3)
         } else {
             None
         };
@@ -632,7 +632,7 @@ impl MessageCompressor {
 
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 2 / 3)
         } else {
             None
         };
@@ -909,7 +909,7 @@ impl MessageCompressor {
 
         let max_tokens = if let Some(max_tokens) = max_tokens {
             // Account for system prompt when setting the adjusted limit
-            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 4 / 5)
+            Some((max_tokens.saturating_sub(self.system_prompt_tokens)) * 2 / 3)
         } else {
             None
         };
@@ -1001,30 +1001,6 @@ impl MessageCompressor {
         })
     }
 
-    /// Create a prompt for summarizing messages
-    #[allow(dead_code)]
-    fn create_summary_prompt(&self, messages: &[Message], chunk_size: usize) -> Result<String> {
-        let mut chunks = Vec::new();
-
-        for chunk in messages.chunks(chunk_size) {
-            let mut chunk_text = String::new();
-            for msg in chunk {
-                chunk_text.push_str(&format!(
-                    "{}: {}\n",
-                    msg.role,
-                    msg.text_content().unwrap_or_default()
-                ));
-            }
-            chunks.push(chunk_text);
-        }
-
-        Ok(format!(
-            "Please summarize the following conversation chunks into a concise summary. \
-             Focus on key information, decisions, and important context:\n\n{}",
-            chunks.join("\n---\n")
-        ))
-    }
-
     /// Estimate tokens for batches
     fn estimate_tokens_from_batches(&self, batches: &[crate::message::MessageBatch]) -> usize {
         batches
@@ -1072,7 +1048,7 @@ impl MessageCompressor {
                 "Please summarize all the previous messages, focusing on key information, \
                  decisions made, and important context. If there was a previous summary provided, \
                  build upon it with the new information. Maintain the conversational style and \
-                 preserve important details.",
+                 preserve important details. Keep it as short as reasonable.",
             ));
 
             let system_prompt = if let Some(custom_prompt) = summarization_prompt {
@@ -1098,14 +1074,14 @@ impl MessageCompressor {
                 provider: provider_name,
                 capabilities: vec![],
                 context_window: 128000,
-                max_output_tokens: Some(4096),
+                max_output_tokens: Some(8192),
                 cost_per_1k_prompt_tokens: None,
                 cost_per_1k_completion_tokens: None,
             };
 
             let model_info = crate::model::defaults::enhance_model_info(model_info);
             let mut options = crate::model::ResponseOptions::new(model_info);
-            options.max_tokens = Some(1000);
+            options.max_tokens = Some(8192);
             options.temperature = Some(0.5);
 
             match provider.complete(&options, request).await {

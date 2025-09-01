@@ -43,20 +43,214 @@ impl DiscordEndpoint {
     /// Try to resolve a channel name to a channel ID
     /// Supports formats: "#channel-name", "channel-name", or numeric ID
     async fn resolve_channel_id(&self, target_id: &str) -> Option<ChannelId> {
+        info!("resolve_channel_id called with target_id: '{}'", target_id);
+
         // Strip leading # if present
         let channel_ref = target_id.trim_start_matches('#');
-
         // First, try parsing as a numeric ID
-        if let Ok(id) = channel_ref.parse::<u64>() {
-            return Some(ChannelId::new(id));
+        match channel_ref.parse::<u64>() {
+            Ok(id) => {
+                info!(
+                    "Successfully parsed '{}' as numeric ID: {}",
+                    channel_ref, id
+                );
+                return Some(ChannelId::new(id));
+            }
+            Err(e) => {
+                info!("Failed to parse '{}' as numeric ID: {:?}", channel_ref, e);
+            }
         }
 
-        // If we have a guild context, we could search for channel by name
-        // For now, we'll just log that we couldn't resolve it
-        debug!(
-            "Could not resolve channel name '{}' to ID - using numeric IDs only for now",
-            channel_ref
-        );
+        // Try to resolve by channel name using Discord API
+        // We need a guild ID to search channels - try to get it from environment
+        if let Ok(guild_id_str) = std::env::var("DISCORD_GUILD_ID") {
+            if let Ok(guild_id_u64) = guild_id_str.parse::<u64>() {
+                let guild_id = serenity::model::id::GuildId::new(guild_id_u64);
+
+                info!(
+                    "Fetching channels for guild {} to resolve name '{}'",
+                    guild_id, channel_ref
+                );
+
+                // Try to get guild channels via HTTP API
+                match self.http.get_channels(guild_id).await {
+                    Ok(channels) => {
+                        info!(
+                            "Retrieved {} channels from guild {}",
+                            channels.len(),
+                            guild_id
+                        );
+
+                        // Search for exact channel name match
+                        for channel in &channels {
+                            if channel.name == channel_ref {
+                                info!(
+                                    "Found exact match channel '{}' with ID: {}",
+                                    channel_ref, channel.id
+                                );
+                                return Some(channel.id);
+                            }
+                        }
+
+                        // If no exact match, try partial matching
+                        for channel in &channels {
+                            if channel.name.contains(channel_ref) {
+                                info!(
+                                    "Found partial match channel '{}' -> '{}' with ID: {}",
+                                    channel_ref, channel.name, channel.id
+                                );
+                                return Some(channel.id);
+                            }
+                        }
+
+                        info!("No channel found matching name '{}'", channel_ref);
+                    }
+                    Err(e) => {
+                        info!("Failed to fetch guild channels: {}", e);
+                    }
+                }
+            } else {
+                info!("Invalid DISCORD_GUILD_ID format: {}", guild_id_str);
+            }
+        } else {
+            info!("DISCORD_GUILD_ID not set, cannot resolve channel names to IDs");
+        }
+
+        info!("Could not resolve channel name '{}' to ID", channel_ref);
+        None
+    }
+
+    /// Try to resolve a Discord username or display name to a user ID
+    /// Supports formats: "@username", "username", "Display Name", or numeric ID
+    async fn resolve_user_id(&self, target_id: &str) -> Option<serenity::model::id::UserId> {
+        info!("resolve_user_id called with target_id: '{}'", target_id);
+
+        // Strip leading @ if present
+        let user_ref = target_id.trim_start_matches('@');
+        info!("After stripping @: '{}'", user_ref);
+
+        // First, try parsing as a numeric ID
+        match user_ref.parse::<u64>() {
+            Ok(id) => {
+                info!(
+                    "Successfully parsed '{}' as numeric user ID: {}",
+                    user_ref, id
+                );
+                return Some(serenity::model::id::UserId::new(id));
+            }
+            Err(e) => {
+                info!("Failed to parse '{}' as numeric user ID: {:?}", user_ref, e);
+            }
+        }
+
+        // Try to resolve by username/display name using Discord API
+        // We need a guild ID to search members - try to get it from environment
+        if let Ok(guild_id_str) = std::env::var("DISCORD_GUILD_ID") {
+            if let Ok(guild_id_u64) = guild_id_str.parse::<u64>() {
+                let guild_id = serenity::model::id::GuildId::new(guild_id_u64);
+
+                info!(
+                    "Fetching guild members from guild {} to resolve user '{}'",
+                    guild_id, user_ref
+                );
+
+                // Try to get guild members via HTTP API
+                // Note: This requires proper bot permissions (GUILD_MEMBERS intent)
+                match self
+                    .http
+                    .get_guild_members(guild_id, Some(1000), None)
+                    .await
+                {
+                    Ok(members) => {
+                        info!(
+                            "Retrieved {} members from guild {}",
+                            members.len(),
+                            guild_id
+                        );
+
+                        // Search for exact username match (case insensitive)
+                        for member in &members {
+                            if member.user.name.to_lowercase() == user_ref.to_lowercase() {
+                                info!(
+                                    "Found exact username match '{}' -> {} (ID: {})",
+                                    user_ref, member.user.name, member.user.id
+                                );
+                                return Some(member.user.id);
+                            }
+                        }
+
+                        // Search for exact display name match (case insensitive)
+                        for member in &members {
+                            if let Some(ref display_name) = member.user.global_name {
+                                if display_name.to_lowercase() == user_ref.to_lowercase() {
+                                    info!(
+                                        "Found exact display name match '{}' -> {} (ID: {})",
+                                        user_ref, display_name, member.user.id
+                                    );
+                                    return Some(member.user.id);
+                                }
+                            }
+                        }
+
+                        // Search for exact nickname match (case insensitive)
+                        for member in &members {
+                            if let Some(ref nick) = member.nick {
+                                if nick.to_lowercase() == user_ref.to_lowercase() {
+                                    info!(
+                                        "Found exact nickname match '{}' -> {} (ID: {})",
+                                        user_ref, nick, member.user.id
+                                    );
+                                    return Some(member.user.id);
+                                }
+                            }
+                        }
+
+                        // If no exact match, try partial matching on username
+                        for member in &members {
+                            if member
+                                .user
+                                .name
+                                .to_lowercase()
+                                .contains(&user_ref.to_lowercase())
+                            {
+                                info!(
+                                    "Found partial username match '{}' -> {} (ID: {})",
+                                    user_ref, member.user.name, member.user.id
+                                );
+                                return Some(member.user.id);
+                            }
+                        }
+
+                        // Try partial matching on display name
+                        for member in &members {
+                            if let Some(ref display_name) = member.user.global_name {
+                                if display_name
+                                    .to_lowercase()
+                                    .contains(&user_ref.to_lowercase())
+                                {
+                                    info!(
+                                        "Found partial display name match '{}' -> {} (ID: {})",
+                                        user_ref, display_name, member.user.id
+                                    );
+                                    return Some(member.user.id);
+                                }
+                            }
+                        }
+
+                        info!("No user found matching '{}'", user_ref);
+                    }
+                    Err(e) => {
+                        info!("Failed to fetch guild members: {}", e);
+                    }
+                }
+            } else {
+                info!("Invalid DISCORD_GUILD_ID format: {}", guild_id_str);
+            }
+        } else {
+            info!("DISCORD_GUILD_ID not set, cannot resolve usernames to IDs");
+        }
+
+        info!("Could not resolve username '{}' to user ID", user_ref);
         None
     }
 
@@ -339,6 +533,11 @@ impl MessageEndpoint for DiscordEndpoint {
     ) -> Result<Option<String>> {
         let content = Self::extract_text(&message);
 
+        info!(
+            "Discord endpoint send() called with metadata: {:?}",
+            metadata
+        );
+
         // Check metadata for routing information
         if let Some(ref meta) = metadata {
             // Check if we should reply to a specific message (for delayed responses)
@@ -348,7 +547,7 @@ impl MessageEndpoint for DiscordEndpoint {
                 .and_then(|v| v.as_u64());
 
             // First check for explicit channel_id (highest priority)
-            if let Some(channel_id) = meta.get("discord_channel_id").and_then(|v| v.as_u64()) {
+            if let Some(channel_id) = meta.get("target_id").and_then(|v| v.as_u64()) {
                 let channel = ChannelId::new(channel_id);
 
                 // If we have a message to reply to and response is delayed, use reply
@@ -412,6 +611,12 @@ impl MessageEndpoint for DiscordEndpoint {
                 if let Some(channel_id) = self.resolve_channel_id(target_id).await {
                     self.send_to_channel(channel_id, content).await?;
                     return Ok(Some(format!("channel:{}", channel_id)));
+                }
+
+                // If channel resolution failed, try user resolution for DMs
+                if let Some(user_id) = self.resolve_user_id(target_id).await {
+                    self.send_dm(user_id, content).await?;
+                    return Ok(Some(format!("dm:{}", user_id)));
                 }
             }
 

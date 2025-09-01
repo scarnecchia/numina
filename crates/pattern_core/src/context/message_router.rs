@@ -719,7 +719,7 @@ impl AgentMessageRouter {
         if let Some(endpoint) = endpoints.get(channel_type) {
             // Create message with role based on origin
             let message = match &origin {
-                Some(MessageOrigin::Agent { .. }) => Message::agent(content),
+                Some(MessageOrigin::Agent { .. }) => Message::user(content),
                 _ => Message::user(content), // External origins use User role
             };
             endpoint.send(message, metadata, origin.as_ref()).await?;
