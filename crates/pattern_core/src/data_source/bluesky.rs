@@ -1927,7 +1927,13 @@ impl BlueskyFirehoseSource {
                 if post_uri.starts_with("at://") {
                     if let Some(did_end) = post_uri[5..].find('/') {
                         let did = &post_uri[5..5 + did_end];
-                        if filter.friends.iter().any(|friend| did.contains(friend)) {
+                        // Skip if this is the agent's own post
+                        if did.contains(agent_did) {
+                            tracing::debug!(
+                                "Triggering post is agent's own post, will filter unless mentioned"
+                            );
+                            return Ok(None);
+                        } else if filter.friends.iter().any(|friend| did.contains(friend)) {
                             tracing::debug!(
                                 "Triggering post is from friend (via URI parsing): {}",
                                 did
@@ -3266,7 +3272,7 @@ impl DataSource for BlueskyFirehoseSource {
             let endpoints = vec![
                 "wss://jetstream2.us-west.bsky.network/subscribe",
                 "wss://jetstream1.us-west.bsky.network/subscribe",
-                "wss://jetstream2.us-east.bsky.network/subscribe",
+                //"wss://jetstream2.us-east.bsky.network/subscribe",
                 "wss://jetstream1.us-east.bsky.network/subscribe",
             ];
             let mut current_endpoint_idx = 0;
@@ -3621,24 +3627,27 @@ impl DataSource for BlueskyFirehoseSource {
 
                 tokio::spawn(async move {
                     // Short timeout for opportunistic hydration
-                    let timeout = tokio::time::timeout(
-                        std::time::Duration::from_millis(2000),
-                        async {
+                    let timeout =
+                        tokio::time::timeout(std::time::Duration::from_millis(2000), async {
                             // Try to fetch full post data
                             let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
                                 uris: vec![post_uri.clone()],
                             };
 
-                            if let Ok(result) = agent.api.app.bsky.feed.get_posts(params.into()).await {
+                            if let Ok(result) =
+                                agent.api.app.bsky.feed.get_posts(params.into()).await
+                            {
                                 if let Some(post_view) = result.posts.first() {
                                     if let Some(hydrated) = BlueskyPost::from_post_view(post_view) {
                                         // Update the cached post in posts_by_thread
-                                        if let Some(mut thread_posts) = batch.posts_by_thread.get_mut(&post_uri) {
+                                        if let Some(mut thread_posts) =
+                                            batch.posts_by_thread.get_mut(&post_uri)
+                                        {
                                             // Find and replace the post in the thread's posts
                                             for post in thread_posts.iter_mut() {
                                                 if post.uri == post_uri {
                                                     *post = hydrated.clone();
-                                                    tracing::trace!("✨ Opportunistically hydrated post in thread: {}", post_uri);
+
                                                     break;
                                                 }
                                             }
@@ -3649,15 +3658,14 @@ impl DataSource for BlueskyFirehoseSource {
                                         for post in pending.iter_mut() {
                                             if post.uri == post_uri {
                                                 *post = hydrated;
-                                                tracing::trace!("✨ Opportunistically hydrated post in pending: {}", post_uri);
                                                 break;
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                    ).await;
+                        })
+                        .await;
 
                     if timeout.is_err() {
                         tracing::trace!("Opportunistic hydration timed out for: {}", post_uri);
@@ -3683,7 +3691,7 @@ impl DataSource for BlueskyFirehoseSource {
             };
 
             if should_flush {
-                tracing::info!("⏰ Flushing batch for thread: {}", thread_root);
+                tracing::debug!("⏰ Flushing batch for thread: {}", thread_root);
                 return self.flush_batch(&thread_root).await;
             }
 
@@ -3695,7 +3703,7 @@ impl DataSource for BlueskyFirehoseSource {
                 if let Some(expired_thread) = expired_batches.first() {
                     // Only flush if it's a different thread than the one we just added to
                     if expired_thread != &thread_root {
-                        tracing::info!(
+                        tracing::debug!(
                             "⏰ Flushing expired batch for thread: {} (found {} expired)",
                             expired_thread,
                             expired_batches.len()
@@ -3790,7 +3798,7 @@ impl DataSource for BlueskyFirehoseSource {
         if !expired_batches.is_empty() {
             // Flush the oldest expired batch first
             if let Some(expired_thread) = expired_batches.first() {
-                tracing::info!(
+                tracing::debug!(
                     "⏰ Flushing expired batch for thread: {} before processing single notification (found {} expired)",
                     expired_thread,
                     expired_batches.len()
@@ -3829,7 +3837,8 @@ impl DataSource for BlueskyFirehoseSource {
             item.text.chars().take(50).collect::<String>()
         );
 
-        self.format_single_notification(item).await
+        None
+        //self.format_single_notification(item).await
     }
 
     fn get_buffer_stats(&self) -> Option<super::BufferStats> {
