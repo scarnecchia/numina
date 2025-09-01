@@ -28,7 +28,7 @@ description = "Current conversant context"
 shared = true
 
 [memory.deep_background]
-content_path = "deep-background.md"
+content_path = "../deep-background.md"
 permission = "read_only"
 memory_type = "archival"
 description = "A framework for systemically researching a topic and / or verifying claims"
