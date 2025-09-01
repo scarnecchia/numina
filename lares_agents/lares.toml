@@ -27,7 +27,7 @@ chunk_size = 20
 summarization_model = "claude-3-5-haiku-latest"
 
 [agent.memory.deep_background]
-content_path = "../deep-background.md"
+content_path = "deep-background.md"
 permission = "read_only"
 memory_type = "core"
 description = "A framework for systemically researching a topic and or verifying claims"
