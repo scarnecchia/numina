@@ -1608,7 +1608,7 @@ impl AgentContext {
                     let total_tokens = system_tokens + message_tokens;
 
                     // Leave some buffer (use 80% of limit to trigger compression)
-                    total_tokens > (max_tokens * 4 / 5)
+                    total_tokens > (max_tokens * 2 / 3)
                 } else {
                     false
                 };

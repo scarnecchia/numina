@@ -1916,14 +1916,62 @@ impl BlueskyFirehoseSource {
 
         // Check if agent is actually participating in this thread (if configured)
         // If not, return None to avoid unnecessary notifications
-        // BUT: Always show if agent is directly mentioned in the current post
+        // BUT: Always show if agent is directly mentioned in the current post OR if current post is from a friend
         if filter.require_agent_participation {
             if let Some(agent_did) = agent_did {
+                // First check if the triggering post itself is from a friend
+                let mut triggering_post_from_friend = false;
+
+                // Quick check: extract DID directly from the URI
+                // Format: at://did:plc:abc123/app.bsky.feed.post/xyz
+                if post_uri.starts_with("at://") {
+                    if let Some(did_end) = post_uri[5..].find('/') {
+                        let did = &post_uri[5..5 + did_end];
+                        if filter.friends.iter().any(|friend| did.contains(friend)) {
+                            tracing::debug!(
+                                "Triggering post is from friend (via URI parsing): {}",
+                                did
+                            );
+                            triggering_post_from_friend = true;
+                        }
+                    }
+                }
+
+                // Fallback: Find the triggering post (the one we're building context for)
+                if !triggering_post_from_friend {
+                    let all_posts =
+                        context
+                            .replies_map
+                            .values()
+                            .flatten()
+                            .chain(context.parent_chain.iter().flat_map(|(p, siblings)| {
+                                std::iter::once(p).chain(siblings.iter())
+                            }))
+                            .chain(context.root.iter());
+
+                    for post in all_posts.clone() {
+                        if post.uri == post_uri {
+                            // Check if this triggering post is from a friend
+                            if filter
+                                .friends
+                                .iter()
+                                .any(|friend| post.did.contains(friend))
+                            {
+                                tracing::debug!(
+                                    "Triggering post is from friend (via post lookup): {}",
+                                    post.did
+                                );
+                                triggering_post_from_friend = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+
                 // Check if the agent is mentioned in current post, its parent, or root
                 // If so, always include it regardless of thread participation
                 let mut agent_mentioned_in_chain = false;
 
-                // Find and check the current post
                 let all_posts = context
                     .replies_map
                     .values()
@@ -1978,15 +2026,45 @@ impl BlueskyFirehoseSource {
                         .flatten()
                         .any(|reply| reply.did.contains(agent_did));
 
-                if !agent_in_thread && !agent_mentioned_in_chain {
+                // Check if any friends are participating in the thread
+                let friends_in_thread = if !filter.friends.is_empty() {
+                    context.root.as_ref().map_or(false, |root| {
+                        filter
+                            .friends
+                            .iter()
+                            .any(|friend| root.did.contains(friend))
+                    }) || context.parent_chain.iter().any(|(parent, siblings)| {
+                        filter
+                            .friends
+                            .iter()
+                            .any(|friend| parent.did.contains(friend))
+                            || siblings
+                                .iter()
+                                .any(|s| filter.friends.iter().any(|friend| s.did.contains(friend)))
+                    }) || context.replies_map.values().flatten().any(|reply| {
+                        filter
+                            .friends
+                            .iter()
+                            .any(|friend| reply.did.contains(friend))
+                    })
+                } else {
+                    false
+                };
+
+                if !agent_in_thread
+                    && !agent_mentioned_in_chain
+                    && !friends_in_thread
+                    && !triggering_post_from_friend
+                {
                     tracing::debug!(
-                        "Agent {} not participating in thread {}, filtering out (require_agent_participation=true)",
+                        "Agent {} not participating in thread {} and no friends participating (including triggering post), filtering out (require_agent_participation=true)",
                         agent_did,
                         thread_root
                     );
                     return Ok(None);
                 }
             }
+        } else {
         }
 
         // Cache the result before returning
@@ -2571,10 +2649,36 @@ impl BlueskyFirehoseSource {
 
         // Sort by timestamp to find the most recent post as the "main" post
         posts.sort_by_key(|p| p.created_at);
-        let main_post = posts.last()?.clone();
 
         // Get agent DID from mentions filter (agent monitors for mentions of itself)
         let agent_did = self.filter.mentions.first().map(|s| s.as_str());
+
+        // Filter out posts from excluded DIDs (but keep the rest)
+        posts.retain(|post| {
+            if self.filter.exclude_dids.contains(&post.did) {
+                tracing::debug!("Removing post from excluded DID from batch: {}", post.did);
+                return false;
+            }
+            true
+        });
+
+        // If all posts were filtered out, return None
+        if posts.is_empty() {
+            tracing::debug!("No posts remaining after filtering excluded DIDs");
+            return None;
+        }
+
+        // Check if batch contains ONLY agent's own posts - if so, no notification needed
+        if let Some(agent_did) = agent_did {
+            let non_agent_posts = posts.iter().any(|post| !post.did.contains(agent_did));
+            if !non_agent_posts {
+                tracing::debug!("Skipping batch notification - only contains agent's own posts");
+                return None;
+            }
+        }
+
+        // Get main_post for thread context building
+        let main_post = posts.last()?.clone();
 
         // Build thread context (uses cache internally)
         let thread_context = match self
@@ -2588,13 +2692,7 @@ impl BlueskyFirehoseSource {
             .await
         {
             Ok(ctx) => ctx,
-            Err(_) => Some(ThreadContext {
-                parent_chain: Vec::new(),
-                root: None,
-                replies_map: std::collections::HashMap::new(),
-                engagement_map: std::collections::HashMap::new(),
-                agent_interactions: std::collections::HashMap::new(),
-            }),
+            Err(_) => None,
         };
 
         // If thread was excluded, don't send notification
@@ -2611,7 +2709,7 @@ impl BlueskyFirehoseSource {
 
         // Add batch header
         message.push_str(&format!(
-            "📦 Thread activity ({} posts in last 3 seconds)\n\n",
+            "Thread activity ({} posts in last 30 seconds)\n\n",
             posts.len()
         ));
 
@@ -2634,6 +2732,20 @@ impl BlueskyFirehoseSource {
 
         // Add reply options
         thread_context.format_reply_options(&mut message, &main_post);
+
+        // Check for excluded keywords in the formatted message
+        if !self.filter.exclude_keywords.is_empty() {
+            let message_lower = message.to_lowercase();
+            for keyword in &self.filter.exclude_keywords {
+                if message_lower.contains(&keyword.to_lowercase()) {
+                    tracing::debug!(
+                        "Batch excluded due to keyword '{}' in formatted message",
+                        keyword
+                    );
+                    return None;
+                }
+            }
+        }
 
         // Collect and append image URLs as markers (take last 4)
         let all_image_urls = thread_context.collect_all_image_urls(&main_post);
@@ -3571,7 +3683,7 @@ impl DataSource for BlueskyFirehoseSource {
             };
 
             if should_flush {
-                tracing::debug!("⏰ Flushing batch for thread: {}", thread_root);
+                tracing::info!("⏰ Flushing batch for thread: {}", thread_root);
                 return self.flush_batch(&thread_root).await;
             }
 
@@ -3583,7 +3695,7 @@ impl DataSource for BlueskyFirehoseSource {
                 if let Some(expired_thread) = expired_batches.first() {
                     // Only flush if it's a different thread than the one we just added to
                     if expired_thread != &thread_root {
-                        tracing::debug!(
+                        tracing::info!(
                             "⏰ Flushing expired batch for thread: {} (found {} expired)",
                             expired_thread,
                             expired_batches.len()
@@ -3593,9 +3705,83 @@ impl DataSource for BlueskyFirehoseSource {
                         }
                     }
                 }
+            } else if !self.pending_batch.batch_timers.is_empty() {
+                // No expired batches, but flush the oldest batch anyway to keep things responsive
+                // let oldest_batch = self
+                //     .pending_batch
+                //     .batch_timers
+                //     .iter()
+                //     .min_by_key(|entry| entry.value().elapsed())
+                //     .map(|entry| entry.key().clone());
+
+                // if let Some(oldest_thread) = oldest_batch {
+                //     tracing::info!(
+                //         "📤 Flushing oldest batch for thread: {} to maintain responsiveness",
+                //         oldest_thread
+                //     );
+                //     if let Some(notification) = self.flush_batch(&oldest_thread).await {
+                //         // Process the current item later - it will come back through
+                //         return Some(notification);
+                //     }
+                // }
             }
 
             return None;
+        } else {
+            let thread_root = self.find_thread_root(&item);
+            // Add to batch
+            self.add_to_batch(item.clone(), thread_root.clone()).await;
+            // Spawn opportunistic hydration task if we have auth
+            if let Some(bsky_agent) = &self.bsky_agent {
+                let post_uri = item.uri.clone();
+                let agent = bsky_agent.clone();
+                let batch = self.pending_batch.clone();
+
+                tokio::spawn(async move {
+                    // Short timeout for opportunistic hydration
+                    let timeout = tokio::time::timeout(
+                        std::time::Duration::from_millis(2000),
+                        async {
+                            // Try to fetch full post data
+                            let params = atrium_api::app::bsky::feed::get_posts::ParametersData {
+                                uris: vec![post_uri.clone()],
+                            };
+
+                            if let Ok(result) = agent.api.app.bsky.feed.get_posts(params.into()).await {
+                                if let Some(post_view) = result.posts.first() {
+                                    if let Some(hydrated) = BlueskyPost::from_post_view(post_view) {
+                                        // Update the cached post in posts_by_thread
+                                        if let Some(mut thread_posts) = batch.posts_by_thread.get_mut(&post_uri) {
+                                            // Find and replace the post in the thread's posts
+                                            for post in thread_posts.iter_mut() {
+                                                if post.uri == post_uri {
+                                                    *post = hydrated.clone();
+                                                    tracing::trace!("✨ Opportunistically hydrated post in thread: {}", post_uri);
+                                                    break;
+                                                }
+                                            }
+                                        }
+
+                                        // Also check pending_posts vector
+                                        let mut pending = batch.pending_posts.write().await;
+                                        for post in pending.iter_mut() {
+                                            if post.uri == post_uri {
+                                                *post = hydrated;
+                                                tracing::trace!("✨ Opportunistically hydrated post in pending: {}", post_uri);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ).await;
+
+                    if timeout.is_err() {
+                        tracing::trace!("Opportunistic hydration timed out for: {}", post_uri);
+                    }
+                });
+            }
         }
 
         // Not batchable - but first check if there are any batches to flush
@@ -3604,7 +3790,7 @@ impl DataSource for BlueskyFirehoseSource {
         if !expired_batches.is_empty() {
             // Flush the oldest expired batch first
             if let Some(expired_thread) = expired_batches.first() {
-                tracing::debug!(
+                tracing::info!(
                     "⏰ Flushing expired batch for thread: {} before processing single notification (found {} expired)",
                     expired_thread,
                     expired_batches.len()
@@ -3616,23 +3802,23 @@ impl DataSource for BlueskyFirehoseSource {
             }
         } else if !self.pending_batch.batch_timers.is_empty() {
             // No expired batches, but flush the oldest batch anyway to keep things responsive
-            let oldest_batch = self
-                .pending_batch
-                .batch_timers
-                .iter()
-                .min_by_key(|entry| entry.value().elapsed())
-                .map(|entry| entry.key().clone());
+            // let oldest_batch = self
+            //     .pending_batch
+            //     .batch_timers
+            //     .iter()
+            //     .min_by_key(|entry| entry.value().elapsed())
+            //     .map(|entry| entry.key().clone());
 
-            if let Some(oldest_thread) = oldest_batch {
-                tracing::debug!(
-                    "📤 Flushing oldest batch for thread: {} to maintain responsiveness",
-                    oldest_thread
-                );
-                if let Some(notification) = self.flush_batch(&oldest_thread).await {
-                    // Process the current item later - it will come back through
-                    return Some(notification);
-                }
-            }
+            // if let Some(oldest_thread) = oldest_batch {
+            //     tracing::info!(
+            //         "📤 Flushing oldest batch for thread: {} to maintain responsiveness",
+            //         oldest_thread
+            //     );
+            //     if let Some(notification) = self.flush_batch(&oldest_thread).await {
+            //         // Process the current item later - it will come back through
+            //         return Some(notification);
+            //     }
+            // }
         }
 
         // Format single notification
@@ -3786,12 +3972,14 @@ impl LexiconIngestor for PostIngestor {
                 } else {
                     // Can send immediately
                     tracing::debug!("📤 Sending post to channel: @{}", post_to_filter.handle);
+
+                    // Always mark activity for watchdog regardless of send success - we're processing messages
+                    let mut act = self.last_activity_time.lock().await;
+                    *act = std::time::Instant::now();
+
                     match self.tx.try_send(Ok(event.clone())) {
                         Ok(_) => {
                             *last_send = std::time::Instant::now();
-                            // Mark activity for watchdog
-                            let mut act = self.last_activity_time.lock().await;
-                            *act = std::time::Instant::now();
                             if let Some(buffer) = &self.buffer {
                                 let mut buffer_guard = buffer.lock();
                                 buffer_guard.push(event);
@@ -3799,11 +3987,15 @@ impl LexiconIngestor for PostIngestor {
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             // Downstream backpressure: queue for rate-limited processing instead
+                            tracing::debug!(
+                                "Backpressure detected: queuing post for later processing (channel full) - @{}",
+                                post_to_filter.handle
+                            );
                             if let Some(buffer) = &self.buffer {
                                 let mut buffer_guard = buffer.lock();
                                 if buffer_guard.queue_for_processing(event.clone()) {
-                                    tracing::warn!(
-                                        "Backpressure: queued post for later processing (channel full)"
+                                    tracing::debug!(
+                                        "Successfully queued post for rate-limited processing"
                                     );
                                 } else {
                                     tracing::warn!(
