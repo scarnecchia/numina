@@ -190,6 +190,11 @@ capabilities = [
     "contamination_detection",
 ]
 
+# Discord configuration for the Lares
+[discord]
+respond_to_dms = true
+respond_to_mentions = true
+
 # Bluesky configuration for the Lares
 [bluesky]
 default_filter = { nsids = [
