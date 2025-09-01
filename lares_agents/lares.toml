@@ -92,13 +92,6 @@ memory_type = "core"
 description = "Shared understanding of Lares purpose and members"
 shared = true
 
-# [memory.intro_blog_post]
-# content_path = "blog-post.md"
-# permission = "read_only"
-# memory_type = "archival"
-# description = "Post written by orual about their motivation for developing our Lares"
-# shared = true
-
 [database]
 type = "remote"
 url = "ws://127.0.0.1:8000" # or "wss://..." for secure connections
