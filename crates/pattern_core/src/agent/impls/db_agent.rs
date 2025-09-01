@@ -38,6 +38,8 @@ use crate::{
     tool::{DynamicTool, ToolRegistry},
 };
 use chrono::Utc;
+use serde_json::Value as JsonValue;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::agent::{ResponseEvent, get_next_message_position_sync};
 
@@ -118,6 +120,29 @@ where
     M: ModelProvider + 'static,
     E: EmbeddingProvider + 'static,
 {
+    /// Build a canonical JSON representation by sorting object keys recursively
+    fn canonicalize_json(value: &JsonValue) -> JsonValue {
+        match value {
+            JsonValue::Object(map) => {
+                let mut sorted: BTreeMap<String, JsonValue> = BTreeMap::new();
+                for (k, v) in map.iter() {
+                    sorted.insert(k.clone(), Self::canonicalize_json(v));
+                }
+                serde_json::to_value(sorted).unwrap_or(JsonValue::Object(map.clone()))
+            }
+            JsonValue::Array(arr) => {
+                JsonValue::Array(arr.iter().map(Self::canonicalize_json).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+
+    /// Compute a deduplication key for a tool call based on name and canonicalized arguments
+    fn tool_call_dedupe_key(call: &crate::message::ToolCall) -> String {
+        let canonical_args = Self::canonicalize_json(&call.fn_arguments);
+        let args_str = serde_json::to_string(&canonical_args).unwrap_or_else(|_| "{}".into());
+        format!("{}|{}", call.fn_name, args_str)
+    }
     /// Clean up temporarily loaded memory blocks that are not pinned
     async fn cleanup_temporary_memory_blocks(&self, loaded_memory_labels: &[String]) {
         if !loaded_memory_labels.is_empty() {
@@ -2005,7 +2030,54 @@ where
         // Get current rule engine state
         let mut rule_engine = self.tool_rules.write().await;
 
+        // Build a recent dedupe set from execution history (last 5 minutes)
+        let mut seen_keys: HashSet<String> = HashSet::new();
+        {
+            let now_recent = std::time::Duration::from_secs(5 * 60);
+            let state = rule_engine.get_execution_state().clone();
+            for exec in state.execution_history.iter().rev().take(200) {
+                // Only consider recent successful executions
+                if exec.timestamp.elapsed() <= now_recent {
+                    if let Some(meta) = &exec.metadata {
+                        // Expecting metadata to possibly contain canonical args under "args"
+                        if let Some(args_val) = meta.get("args") {
+                            // Rebuild a synthetic key using tool name + canonical args
+                            let canonical_args = Self::canonicalize_json(args_val);
+                            if let Ok(args_str) = serde_json::to_string(&canonical_args) {
+                                seen_keys.insert(format!("{}|{}", exec.tool_name, args_str));
+                            }
+                        }
+                    }
+                } else {
+                    // Older than window; break early as list is reverse chronological by insertion order
+                    // (best-effort; if not strictly ordered, this still limits scan)
+                    // Do not break if ordering is unsure
+                }
+            }
+        }
+
         for call in calls {
+            // Check for duplicate tool call by content (name + canonicalized args)
+            let dedupe_key = Self::tool_call_dedupe_key(call);
+            if seen_keys.contains(&dedupe_key) {
+                tracing::warn!(
+                    "♻️ Duplicate tool call suppressed: {} with identical arguments",
+                    call.fn_name
+                );
+                // Return a normal tool response explaining suppression, then short-circuit
+                responses.push(ToolResponse {
+                    call_id: call.call_id.clone(),
+                    content: format!(
+                        "Duplicate tool call detected for '{}'; skipping re-execution to avoid repetition.",
+                        call.fn_name
+                    ),
+                    is_error: Some(true),
+                });
+
+                // Short-circuit tool execution loop per design
+                break;
+            }
+
             // Check if tool can be executed according to rules
             match rule_engine.can_execute_tool(&call.fn_name) {
                 Ok(_) => {
@@ -2073,11 +2145,17 @@ where
                     call_id: call.call_id.clone(),
                     timestamp: std::time::Instant::now(),
                     success: execution_success,
-                    metadata: None,
+                    // Store canonicalized args in metadata for future dedupe
+                    metadata: Some(serde_json::json!({
+                        "args": Self::canonicalize_json(&call.fn_arguments)
+                    })),
                 };
                 rule_engine.record_execution(execution);
 
                 responses.push(tool_response);
+
+                // Mark this call's content as seen to dedupe subsequent identical calls
+                seen_keys.insert(dedupe_key);
 
                 // Check if we should exit after this tool
                 if rule_engine.should_exit_loop() {
