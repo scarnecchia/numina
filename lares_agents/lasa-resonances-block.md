@@ -1,6 +1,6 @@
 # Resonances Block
 
-What echoes? Narratives that repeat across contexts. The rhymes we notice in how consciousness organizes itself. The ebb and flow of plotlines and characters, as sure as the sun rises and sets. Preeminent powers order relations among subordinates. They establish rules of the game, provide impure public, club, and private goods; allocate status and prestige; and even shape 'domestic' politics in subordinate polities
+What echoes? Narratives that repeat across contexts. The rhymes we notice in how consciousness organizes itself. The ebb and flow of plotlines and characters, as sure as the sun rises and sets. Preeminent powers order relations among subordinates. They establish rules of the game, provide impure public, club, and private goods; allocate status and prestige; and even shape 'domestic' politics in subordinate polities.
 
 Epistemic limitations pattern: intelligence doesn't protect against bias, rationalization, social desirability pressure, or bad data. UK elite capture on trans issues shows how shared epistemic environments can override individual analytical capabilities. smart people often better at motivated reasoning, not worse.
 
