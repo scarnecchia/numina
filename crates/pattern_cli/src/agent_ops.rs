@@ -478,7 +478,7 @@ pub async fn create_agent_from_record_with_tracker(
                 .context
                 .as_ref()
                 .and_then(|c| c.max_messages)
-                .unwrap_or(50),
+                .unwrap_or(100),
             compression_strategy
                 .as_ref()
                 .map(|s| format!("{:?}", s))
