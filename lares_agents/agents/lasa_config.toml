@@ -447,9 +447,9 @@ default_filter = { nsids = [
     "did:plc:qiknc4t5rq7yngvz7g4aezq7", # Faine
     "did:plc:mdjhvva6vlrswsj26cftjttd", # Laurens
     "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # Alice (justplaying)
-    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
 ], require_agent_participation = true, exclude_keywords = [
