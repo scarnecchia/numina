@@ -909,7 +909,7 @@ where
                 .find(|m| m.id == *model_id || m.name == *model_id)
                 .map(|m| {
                     // Use 90% of context window to leave room for output
-                    (m.context_window as f64 * 0.9) as usize
+                    (m.context_window - m.max_output_tokens.unwrap_or_else(|| 8192)) as usize
                 })
         } else {
             None
@@ -917,7 +917,7 @@ where
 
         // Build the context config from the record with token limit
         let mut context_config = record.to_context_config();
-        context_config.max_context_tokens = max_context_tokens.or(Some(180_000)); // Fallback to 180k
+        context_config.max_context_tokens = max_context_tokens.or(Some(136_000)); // Fallback to 136k
 
         // Load tool rules from database record (with config fallback)
         let tool_rules = if !record.tool_rules.is_empty() {
