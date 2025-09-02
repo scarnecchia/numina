@@ -201,7 +201,6 @@ default_filter = { nsids = [
     "did:plc:z46zh55ljmgogiammxofkrqz",
     "did:plc:g2iyxoulrzt2s3hmdarmrtmo",
     "did:plc:mbyqgn55oj6ofgyhwbpno7r4",
-    "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
     "did:plc:icdti5op3injp4wzx2bcnbtx",
     "did:plc:43avkwppcl6bmqirxrxd5rpf",
     "did:plc:cnt43ffyb7jauqgl4vknklto",
@@ -518,6 +517,7 @@ default_filter = { nsids = [
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
+    "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
 ], require_agent_participation = true, exclude_keywords = [
