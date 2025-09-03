@@ -1729,76 +1729,72 @@ impl BlueskyFirehoseSource {
 
             // Walk up the parent chain up to 10 levels deep to prevent infinite loops
             for _ in 0..10 {
-                if checked_uris.contains(&current_parent_uri) {
-                    break; // Avoid loops
-                }
+                // if checked_uris.contains(&current_parent_uri) {
+                //     break; // Avoid loops
+                // }
                 checked_uris.insert(current_parent_uri.clone());
 
-                let parent_params = atrium_api::app::bsky::feed::get_posts::ParametersData {
-                    uris: vec![current_parent_uri.clone()],
+                let full_hydration = HydrationState {
+                    handle_resolved: true,
+                    profile_fetched: true,
+                    embed_enriched: true,
                 };
 
-                match bsky_agent
-                    .api
-                    .app
-                    .bsky
-                    .feed
-                    .get_posts(parent_params.into())
+                match self
+                    .get_or_fetch_post(&current_parent_uri, full_hydration)
                     .await
                 {
-                    Ok(parent_result) => {
-                        if let Some(post_view) = parent_result.posts.first() {
-                            if let Some(parent_post) = BlueskyPost::from_post_view(post_view) {
-                                // Check for exclusions at this level
-                                if filter.exclude_dids.contains(&parent_post.did) {
+                    Ok(Some(parent_post)) => {
+                        // Check for exclusions at this level
+                        if filter.exclude_dids.contains(&parent_post.did) {
+                            tracing::debug!(
+                                "Excluding thread: contains excluded DID {} upstream",
+                                parent_post.did
+                            );
+                            return Ok(None);
+                        }
+
+                        if !filter.exclude_keywords.is_empty() {
+                            let text_lower = parent_post.text.to_lowercase();
+                            for keyword in &filter.exclude_keywords {
+                                if text_lower.contains(&keyword.to_lowercase()) {
                                     tracing::debug!(
-                                        "Excluding thread: contains excluded DID {} upstream",
-                                        parent_post.did
+                                        "Excluding thread: contains excluded keyword '{}' upstream",
+                                        keyword
                                     );
                                     return Ok(None);
                                 }
-
-                                if !filter.exclude_keywords.is_empty() {
-                                    let text_lower = parent_post.text.to_lowercase();
-                                    for keyword in &filter.exclude_keywords {
-                                        if text_lower.contains(&keyword.to_lowercase()) {
-                                            tracing::debug!(
-                                                "Excluding thread: contains excluded keyword '{}' upstream",
-                                                keyword
-                                            );
-                                            return Ok(None);
-                                        }
-                                    }
-                                }
-
-                                // Check if this post has a parent to continue walking up
-                                let next_parent =
-                                    parent_post.reply.as_ref().map(|r| r.parent.uri.clone());
-
-                                // Add engagement metrics
-                                context.engagement_map.insert(
-                                    parent_post.uri.clone(),
-                                    PostEngagement {
-                                        like_count: parent_post.like_count.unwrap_or(0) as u32,
-                                        reply_count: parent_post.reply_count.unwrap_or(0) as u32,
-                                        repost_count: parent_post.repost_count.unwrap_or(0) as u32,
-                                    },
-                                );
-
-                                parent_chain.push(parent_post);
-
-                                // Continue walking up if there's a parent
-                                if let Some(next) = next_parent {
-                                    current_parent_uri = next;
-                                } else {
-                                    break; // Reached root of thread
-                                }
-                            } else {
-                                break;
                             }
-                        } else {
-                            break;
                         }
+
+                        // Determine next parent
+                        let next_parent = parent_post.reply.as_ref().map(|r| r.parent.uri.clone());
+
+                        // Add engagement metrics
+                        context.engagement_map.insert(
+                            parent_post.uri.clone(),
+                            PostEngagement {
+                                like_count: parent_post.like_count.unwrap_or(0) as u32,
+                                reply_count: parent_post.reply_count.unwrap_or(0) as u32,
+                                repost_count: parent_post.repost_count.unwrap_or(0) as u32,
+                            },
+                        );
+
+                        parent_chain.push(parent_post);
+
+                        // Continue walking up if there's a parent
+                        if let Some(next) = next_parent {
+                            current_parent_uri = next;
+                        } else {
+                            break; // Reached root of thread
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            "Parent fetch returned None for {} — stopping climb",
+                            current_parent_uri
+                        );
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!("Failed to fetch parent {}: {}", current_parent_uri, e);
@@ -1959,9 +1955,13 @@ impl BlueskyFirehoseSource {
             let mut is_agent_root_thread = false;
             let mut is_from_friend_direct = false;
             let mut has_friend_upthread = false;
+            let mut has_upstream_mention = false;
             let mut downstream_mention = false;
 
             if let Some(tp) = triggering_post.as_ref() {
+                // Friend matching helper (DID-only exact match)
+                let is_friend_post =
+                    |p: &BlueskyPost| -> bool { filter.friends.iter().any(|f| p.did == *f) };
                 // Direct mention in the triggering post
                 is_direct_mention = tp.mentioned_dids().contains(&aid);
 
@@ -1972,22 +1972,37 @@ impl BlueskyFirehoseSource {
                     }
                 }
 
-                // From friend directly
-                is_from_friend_direct = filter.friends.iter().any(|f| tp.did.contains(f));
+                // From friend directly (by DID or handle)
+                is_from_friend_direct = is_friend_post(tp);
 
                 // Agent root thread
                 if let Some(root) = &context.root {
-                    is_agent_root_thread = root.did.contains(aid);
+                    is_agent_root_thread = root.did == aid;
                 }
 
-                // Friend up-thread (ancestors only) — check up to 4 levels
+                // Friend up-thread (ancestors only) — check up to 4 levels, by DID or handle
                 if let Some(root) = &context.root {
-                    has_friend_upthread = filter.friends.iter().any(|f| root.did.contains(f));
+                    has_friend_upthread = is_friend_post(root);
                 }
                 if !has_friend_upthread {
                     for (parent, _) in context.parent_chain.iter().take(4) {
-                        if filter.friends.iter().any(|f| parent.did.contains(f)) {
+                        if is_friend_post(parent) {
                             has_friend_upthread = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Upstream mentions (ancestors only) — check up to 4 levels
+                if let Some(root) = &context.root {
+                    if root.mentioned_dids().contains(&aid) {
+                        has_upstream_mention = true;
+                    }
+                }
+                if !has_upstream_mention {
+                    for (parent, _) in context.parent_chain.iter().take(4) {
+                        if parent.mentioned_dids().contains(&aid) {
+                            has_upstream_mention = true;
                             break;
                         }
                     }
@@ -2020,6 +2035,19 @@ impl BlueskyFirehoseSource {
                 }
             }
 
+            tracing::info!(
+                "Participation flags for {}: direct_mention={}, reply_to_agent={}, agent_root={}, friend_direct={}, friend_upthread={}, upstream_mention={}, downstream_mention={}, require_participation={}",
+                post_uri,
+                is_direct_mention,
+                is_reply_to_agent,
+                is_agent_root_thread,
+                is_from_friend_direct,
+                has_friend_upthread,
+                has_upstream_mention,
+                downstream_mention,
+                filter.require_agent_participation
+            );
+
             let include = if filter.require_agent_participation {
                 is_direct_mention
                     || is_reply_to_agent
@@ -2032,6 +2060,7 @@ impl BlueskyFirehoseSource {
                     || is_agent_root_thread
                     || is_from_friend_direct
                     || has_friend_upthread
+                    || has_upstream_mention
                     || downstream_mention
             };
 
@@ -2132,6 +2161,27 @@ impl BlueskyFirehoseSource {
                 }
             }
             *siblings = kept;
+        }
+
+        // 4) If we still don't have a root but the triggering post provides one, fetch and set it now
+        if context.root.is_none() {
+            if let Some(tp) = triggering_post_fetched.as_ref() {
+                if let Some(reply) = &tp.reply {
+                    let root_uri = reply.root.uri.clone();
+                    if !root_uri.is_empty() {
+                        let full_hydration = HydrationState {
+                            handle_resolved: true,
+                            profile_fetched: true,
+                            embed_enriched: true,
+                        };
+                        if let Ok(Some(root_post)) =
+                            self.get_or_fetch_post(&root_uri, full_hydration).await
+                        {
+                            context.root = Some(root_post);
+                        }
+                    }
+                }
+            }
         }
 
         // Cache the result before returning
@@ -2953,6 +3003,7 @@ impl BlueskyFirehoseSource {
                 let mut is_agent_root_thread = false;
                 let mut is_from_friend_direct = false;
                 let mut has_friend_upthread = false;
+                let mut has_upstream_mention = false;
                 let mut downstream_mention = false;
 
                 is_direct_mention = tp.mentioned_dids().contains(&aid);
@@ -2961,15 +3012,26 @@ impl BlueskyFirehoseSource {
                         is_reply_to_agent = true;
                     }
                 }
-                is_from_friend_direct = self.filter.friends.iter().any(|f| tp.did.contains(f));
+                is_from_friend_direct = self.filter.friends.iter().any(|f| tp.did == *f);
                 if let Some(root) = &ctx.root {
-                    is_agent_root_thread = root.did.contains(aid);
-                    has_friend_upthread = self.filter.friends.iter().any(|f| root.did.contains(f));
+                    is_agent_root_thread = root.did == aid;
+                    has_friend_upthread = self.filter.friends.iter().any(|f| root.did == *f);
+                    if root.mentioned_dids().contains(&aid) {
+                        has_upstream_mention = true;
+                    }
                 }
                 if !has_friend_upthread {
                     for (parent, _) in ctx.parent_chain.iter().take(4) {
-                        if self.filter.friends.iter().any(|f| parent.did.contains(f)) {
+                        if self.filter.friends.iter().any(|f| parent.did == *f) {
                             has_friend_upthread = true;
+                            break;
+                        }
+                    }
+                }
+                if !has_upstream_mention {
+                    for (parent, _) in ctx.parent_chain.iter().take(4) {
+                        if parent.mentioned_dids().contains(&aid) {
+                            has_upstream_mention = true;
                             break;
                         }
                     }
@@ -3000,6 +3062,19 @@ impl BlueskyFirehoseSource {
                     }
                 }
 
+                tracing::debug!(
+                    "Single notify participation flags for {}: direct_mention={}, reply_to_agent={}, agent_root={}, friend_direct={}, friend_upthread={}, upstream_mention={}, downstream_mention={}, require_participation={}",
+                    post.uri,
+                    is_direct_mention,
+                    is_reply_to_agent,
+                    is_agent_root_thread,
+                    is_from_friend_direct,
+                    has_friend_upthread,
+                    has_upstream_mention,
+                    downstream_mention,
+                    self.filter.require_agent_participation
+                );
+
                 let include = if self.filter.require_agent_participation {
                     is_direct_mention
                         || is_reply_to_agent
@@ -3012,6 +3087,7 @@ impl BlueskyFirehoseSource {
                         || is_agent_root_thread
                         || is_from_friend_direct
                         || has_friend_upthread
+                        || has_upstream_mention
                         || downstream_mention
                 };
 
