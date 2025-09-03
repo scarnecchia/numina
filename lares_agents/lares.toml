@@ -188,6 +188,12 @@ capabilities = [
 respond_to_dms = true
 respond_to_mentions = true
 
+[partners]
+[[partners.users]]
+discord_id = "592429922052472840"
+name = "mountainherder"
+auto_initialize = true
+
 # Bluesky configuration for the Lares
 [bluesky]
 default_filter = { nsids = [
@@ -514,6 +520,7 @@ default_filter = { nsids = [
     "did:plc:qiknc4t5rq7yngvz7g4aezq7", # Faine
     "did:plc:mdjhvva6vlrswsj26cftjttd", # Laurens
     "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # Alice (justplaying)
+    "did:plc:vc7f4oafdgxsihk4cry2xpze", # Jerry Chen
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
@@ -538,6 +545,7 @@ default_filter = { nsids = [
     "did:plc:lw7hallqsgrhwumgudkph44j", # Too fascinated with replying
     "did:plc:4y3wcmmyzmcpgearodhrbsae", # Fucking with the AIs / Cultist
     "did:plc:vszw3ess46odfhnzdsy4huae" # SE Gyges got got
+    "did:plc:u6ajzyiqzkzbppp2x2y7fpfu" # Noah is uninterested
 ] }
 auto_connect_firehose = true # Control when to connect
 
