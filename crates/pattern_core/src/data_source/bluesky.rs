@@ -1914,71 +1914,27 @@ impl BlueskyFirehoseSource {
             .await;
         }
 
-        // Check if agent is actually participating in this thread (if configured)
-        // If not, return None to avoid unnecessary notifications
-        // BUT: Always show if agent is directly mentioned in the current post OR if current post is from a friend
-        if filter.require_agent_participation {
-            if let Some(agent_did) = agent_did {
-                // First check if the triggering post itself is from a friend
-                let mut triggering_post_from_friend = false;
+        // Hydrate the triggering post (with cache) so participation checks are accurate
+        let triggering_post_fetched: Option<BlueskyPost> = if self.bsky_agent.is_some() {
+            let hydration = HydrationState {
+                handle_resolved: true,
+                profile_fetched: true,
+                embed_enriched: true,
+            };
+            match self.get_or_fetch_post(post_uri, hydration).await {
+                Ok(Some(p)) => Some(p),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
-                // Quick check: extract DID directly from the URI
-                // Format: at://did:plc:abc123/app.bsky.feed.post/xyz
-                if post_uri.starts_with("at://") {
-                    if let Some(did_end) = post_uri[5..].find('/') {
-                        let did = &post_uri[5..5 + did_end];
-                        // Skip if this is the agent's own post
-                        if did.contains(agent_did) {
-                            tracing::debug!(
-                                "Triggering post is agent's own post, will filter unless mentioned"
-                            );
-                            return Ok(None);
-                        } else if filter.friends.iter().any(|friend| did.contains(friend)) {
-                            tracing::debug!(
-                                "Triggering post is from friend (via URI parsing): {}",
-                                did
-                            );
-                            triggering_post_from_friend = true;
-                        }
-                    }
-                }
-
-                // Fallback: Find the triggering post (the one we're building context for)
-                if !triggering_post_from_friend {
-                    let all_posts =
-                        context
-                            .replies_map
-                            .values()
-                            .flatten()
-                            .chain(context.parent_chain.iter().flat_map(|(p, siblings)| {
-                                std::iter::once(p).chain(siblings.iter())
-                            }))
-                            .chain(context.root.iter());
-
-                    for post in all_posts.clone() {
-                        if post.uri == post_uri {
-                            // Check if this triggering post is from a friend
-                            if filter
-                                .friends
-                                .iter()
-                                .any(|friend| post.did.contains(friend))
-                            {
-                                tracing::debug!(
-                                    "Triggering post is from friend (via post lookup): {}",
-                                    post.did
-                                );
-                                triggering_post_from_friend = true;
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // Check if the agent is mentioned in current post, its parent, or root
-                // If so, always include it regardless of thread participation
-                let mut agent_mentioned_in_chain = false;
-
-                let all_posts = context
+        // Participation evaluation (precise rules)
+        if let Some(aid) = agent_did {
+            // Prefer the hydrated current post; fall back to context scan only if missing
+            let mut triggering_post: Option<BlueskyPost> = triggering_post_fetched.clone();
+            if triggering_post.is_none() {
+                for p in context
                     .replies_map
                     .values()
                     .flatten()
@@ -1986,91 +1942,196 @@ impl BlueskyFirehoseSource {
                         context
                             .parent_chain
                             .iter()
-                            .flat_map(|(p, siblings)| std::iter::once(p).chain(siblings.iter())),
+                            .flat_map(|(p, s)| std::iter::once(p).chain(s.iter())),
                     )
-                    .chain(context.root.iter());
-
-                for post in all_posts {
-                    if post.uri == post_uri {
-                        // Check current post for mentions
-                        if post.mentioned_dids().contains(&agent_did) {
-                            agent_mentioned_in_chain = true;
-                            break;
-                        }
-
-                        // Check if parent or root post URI contains agent DID (indicating reply TO agent)
-                        if let Some(reply) = &post.reply {
-                            if reply.parent.uri.contains(agent_did)
-                                || reply.root.uri.contains(agent_did)
-                            {
-                                agent_mentioned_in_chain = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Always check the root for mentions
-                if let Some(root) = &context.root {
-                    if root.mentioned_dids().contains(&agent_did) {
-                        agent_mentioned_in_chain = true;
-                    }
-                }
-
-                // Check if agent is participating in the thread
-                let agent_in_thread = context
-                    .root
-                    .as_ref()
-                    .map_or(false, |root| root.did.contains(agent_did))
-                    || context.parent_chain.iter().any(|(parent, siblings)| {
-                        parent.did.contains(agent_did)
-                            || siblings.iter().any(|s| s.did.contains(agent_did))
-                    })
-                    || context
-                        .replies_map
-                        .values()
-                        .flatten()
-                        .any(|reply| reply.did.contains(agent_did));
-
-                // Check if any friends are participating in the thread
-                let friends_in_thread = if !filter.friends.is_empty() {
-                    context.root.as_ref().map_or(false, |root| {
-                        filter
-                            .friends
-                            .iter()
-                            .any(|friend| root.did.contains(friend))
-                    }) || context.parent_chain.iter().any(|(parent, siblings)| {
-                        filter
-                            .friends
-                            .iter()
-                            .any(|friend| parent.did.contains(friend))
-                            || siblings
-                                .iter()
-                                .any(|s| filter.friends.iter().any(|friend| s.did.contains(friend)))
-                    }) || context.replies_map.values().flatten().any(|reply| {
-                        filter
-                            .friends
-                            .iter()
-                            .any(|friend| reply.did.contains(friend))
-                    })
-                } else {
-                    false
-                };
-
-                if !agent_in_thread
-                    && !agent_mentioned_in_chain
-                    && !friends_in_thread
-                    && !triggering_post_from_friend
+                    .chain(context.root.iter())
                 {
-                    tracing::debug!(
-                        "Agent {} not participating in thread {} and no friends participating (including triggering post), filtering out (require_agent_participation=true)",
-                        agent_did,
-                        thread_root
-                    );
-                    return Ok(None);
+                    if p.uri == post_uri {
+                        triggering_post = Some(p.clone());
+                        break;
+                    }
                 }
             }
-        } else {
+
+            // Helper flags
+            let mut is_direct_mention = false;
+            let mut is_reply_to_agent = false;
+            let mut is_agent_root_thread = false;
+            let mut is_from_friend_direct = false;
+            let mut has_friend_upthread = false;
+            let mut downstream_mention = false;
+
+            if let Some(tp) = triggering_post.as_ref() {
+                // Direct mention in the triggering post
+                is_direct_mention = tp.mentioned_dids().contains(&aid);
+
+                // Reply to agent (immediate parent authored by agent OR URI heuristic)
+                if let Some(reply) = &tp.reply {
+                    if reply.parent.uri.contains(aid) {
+                        is_reply_to_agent = true;
+                    }
+                }
+
+                // From friend directly
+                is_from_friend_direct = filter.friends.iter().any(|f| tp.did.contains(f));
+
+                // Agent root thread
+                if let Some(root) = &context.root {
+                    is_agent_root_thread = root.did.contains(aid);
+                }
+
+                // Friend up-thread (ancestors only) — check up to 4 levels
+                if let Some(root) = &context.root {
+                    has_friend_upthread = filter.friends.iter().any(|f| root.did.contains(f));
+                }
+                if !has_friend_upthread {
+                    for (parent, _) in context.parent_chain.iter().take(4) {
+                        if filter.friends.iter().any(|f| parent.did.contains(f)) {
+                            has_friend_upthread = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Downstream mention within small depth (e.g., 2)
+                let max_downstream_depth = 4usize;
+                if max_downstream_depth > 0 {
+                    let mut queue: std::collections::VecDeque<(String, usize)> =
+                        std::collections::VecDeque::new();
+                    queue.push_back((tp.uri.clone(), 0));
+                    let mut visited = std::collections::HashSet::new();
+                    while let Some((uri, depth)) = queue.pop_front() {
+                        if depth > max_downstream_depth || !visited.insert(uri.clone()) {
+                            continue;
+                        }
+                        if let Some(children) = context.replies_map.get(&uri) {
+                            for child in children {
+                                if child.mentioned_dids().contains(&aid) {
+                                    downstream_mention = true;
+                                    break;
+                                }
+                                queue.push_back((child.uri.clone(), depth + 1));
+                            }
+                        }
+                        if downstream_mention {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let include = if filter.require_agent_participation {
+                is_direct_mention
+                    || is_reply_to_agent
+                    || is_agent_root_thread
+                    || is_from_friend_direct
+                    || downstream_mention
+            } else {
+                is_direct_mention
+                    || is_reply_to_agent
+                    || is_agent_root_thread
+                    || is_from_friend_direct
+                    || has_friend_upthread
+                    || downstream_mention
+            };
+
+            if !include {
+                tracing::info!(
+                    "Filtering out thread {} due to participation rules (require_agent_participation={})",
+                    thread_root,
+                    filter.require_agent_participation
+                );
+                return Ok(None);
+            }
+        }
+
+        // Exclusion sweep with vacate-vs-hide semantics
+        // 1) Build path-to-trigger (ancestors) URIs
+        let mut path_to_trigger: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        if let Some(root) = &context.root {
+            path_to_trigger.insert(root.uri.clone());
+        }
+        for (parent, _) in &context.parent_chain {
+            path_to_trigger.insert(parent.uri.clone());
+        }
+        path_to_trigger.insert(post_uri.to_string());
+
+        // Helper: check if a post matches exclusion rules
+        let post_is_excluded = |p: &BlueskyPost| -> bool {
+            if filter.exclude_dids.contains(&p.did) {
+                return true;
+            }
+            if !filter.exclude_keywords.is_empty() {
+                let text_lower = p.text.to_lowercase();
+                for kw in &filter.exclude_keywords {
+                    if text_lower.contains(&kw.to_lowercase()) {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        // Helper: recursive DFS for subtree exclusion detection
+        fn subtree_contains_exclusion(
+            start_uri: &str,
+            replies_map: &std::collections::HashMap<String, Vec<BlueskyPost>>,
+            filter: &BlueskyFilter,
+        ) -> bool {
+            let mut stack: Vec<&str> = vec![start_uri];
+            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while let Some(uri) = stack.pop() {
+                if !visited.insert(uri.to_string()) {
+                    continue;
+                }
+                if let Some(children) = replies_map.get(uri) {
+                    for child in children {
+                        // DID exclusion
+                        if filter.exclude_dids.contains(&child.did) {
+                            return true;
+                        }
+                        // Keyword exclusion
+                        if !filter.exclude_keywords.is_empty() {
+                            let text_lower = child.text.to_lowercase();
+                            for kw in &filter.exclude_keywords {
+                                if text_lower.contains(&kw.to_lowercase()) {
+                                    return true;
+                                }
+                            }
+                        }
+                        stack.push(child.uri.as_str());
+                    }
+                }
+            }
+            false
+        }
+
+        // 2) Vacate if exclusion found strictly downstream in the triggering branch
+        let replies_map_snapshot = context.replies_map.clone();
+        if subtree_contains_exclusion(post_uri, &replies_map_snapshot, filter) {
+            tracing::debug!(
+                "Excluding thread {} due to downstream exclusion on trigger branch",
+                thread_root
+            );
+            return Ok(None);
+        }
+
+        // 3) Hide sibling branches with exclusions
+        for (_parent, siblings) in context.parent_chain.iter_mut() {
+            let mut kept: Vec<BlueskyPost> = Vec::with_capacity(siblings.len());
+            for sib in siblings.iter() {
+                let mut hide = false;
+                if post_is_excluded(sib) {
+                    hide = true;
+                } else if subtree_contains_exclusion(&sib.uri, &replies_map_snapshot, filter) {
+                    hide = true;
+                }
+                if !hide {
+                    kept.push(sib.clone());
+                }
+            }
+            *siblings = kept;
         }
 
         // Cache the result before returning
@@ -2659,21 +2720,6 @@ impl BlueskyFirehoseSource {
         // Get agent DID from mentions filter (agent monitors for mentions of itself)
         let agent_did = self.filter.mentions.first().map(|s| s.as_str());
 
-        // Filter out posts from excluded DIDs (but keep the rest)
-        posts.retain(|post| {
-            if self.filter.exclude_dids.contains(&post.did) {
-                tracing::debug!("Removing post from excluded DID from batch: {}", post.did);
-                return false;
-            }
-            true
-        });
-
-        // If all posts were filtered out, return None
-        if posts.is_empty() {
-            tracing::debug!("No posts remaining after filtering excluded DIDs");
-            return None;
-        }
-
         // Check if batch contains ONLY agent's own posts - if so, no notification needed
         if let Some(agent_did) = agent_did {
             let non_agent_posts = posts.iter().any(|post| !post.did.contains(agent_did));
@@ -2739,19 +2785,7 @@ impl BlueskyFirehoseSource {
         // Add reply options
         thread_context.format_reply_options(&mut message, &main_post);
 
-        // Check for excluded keywords in the formatted message
-        if !self.filter.exclude_keywords.is_empty() {
-            let message_lower = message.to_lowercase();
-            for keyword in &self.filter.exclude_keywords {
-                if message_lower.contains(&keyword.to_lowercase()) {
-                    tracing::debug!(
-                        "Batch excluded due to keyword '{}' in formatted message",
-                        keyword
-                    );
-                    return None;
-                }
-            }
-        }
+        // Keyword/DID exclusions are handled in build_thread_context with vacate/hide semantics
 
         // Collect and append image URLs as markers (take last 4)
         let all_image_urls = thread_context.collect_all_image_urls(&main_post);
@@ -2908,98 +2942,87 @@ impl BlueskyFirehoseSource {
             None
         };
 
-        // Now that we have full thread context, apply comprehensive filtering
-
-        // Build list of all DIDs in the thread
-        let mut thread_dids = vec![post.did.clone()];
-        let mut mention_check_queue = post
-            .mentioned_dids()
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
+        // Apply participation rules (relying on build_thread_context for exclusions)
         if let Some(ref ctx) = thread_context {
-            // Add ALL parent chain DIDs for exclusion checking (aggressive filtering)
-            for (parent, siblings) in &ctx.parent_chain {
-                thread_dids.push(parent.did.clone());
+            if let Some(aid) = agent_did {
+                // Use hydrated `post` as triggering post
+                let tp = &post;
 
-                // Add all sibling DIDs for exclusion checking
-                for sibling in siblings {
-                    thread_dids.push(sibling.did.clone());
+                let mut is_direct_mention = false;
+                let mut is_reply_to_agent = false;
+                let mut is_agent_root_thread = false;
+                let mut is_from_friend_direct = false;
+                let mut has_friend_upthread = false;
+                let mut downstream_mention = false;
+
+                is_direct_mention = tp.mentioned_dids().contains(&aid);
+                if let Some(reply) = &tp.reply {
+                    if reply.parent.uri.contains(aid) {
+                        is_reply_to_agent = true;
+                    }
                 }
-            }
-
-            // Add immediate parent and sibling mentions only (not all ancestors)
-            if let Some((parent, siblings)) = ctx.parent_chain.first() {
-                mention_check_queue.extend(parent.mentioned_dids().iter().map(|s| s.to_string()));
-
-                // Add immediate sibling mentions
-                for sibling in siblings {
-                    mention_check_queue
-                        .extend(sibling.mentioned_dids().iter().map(|s| s.to_string()));
+                is_from_friend_direct = self.filter.friends.iter().any(|f| tp.did.contains(f));
+                if let Some(root) = &ctx.root {
+                    is_agent_root_thread = root.did.contains(aid);
+                    has_friend_upthread = self.filter.friends.iter().any(|f| root.did.contains(f));
                 }
-            }
-
-            // Add reply DIDs and mentions
-            for replies in ctx.replies_map.values() {
-                for reply in replies {
-                    thread_dids.push(reply.did.clone());
-                    mention_check_queue
-                        .extend(reply.mentioned_dids().iter().map(|s| s.to_string()));
+                if !has_friend_upthread {
+                    for (parent, _) in ctx.parent_chain.iter().take(4) {
+                        if self.filter.friends.iter().any(|f| parent.did.contains(f)) {
+                            has_friend_upthread = true;
+                            break;
+                        }
+                    }
                 }
-            }
-        }
 
-        // Check if quoted post mentions anyone
-        if let Some(quoted) = post.quoted_post() {
-            thread_dids.push(quoted.did.clone());
-            mention_check_queue.push(quoted.did.clone());
-        }
+                let max_downstream_depth = 4usize;
+                if max_downstream_depth > 0 {
+                    let mut queue: std::collections::VecDeque<(String, usize)> =
+                        std::collections::VecDeque::new();
+                    queue.push_back((tp.uri.clone(), 0));
+                    let mut visited = std::collections::HashSet::new();
+                    while let Some((uri, depth)) = queue.pop_front() {
+                        if depth > max_downstream_depth || !visited.insert(uri.clone()) {
+                            continue;
+                        }
+                        if let Some(children) = ctx.replies_map.get(&uri) {
+                            for child in children {
+                                if child.mentioned_dids().contains(&aid) {
+                                    downstream_mention = true;
+                                    break;
+                                }
+                                queue.push_back((child.uri.clone(), depth + 1));
+                            }
+                        }
+                        if downstream_mention {
+                            break;
+                        }
+                    }
+                }
 
-        // Apply exclusion filters on entire thread
-        for did in &thread_dids {
-            if self.filter.exclude_dids.contains(did) {
-                tracing::debug!("Excluding: thread contains excluded DID: {}", did);
-                return None;
-            }
-        }
+                let include = if self.filter.require_agent_participation {
+                    is_direct_mention
+                        || is_reply_to_agent
+                        || is_agent_root_thread
+                        || is_from_friend_direct
+                        || downstream_mention
+                } else {
+                    is_direct_mention
+                        || is_reply_to_agent
+                        || is_agent_root_thread
+                        || is_from_friend_direct
+                        || has_friend_upthread
+                        || downstream_mention
+                };
 
-        // Check for excluded keywords in the entire formatted message (will build it temporarily)
-        if !self.filter.exclude_keywords.is_empty() {
-            let mut temp_message = String::new();
-            if let Some(ref ctx) = thread_context {
-                ctx.append_thread_tree(&mut temp_message, &post, agent_did);
-            } else {
-                post.append_as_standalone(&mut temp_message, agent_did);
-            }
-
-            let message_lower = temp_message.to_lowercase();
-            for keyword in &self.filter.exclude_keywords {
-                if message_lower.contains(&keyword.to_lowercase()) {
-                    tracing::debug!("Excluding: thread contains excluded keyword: {}", keyword);
+                if !include {
+                    tracing::info!(
+                        "Skipping: participation rules not met (require_agent_participation={})",
+                        self.filter.require_agent_participation
+                    );
                     return None;
                 }
             }
-        }
-
-        // Check if any friends are in the thread
-        let has_friend_in_thread = thread_dids
-            .iter()
-            .any(|did| self.filter.friends.contains(did));
-
-        // Check if agent is mentioned anywhere
-        let agent_mentioned = agent_did.map_or(false, |aid| {
-            mention_check_queue.contains(&aid.to_string())
-                || mention_check_queue.contains(&format!("@{}", aid))
-        });
-
-        // Check if agent authored anything in thread
-        let agent_in_thread = agent_did.map_or(false, |aid| thread_dids.contains(&aid.to_string()));
-
-        // Determine if we should show this post
-        if !has_friend_in_thread && !agent_mentioned && !agent_in_thread {
-            tracing::debug!("Skipping: no friends in thread, agent not mentioned or involved");
-            return None;
         }
 
         // Format the notification

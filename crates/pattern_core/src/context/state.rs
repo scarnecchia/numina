@@ -15,7 +15,7 @@ use crate::{
     db::{DatabaseError, DbEntity},
     id::MessageId,
     memory::{Memory, MemoryBlock, MemoryPermission, MemoryType},
-    message::{Message, MessageContent, ToolCall, ToolResponse},
+    message::{Message, MessageContent, MessageRelationType, ToolCall, ToolResponse},
     tool::ToolRegistry,
 };
 
@@ -920,7 +920,7 @@ impl AgentHandle {
             // Filter by agent if needed
             // Get all message IDs belonging to this agent
             let agent_msg_sql = format!(
-                "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
+                "SELECT message_type, out FROM agent_messages WHERE in = {} AND message_type = 'archived' AND out IS NOT NULL ",
                 self.agent_id.to_string()
             );
 
@@ -933,12 +933,17 @@ impl AgentHandle {
             #[derive(serde::Deserialize)]
             struct OutRecord {
                 out: RecordId,
+                message_type: MessageRelationType,
             }
 
             let out_records: Vec<OutRecord> =
                 agent_msg_result.take(0).map_err(DatabaseError::from)?;
 
-            let agent_msg_ids: Vec<RecordId> = out_records.into_iter().map(|r| r.out).collect();
+            let agent_msg_ids: Vec<RecordId> = out_records
+                .into_iter()
+                .filter(|r| r.message_type != MessageRelationType::Active)
+                .map(|r| r.out)
+                .collect();
 
             let agent_msg_id_set: std::collections::HashSet<RecordId> =
                 agent_msg_ids.into_iter().collect();
@@ -1046,7 +1051,7 @@ impl AgentHandle {
 
         // Query the agent_messages relation table directly
         let sql = format!(
-            "SELECT position, batch, sequence_num, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC LIMIT $limit FETCH messages",
+            "SELECT position, batch, sequence_num, message_type, ->(msg{}) AS messages FROM agent_messages WHERE (in = agent:{} AND message_type = 'archived' AND out IS NOT NULL) ORDER BY batch NUMERIC DESC, sequence_num NUMERIC DESC, position NUMERIC DESC LIMIT $limit FETCH messages",
             where_clause,
             self.agent_id.to_key()
         );
@@ -1194,7 +1199,7 @@ impl AgentHandle {
             for agent in &agents {
                 let agent_id = crate::AgentId::from_record(agent.id.clone());
                 let agent_msg_sql = format!(
-                    "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL",
+                    "SELECT out FROM agent_messages WHERE in = {} AND out IS NOT NULL AND message_type = 'archived'",
                     agent_id.to_string()
                 );
 

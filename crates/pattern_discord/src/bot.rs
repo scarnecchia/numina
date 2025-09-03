@@ -18,6 +18,8 @@ use pattern_core::{
     Agent, AgentGroup,
     coordination::groups::{AgentWithMembership, GroupManager},
 };
+use serenity::all::MessageId;
+use serenity::builder::GetMessages;
 
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::Mutex;
@@ -74,6 +76,10 @@ pub struct DiscordBot {
     typing_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Track status reactions we've added (message_id -> reaction)
     status_reactions: Arc<Mutex<HashMap<u64, char>>>,
+    /// Debounced queue flush task (reset when new messages arrive while busy)
+    queue_flush_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Per-channel recent activity timestamps to decide when to include history
+    recent_activity_by_channel: Arc<Mutex<HashMap<u64, std::time::Instant>>>,
 }
 
 /// Configuration for the Discord bot
@@ -126,6 +132,8 @@ impl DiscordBot {
             current_message_start: Arc::new(Mutex::new(None)),
             typing_handle: Arc::new(Mutex::new(None)),
             status_reactions: Arc::new(Mutex::new(HashMap::new())),
+            queue_flush_task: Arc::new(Mutex::new(None)),
+            recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -145,6 +153,8 @@ impl DiscordBot {
             current_message_start: Arc::new(Mutex::new(None)),
             typing_handle: Arc::new(Mutex::new(None)),
             status_reactions: Arc::new(Mutex::new(HashMap::new())),
+            queue_flush_task: Arc::new(Mutex::new(None)),
+            recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -157,6 +167,17 @@ pub struct DiscordEventHandler {
 impl DiscordEventHandler {
     pub fn new(bot: Arc<DiscordBot>) -> Self {
         Self { bot }
+    }
+}
+
+// Safe Unicode-aware preview helper
+fn unicode_preview(s: &str, max_chars: usize) -> String {
+    let mut it = s.chars();
+    let preview: String = it.by_ref().take(max_chars).collect();
+    if it.next().is_some() {
+        format!("{}...", preview)
+    } else {
+        preview
     }
 }
 
@@ -242,103 +263,54 @@ impl EventHandler for DiscordEventHandler {
         let is_busy = *self.bot.is_processing.lock().await;
 
         if is_busy {
-            // Add to queue instead of processing immediately
+            // Simplified queueing: keep at most one pending entry per channel, replacing with newest
             let mut queue = self.bot.message_queue.lock().await;
 
-            // Try to merge with existing message from same user in same channel
-            let mut merged = false;
-            for queued_msg in queue.iter_mut() {
-                if queued_msg.author_name == msg.author.name
-                    && queued_msg.channel_id == msg.channel_id.get()
-                {
-                    // Merge messages from same user
-                    info!(
-                        "Merging message from {} into existing queue entry",
-                        msg.author.name
-                    );
-
-                    // Calculate time since the original message
-                    let time_diff = queued_msg.timestamp.elapsed().as_secs();
-
-                    // Append the new content with separator and timestamp
-                    queued_msg
-                        .content
-                        .push_str(&format!("\n--- [+{}s later] ---\n", time_diff));
-                    queued_msg.content.push_str(&msg.content);
-
-                    // Update the message ID to the latest one for reply purposes
-                    queued_msg.msg_id = msg.id.get();
-
-                    merged = true;
-                    break;
-                }
+            if let Some(existing) = queue
+                .iter_mut()
+                .find(|q| q.channel_id == msg.channel_id.get())
+            {
+                info!(
+                    "Updating existing queued entry for channel {} with latest message from {}",
+                    msg.channel_id, msg.author.name
+                );
+                existing.msg_id = msg.id.get();
+                existing.author_name = msg.author.name.clone();
+                existing.content = msg.content.clone();
+                existing.timestamp = std::time::Instant::now();
+            } else {
+                info!(
+                    "Queueing single pending message for channel {} from {}",
+                    msg.channel_id, msg.author.name
+                );
+                queue.push_back(QueuedMessage {
+                    msg_id: msg.id.get(),
+                    channel_id: msg.channel_id.get(),
+                    author_name: msg.author.name.clone(),
+                    content: msg.content.clone(),
+                    timestamp: std::time::Instant::now(),
+                });
             }
 
-            if !merged {
-                // Check if we have room for a new entry
-                if queue.len() >= 4 {
-                    // Try to find an entry to merge with based on channel
-                    let mut channel_merged = false;
-                    for queued_msg in queue.iter_mut() {
-                        if queued_msg.channel_id == msg.channel_id.get() {
-                            info!(
-                                "Queue full, merging message from {} into existing channel entry",
-                                msg.author.name
-                            );
-
-                            // Calculate time since the original message
-                            let time_diff = queued_msg.timestamp.elapsed().as_secs();
-
-                            // Merge as different user in same channel with timestamp
-                            queued_msg.content.push_str(&format!(
-                                "\n\n[Also from {} - +{}s later]:\n{}",
-                                msg.author.name, time_diff, msg.content
-                            ));
-                            queued_msg.msg_id = msg.id.get();
-
-                            channel_merged = true;
-                            break;
-                        }
-                    }
-
-                    if !channel_merged {
-                        // Last resort: merge into the last entry
-                        if let Some(last_msg) = queue.back_mut() {
-                            info!(
-                                "Queue full, force-merging message from {} into last entry",
-                                msg.author.name
-                            );
-                            last_msg.content.push_str(&format!(
-                                "\n\n[Also from {} in different context]:\n{}",
-                                msg.author.name, msg.content
-                            ));
-                            last_msg.msg_id = msg.id.get();
-                        }
-                    }
-                } else {
-                    // Add as new queue entry
-                    queue.push_back(QueuedMessage {
-                        msg_id: msg.id.get(),
-                        channel_id: msg.channel_id.get(),
-                        author_name: msg.author.name.clone(),
-                        content: msg.content.clone(),
-                        timestamp: std::time::Instant::now(),
-                    });
-                }
-            }
-
-            info!(
-                "Queue status: {} entries after processing message from {}",
-                queue.len(),
-                msg.author.name
-            );
-
-            // Show indicator based on whether we merged or queued
-            let indicator = if merged { '🔄' } else { '📥' };
-            if msg.react(&ctx.http, indicator).await.is_ok() {
-                // Track this reaction so we can remove it later
+            // Simple queued indicator
+            if msg.react(&ctx.http, '📥').await.is_ok() {
                 let mut reactions = self.bot.status_reactions.lock().await;
-                reactions.insert(msg.id.get(), indicator);
+                reactions.insert(msg.id.get(), '📥');
+            }
+
+            // Debounced flush: reset a single 5s timer for the whole queue
+            {
+                let mut task = self.bot.queue_flush_task.lock().await;
+                if let Some(handle) = task.take() {
+                    handle.abort();
+                }
+                let bot = self.bot.clone();
+                let ctx_clone = ctx.clone();
+                *task = Some(tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    // On timer fire, attempt to flush queued messages
+                    bot.process_message_queue(&ctx_clone).await;
+                }));
             }
             return;
         }
@@ -658,6 +630,17 @@ impl EventHandler for DiscordEventHandler {
 }
 
 impl DiscordBot {
+    /// Check if a channel is stale (no recent messages within threshold) and update last-seen time
+    async fn channel_is_stale_and_touch(&self, channel_id: u64, threshold: Duration) -> bool {
+        let mut map = self.recent_activity_by_channel.lock().await;
+        let now = std::time::Instant::now();
+        let stale = match map.get(&channel_id) {
+            Some(last) => last.elapsed() > threshold,
+            None => true,
+        };
+        map.insert(channel_id, now);
+        stale
+    }
     /// Get the elapsed time since we started processing the current message
     pub async fn get_current_processing_time(&self) -> Option<std::time::Duration> {
         let start_time = self.current_message_start.lock().await;
@@ -678,14 +661,6 @@ impl DiscordBot {
         // Get ALL queued messages at once
         let queued_messages = {
             let mut queue = self.message_queue.lock().await;
-
-            // Check if we're still processing
-            let is_processing = *self.is_processing.lock().await;
-            if is_processing {
-                // Still busy, don't take from queue yet
-                return;
-            }
-
             // Drain all messages from queue
             queue.drain(..).collect::<Vec<_>>()
         };
@@ -761,6 +736,49 @@ impl DiscordBot {
         } else {
             format!("channel {}", channel_id)
         };
+
+        // Add extended recent context only if the batch is "stale" (oldest queued > threshold)
+        let oldest_age = queued_messages
+            .iter()
+            .map(|m| m.timestamp.elapsed())
+            .max()
+            .unwrap_or_else(|| std::time::Duration::from_secs(0));
+        if oldest_age > std::time::Duration::from_secs(180) {
+            let extra = queued_messages.len().min(12) as u8; // cap extra to prevent bloat
+            let base_limit: u8 = 4;
+            let fetch_limit = base_limit.saturating_add(extra);
+            if let Ok(mut msgs) = ChannelId::new(channel_id)
+                .messages(&ctx.http, GetMessages::new().limit(fetch_limit))
+                .await
+            {
+                msgs.reverse();
+                let lines: Vec<String> = msgs
+                    .into_iter()
+                    .map(|m| {
+                        let author = if let Some(ref gn) = m.author.global_name {
+                            format!("{} [{}]", gn, m.author.name)
+                        } else {
+                            m.author.name.clone()
+                        };
+                        let text = if !m.content.is_empty() {
+                            let trimmed = m.content.trim();
+                            unicode_preview(trimmed, 180)
+                        } else if !m.attachments.is_empty() {
+                            let first = &m.attachments[0];
+                            format!("<attachment: {}>", first.filename)
+                        } else {
+                            String::from("<non-text message>")
+                        };
+                        format!("- {}: {}", author, text)
+                    })
+                    .collect();
+                if !lines.is_empty() {
+                    combined_content.push_str("Recent context (latest first):\n");
+                    combined_content.push_str(&lines.join("\n"));
+                    combined_content.push_str("\n\n");
+                }
+            }
+        }
 
         combined_content.push_str(&format!(
             "You can respond to these messages as a batch. Use send_message with target_type: \"channel\" \
@@ -1133,6 +1151,67 @@ impl DiscordBot {
                 )
             };
 
+            // Build lightweight reply/thread context
+            let mut reply_context = String::new();
+            if let Some(referenced) = &msg.referenced_message {
+                // Identify author display
+                let ref_author = referenced.author.name.clone();
+                let ref_preview = unicode_preview(referenced.content.as_str(), 180);
+                reply_context.push_str(&format!(
+                    "\n[Replying to {}]: \"{}\"\n",
+                    ref_author, ref_preview
+                ));
+            }
+
+            // Provide recent in-channel context only if channel looks stale (no activity for ~3 minutes)
+            let mut recent_context = String::new();
+            let include_recent_context = self
+                .channel_is_stale_and_touch(msg.channel_id.get(), Duration::from_secs(180))
+                .await;
+            if include_recent_context {
+                if let Ok(mut msgs) = msg
+                    .channel_id
+                    .messages(
+                        &ctx.http,
+                        GetMessages::new()
+                            .before(MessageId::new(msg.id.get()))
+                            .limit(4),
+                    )
+                    .await
+                {
+                    // Newest first -> reverse for chronological
+                    msgs.reverse();
+                    // Summarize last few lines with author and snippet
+                    let mut lines = Vec::new();
+                    for m in msgs.into_iter() {
+                        // Skip pure bot-system noise unless it's from us
+                        if m.author.bot && m.author.id != msg.author.id {
+                            continue;
+                        }
+                        let author = if let Some(ref gn) = m.author.global_name {
+                            format!("{} [{}]", gn, m.author.name)
+                        } else {
+                            m.author.name.clone()
+                        };
+                        let text = if !m.content.is_empty() {
+                            let trimmed = m.content.trim();
+                            unicode_preview(trimmed, 160)
+                        } else if !m.attachments.is_empty() {
+                            let first = &m.attachments[0];
+                            format!("<attachment: {}>", first.filename)
+                        } else {
+                            String::from("<non-text message>")
+                        };
+                        lines.push(format!("- {}: {}", author, text));
+                    }
+                    if !lines.is_empty() {
+                        recent_context.push_str("\nRecent context:\n");
+                        recent_context.push_str(&lines.join("\n"));
+                        recent_context.push_str("\n");
+                    }
+                }
+            }
+
             // Process attachments if any
             let mut attachment_content = String::new();
             let mut unique_image_urls = std::collections::HashSet::new();
@@ -1208,13 +1287,13 @@ impl DiscordBot {
 
             // Create framing prompt that makes responding optional
             let framed_message = format!(
-                "{}\n\
+                "{}{}{}\n\
                 Message: {}{}\n\n\
                 you can respond if you have something to add, or if you're directly mentioned.
-                if you do, use send_message with target_type: \"channel\" and target_id: \"{}\" (or the channel name {}) or direct text
-
-                ",
+                if you do, use send_message with target_type: \"channel\" and target_id: \"{}\" (or the channel name {})",
                 discord_context,
+                reply_context,
+                recent_context,
                 resolved_content,
                 attachment_content,
                 discord_channel_id,
@@ -1276,29 +1355,7 @@ impl DiscordBot {
                             has_sent_initial_response = true; // ANY activity counts as a response
 
                             match event {
-                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { agent_id: _, text:_, is_final:_ } => {
-                                    // // Filter out single '.' which is a null response
-                                    // if !text.is_empty() && text.trim() != "." {
-                                    //     current_message.push_str(&text);
-
-                                    //     // Send complete sentences/paragraphs as they arrive
-                                    //     if is_final || text.ends_with('\n') || text.ends_with(". ") || current_message.len() > 1500 {
-                                    //         if !current_message.trim().is_empty() && current_message.trim() != "." {
-                                    //             for chunk in split_message(&current_message, 2000) {
-                                    //                 // Use channel.say() to respond in the same channel instead of DM
-                                    //                 if let Err(e) = msg.channel_id.say(&ctx.http, chunk).await {
-                                    //                     warn!("Failed to send response chunk to channel {}: {}", msg.channel_id, e);
-                                    //                     // Log more details about the context
-                                    //                     warn!("Message context - Guild: {:?}, Channel: {}, Is DM: {}",
-                                    //                         msg.guild_id, msg.channel_id, msg.guild_id.is_none());
-                                    //                 }
-                                    //                 has_sent_initial_response = true;
-                                    //             }
-                                    //             current_message.clear();
-                                    //         }
-                                    //     }
-                                    // }
-                                },
+                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { ..} => {},
                                 pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id: _, call_id, fn_name, args: _ } => {
                                     info!("Tool call started: {} ({})", fn_name, call_id);
 

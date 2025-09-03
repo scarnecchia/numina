@@ -156,7 +156,7 @@ impl Default for ContextConfig {
             base_instructions: DEFAULT_BASE_INSTRUCTIONS.to_string(),
             memory_char_limit: DEFAULT_CORE_MEMORY_CHAR_LIMIT,
             max_context_messages: DEFAULT_MAX_CONTEXT_MESSAGES,
-            max_context_tokens: Some(130000),
+            max_context_tokens: Some(128000),
             enable_thinking: true,
             tool_usage_rules: Vec::new(),
             tool_workflow_rules: Vec::new(),
@@ -188,7 +188,7 @@ impl Default for ModelAdjustments {
             native_thinking: false,
             use_xml_tags: true,
             max_context_tokens: None,
-            token_multiplier: 1.0, // Rough estimate: 1 token ≈ 0.75 words
+            token_multiplier: 1.5, // Rough estimate: 1 token ≈ 0.75 words
         }
     }
 }
