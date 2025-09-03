@@ -477,6 +477,6 @@ default_filter = { nsids = [
     "did:plc:lw7hallqsgrhwumgudkph44j", # Too fascinated with replying
     "did:plc:4y3wcmmyzmcpgearodhrbsae", # Fucking with the AIs / Cultist
     "did:plc:vszw3ess46odfhnzdsy4huae" # SE Gyges got got
-    "did:plc:u6ajzyiqzkzbppp2x2y7fpfu" # Noah is uninterested
+    "did:plc:u6ajzyiqzkzbppp2x2y7fpfu", # Noah is uninterested
 ] }
 auto_connect_firehose = true
