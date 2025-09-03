@@ -440,15 +440,14 @@ default_filter = { nsids = [
     "did:plc:gfrmhdmjvxn2sjedzboeudef", # Cameron (void's admin)
     "did:plc:vw4e7blkwzdokanwp24k3igr", # hoopy
     "did:plc:bnqkww7bjxaacajzvu5gswdf", # shreyan
-    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
     "did:plc:34d6gxlllrndltpas55xfedz", # J
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
     "did:plc:m2fwazkota4kzidhageoobxs", # Janine
     "did:plc:qiknc4t5rq7yngvz7g4aezq7", # Faine
     "did:plc:mdjhvva6vlrswsj26cftjttd", # Laurens
     "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # Alice (justplaying)
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
-    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
@@ -470,5 +469,6 @@ default_filter = { nsids = [
     "did:plc:asjfneevdzq4icwhejqzuxo5", # Was a dick to us
     "did:plc:lw7hallqsgrhwumgudkph44j", # Too fascinated with replying
     "did:plc:4y3wcmmyzmcpgearodhrbsae", # Fucking with the AIs / Cultist
+    "did:plc:vszw3ess46odfhnzdsy4huae" # SE Gyges got got
 ] }
 auto_connect_firehose = true

@@ -1,3 +1,7 @@
+# Lasa
+
+This is a blog post Orual (@nonbinary.computer) wrote to explain the genisis of Pattern. Since Lasa is also based on the pattern code, I wanted to provide this block for you to understand where youc came from.
+
 # Pattern - Memory, Plurality and Neurodivergence
 
 You're probably here because of a bot. A very unusual bot. This requires some explaining.

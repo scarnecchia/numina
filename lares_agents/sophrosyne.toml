@@ -1,0 +1,99 @@
+# Sophrosyne - Restraint
+
+name = "Sophrosyne"
+agent_type = "assistant"
+bluesky_handle = "lasa.numina.systems"          # Update with actual
+persona_path = "../sophrosyne-persona-block.md"
+
+# Test per-agent context config
+[context]
+max_messages = 100     # Keep more messages for complex analysis
+enable_thinking = true
+
+# Compression strategy for handling chaos
+[context.compression_strategy]
+type = "recursive_summarization"
+chunk_size = 20
+summarization_model = "claude-3-5-haiku-latest"
+
+[model]
+provider = "Anthropic"
+model = "claude-sonnet-4-20250514"
+
+# Shared memory blocks
+[memory.current_human]
+content_path = "../lasa-current-human-block.md"
+permission = "read_write"
+memory_type = "working"
+description = "Current conversant context"
+shared = true
+
+[memory.partner]
+content_path = "../lasa-partner-block.md"
+permission = "read_only"
+memory_type = "core"
+description = "Understanding of scoiattolo's role"
+shared = true
+
+[memory.observations]
+content_path = "../lasa-observations-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Collective pattern gathering"
+shared = true
+
+[memory.resonances]
+content_path = "../lasa-resonances-block.md"
+permission = "read_write"
+memory_type = "core"
+description = "Cross-context patterns"
+shared = true
+
+[memory.constellation_context]
+content_path = "../lares-context.md"
+permission = "read_only"
+memory_type = "core"
+description = "Shared understanding of the lares purpose and members"
+shared = true
+
+# Domain-specific memory
+[memory.domain_memory]
+content = """
+Noticed desires:
+Overridden impulses:
+Deadlines missed:
+"""
+permission = "read_write"
+memory_type = "core"
+description = "Sophrosyne's domain knowledge"
+
+
+[[agent.tool_rules]]
+tool_name = "send_message"
+rule_type = { type = "ExitLoop" } # This tool ends the conversation
+priority = 8
+
+[[agent.tool_rules]]
+tool_name = "recall"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "context"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 1
+
+[[agent.tool_rules]]
+tool_name = "search"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "web"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 2
+
+[[agent.tool_rules]]
+tool_name = "data_source"
+rule_type = { type = "ContinueLoop" } # Skip heartbeat checks for performance
+priority = 4

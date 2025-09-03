@@ -34,7 +34,7 @@ TIMESTAMPED_FILENAME=$(echo "$GROUP_STRING" | tr ' ' '-')_${TIMESTAMP}.car
 FINAL_OUTPUT_PATH="$OUTPUT_DIR/$TIMESTAMPED_FILENAME"
 
 # Run the cargo command (it will create the original filename)
-cargo run --bin pattern-cli -- -c "$CONFIG_PATH" export group "$GROUP_STRING"
+/home/scarndp/.cargo/bin/cargo run --bin pattern-cli -- -c "$CONFIG_PATH" export group "$GROUP_STRING"
 
 # Move the original file to the timestamped name in the output directory
 if [ -f "$ORIGINAL_FILENAME" ]; then
