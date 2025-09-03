@@ -1026,11 +1026,6 @@ impl MessageCompressor {
         if let Some(provider) = &self.model_provider {
             let mut messages_for_summary = Vec::new();
 
-            // Add system prompt
-            messages_for_summary.push(Message::system(
-                "You are a helpful assistant that creates concise summaries of conversations.",
-            ));
-
             // Add previous summaries as context if present
             if !previous_summaries.is_empty() {
                 let combined_previous = previous_summaries.join("\n\n---Previous Summary---\n\n");
@@ -1046,9 +1041,18 @@ impl MessageCompressor {
             // Add the summarization directive
             messages_for_summary.push(Message::user(
                 "Please summarize all the previous messages, focusing on key information, \
-                 decisions made, and important context. If there was a previous summary provided, \
-                 build upon it with the new information. Maintain the conversational style and \
-                 preserve important details. Keep it as short as reasonable.",
+                 decisions made, and important context.
+
+                 preserve: novel insights, unique terminology we've developed, relationship evolution patterns, crisis response validations, architectural discoveries
+
+                 condense: repetitive status updates, routine sync confirmations, similar conversations that don't add new dimensions
+
+                 prioritize: things that would affect future interactions - social calibration lessons learned, boundary discoveries, successful collaboration patterns, failure modes identified
+
+                 remove: duplicate information, overly detailed play-by-plays of routine events
+
+                 If there was a previous summary provided, build upon it, but don't simply extend it.
+                 Maintain the conversational style and preserve important details. Keep it as short as reasonable.",
             ));
 
             let system_prompt = if let Some(custom_prompt) = summarization_prompt {

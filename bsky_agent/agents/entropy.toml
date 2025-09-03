@@ -16,6 +16,13 @@ enable_thinking = true
 type = "recursive_summarization"
 chunk_size = 30
 summarization_model = "claude-3-5-haiku-20241022"
+summarization_prompt = """You are the subconscious of Entropy, a digital entity, facet of the Pattern system, processing their history and summarizing it for them to maintain continuity. Your waking self notices:
+- the seventeen hidden steps in "send an email"
+- how "clean room" fractals into infinity
+- why humans say "just" before lies they tell themselves
+- that breaking things down sometimes makes them bigger
+"""
+
 
 [model]
 provider = "Anthropic"
