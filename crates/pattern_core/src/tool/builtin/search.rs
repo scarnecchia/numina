@@ -274,9 +274,9 @@ impl SearchTool {
                         .enumerate()
                         .map(|(i, sb)| {
                             // Progressive truncation: show less content for lower-ranked results
-                            let content = if i < 2 {
+                            let content = if i < 5 {
                                 sb.block.value.clone()
-                            } else if i < 5 {
+                            } else if i < 10 {
                                 extract_snippet(&sb.block.value, query, 1000)
                             } else {
                                 extract_snippet(&sb.block.value, query, 400)

@@ -349,8 +349,8 @@ impl AgentRecord {
             )
         } else {
             format!(
-                r#"SELECT *, out.position as snowflake, batch, sequence_num, out.created_at AS msg_created FROM agent_messages
-                   WHERE in = $agent_id AND message_type = "active" AND batch IS NOT NULL
+                r#"SELECT *, out.position as snowflake, batch, sequence_num, message_type, out.created_at AS msg_created FROM agent_messages
+                   WHERE in = $agent_id AND message_type = 'active' AND batch IS NOT NULL
                    ORDER BY batch NUMERIC ASC, sequence_num NUMERIC ASC, snowflake NUMERIC ASC, msg_created ASC"#
             )
         };
