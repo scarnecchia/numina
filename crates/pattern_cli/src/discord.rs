@@ -283,11 +283,16 @@ pub async fn run_discord_bot_with_group(
         );
 
         // Create the Discord bot in CLI mode (wrapped in Arc for sharing)
+        // Build forward sinks so CLI can mirror Discord stream (and optional file sink)
+        let sinks =
+            crate::forwarding::build_discord_group_sinks(&output, &agents_with_membership).await;
+
         let bot = Arc::new(DiscordBot::new_cli_mode(
             config,
             agents_with_membership.clone(),
             group.clone(),
             pattern_manager.clone(),
+            Some(sinks),
         ));
 
         // Connect the bot to the Discord endpoint for timing context

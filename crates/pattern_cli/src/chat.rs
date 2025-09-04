@@ -134,10 +134,17 @@ pub async fn chat_with_agent(
                     use tokio_stream::StreamExt;
 
                     match r_agent.clone().process_message_stream(message).await {
-                        Ok(mut stream) => {
-                            while let Some(event) = stream.next().await {
-                                print_response_event(event, &output);
-                            }
+                        Ok(stream) => {
+                            // Tee the agent stream to CLI printer and optional file; remove direct prints
+                            let sinks = crate::forwarding::build_cli_agent_sinks(&output).await;
+                            let ctx = pattern_core::realtime::AgentEventContext {
+                                source_tag: Some("CLI".to_string()),
+                                agent_name: Some(r_agent.name()),
+                            };
+                            let mut stream =
+                                pattern_core::realtime::tap_agent_stream(stream, sinks, ctx);
+                            // Drain without direct printing; sinks handle display
+                            while let Some(_event) = stream.next().await {}
                         }
                         Err(e) => {
                             output.error(&format!("Error: {}", e));
@@ -1066,19 +1073,24 @@ pub async fn run_group_chat_loop(
                         .route_message(&group, &agents_with_membership, message)
                         .await
                     {
-                        Ok(mut stream) => {
+                        Ok(stream) => {
                             use tokio_stream::StreamExt;
 
-                            // Process the stream of events
-                            while let Some(event) = stream.next().await {
-                                print_group_response_event(
-                                    event,
-                                    &output,
-                                    &agents_with_membership,
-                                    None,
-                                )
-                                .await;
-                            }
+                            // Tee to CLI printer + optional file; sinks handle printing
+                            let sinks = crate::forwarding::build_cli_group_sinks(
+                                &output,
+                                &agents_with_membership,
+                            )
+                            .await;
+                            let ctx = pattern_core::realtime::GroupEventContext {
+                                source_tag: Some("CLI".to_string()),
+                                group_name: Some(group.name.clone()),
+                            };
+                            let mut stream =
+                                pattern_core::realtime::tap_group_stream(stream, sinks, ctx);
+
+                            // Drain without direct printing
+                            while let Some(_event) = stream.next().await {}
                         }
                         Err(e) => {
                             output.error(&format!("Error routing message: {}", e));

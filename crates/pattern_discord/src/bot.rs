@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use futures::StreamExt;
 use pattern_core::message::Message as PatternMessage;
+use pattern_core::realtime::{GroupEventContext, GroupEventSink, tap_group_stream};
 use pattern_core::{
     Agent, AgentGroup,
     coordination::groups::{AgentWithMembership, GroupManager},
@@ -80,6 +81,9 @@ pub struct DiscordBot {
     queue_flush_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Per-channel recent activity timestamps to decide when to include history
     recent_activity_by_channel: Arc<Mutex<HashMap<u64, std::time::Instant>>>,
+
+    /// Optional sinks to mirror group events (e.g., CLI printer, file)
+    group_event_sinks: Option<Vec<Arc<dyn GroupEventSink>>>,
 }
 
 /// Configuration for the Discord bot
@@ -117,6 +121,7 @@ impl DiscordBot {
         agents_with_membership: Vec<AgentWithMembership<Arc<dyn Agent>>>,
         group: AgentGroup,
         group_manager: Arc<dyn GroupManager>,
+        group_event_sinks: Option<Vec<Arc<dyn GroupEventSink>>>,
     ) -> Self {
         Self {
             cli_mode: true,
@@ -134,6 +139,7 @@ impl DiscordBot {
             status_reactions: Arc::new(Mutex::new(HashMap::new())),
             queue_flush_task: Arc::new(Mutex::new(None)),
             recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
+            group_event_sinks,
         }
     }
 
@@ -155,6 +161,7 @@ impl DiscordBot {
             status_reactions: Arc::new(Mutex::new(HashMap::new())),
             queue_flush_task: Arc::new(Mutex::new(None)),
             recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
+            group_event_sinks: None,
         }
     }
 }
@@ -813,8 +820,18 @@ impl DiscordBot {
                     .route_message(group, agents_with_membership, pattern_msg)
                     .await
                 {
-                    Ok(mut stream) => {
+                    Ok(stream) => {
                         use futures::StreamExt;
+                        // Tee to sinks if configured
+                        let mut stream = if let Some(sinks) = &self.group_event_sinks {
+                            let ctx = GroupEventContext {
+                                source_tag: Some("Discord".to_string()),
+                                group_name: Some(group.name.clone()),
+                            };
+                            tap_group_stream(stream, sinks.clone(), ctx)
+                        } else {
+                            stream
+                        };
                         let mut response = String::new();
                         let mut has_response = false;
 
@@ -1326,10 +1343,21 @@ impl DiscordBot {
                 );
 
                 // Route through group manager using the real agents with membership
-                let mut response_stream = group_manager
+                let response_stream = group_manager
                     .route_message(group, agents_with_membership, pattern_msg)
                     .await
                     .map_err(|e| format!("Failed to route message: {}", e))?;
+
+                // Tee to optional sinks (e.g., CLI printer, file) so CLI can mirror Discord output
+                let mut response_stream = if let Some(sinks) = &self.group_event_sinks {
+                    let ctx = GroupEventContext {
+                        source_tag: Some("Discord".to_string()),
+                        group_name: Some(group.name.clone()),
+                    };
+                    tap_group_stream(response_stream, sinks.clone(), ctx)
+                } else {
+                    response_stream
+                };
 
                 // Set up idle timeout - resets on any activity
                 let idle_timeout = Duration::from_secs(600); // 10 minutes of inactivity
@@ -1356,8 +1384,8 @@ impl DiscordBot {
 
                             match event {
                                 pattern_core::coordination::groups::GroupResponseEvent::TextChunk { ..} => {},
-                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id: _, call_id, fn_name, args: _ } => {
-                                    info!("Tool call started: {} ({})", fn_name, call_id);
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { agent_id: _, call_id:_, fn_name, args: _ } => {
+                                    //info!("Tool call started: {} ({})", fn_name, call_id);
 
                                     // Don't intercept send_message tool calls - let them go through the agent's router
                                     // This ensures proper routing based on the target specified in the tool call
@@ -1376,8 +1404,8 @@ impl DiscordBot {
                                         has_sent_initial_response = true;
                                     }
                                 },
-                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallCompleted { agent_id: _, call_id, result } => {
-                                    info!("Tool call completed: {} - {:?}", call_id, result);
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallCompleted { agent_id: _, call_id:_, result } => {
+                                    //info!("Tool call completed: {} - {:?}", call_id, result);
 
                                     // Check if this was a send_message tool that succeeded
                                     if let Ok(result_str) = &result {

@@ -5,6 +5,7 @@ mod commands;
 mod data_sources;
 mod discord;
 mod endpoints;
+mod forwarding;
 mod message_display;
 mod output;
 mod slash_commands;

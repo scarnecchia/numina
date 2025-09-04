@@ -3278,36 +3278,36 @@ where
                         let mut ctx = context.write().await;
                         ctx.add_tool_rules(tool_rules);
 
-                        // Determine role based on vendor
-                        let role = match model_vendor {
-                            Some(vendor) if vendor.is_openai_compatible() => ChatRole::System,
-                            Some(crate::model::ModelVendor::Gemini) => ChatRole::User,
-                            _ => ChatRole::User, // Anthropic and default
-                        };
+                        // // Determine role based on vendor
+                        // let role = match model_vendor {
+                        //     Some(vendor) if vendor.is_openai_compatible() => ChatRole::System,
+                        //     Some(crate::model::ModelVendor::Gemini) => ChatRole::User,
+                        //     _ => ChatRole::User, // Anthropic and default
+                        // };
 
-                        // Create continuation message in same batch
-                        let content = format!(
-                            "{}Function call finished, returning control",
-                            NON_USER_MESSAGE_PREFIX
-                        );
-                        let mut message = match role {
-                            ChatRole::System => Message::system(content),
-                            ChatRole::Assistant => Message::agent(content),
-                            _ => Message::user(content),
-                        };
-                        message.batch = current_batch_id;
-                        let updated_message = ctx.add_message(message).await;
+                        // // Create continuation message in same batch
+                        // let content = format!(
+                        //     "{}Function call finished, returning control",
+                        //     NON_USER_MESSAGE_PREFIX
+                        // );
+                        // let mut message = match role {
+                        //     ChatRole::System => Message::system(content),
+                        //     ChatRole::Assistant => Message::agent(content),
+                        //     _ => Message::user(content),
+                        // };
+                        // message.batch = current_batch_id;
+                        // let updated_message = ctx.add_message(message).await;
 
-                        let _ = crate::db::ops::persist_agent_message(
-                            &self.db,
-                            &agent_id,
-                            &updated_message,
-                            crate::message::MessageRelationType::Active,
-                        )
-                        .await
-                        .inspect_err(|e| {
-                            crate::log_error!("Failed to persist response message", e);
-                        });
+                        // let _ = crate::db::ops::persist_agent_message(
+                        //     &self.db,
+                        //     &agent_id,
+                        //     &updated_message,
+                        //     crate::message::MessageRelationType::Active,
+                        // )
+                        // .await
+                        // .inspect_err(|e| {
+                        //     crate::log_error!("Failed to persist response message", e);
+                        // });
                     }
 
                     // IMPORTANT: Rebuild context to get fresh memory state after tool execution

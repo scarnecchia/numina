@@ -97,7 +97,7 @@ impl MemoryContext {
         if let Some(summary) = &self.archive_summary {
             // TODO: Make head/tail counts configurable via ContextConfig
             // For now, show first 1 and last 2 summary blocks.
-            let clipped = clip_archive_summary(summary, 1, 2);
+            let clipped = clip_archive_summary(summary, 2, 4);
             messages.push(crate::message::Message::system(format!(
                 "Previous conversation summary:\n{}",
                 clipped

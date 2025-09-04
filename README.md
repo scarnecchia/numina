@@ -21,12 +21,12 @@ The first is a platform for building stateful agents, based on the MemGPT paper,
 - Built-in tools (context, recall, search, send_message)
 - Message compression strategies (truncation, summarization, importance-based)
 - Agent groups with coordination patterns (round-robin, dynamic, pipeline)
+- CLI tool usable, two active long-running public constellations on Bluesky (@pattern.atproto.systems and @lasa.numina.systems) running via the CLI
 
 **In Progress**:
 - Vector embeddings and semantic search
-- MCP server refactor
-- Discord bot integration
-- Additional coordination patterns
+- MCP client CLI configuration support
+- Permissions system for agents
 
 ## The `Pattern` agent constellation:
 
@@ -43,7 +43,7 @@ The second is a multi-agent cognitive support system designed for the neurodiver
 
 - **Three-Tier Memory**: Core blocks, searchable sources, and archival storage
 - **Discord Integration**: Natural language interface through Discord bot
-- **MCP Server**: Expose agent capabilities via Model Context Protocol
+- **MCP Client/Server**: Give entities access to external MCP tools, or present internal tools to external runtime
 - **Cost-Optimized Sleeptime**: Two-tier monitoring (rules-based + AI intervention)
 - **Flexible Group Patterns**: Create any coordination style you need
 - **Task Management**: ADHD-aware task breakdown with time multiplication
@@ -332,6 +332,18 @@ cargo run --bin pattern-cli -- -c path/to/pattern.toml chat --group "Lares Clust
 cargo run --bin pattern-cli -- -c path/to/pattern.toml db query "SELECT * from mem"
 ```
 
+## Stream Forwarding (CLI)
+
+Pattern can tee live agent/group output to additional sinks from the CLI.
+
+- `PATTERN_FORWARD_FILE`: When set to a filepath, Pattern appends timestamped event lines to this file for both single‑agent chats and group streams (including Discord→group and Jetstream→group).
+
+Example:
+
+```bash
+export PATTERN_FORWARD_FILE=/tmp/pattern-stream.log
+```
+
 ## Development
 
 ### Building
@@ -373,9 +385,8 @@ pattern/
 - Build-out of the core framework
   - Vector search
   - MCP refactor
-  - Discord re-integration
-- Bluesky integration for public interaction demo
-- Re-implementation of the core Pattern constellation
+- Home Assistant data source
+- Other neurodivergent-oriented tooling
 - Command-line tool for chat and debugging
 
 ### Planned
