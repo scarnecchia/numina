@@ -1790,14 +1790,11 @@ impl BlueskyFirehoseSource {
                         }
                     }
                     Ok(None) => {
-                        // We have a reference to a parent URI from the record, but a fetch
-                        // returned None without a transport error. Treat this as an access
-                        // restriction (e.g., author blocked the agent) and drop the thread.
-                        tracing::info!(
-                            "Parent fetch returned None — assuming restricted/blocked upstream; dropping thread context (uri={})",
+                        tracing::debug!(
+                            "Parent fetch returned None for {} — stopping climb",
                             current_parent_uri
                         );
-                        return Ok(None);
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!("Failed to fetch parent {}: {}", current_parent_uri, e);
@@ -2246,21 +2243,10 @@ impl BlueskyFirehoseSource {
                             profile_fetched: true,
                             embed_enriched: true,
                         };
-                        match self.get_or_fetch_post(&root_uri, full_hydration).await {
-                            Ok(Some(root_post)) => {
-                                context.root = Some(root_post);
-                            }
-                            Ok(None) => {
-                                // Known root URI but no data and no error => treat as restricted
-                                tracing::info!(
-                                    "Root fetch returned None — assuming restricted/blocked root; dropping thread context (uri={})",
-                                    root_uri
-                                );
-                                return Ok(None);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to fetch root {}: {}", root_uri, e);
-                            }
+                        if let Ok(Some(root_post)) =
+                            self.get_or_fetch_post(&root_uri, full_hydration).await
+                        {
+                            context.root = Some(root_post);
                         }
                     }
                 }

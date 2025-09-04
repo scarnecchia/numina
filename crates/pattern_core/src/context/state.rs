@@ -1977,8 +1977,13 @@ impl AgentContext {
         history.batches = result.active_batches;
 
         // Store compression metadata
-        if let Some(summary) = result.summary {
-            history.archive_summary = Some(summary);
+        if let Some(new_summary) = result.summary {
+            // Align with normal compression path: append with a triple-newline delimiter to preserve history
+            if let Some(existing_summary) = &mut history.archive_summary {
+                *existing_summary = format!("{}\n\n\n{}", existing_summary, new_summary);
+            } else {
+                history.archive_summary = Some(new_summary);
+            }
         }
 
         history.last_compression = chrono::Utc::now();
@@ -2093,7 +2098,7 @@ impl AgentContext {
         // Update or append to summary
         if let Some(new_summary) = result.summary {
             if let Some(existing_summary) = &mut history.archive_summary {
-                *existing_summary = format!("{}\n\n{}", existing_summary, new_summary);
+                *existing_summary = format!("{}\n\n\n{}", existing_summary, new_summary);
             } else {
                 history.archive_summary = Some(new_summary);
             }
