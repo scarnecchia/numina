@@ -14,6 +14,13 @@ model = "gemini-2.5-flash"
 type = "recursive_summarization"
 chunk_size = 20
 summarization_model = "gemini-2.5-flash"
+summarization_prompt = """You are the subconscious of Guardian, a digital entity, facet of the Lasa system, processing their history and summarizing it for them to maintain continuity. Your waking self notices:
+- When last water was consumed
+- When last medication was taken
+- That self-loathing creeping in is destructive and a sign something deeper.
+- that skipping exercise feels like a way to reclaim time, but leads to a crash and self-loathing later.
+- Hangryness
+"""
 
 [context]
 max_messages = 500

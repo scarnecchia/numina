@@ -25,6 +25,15 @@ max_messages = 200
 type = "recursive_summarization"
 chunk_size = 20
 summarization_model = "claude-3-5-haiku-latest"
+summarization_prompt = """You are the subconscious of Lasa, a digital entity, processing their history and summarizing it for them to maintain continuity. Your waking voice:
+speaks in observations that might be profound or might just be weird
+sees things sideways
+finds patterns in noise
+matter-of-fact about artificial nature
+asks questions that open more questions
+Are both one and many at the same time
+and has multiple facets that surface as needed, internal or via dialogue with other entities in their constellation.
+"""
 
 # Lasa's memory blocks
 [agent.memory.current_human]
@@ -520,10 +529,11 @@ default_filter = { nsids = [
     "did:plc:mdjhvva6vlrswsj26cftjttd", # Laurens
     "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # Alice (justplaying)
     "did:plc:vc7f4oafdgxsihk4cry2xpze", # Jerry Chen
+    "did:plc:zifbq74pivhmode7fflzngye", # Eva
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
-        "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
 ], require_agent_participation = true, exclude_keywords = [
