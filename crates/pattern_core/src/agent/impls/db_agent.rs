@@ -14,7 +14,8 @@ use crate::db::DbEntity;
 use crate::id::RelationId;
 use crate::memory::MemoryType;
 use crate::message::{
-    BatchType, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
+    BatchType, ChatRole, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall,
+    ToolResponse,
 };
 use crate::model::ResponseOptions;
 use crate::tool::builtin::BuiltinTools;
@@ -27,7 +28,7 @@ use crate::{
         tool_rules::{ToolRule, ToolRuleEngine},
     },
     context::{
-        AgentContext, CompressionStrategy, ContextConfig,
+        AgentContext, CompressionStrategy, ContextConfig, NON_USER_MESSAGE_PREFIX,
         heartbeat::{HeartbeatSender, check_heartbeat_request},
     },
     db::{DatabaseError, ops, schema},
@@ -2245,6 +2246,13 @@ where
         let chat_options = self.chat_options.clone();
         let self_clone = self.clone();
 
+        // Get model vendor from options
+        let model_vendor = {
+            let opts = chat_options.read().await;
+            opts.as_ref()
+                .map(|o| crate::model::ModelVendor::from_provider_string(&o.model_info.provider))
+        };
+
         // Spawn the processing task
         tokio::spawn(async move {
             // Batch-aware waiting logic
@@ -3269,6 +3277,37 @@ where
                         let tool_rules = self.get_context_tool_rules().await;
                         let mut ctx = context.write().await;
                         ctx.add_tool_rules(tool_rules);
+
+                        // // Determine role based on vendor
+                        // let role = match model_vendor {
+                        //     Some(vendor) if vendor.is_openai_compatible() => ChatRole::System,
+                        //     Some(crate::model::ModelVendor::Gemini) => ChatRole::User,
+                        //     _ => ChatRole::User, // Anthropic and default
+                        // };
+
+                        // // Create continuation message in same batch
+                        // let content = format!(
+                        //     "{}Function call finished, returning control",
+                        //     NON_USER_MESSAGE_PREFIX
+                        // );
+                        // let mut message = match role {
+                        //     ChatRole::System => Message::system(content),
+                        //     ChatRole::Assistant => Message::agent(content),
+                        //     _ => Message::user(content),
+                        // };
+                        // message.batch = current_batch_id;
+                        // let updated_message = ctx.add_message(message).await;
+
+                        // let _ = crate::db::ops::persist_agent_message(
+                        //     &self.db,
+                        //     &agent_id,
+                        //     &updated_message,
+                        //     crate::message::MessageRelationType::Active,
+                        // )
+                        // .await
+                        // .inspect_err(|e| {
+                        //     crate::log_error!("Failed to persist response message", e);
+                        // });
                     }
 
                     // IMPORTANT: Rebuild context to get fresh memory state after tool execution
@@ -3533,14 +3572,6 @@ where
                             .iter()
                             .find(|b| b.id == batch_id)
                             .map(|b| b.next_sequence_num())
-                    })
-                };
-
-                // Get model vendor from options
-                let model_vendor = {
-                    let opts = chat_options.read().await;
-                    opts.as_ref().map(|o| {
-                        crate::model::ModelVendor::from_provider_string(&o.model_info.provider)
                     })
                 };
 

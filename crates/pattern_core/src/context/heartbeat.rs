@@ -38,6 +38,7 @@ pub fn check_heartbeat_request(fn_arguments: &Value) -> bool {
 
 use crate::{
     agent::{Agent, AgentState, ResponseEvent},
+    context::NON_USER_MESSAGE_PREFIX,
     message::{ChatRole, Message},
 };
 use futures::StreamExt;
@@ -93,14 +94,14 @@ pub async fn process_heartbeats<F, Fut>(
                 // Determine role based on vendor
                 let role = match heartbeat.model_vendor {
                     Some(vendor) if vendor.is_openai_compatible() => ChatRole::System,
-                    Some(crate::model::ModelVendor::Gemini) => ChatRole::System,
+                    Some(crate::model::ModelVendor::Gemini) => ChatRole::User,
                     _ => ChatRole::User, // Anthropic and default
                 };
 
                 // Create continuation message in same batch
                 let content = format!(
-                    "[Heartbeat continuation from tool: {}]",
-                    heartbeat.tool_name
+                    "{}Function called using request_heartbeat=true, returning control {}",
+                    NON_USER_MESSAGE_PREFIX, heartbeat.tool_name
                 );
                 let message = if let (Some(batch_id), Some(seq_num)) =
                     (heartbeat.batch_id, heartbeat.next_sequence_num)

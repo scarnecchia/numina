@@ -31,6 +31,7 @@ use crate::{
 /// Build a ContextConfig and CompressionStrategy from an AgentConfig with optional overrides
 fn build_context_config(
     agent_config: &pattern_core::config::AgentConfig,
+    response_options: Option<&ResponseOptions>,
 ) -> (
     pattern_core::context::ContextConfig,
     Option<pattern_core::context::CompressionStrategy>,
@@ -57,6 +58,21 @@ fn build_context_config(
         if let Some(strategy) = &ctx_opts.compression_strategy {
             compression_strategy = Some(strategy.clone());
         }
+    }
+
+    // If we have model ResponseOptions, set max_context_tokens to the model's
+    // input budget: context window minus the model's max output tokens.
+    if let Some(opts) = response_options {
+        let model = &opts.model_info;
+        // Use the response max_tokens if provided, else derive defaults for the model.
+        // Guard: ensure we always reserve at least 8192 tokens for output (matching core from_record()).
+        let mut reserve_output = opts.max_tokens.map(|t| t as usize).unwrap_or_else(|| {
+            pattern_core::model::defaults::calculate_max_tokens(model, None) as usize
+        });
+        reserve_output = reserve_output.max(8192);
+
+        let input_budget = model.context_window.saturating_sub(reserve_output);
+        context_config.max_context_tokens = Some(input_budget);
     }
 
     (context_config, compression_strategy)
@@ -404,11 +420,9 @@ pub async fn create_agent_from_record(
     )
     .await?;
 
-    // Set the chat options with our selected model
+    // Set the chat options with our selected model (do not overwrite max_context_tokens here;
+    // DatabaseAgent::from_record already set an appropriate value from provider data)
     {
-        let mut context = agent.context.write().await;
-        context.context_config.max_context_tokens =
-            Some(response_options.model_info.context_window);
         let mut options = agent.chat_options.write().await;
         *options = Some(response_options);
     }
@@ -466,7 +480,8 @@ pub async fn create_agent_from_record_with_tracker(
     .await?;
 
     // Apply context config from the passed PatternConfig
-    let (context_config, compression_strategy) = build_context_config(&config.agent);
+    let (context_config, compression_strategy) =
+        build_context_config(&config.agent, Some(&response_options));
 
     // Log the config being applied
     output.info(
@@ -849,7 +864,8 @@ pub async fn create_agent(
     let user_id = config.user.id.clone();
 
     // Build context config from agent config
-    let (context_config, compression_strategy) = build_context_config(&config.agent);
+    let (context_config, compression_strategy) =
+        build_context_config(&config.agent, Some(&response_options));
 
     // Load tool rules from configuration
     let tool_rules = config.agent.get_tool_rules().unwrap_or_else(|e| {

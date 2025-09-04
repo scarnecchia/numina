@@ -1954,6 +1954,7 @@ impl BlueskyFirehoseSource {
             let mut is_reply_to_agent = false;
             let mut is_agent_root_thread = false;
             let mut is_from_friend_direct = false;
+            let mut is_from_allowlist_direct = false;
             let mut has_friend_upthread = false;
             let mut has_upstream_mention = false;
             let mut downstream_mention = false;
@@ -1972,8 +1973,9 @@ impl BlueskyFirehoseSource {
                     }
                 }
 
-                // From friend directly (by DID or handle)
+                // From friend directly (by DID) and/or allowlist directly
                 is_from_friend_direct = is_friend_post(tp);
+                is_from_allowlist_direct = filter.dids.iter().any(|d| *d == tp.did);
 
                 // Agent root thread
                 if let Some(root) = &context.root {
@@ -2035,7 +2037,7 @@ impl BlueskyFirehoseSource {
                 }
             }
 
-            tracing::info!(
+            tracing::debug!(
                 "Participation flags for {}: direct_mention={}, reply_to_agent={}, agent_root={}, friend_direct={}, friend_upthread={}, upstream_mention={}, downstream_mention={}, require_participation={}",
                 post_uri,
                 is_direct_mention,
@@ -2059,13 +2061,14 @@ impl BlueskyFirehoseSource {
                     || is_reply_to_agent
                     || is_agent_root_thread
                     || is_from_friend_direct
+                    || is_from_allowlist_direct
                     || has_friend_upthread
                     || has_upstream_mention
                     || downstream_mention
             };
 
             if !include {
-                tracing::info!(
+                tracing::debug!(
                     "Filtering out thread {} due to participation rules (require_agent_participation={})",
                     thread_root,
                     filter.require_agent_participation
@@ -2102,7 +2105,7 @@ impl BlueskyFirehoseSource {
             false
         };
 
-        // Helper: recursive DFS for subtree exclusion detection
+        // Helper: recursive DFS for subtree exclusion detection (keywords + DIDs)
         fn subtree_contains_exclusion(
             start_uri: &str,
             replies_map: &std::collections::HashMap<String, Vec<BlueskyPost>>,
@@ -2136,6 +2139,30 @@ impl BlueskyFirehoseSource {
             false
         }
 
+        // Helper: recursive DFS for subtree DID-only exclusion detection
+        fn subtree_contains_excluded_did(
+            start_uri: &str,
+            replies_map: &std::collections::HashMap<String, Vec<BlueskyPost>>,
+            filter: &BlueskyFilter,
+        ) -> bool {
+            let mut stack: Vec<&str> = vec![start_uri];
+            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while let Some(uri) = stack.pop() {
+                if !visited.insert(uri.to_string()) {
+                    continue;
+                }
+                if let Some(children) = replies_map.get(uri) {
+                    for child in children {
+                        if filter.exclude_dids.contains(&child.did) {
+                            return true;
+                        }
+                        stack.push(child.uri.as_str());
+                    }
+                }
+            }
+            false
+        }
+
         // 2) Vacate if exclusion found strictly downstream in the triggering branch
         let replies_map_snapshot = context.replies_map.clone();
         if subtree_contains_exclusion(post_uri, &replies_map_snapshot, filter) {
@@ -2146,14 +2173,56 @@ impl BlueskyFirehoseSource {
             return Ok(None);
         }
 
-        // 3) Hide sibling branches with exclusions
+        // 3) If any upstream sibling branch contains an excluded DID anywhere in its subtree,
+        //    vacate the entire thread context. For keywords, continue to hide-only.
+        let mut has_excluded_did_upthread = false;
+        for (_parent, siblings) in context.parent_chain.iter() {
+            for sib in siblings.iter() {
+                if filter.exclude_dids.contains(&sib.did)
+                    || subtree_contains_excluded_did(&sib.uri, &replies_map_snapshot, filter)
+                {
+                    has_excluded_did_upthread = true;
+                    break;
+                }
+            }
+            if has_excluded_did_upthread {
+                break;
+            }
+        }
+
+        if has_excluded_did_upthread {
+            tracing::debug!(
+                "Excluding thread {} due to upstream sibling from excluded DID",
+                thread_root
+            );
+            return Ok(None);
+        }
+
+        // Otherwise, hide-only for keyword-based exclusions in sibling branches.
         for (_parent, siblings) in context.parent_chain.iter_mut() {
             let mut kept: Vec<BlueskyPost> = Vec::with_capacity(siblings.len());
             for sib in siblings.iter() {
                 let mut hide = false;
-                if post_is_excluded(sib) {
-                    hide = true;
-                } else if subtree_contains_exclusion(&sib.uri, &replies_map_snapshot, filter) {
+                // Keywords only; DID-based exclusions would have vacated already
+                if !filter.exclude_keywords.is_empty() {
+                    let text_lower = sib.text.to_lowercase();
+                    for kw in &filter.exclude_keywords {
+                        if text_lower.contains(&kw.to_lowercase()) {
+                            hide = true;
+                            break;
+                        }
+                    }
+                }
+                if !hide
+                    && subtree_contains_exclusion(
+                        &sib.uri,
+                        &replies_map_snapshot,
+                        &BlueskyFilter {
+                            exclude_keywords: filter.exclude_keywords.clone(),
+                            ..Default::default()
+                        },
+                    )
+                {
                     hide = true;
                 }
                 if !hide {
@@ -2767,44 +2836,115 @@ impl BlueskyFirehoseSource {
         // Sort by timestamp to find the most recent post as the "main" post
         posts.sort_by_key(|p| p.created_at);
 
+        posts.retain(|post| !self.filter.exclude_dids.contains(&post.did));
+
         // Get agent DID from mentions filter (agent monitors for mentions of itself)
         let agent_did = self.filter.mentions.first().map(|s| s.as_str());
 
         // Check if batch contains ONLY agent's own posts - if so, no notification needed
         if let Some(agent_did) = agent_did {
-            let non_agent_posts = posts.iter().any(|post| !post.did.contains(agent_did));
+            let non_agent_posts = posts.iter().any(|post| post.did != agent_did);
             if !non_agent_posts {
                 tracing::debug!("Skipping batch notification - only contains agent's own posts");
                 return None;
             }
         }
 
-        // Get main_post for thread context building
-        let main_post = posts.last()?.clone();
+        // Heuristic: try to include contexts for multiple posts in the batch.
+        // Prioritize friend posts and direct mentions when selecting which posts
+        // to build context around. This avoids excluding batches just because the
+        // last post isn’t the most relevant one.
 
-        // Build thread context (uses cache internally)
-        let thread_context = match self
-            .build_thread_context(
-                &main_post.uri,
-                main_post.reply.as_ref().map(|r| r.parent.uri.as_str()),
-                agent_did,
-                &self.filter,
-                2, // Limited depth for batch notifications
-            )
-            .await
-        {
-            Ok(ctx) => ctx,
-            Err(_) => None,
-        };
-
-        // If thread was excluded, don't send notification
-        let thread_context = match thread_context {
-            Some(ctx) => ctx,
-            None => {
-                tracing::debug!("Batch excluded due to upstream content");
-                return None;
+        // Build a priority-ordered list of posts to consider for context
+        let mut prioritized: Vec<BlueskyPost> = Vec::with_capacity(posts.len());
+        let is_friend = |p: &BlueskyPost| self.filter.friends.iter().any(|d| *d == p.did);
+        let is_allowlist = |p: &BlueskyPost| self.filter.dids.iter().any(|d| *d == p.did);
+        let mentions_agent = |p: &BlueskyPost, aid: Option<&str>| -> bool {
+            if let Some(a) = aid {
+                p.mentioned_dids().contains(&a)
+            } else {
+                false
             }
         };
+        let replies_to_agent = |p: &BlueskyPost, aid: Option<&str>| -> bool {
+            if let (Some(a), Some(r)) = (aid, p.reply.as_ref()) {
+                r.parent.uri.contains(a)
+            } else {
+                false
+            }
+        };
+
+        // Work from most recent backwards
+        for p in posts.iter().rev() {
+            if is_friend(p) {
+                prioritized.push(p.clone());
+            }
+        }
+        for p in posts.iter().rev() {
+            if !is_friend(p) && is_allowlist(p) {
+                prioritized.push(p.clone());
+            }
+        }
+        for p in posts.iter().rev() {
+            if !is_friend(p) && mentions_agent(p, agent_did.as_deref()) {
+                prioritized.push(p.clone());
+            }
+        }
+        for p in posts.iter().rev() {
+            if !is_friend(p)
+                && !mentions_agent(p, agent_did.as_deref())
+                && replies_to_agent(p, agent_did.as_deref())
+            {
+                prioritized.push(p.clone());
+            }
+        }
+        // Fill with remaining posts (most recent first)
+        for p in posts.iter().rev() {
+            if !prioritized.iter().any(|q| q.uri == p.uri) {
+                prioritized.push(p.clone());
+            }
+        }
+
+        // Build contexts for up to 3 distinct parents to keep output concise
+        use std::collections::HashSet;
+        let mut parent_keys: HashSet<String> = HashSet::new();
+        let mut contexts: Vec<(BlueskyPost, ThreadContext)> = Vec::new();
+
+        for p in prioritized {
+            let parent_uri_opt = p.reply.as_ref().map(|r| r.parent.uri.as_str());
+            let key = parent_uri_opt.unwrap_or(p.uri.as_str()).to_string();
+            if !parent_keys.insert(key.clone()) {
+                continue; // already have a context for this parent branch
+            }
+
+            match self
+                .build_thread_context(
+                    &p.uri,
+                    parent_uri_opt,
+                    agent_did.as_deref(),
+                    &self.filter,
+                    2,
+                )
+                .await
+            {
+                Ok(Some(ctx)) => {
+                    contexts.push((p.clone(), ctx));
+                    if contexts.len() >= 3 {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Skip this branch; may be excluded, try others
+                    continue;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        if contexts.is_empty() {
+            tracing::debug!("Batch excluded: no eligible contexts in posts");
+            return None;
+        }
 
         // Format the notification
         let mut message = String::new();
@@ -2815,35 +2955,38 @@ impl BlueskyFirehoseSource {
             posts.len()
         ));
 
-        // Format the thread tree with smart trimming
+        // Determine thread root from the most recent included context
+        let main_post = contexts.first().map(|(p, _)| p.clone()).unwrap();
         let thread_root = main_post.thread_root();
 
-        // Check if we should show abbreviated context for recently-seen threads
-        if self.was_thread_recently_shown(&thread_root) {
-            thread_context.append_abbreviated_thread_tree(
-                &mut message,
-                &main_post,
-                agent_did.as_deref(),
-            );
-        } else {
-            thread_context.append_thread_tree(&mut message, &main_post, agent_did.as_deref());
+        // Append each selected branch’s thread view
+        for (idx, (post_ref, ctx)) in contexts.iter().enumerate() {
+            if contexts.len() > 1 {
+                if idx > 0 {
+                    message.push_str("\n───\n");
+                }
+                message.push_str(&format!("Context {}:\n", idx + 1));
+            }
+
+            if self.was_thread_recently_shown(&thread_root) {
+                ctx.append_abbreviated_thread_tree(&mut message, post_ref, agent_did.as_deref());
+            } else {
+                ctx.append_thread_tree(&mut message, post_ref, agent_did.as_deref());
+            }
+            ctx.format_reply_options(&mut message, post_ref);
+
+            // Collect and append image URLs as markers (take last 4)
+            let all_image_urls = ctx.collect_all_image_urls(post_ref);
+            let selected_urls: Vec<_> = all_image_urls.iter().rev().take(4).rev().collect();
+            for url in selected_urls {
+                message.push_str(&format!("\n[IMAGE: {}]", url));
+            }
         }
 
         // Mark this thread as shown
         self.mark_thread_as_shown(&thread_root);
 
-        // Add reply options
-        thread_context.format_reply_options(&mut message, &main_post);
-
         // Keyword/DID exclusions are handled in build_thread_context with vacate/hide semantics
-
-        // Collect and append image URLs as markers (take last 4)
-        let all_image_urls = thread_context.collect_all_image_urls(&main_post);
-        let selected_urls: Vec<_> = all_image_urls.iter().rev().take(4).rev().collect();
-
-        for url in selected_urls {
-            message.push_str(&format!("\n[IMAGE: {}]", url));
-        }
 
         // Collect memory blocks
         let mut memory_blocks = Vec::new();
@@ -2998,21 +3141,19 @@ impl BlueskyFirehoseSource {
                 // Use hydrated `post` as triggering post
                 let tp = &post;
 
-                let mut is_direct_mention = false;
+                let is_direct_mention = tp.mentioned_dids().contains(&aid);
                 let mut is_reply_to_agent = false;
                 let mut is_agent_root_thread = false;
-                let mut is_from_friend_direct = false;
+                let is_from_friend_direct = self.filter.friends.iter().any(|f| tp.did == *f);
+                let is_from_allowlist_direct = self.filter.dids.iter().any(|d| *d == tp.did);
                 let mut has_friend_upthread = false;
                 let mut has_upstream_mention = false;
                 let mut downstream_mention = false;
-
-                is_direct_mention = tp.mentioned_dids().contains(&aid);
                 if let Some(reply) = &tp.reply {
                     if reply.parent.uri.contains(aid) {
                         is_reply_to_agent = true;
                     }
                 }
-                is_from_friend_direct = self.filter.friends.iter().any(|f| tp.did == *f);
                 if let Some(root) = &ctx.root {
                     is_agent_root_thread = root.did == aid;
                     has_friend_upthread = self.filter.friends.iter().any(|f| root.did == *f);
@@ -3086,6 +3227,7 @@ impl BlueskyFirehoseSource {
                         || is_reply_to_agent
                         || is_agent_root_thread
                         || is_from_friend_direct
+                        || is_from_allowlist_direct
                         || has_friend_upthread
                         || has_upstream_mention
                         || downstream_mention
@@ -3909,23 +4051,23 @@ impl DataSource for BlueskyFirehoseSource {
             }
         } else if !self.pending_batch.batch_timers.is_empty() {
             // No expired batches, but flush the oldest batch anyway to keep things responsive
-            // let oldest_batch = self
-            //     .pending_batch
-            //     .batch_timers
-            //     .iter()
-            //     .min_by_key(|entry| entry.value().elapsed())
-            //     .map(|entry| entry.key().clone());
+            let oldest_batch = self
+                .pending_batch
+                .batch_timers
+                .iter()
+                .min_by_key(|entry| entry.value().elapsed())
+                .map(|entry| entry.key().clone());
 
-            // if let Some(oldest_thread) = oldest_batch {
-            //     tracing::info!(
-            //         "📤 Flushing oldest batch for thread: {} to maintain responsiveness",
-            //         oldest_thread
-            //     );
-            //     if let Some(notification) = self.flush_batch(&oldest_thread).await {
-            //         // Process the current item later - it will come back through
-            //         return Some(notification);
-            //     }
-            // }
+            if let Some(oldest_thread) = oldest_batch {
+                tracing::debug!(
+                    "📤 Flushing oldest batch for thread: {} to maintain responsiveness",
+                    oldest_thread
+                );
+                if let Some(notification) = self.flush_batch(&oldest_thread).await {
+                    // Process the current item later - it will come back through
+                    return Some(notification);
+                }
+            }
         }
 
         // Format single notification

@@ -1,4 +1,4 @@
-use crate::{chat::print_group_response_event, output::Output};
+use crate::output::Output;
 use async_trait::async_trait;
 use owo_colors::OwoColorize;
 use pattern_core::{
@@ -130,17 +130,24 @@ impl MessageEndpoint for GroupCliEndpoint {
             }
         }
 
-        let mut stream = self
+        let stream = self
             .manager
             .route_message(&self.group, &self.agents, message)
             .await?;
 
+        // Tee to CLI printer + optional file; sinks handle printing
+        let sinks =
+            crate::forwarding::build_jetstream_group_sinks(&self.output, &self.agents).await;
+        let ctx = pattern_core::realtime::GroupEventContext {
+            source_tag: Some("Jetstream".to_string()),
+            group_name: Some(self.group.name.clone()),
+        };
+        let mut stream = pattern_core::realtime::tap_group_stream(stream, sinks, ctx);
+
         // Show which source this is from at the beginning
         self.output.section("[Jetstream] Processing incoming data");
 
-        while let Some(event) = stream.next().await {
-            print_group_response_event(event, &self.output, &self.agents, Some("Jetstream")).await;
-        }
+        while let Some(_event) = stream.next().await {}
 
         Ok(None)
     }

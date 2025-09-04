@@ -13,6 +13,7 @@ use crate::{
     message::{CacheControl, Message, MessageBatch},
     tool::{DynamicTool, ToolRegistry},
 };
+use regex::Regex;
 
 pub mod compression;
 pub mod endpoints;
@@ -28,6 +29,9 @@ const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 10000;
 
 /// Maximum messages to keep in immediate context before compression
 const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 200;
+
+pub const NON_USER_MESSAGE_PREFIX: &str =
+    "[This is an automated system message hidden from the user] ";
 
 /// A complete context ready to be sent to an LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,9 +95,12 @@ impl MemoryContext {
 
         // Add archive summary as initial system message if present
         if let Some(summary) = &self.archive_summary {
+            // TODO: Make head/tail counts configurable via ContextConfig
+            // For now, show first 1 and last 2 summary blocks.
+            let clipped = clip_archive_summary(summary, 2, 4);
             messages.push(crate::message::Message::system(format!(
                 "Previous conversation summary:\n{}",
-                summary
+                clipped
             )));
         }
 
@@ -106,6 +113,48 @@ impl MemoryContext {
             tools: Some(self.tools.clone()),
         }
     }
+}
+
+/// Clip a delimited archive summary to show the first N and last M blocks.
+/// Blocks are separated by two-or-more consecutive newlines. If there are not
+/// enough blocks, return the original summary.
+fn clip_archive_summary(summary: &str, head: usize, tail: usize) -> String {
+    // Split on two-or-more newlines (treat multiple blank lines as block separators)
+    // Compiling each time is acceptable here due to infrequent calls.
+    let delim_re = Regex::new(r"\n{2,}").expect("valid delimiter regex");
+
+    let mut blocks: Vec<&str> = delim_re
+        .split(summary)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // If not enough blocks to clip, return as-is
+    if blocks.len() <= head + tail {
+        return summary.to_string();
+    }
+
+    // Build clipped view: first head blocks + marker + last tail blocks
+    let mut clipped_parts: Vec<&str> = Vec::new();
+    clipped_parts.extend(blocks.drain(0..head));
+
+    let omitted = blocks.len().saturating_sub(tail);
+    let marker = if omitted > 0 {
+        format!("[... {} summaries omitted ...]", omitted)
+    } else {
+        "[...]".to_string()
+    };
+
+    let last_tail = blocks.split_off(blocks.len().saturating_sub(tail));
+
+    // Join with a clear delimiter of three newlines for readability
+    let mut out = String::new();
+    out.push_str(&clipped_parts.join("\n\n\n"));
+    out.push_str("\n\n\n");
+    out.push_str(&marker);
+    out.push_str("\n\n\n");
+    out.push_str(&last_tail.join("\n\n\n"));
+    out
 }
 
 /// Metadata about the context build
