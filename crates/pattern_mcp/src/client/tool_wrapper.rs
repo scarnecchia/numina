@@ -1,7 +1,7 @@
 //! MCP tool wrapper stub implementation
 
 use async_trait::async_trait;
-use pattern_core::tool::{DynamicTool, DynamicToolExample};
+use pattern_core::tool::{DynamicTool, DynamicToolExample, ExecutionMeta};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
@@ -104,7 +104,11 @@ impl DynamicTool for McpToolWrapper {
         Some("MCP tools require external server connection")
     }
 
-    async fn execute(&self, params: Value) -> std::result::Result<Value, pattern_core::CoreError> {
+    async fn execute(
+        &self,
+        params: Value,
+        _meta: &ExecutionMeta,
+    ) -> std::result::Result<Value, pattern_core::CoreError> {
         debug!(
             "MCP tool '{}' execute called with params: {}",
             self.tool_name, params

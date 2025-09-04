@@ -78,6 +78,9 @@ pub async fn chat_with_agent(
         },
     ));
 
+    // Spawn CLI permission listener
+    let _perm_task = crate::permission_sink::spawn_cli_permission_listener(output.clone());
+
     loop {
         // Handle user input
         let event = rl.readline().await;

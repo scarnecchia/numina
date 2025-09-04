@@ -10,7 +10,7 @@ use crate::{
     Result,
     context::AgentHandle,
     memory::{MemoryPermission, MemoryType},
-    tool::AiTool,
+    tool::{AiTool, ExecutionMeta},
 };
 
 /// Operation types for recall storage management
@@ -97,7 +97,11 @@ impl AiTool for RecallTool {
  - 'delete' removes the recall memory with the specified label"
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         match params.operation {
             ArchivalMemoryOperationType::Insert => {
                 let content = params.content.ok_or_else(|| {

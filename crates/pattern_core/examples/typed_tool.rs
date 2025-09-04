@@ -1,7 +1,7 @@
 //! Example of implementing a type-safe tool using the new AiTool trait
 
 use async_trait::async_trait;
-use pattern_core::tool::{AiTool, ToolExample, ToolRegistry};
+use pattern_core::tool::{AiTool, ExecutionMeta, ToolExample, ToolRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,11 @@ impl AiTool for WeatherTool {
         "Get current weather conditions for a city"
     }
 
-    async fn execute(&self, params: Self::Input) -> pattern_core::Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &ExecutionMeta,
+    ) -> pattern_core::Result<Self::Output> {
         // In a real implementation, this would call a weather API
         // For this example, we'll return mock data
 
@@ -182,7 +186,11 @@ impl AiTool for CreateTaskTool {
         "Create a new task with ADHD-aware defaults and breakdown suggestions"
     }
 
-    async fn execute(&self, params: Self::Input) -> pattern_core::Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &ExecutionMeta,
+    ) -> pattern_core::Result<Self::Output> {
         use chrono::Utc;
         use uuid::Uuid;
 
@@ -214,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
                 "country_code": "JP",
                 "unit": "celsius"
             }),
+            &ExecutionMeta::default(),
         )
         .await?;
 

@@ -1,4 +1,5 @@
 pub mod builtin;
+mod mod_utils;
 
 use async_trait::async_trait;
 use compact_str::{CompactString, ToCompactString};
@@ -8,6 +9,19 @@ use serde_json::Value;
 use std::{fmt::Debug, sync::Arc};
 
 use crate::Result;
+
+/// Execution metadata provided to tools at runtime
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionMeta {
+    /// Optional permission grant for bypassing ACLs in specific scopes
+    pub permission_grant: Option<crate::permission::PermissionGrant>,
+    /// Whether the caller requests a heartbeat continuation after execution
+    pub request_heartbeat: bool,
+    /// Optional caller user context
+    pub caller_user: Option<crate::UserId>,
+    /// Optional tool call id for tracing
+    pub call_id: Option<crate::ToolCallId>,
+}
 
 /// A tool that can be executed by agents with type-safe input and output
 #[async_trait]
@@ -24,8 +38,8 @@ pub trait AiTool: Send + Sync + Debug {
     /// Get a human-readable description of what this tool does
     fn description(&self) -> &str;
 
-    /// Execute the tool with the given parameters
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output>;
+    /// Execute the tool with the given parameters and execution metadata
+    async fn execute(&self, params: Self::Input, meta: &ExecutionMeta) -> Result<Self::Output>;
 
     /// Get usage examples for this tool
     fn examples(&self) -> Vec<ToolExample<Self::Input, Self::Output>> {
@@ -41,13 +55,17 @@ pub trait AiTool: Send + Sync + Debug {
         let generator = SchemaGenerator::new(settings);
         let schema = generator.into_root_schema_for::<Self::Input>();
 
-        serde_json::to_value(schema).unwrap_or_else(|_| {
+        let mut schema_val = serde_json::to_value(schema).unwrap_or_else(|_| {
             serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
             })
-        })
+        });
+
+        // Best-effort inject request_heartbeat into the parameters schema
+        crate::tool::mod_utils::inject_request_heartbeat(&mut schema_val);
+        schema_val
     }
 
     /// Get the JSON schema for the tool's output (MCP-compatible, no refs)
@@ -99,8 +117,8 @@ pub trait DynamicTool: Send + Sync + Debug {
     /// Get the JSON schema for the tool's output
     fn output_schema(&self) -> Value;
 
-    /// Execute the tool with the given parameters
-    async fn execute(&self, params: Value) -> Result<Value>;
+    /// Execute the tool with the given parameters and metadata
+    async fn execute(&self, params: Value, meta: &ExecutionMeta) -> Result<Value>;
 
     /// Validate the parameters against the schema
     fn validate_params(&self, _params: &Value) -> Result<()> {
@@ -175,13 +193,17 @@ where
         self.inner.output_schema()
     }
 
-    async fn execute(&self, params: Value) -> Result<Value> {
+    async fn execute(&self, mut params: Value, meta: &ExecutionMeta) -> Result<Value> {
         // Deserialize the JSON value into the tool's input type
+        // Strip request_heartbeat if present in object form
+        if let Value::Object(ref mut map) = params {
+            map.remove("request_heartbeat");
+        }
         let input: T::Input = serde_json::from_value(params)
             .map_err(|e| crate::CoreError::tool_validation_error(self.name(), e.to_string()))?;
 
         // Execute the tool
-        let output = self.inner.execute(input).await?;
+        let output = self.inner.execute(input, meta).await?;
 
         // Serialize the output back to JSON
         serde_json::to_value(output)
@@ -278,7 +300,12 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name
-    pub async fn execute(&self, tool_name: &str, params: Value) -> Result<Value> {
+    pub async fn execute(
+        &self,
+        tool_name: &str,
+        params: Value,
+        meta: &ExecutionMeta,
+    ) -> Result<Value> {
         let tool = self.get(tool_name).ok_or_else(|| {
             crate::CoreError::tool_not_found(
                 tool_name,
@@ -289,7 +316,7 @@ impl ToolRegistry {
             )
         })?;
 
-        tool.execute(params).await
+        tool.execute(params, meta).await
     }
 
     /// Get all tools as genai tools
@@ -413,7 +440,11 @@ macro_rules! impl_tool {
                 $desc
             }
 
-            async fn execute(&self, params: Self::Input) -> $crate::Result<Self::Output> {
+            async fn execute(
+                &self,
+                params: Self::Input,
+                _meta: &$crate::tool::ExecutionMeta,
+            ) -> $crate::Result<Self::Output> {
                 $execute(params).await
             }
         }
@@ -454,7 +485,11 @@ mod tests {
             "A tool for testing"
         }
 
-        async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+        async fn execute(
+            &self,
+            params: Self::Input,
+            _meta: &ExecutionMeta,
+        ) -> Result<Self::Output> {
             Ok(TestOutput {
                 response: format!("Received: {}", params.message),
                 processed_count: params.count.unwrap_or(1),
@@ -481,10 +516,13 @@ mod tests {
         let tool = TestTool;
 
         let result = tool
-            .execute(TestInput {
-                message: "Hello, world!".to_string(),
-                count: Some(3),
-            })
+            .execute(
+                TestInput {
+                    message: "Hello, world!".to_string(),
+                    count: Some(3),
+                },
+                &ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 

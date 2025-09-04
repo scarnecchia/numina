@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::search_utils::extract_snippet;
-use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
+use crate::{
+    Result,
+    context::AgentHandle,
+    message::ChatRole,
+    tool::{AiTool, ExecutionMeta},
+};
 
 /// Default search domain for constellation search
 fn default_domain() -> ConstellationSearchDomain {
@@ -120,7 +125,11 @@ impl AiTool for ConstellationSearchTool {
                 "
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         let limit = params.limit.max(1).min(100) as usize;
 
         match params.domain {

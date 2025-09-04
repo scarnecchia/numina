@@ -1,4 +1,10 @@
-use crate::{context::AgentHandle, error::Result, id::MemoryId, memory::MemoryBlock, tool::AiTool};
+use crate::{
+    context::AgentHandle,
+    error::Result,
+    id::MemoryId,
+    memory::MemoryBlock,
+    tool::{AiTool, ExecutionMeta},
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -65,7 +71,7 @@ impl AiTool for SystemIntegrityTool {
         "EMERGENCY ONLY: Immediately terminate the process. Use only when system integrity is at risk or unrecoverable errors occur."
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(&self, params: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
         let reason = params.reason;
         let severity = params.severity;
 

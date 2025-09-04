@@ -1815,11 +1815,58 @@ impl AgentContext {
             call.fn_arguments
         );
 
-        match self
-            .tools
-            .execute(&call.fn_name, call.fn_arguments.clone())
-            .await
-        {
+        // Build execution metadata from the call
+        let mut params = call.fn_arguments.clone();
+
+        // Check for a simple consent rule in workflow rules: rule == "requires_consent"
+        let requires_consent = self
+            .context_config
+            .tool_workflow_rules
+            .iter()
+            .any(|r| r.tool_name == call.fn_name && r.rule == "requires_consent");
+        let request_heartbeat = params
+            .get("request_heartbeat")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // Strip request_heartbeat before tool deserialization
+        if let serde_json::Value::Object(ref mut map) = params {
+            map.remove("request_heartbeat");
+        }
+        // Obtain permission grant if required (simple ToolExecution scope)
+        let permission_grant = if requires_consent {
+            let scope = crate::permission::PermissionScope::ToolExecution {
+                tool: call.fn_name.clone(),
+                args_digest: None,
+            };
+            crate::permission::broker()
+                .request(
+                    self.handle.agent_id.clone(),
+                    call.fn_name.clone(),
+                    scope,
+                    Some("Tool requires consent".to_string()),
+                    std::time::Duration::from_secs(90),
+                )
+                .await
+        } else {
+            None
+        };
+
+        if requires_consent && permission_grant.is_none() {
+            return Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: call.fn_name.clone(),
+                cause: "Permission denied or timed out".to_string(),
+                parameters: params.clone(),
+            });
+        }
+
+        let meta = crate::tool::ExecutionMeta {
+            permission_grant,
+            request_heartbeat,
+            caller_user: None,
+            call_id: Some(crate::id::ToolCallId(call.call_id.clone())),
+        };
+
+        match self.tools.execute(&call.fn_name, params, &meta).await {
             Ok(tool_response) => {
                 tracing::debug!("✅ Tool {} executed successfully", call.fn_name);
 

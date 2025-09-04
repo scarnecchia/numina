@@ -9,7 +9,8 @@ use crate::{
     Result,
     context::AgentHandle,
     memory::{MemoryPermission, MemoryType},
-    tool::AiTool,
+    permission::PermissionScope,
+    tool::{AiTool, ExecutionMeta},
 };
 
 /// Operation types for context management
@@ -104,7 +105,7 @@ impl AiTool for ContextTool {
  - 'swap' replaces a working memory with the requested recall memory, by label"
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(&self, params: Self::Input, meta: &ExecutionMeta) -> Result<Self::Output> {
         match params.operation {
             CoreMemoryOperationType::Append => {
                 let name = params.name.ok_or_else(|| {
@@ -121,7 +122,7 @@ impl AiTool for ContextTool {
                         "append operation requires 'content' field",
                     )
                 })?;
-                self.execute_append(name, content).await
+                self.execute_append(name, content, meta).await
             }
             CoreMemoryOperationType::Replace => {
                 let name = params.name.ok_or_else(|| {
@@ -145,7 +146,8 @@ impl AiTool for ContextTool {
                         "replace operation requires 'new_content' field",
                     )
                 })?;
-                self.execute_replace(name, old_content, new_content).await
+                self.execute_replace(name, old_content, new_content, meta)
+                    .await
             }
             CoreMemoryOperationType::Archive => {
                 let name = params.name.ok_or_else(|| {
@@ -155,7 +157,8 @@ impl AiTool for ContextTool {
                         "archive operation requires 'name' field",
                     )
                 })?;
-                self.execute_archive(name, params.archival_label).await
+                self.execute_archive(name, params.archival_label, meta)
+                    .await
             }
             CoreMemoryOperationType::Load => {
                 let archival_label = params.archival_label.ok_or_else(|| {
@@ -239,7 +242,24 @@ impl ContextTool {
     pub fn new(handle: AgentHandle) -> Self {
         Self { handle }
     }
-    async fn execute_append(&self, name: String, content: String) -> Result<ContextOutput> {
+    fn can_bypass(&self, meta: &ExecutionMeta, key: &str) -> bool {
+        if let Some(grant) = &meta.permission_grant {
+            match &grant.scope {
+                PermissionScope::MemoryEdit { key: gk } => gk == key,
+                PermissionScope::MemoryBatch { prefix } => key.starts_with(prefix),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    async fn execute_append(
+        &self,
+        name: String,
+        content: String,
+        meta: &ExecutionMeta,
+    ) -> Result<ContextOutput> {
         // Check if the block exists first
         if !self.handle.memory.contains_block(&name) {
             return Err(crate::CoreError::memory_not_found(
@@ -267,7 +287,7 @@ impl ContextTool {
             }
 
             // Check permission
-            if block.permission < MemoryPermission::Append {
+            if block.permission < MemoryPermission::Append && !self.can_bypass(meta, &name) {
                 validation_result = Some(ContextOutput {
                     success: false,
                     message: Some(format!(
@@ -337,6 +357,7 @@ impl ContextTool {
         name: String,
         old_content: String,
         new_content: String,
+        meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
         // Check if the block exists first
         if !self.handle.memory.contains_block(&name) {
@@ -369,7 +390,7 @@ impl ContextTool {
             }
 
             // Check permission
-            if block.permission < MemoryPermission::ReadWrite {
+            if block.permission < MemoryPermission::ReadWrite && !self.can_bypass(meta, &name) {
                 validation_result = Some(ContextOutput {
                     success: false,
                     message: Some(format!(
@@ -460,6 +481,7 @@ impl ContextTool {
         &self,
         name: String,
         archival_label: Option<String>,
+        meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
         // Check if the block exists and is context
         let block = match self.handle.memory.get_block(&name) {
@@ -477,7 +499,9 @@ impl ContextTool {
                         )),
                         content: json!({}),
                     });
-                } else if block.permission < MemoryPermission::Append {
+                } else if block.permission < MemoryPermission::Append
+                    && !self.can_bypass(meta, &name)
+                {
                     return Ok(ContextOutput {
                         success: false,
                         message: Some(format!(

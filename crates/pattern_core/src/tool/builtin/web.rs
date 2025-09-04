@@ -749,7 +749,11 @@ Important search operators:
 Use this whenever you need current information, facts, news, or anything beyond your training data."#
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         match params.operation {
             WebOperation::Fetch => {
                 let format = params.format.unwrap_or_default();

@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::search_utils::{extract_snippet, process_search_results};
-use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
+use crate::{
+    Result,
+    context::AgentHandle,
+    message::ChatRole,
+    tool::{AiTool, ExecutionMeta},
+};
 
 /// Search domains available
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -106,7 +111,11 @@ impl AiTool for SearchTool {
                 "
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         let limit = params
             .limit
             .map(|l| l.max(1).min(100) as usize)

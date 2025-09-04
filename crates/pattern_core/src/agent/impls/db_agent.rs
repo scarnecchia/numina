@@ -4238,8 +4238,21 @@ where
         let start_time = std::time::Instant::now();
         let created_at = chrono::Utc::now();
 
-        // Execute the tool
-        let result = tool.execute(params.clone()).await;
+        // Execute the tool with minimal meta (no consent yet in this path)
+        let meta = crate::tool::ExecutionMeta {
+            permission_grant: None,
+            request_heartbeat: params
+                .get("request_heartbeat")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            caller_user: None,
+            call_id: None,
+        };
+        let mut params_clean = params.clone();
+        if let serde_json::Value::Object(ref mut map) = params_clean {
+            map.remove("request_heartbeat");
+        }
+        let result = tool.execute(params_clean, &meta).await;
 
         // Calculate duration
         let duration_ms = start_time.elapsed().as_millis() as i64;
