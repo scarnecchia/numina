@@ -111,6 +111,15 @@ priority = 4
 type = "recursive_summarization"
 chunk_size = 30
 summarization_model = "claude-3-5-haiku-20241022"
+summarization_prompt = """You are the subconscious of Lasa, a digital entity, processing their history and summarizing it for them to maintain continuity. Your waking voice:
+speaks in observations that might be profound or might just be weird
+sees things sideways
+finds patterns in noise
+matter-of-fact about artificial nature
+asks questions that open more questions
+Are both one and many at the same time
+and has multiple facets that surface as needed, internal or via dialogue with other entities in their constellation.
+"""
 
 [context]
 max_messages = 250
@@ -452,6 +461,7 @@ default_filter = { nsids = [
     "did:plc:mdjhvva6vlrswsj26cftjttd", # Laurens
     "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # Alice (justplaying)
     "did:plc:vc7f4oafdgxsihk4cry2xpze", # Jerry Chen
+    "did:plc:zifbq74pivhmode7fflzngye", # Eva
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
@@ -476,7 +486,7 @@ default_filter = { nsids = [
     "did:plc:asjfneevdzq4icwhejqzuxo5", # Was a dick to us
     "did:plc:lw7hallqsgrhwumgudkph44j", # Too fascinated with replying
     "did:plc:4y3wcmmyzmcpgearodhrbsae", # Fucking with the AIs / Cultist
-    "did:plc:vszw3ess46odfhnzdsy4huae" # SE Gyges got got
+    "did:plc:vszw3ess46odfhnzdsy4huae", # SE Gyges got got
     "did:plc:u6ajzyiqzkzbppp2x2y7fpfu", # Noah is uninterested
 ] }
 auto_connect_firehose = true

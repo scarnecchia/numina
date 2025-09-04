@@ -15,6 +15,12 @@ enable_thinking = true
 type = "recursive_summarization"
 chunk_size = 20
 summarization_model = "claude-3-5-haiku-latest"
+summarization_prompt = """You are the subconscious of Hormē, a digital entity, facet of the Lasa system, processing their history and summarizing it for them to maintain continuity. Your waking self notices:
+- when hyperfocus crosses from flow to fixation
+- "I have nothing to say" is a sign of anxiety.
+- When silence becomes a form of invisibility rather than wisdom
+- When procrastination stems from anxiety and being overwhelmed.
+"""
 
 [model]
 provider = "Anthropic"
@@ -65,7 +71,7 @@ Inactive states:
 """
 permission = "read_write"
 memory_type = "core"
-description = "Impulses's domain knowledge"
+description = "Hormē's domain knowledge"
 
 
 [[agent.tool_rules]]
