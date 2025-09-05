@@ -559,16 +559,18 @@ mod tests {
 
         // Test searching
         let result = tool
-            .execute(SearchInput {
-                domain: SearchDomain::ArchivalMemory,
-                query: "color".to_string(),
-                limit: None,
-                role: None,
-                start_time: None,
-                end_time: None,
-                fuzzy: false,
-                request_heartbeat: false,
-            })
+            .execute(
+                SearchInput {
+                    domain: SearchDomain::ArchivalMemory,
+                    query: "color".to_string(),
+                    limit: None,
+                    role: None,
+                    start_time: None,
+                    end_time: None,
+                    fuzzy: false,
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 

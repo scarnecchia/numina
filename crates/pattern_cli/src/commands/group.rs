@@ -785,6 +785,7 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
         model: ModelConfig::default(),
         database: DatabaseConfig::default(),
         bluesky: None,
+        discord: None,
         groups: vec![group_config.clone()],
     };
 

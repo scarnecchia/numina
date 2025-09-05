@@ -614,57 +614,7 @@ impl GeminiEmbeddingTaskType {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mk(texts: &[&str], dims: Option<usize>) -> (GeminiEmbedder, Vec<String>) {
-        let emb = GeminiEmbedder::new(
-            "gemini-embedding-001".to_string(),
-            "test_key".to_string(),
-            dims,
-        )
-        .with_task_type(Some(GeminiEmbeddingTaskType::RetrievalQuery));
-        let batch = texts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        (emb, batch)
-    }
-
-    #[test]
-    fn build_request_single_has_content_and_camelcase() {
-        let (emb, batch) = mk(&["hello"], Some(1536));
-        let (url, body) = emb.build_request(&batch);
-        assert!(url.ends_with(":embedContent"));
-        assert_eq!(
-            body["model"],
-            serde_json::json!("models/gemini-embedding-001")
-        );
-        assert!(body.get("content").is_some());
-        assert!(body.get("contents").is_none());
-        assert_eq!(body["taskType"], serde_json::json!("RETRIEVAL_QUERY"));
-        assert_eq!(body["outputDimensionality"], serde_json::json!(1536));
-        // content.parts[0].text == "hello"
-        assert_eq!(
-            body["content"]["parts"][0]["text"],
-            serde_json::json!("hello")
-        );
-    }
-
-    #[test]
-    fn build_request_batch_has_requests_array() {
-        let (emb, batch) = mk(&["a", "b"], None);
-        let (url, body) = emb.build_request(&batch);
-        assert!(url.ends_with(":batchEmbedContents"));
-        assert!(body.get("requests").is_some());
-        let reqs = body["requests"].as_array().unwrap();
-        assert_eq!(reqs.len(), 2);
-        assert_eq!(
-            reqs[0]["content"]["parts"][0]["text"],
-            serde_json::json!("a")
-        );
-        assert_eq!(reqs[0]["taskType"], serde_json::json!("RETRIEVAL_QUERY"));
-        assert!(reqs[0].get("outputDimensionality").is_none());
-    }
-}
+// (Gemini request building tests merged into the tests module below)
 
 /// Cohere embedding provider
 pub struct CohereEmbedder {
@@ -816,6 +766,52 @@ struct CohereEmbeddingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mk(texts: &[&str], dims: Option<usize>) -> (GeminiEmbedder, Vec<String>) {
+        let emb = GeminiEmbedder::new(
+            "gemini-embedding-001".to_string(),
+            "test_key".to_string(),
+            dims,
+        )
+        .with_task_type(Some(GeminiEmbeddingTaskType::RetrievalQuery));
+        let batch = texts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        (emb, batch)
+    }
+
+    #[test]
+    fn build_request_single_has_content_and_camelcase() {
+        let (emb, batch) = mk(&["hello"], Some(1536));
+        let (url, body) = emb.build_request(&batch);
+        assert!(url.ends_with(":embedContent"));
+        assert_eq!(
+            body["model"],
+            serde_json::json!("models/gemini-embedding-001")
+        );
+        assert!(body.get("content").is_some());
+        assert!(body.get("contents").is_none());
+        assert_eq!(body["taskType"], serde_json::json!("RETRIEVAL_QUERY"));
+        assert_eq!(body["outputDimensionality"], serde_json::json!(1536));
+        assert_eq!(
+            body["content"]["parts"][0]["text"],
+            serde_json::json!("hello")
+        );
+    }
+
+    #[test]
+    fn build_request_batch_has_requests_array() {
+        let (emb, batch) = mk(&["a", "b"], None);
+        let (url, body) = emb.build_request(&batch);
+        assert!(url.ends_with(":batchEmbedContents"));
+        assert!(body.get("requests").is_some());
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(
+            reqs[0]["content"]["parts"][0]["text"],
+            serde_json::json!("a")
+        );
+        assert_eq!(reqs[0]["taskType"], serde_json::json!("RETRIEVAL_QUERY"));
+        assert!(reqs[0].get("outputDimensionality").is_none());
+    }
 
     #[test]
     fn test_openai_dimensions() {

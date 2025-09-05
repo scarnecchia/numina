@@ -151,3 +151,11 @@ default_filter = { nsids = [
 ] }
 auto_connect_firehose = false
 # jetstream_endpoint = "wss://jetstream2.us-east.bsky.network/subscribe"
+
+# Optional: Discord configuration (non-sensitive)
+[discord]
+# allowed_channels = ["1390442382654181477", "1310716219527135363"]
+# allowed_guilds = ["1234567890123456789", "9876543210987654321"]
+# admin_users     = ["592429922052472840", "123456789012345678"]
+# respond_to_dms = true
+# respond_to_mentions = true

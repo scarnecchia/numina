@@ -1863,7 +1863,7 @@ impl AgentContext {
                     call.fn_name.clone(),
                     scope,
                     Some("Tool requires consent".to_string()),
-                    route_metadata,
+                    route_metadata.clone(),
                     std::time::Duration::from_secs(90),
                 )
                 .await
@@ -1884,6 +1884,7 @@ impl AgentContext {
             request_heartbeat,
             caller_user: None,
             call_id: Some(crate::id::ToolCallId(call.call_id.clone())),
+            route_metadata: route_metadata.clone(),
         };
 
         match self.tools.execute(&call.fn_name, params, &meta).await {

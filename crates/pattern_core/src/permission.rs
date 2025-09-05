@@ -80,6 +80,7 @@ impl PermissionBroker {
         metadata: Option<serde_json::Value>,
         timeout: std::time::Duration,
     ) -> Option<PermissionGrant> {
+        tracing::debug!("permission.request tool={} scope={:?}", tool_name, scope);
         let id = Uuid::new_v4().to_string();
         let (tx_decision, rx_decision) = oneshot::channel();
         {
@@ -121,7 +122,14 @@ impl PermissionBroker {
                     ),
                 }),
             },
-            _ => None, // timeout or channel closed
+            _ => {
+                tracing::warn!(
+                    "permission.request timeout or channel closed: tool={} scope={:?}",
+                    tool_name,
+                    scope
+                );
+                None
+            }
         }
     }
 
@@ -132,6 +140,11 @@ impl PermissionBroker {
             pi.remove(request_id);
         }
         if let Some(tx) = tx_opt {
+            tracing::debug!(
+                "permission.resolve id={} decision={:?}",
+                request_id,
+                decision
+            );
             let _ = tx.send(decision);
             true
         } else {

@@ -631,6 +631,7 @@ pub async fn setup_group(
                 database: config.database.clone(),
                 groups: config.groups.clone(),
                 bluesky: config.bluesky.clone(),
+                discord: config.discord.clone(),
             }
         } else {
             output.info("📋", "Using default config (no persona)");

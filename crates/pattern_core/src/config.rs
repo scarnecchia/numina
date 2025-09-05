@@ -53,6 +53,21 @@ pub struct PatternConfig {
     /// Bluesky configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky: Option<BlueskyConfig>,
+
+    /// Discord configuration (non-sensitive options)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordAppConfig>,
+}
+
+/// Discord options in pattern.toml (non-sensitive)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscordAppConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_channels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_guilds: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_users: Option<Vec<String>>,
 }
 
 /// User configuration
@@ -643,6 +658,7 @@ impl Default for PatternConfig {
             database: DatabaseConfig::default(),
             groups: Vec::new(),
             bluesky: None,
+            discord: None,
         }
     }
 }
@@ -795,6 +811,7 @@ pub fn merge_configs(base: PatternConfig, overlay: PartialConfig) -> PatternConf
         database: overlay.database.unwrap_or(base.database),
         groups: overlay.groups.unwrap_or(base.groups),
         bluesky: overlay.bluesky.or(base.bluesky),
+        discord: base.discord,
     }
 }
 

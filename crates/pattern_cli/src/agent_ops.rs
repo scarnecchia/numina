@@ -702,7 +702,7 @@ pub async fn create_agent_from_record_with_tracker(
     // Set up Discord endpoint if configured
     #[cfg(feature = "discord")]
     {
-        crate::discord::setup_discord_endpoint(&agent_dyn, output)
+        crate::discord::setup_discord_endpoint(&agent_dyn, config, output)
             .await
             .inspect_err(|e| {
                 tracing::error!("Failed to setup Discord endpoint: {:?}", e);
@@ -1316,6 +1316,7 @@ pub async fn load_or_create_agent_from_member(
                     database: Default::default(),
                     groups: vec![],
                     bluesky: None,
+                    discord: None,
                 };
 
                 // Create the agent with the specified ID
@@ -1457,6 +1458,7 @@ pub async fn load_or_create_agent_from_member(
                     database: Default::default(),
                     groups: vec![],
                     bluesky: None,
+                    discord: None,
                 };
 
                 // Create the agent with the specified ID
@@ -1563,6 +1565,7 @@ pub async fn load_or_create_agent_from_member(
             database: Default::default(),
             groups: vec![],
             bluesky: None,
+            discord: None,
         };
 
         return create_agent_from_record(
@@ -1610,6 +1613,7 @@ pub async fn load_or_create_agent_from_member(
             database: Default::default(),
             groups: vec![],
             bluesky: None,
+            discord: None,
         };
 
         // Use the agent name from config, or fall back to member name
@@ -1675,6 +1679,7 @@ pub async fn load_or_create_agent_from_member(
             database: Default::default(),
             groups: vec![],
             bluesky: None,
+            discord: None,
         };
 
         // Use the agent name from config, or fall back to member name
@@ -1735,6 +1740,7 @@ pub async fn load_or_create_agent_from_member(
         database: Default::default(),
         groups: vec![],
         bluesky: None,
+        discord: None,
     };
 
     create_agent(&member.name, None, enable_tools, &config, heartbeat_sender).await

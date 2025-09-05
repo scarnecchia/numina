@@ -21,6 +21,8 @@ pub struct ExecutionMeta {
     pub caller_user: Option<crate::UserId>,
     /// Optional tool call id for tracing
     pub call_id: Option<crate::ToolCallId>,
+    /// Optional routing metadata (e.g., discord_channel_id) to help permission prompts reach the origin
+    pub route_metadata: Option<serde_json::Value>,
 }
 
 /// A tool that can be executed by agents with type-safe input and output
@@ -547,6 +549,7 @@ mod tests {
                     "message": "Hello, world!",
                     "count": 42
                 }),
+                &ExecutionMeta::default(),
             )
             .await
             .unwrap();

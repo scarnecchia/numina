@@ -59,18 +59,25 @@ Agent names are automatically detected for routing - no hardcoded lists!
 ### Environment Variables
 
 - `DISCORD_TOKEN` (required) - Bot token
-- `DISCORD_CHANNEL_ID` (optional) - Limit to specific channel
+- `DISCORD_CHANNEL_ID` (optional) - Limit to specific channel(s). Comma-separated list supported.
+- `DISCORD_GUILD_IDS` (optional) - Restrict responses to specific guild(s). Comma-separated list supported. (`DISCORD_GUILD_ID` for a single ID also works)
 - `LETTA_BASE_URL` - Letta server URL (default: http://localhost:8000)
 - `LETTA_API_KEY` - For Letta cloud instead of local server
 - `PATTERN_DB_PATH` - Database location (default: pattern.db)
 
 ### Config File
 
-Create `pattern.toml` for persistent configuration:
+Create `pattern.toml` for persistent configuration (non-sensitive options like channel and admin lists can live here):
 
 ```toml
 [discord]
-token = "your_bot_token"
+# Non-sensitive options (token stays in environment)
+# Channels the bot may proactively post to when routing prompts or announcements
+allowed_channels = ["1390442382654181477", "1310716219527135363"] # or: "1390442382654181477,1310716219527135363"
+# Admin users allowed to use /permit, /deny, /permits
+admin_users = ["592429922052472840", "123456789012345678"]     # or: "592429922052472840,123456789012345678"
+
+# Behavior flags (optional)
 respond_to_dms = true
 respond_to_mentions = true
 
@@ -88,3 +95,9 @@ path = "pattern.db"
 - Never commit `.env` or `pattern.toml` with real tokens
 - Use environment variables for sensitive data in production
 - The bot requires MESSAGE_CONTENT intent for natural language routing
+
+### Env/Config precedence
+
+- Token (`DISCORD_TOKEN`): environment only (required).
+- allowed_channels/admin_users: read from pattern.toml if present; otherwise from env.
+  - Environment overrides: `DISCORD_CHANNEL_ID` and `DISCORD_ADMIN_USERS` accept comma-separated lists.

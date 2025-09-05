@@ -34,7 +34,11 @@ use std::sync::Arc;
 
 /// Set up Discord endpoint for an agent if configured
 #[cfg(feature = "discord")]
-pub async fn setup_discord_endpoint(agent: &Arc<dyn Agent>, output: &Output) -> Result<()> {
+pub async fn setup_discord_endpoint(
+    agent: &Arc<dyn Agent>,
+    cfg: &pattern_core::config::PatternConfig,
+    output: &Output,
+) -> Result<()> {
     // Check if DISCORD_TOKEN is available
     let discord_token = match std::env::var("DISCORD_TOKEN") {
         Ok(token) => token,
@@ -46,41 +50,26 @@ pub async fn setup_discord_endpoint(agent: &Arc<dyn Agent>, output: &Output) -> 
 
     output.status("Setting up Discord endpoint...");
 
-    // Create Discord endpoint
-    let mut discord_endpoint = DiscordEndpoint::new(discord_token);
+    // Create Discord endpoint with config (handles channels and DM users automatically)
+    let discord_endpoint =
+        DiscordEndpoint::with_config(discord_token.clone(), cfg.discord.as_ref());
 
-    // Check for DISCORD_CHANNEL_ID (specific channel to listen to)
-    if let Ok(channel_id) = std::env::var("DISCORD_CHANNEL_ID") {
-        if let Ok(channel_id) = channel_id.parse::<u64>() {
-            discord_endpoint = discord_endpoint.with_default_channel(channel_id);
-            output.info("Listen channel:", &format!("{}", channel_id));
-        } else {
-            output.warning("Invalid DISCORD_CHANNEL_ID value");
-        }
-    }
-
-    // Check if there's a default channel ID (fallback for messages without target)
-    if let Ok(channel_id) = std::env::var("DISCORD_DEFAULT_CHANNEL") {
-        if let Ok(channel_id) = channel_id.parse::<u64>() {
-            // Only set if DISCORD_CHANNEL_ID wasn't already set
-            if std::env::var("DISCORD_CHANNEL_ID").is_err() {
-                discord_endpoint = discord_endpoint.with_default_channel(channel_id);
-                output.info("Default channel:", &format!("{}", channel_id));
+    // Log the configuration if present
+    if let Some(dc) = &cfg.discord {
+        if let Some(chs) = &dc.allowed_channels {
+            if let Some(first) = chs.first() {
+                output.info("Listen channel:", first);
             }
-        } else {
-            output.warning("Invalid DISCORD_DEFAULT_CHANNEL value");
+        }
+        if let Some(admins) = &dc.admin_users {
+            if let Some(first) = admins.first() {
+                output.info("Default DM user:", first);
+            }
         }
     }
 
-    // Check if there's a default DM user ID for CLI mode
-    if let Ok(user_id) = std::env::var("DISCORD_DEFAULT_DM_USER") {
-        if let Ok(user_id) = user_id.parse::<u64>() {
-            discord_endpoint = discord_endpoint.with_default_dm_user(user_id);
-            output.info("Default DM user:", &format!("{}", user_id));
-        } else {
-            output.warning("Invalid DISCORD_DEFAULT_DM_USER value");
-        }
-    }
+    // Note: Bot reference is not set here, so channel validation will be skipped
+    // This means the endpoint will accept any channel ID
 
     // Display APP_ID and PUBLIC_KEY if configured (for reference)
     if let Ok(app_id) = std::env::var("APP_ID") {
@@ -254,33 +243,40 @@ pub async fn run_discord_bot_with_group(
     {
         output.status("Registering Discord endpoint on agents...");
 
-        // Create Discord endpoint with token
-        let mut discord_endpoint =
-            pattern_discord::endpoints::DiscordEndpoint::new(discord_token.clone());
+        // Create Discord endpoint with config (handles channels and DM users automatically)
+        let discord_endpoint = pattern_discord::endpoints::DiscordEndpoint::with_config(
+            discord_token.clone(),
+            config.discord.as_ref(),
+        );
 
-        // Configure default channel if set
-        if let Ok(channel_id) = std::env::var("DISCORD_CHANNEL_ID") {
-            if let Ok(channel_id) = channel_id.parse::<u64>() {
-                discord_endpoint = discord_endpoint.with_default_channel(channel_id);
-                output.info("Discord channel:", &format!("{}", channel_id));
+        // Log the configuration if present
+        if let Some(dc) = &config.discord {
+            if let Some(chs) = &dc.allowed_channels {
+                if let Some(first) = chs.first() {
+                    output.info("Discord channel:", first);
+                }
             }
-        }
-
-        // Configure default DM user if set
-        if let Ok(user_id) = std::env::var("DISCORD_DEFAULT_DM_USER") {
-            if let Ok(user_id) = user_id.parse::<u64>() {
-                discord_endpoint = discord_endpoint.with_default_dm_user(user_id);
-                output.info("Discord DM user:", &format!("{}", user_id));
+            if let Some(admins) = &dc.admin_users {
+                if let Some(first) = admins.first() {
+                    output.info("Discord DM user:", first);
+                }
             }
         }
 
         // Don't create Arc yet, we'll update it with bot reference
         let mut discord_endpoint_base = discord_endpoint;
 
-        // Create Discord bot config
-        let config = DiscordBotConfig::new(
-            std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
-        );
+        // Create Discord bot config from PatternConfig (with env var fallback)
+        let bot_cfg = if let Some(dc) = &config.discord {
+            DiscordBotConfig::from_config(
+                std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
+                dc,
+            )
+        } else {
+            DiscordBotConfig::new(
+                std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
+            )
+        };
 
         // Create the Discord bot in CLI mode (wrapped in Arc for sharing)
         // Build forward sinks so CLI can mirror Discord stream (and optional file sink)
@@ -288,7 +284,7 @@ pub async fn run_discord_bot_with_group(
             crate::forwarding::build_discord_group_sinks(&output, &agents_with_membership).await;
 
         let bot = Arc::new(DiscordBot::new_cli_mode(
-            config,
+            bot_cfg,
             agents_with_membership.clone(),
             group.clone(),
             pattern_manager.clone(),

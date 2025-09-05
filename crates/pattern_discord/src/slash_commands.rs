@@ -429,12 +429,18 @@ pub async fn handle_permits(ctx: &Context, command: &CommandInteraction) -> Resu
 // ===== Permission approvals =====
 
 fn is_authorized_user(user_id: u64) -> bool {
-    if let Ok(v) = std::env::var("DISCORD_DEFAULT_DM_USER") {
-        if v.trim() == user_id.to_string() {
+    // Support DISCORD_ADMIN_USERS as comma-separated list
+    if let Ok(v) = std::env::var("DISCORD_ADMIN_USERS") {
+        let ok = v
+            .split(',')
+            .map(|s| s.trim())
+            .any(|s| s == user_id.to_string());
+        if ok {
             return true;
         }
     }
-    if let Ok(v) = std::env::var("DISCORD_ADMIN_USERS") {
+    // Also support DISCORD_DEFAULT_DM_USER as single or comma-separated
+    if let Ok(v) = std::env::var("DISCORD_DEFAULT_DM_USER") {
         let ok = v
             .split(',')
             .map(|s| s.trim())

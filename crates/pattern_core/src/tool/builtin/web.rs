@@ -785,7 +785,6 @@ mod tests {
             format: Some(WebFormat::Markdown),
             limit: None,
             continue_from: None,
-            request_heartbeat: false,
         };
         let json = serde_json::to_string(&fetch).unwrap();
         assert!(json.contains("\"operation\":\"fetch\""));
@@ -797,7 +796,6 @@ mod tests {
             format: None,
             limit: Some(5),
             continue_from: None,
-            request_heartbeat: false,
         };
         let json = serde_json::to_string(&search).unwrap();
         assert!(json.contains("\"operation\":\"search\""));

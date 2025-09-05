@@ -254,15 +254,17 @@ mod tests {
 
         // Test sending to user
         let result = tool
-            .execute(SendMessageInput {
-                target: MessageTarget {
-                    target_type: TargetType::User,
-                    target_id: None,
+            .execute(
+                SendMessageInput {
+                    target: MessageTarget {
+                        target_type: TargetType::User,
+                        target_id: None,
+                    },
+                    content: "Test message".to_string(),
+                    metadata: None,
                 },
-                content: "Test message".to_string(),
-                metadata: None,
-                request_heartbeat: false,
-            })
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 

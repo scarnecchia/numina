@@ -144,7 +144,7 @@ impl Default for AgentMemoryRelation {
             id: RelationId::nil(),
             in_id: AgentId::nil(),
             out_id: MemoryId::nil(),
-            access_level: MemoryPermission::default(), // Uses Append as default
+            access_level: MemoryPermission::default(), // Uses ReadWrite as default
             created_at: Utc::now(),
         }
     }

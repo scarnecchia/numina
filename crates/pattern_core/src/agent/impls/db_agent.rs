@@ -2527,6 +2527,7 @@ where
             }
 
             // Build memory context with the current batch ID
+            tracing::info!("Building memory context (batch {:?})", current_batch_id);
             let memory_context = match context.read().await.build_context(current_batch_id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -2558,8 +2559,14 @@ where
                     return;
                 }
             };
+            tracing::info!(
+                "Context built: messages={}, tools={}",
+                memory_context.messages().len(),
+                memory_context.tools.len()
+            );
 
             // Execute start constraint tools if any are required
+            tracing::info!("Checking and executing start-constraint tools (if any)");
             match self_clone.execute_start_constraint_tools().await {
                 Ok(start_responses) => {
                     if !start_responses.is_empty() {
@@ -2607,6 +2614,11 @@ where
             }
 
             // Create request
+            tracing::info!(
+                "Preparing model request (messages={}, tools={})",
+                memory_context.messages().len(),
+                memory_context.tools.len()
+            );
             let request = Request {
                 system: Some(vec![memory_context.system_prompt.clone()]),
                 messages: memory_context.messages(),
@@ -4266,6 +4278,7 @@ where
                 .unwrap_or(false),
             caller_user: None,
             call_id: None,
+            route_metadata: None,
         };
         let mut params_clean = params.clone();
         if let serde_json::Value::Object(ref mut map) = params_clean {

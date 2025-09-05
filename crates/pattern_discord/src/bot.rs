@@ -93,28 +93,125 @@ pub struct DiscordBotConfig {
     pub prefix: String,
     pub intents: serenity::all::GatewayIntents,
     pub allowed_channels: Option<Vec<String>>,
+    pub allowed_guilds: Option<Vec<String>>,
     pub admin_users: Option<Vec<String>>,
 }
 
 impl DiscordBotConfig {
     pub fn new(token: impl Into<String>) -> Self {
-        let admin_users = std::env::var("DISCORD_DEFAULT_DM_USER")
+        // Admin users: support DISCORD_ADMIN_USERS (comma-separated) and DISCORD_DEFAULT_DM_USER (single or comma-separated)
+        let admin_users = std::env::var("DISCORD_ADMIN_USERS")
             .ok()
-            .map(|id| vec![id]);
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .or_else(|| {
+                std::env::var("DISCORD_DEFAULT_DM_USER").ok().map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+            });
 
-        let allowed_channels = std::env::var("DISCORD_CHANNEL_ID").ok().map(|id| vec![id]);
+        // Allowed channels: support comma-separated list in DISCORD_CHANNEL_ID
+        let allowed_channels = std::env::var("DISCORD_CHANNEL_ID").ok().map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        });
+
+        // Allowed guilds: support comma-separated list in DISCORD_GUILD_IDS (or single DISCORD_GUILD_ID)
+        let allowed_guilds = std::env::var("DISCORD_GUILD_IDS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .or_else(|| std::env::var("DISCORD_GUILD_ID").ok().map(|id| vec![id]));
 
         Self {
             token: token.into(),
             prefix: "!".to_string(),
             intents: serenity::all::GatewayIntents::default(),
             allowed_channels,
+            allowed_guilds,
             admin_users,
         }
+    }
+
+    /// Create from token and DiscordAppConfig, preferring config over env vars
+    pub fn from_config(
+        token: impl Into<String>,
+        config: &pattern_core::config::DiscordAppConfig,
+    ) -> Self {
+        let mut bot_config = Self {
+            token: token.into(),
+            prefix: "!".to_string(),
+            intents: serenity::all::GatewayIntents::default(),
+            allowed_channels: None,
+            allowed_guilds: None,
+            admin_users: None,
+        };
+
+        // Apply config values, falling back to env vars if not in config
+        bot_config.allowed_channels = config.allowed_channels.clone().or_else(|| {
+            std::env::var("DISCORD_CHANNEL_ID").ok().map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+        });
+
+        bot_config.allowed_guilds = config
+            .allowed_guilds
+            .clone()
+            .or_else(|| {
+                std::env::var("DISCORD_GUILD_IDS").ok().map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .or_else(|| std::env::var("DISCORD_GUILD_ID").ok().map(|id| vec![id]));
+
+        bot_config.admin_users = config
+            .admin_users
+            .clone()
+            .or_else(|| {
+                std::env::var("DISCORD_ADMIN_USERS").ok().map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .or_else(|| {
+                std::env::var("DISCORD_DEFAULT_DM_USER").ok().map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+            });
+
+        bot_config
     }
 }
 
 impl DiscordBot {
+    /// Expose read-only access to bot configuration
+    pub fn config(&self) -> &DiscordBotConfig {
+        &self.config
+    }
     /// Create a new Discord bot for CLI mode
     pub fn new_cli_mode(
         config: DiscordBotConfig,
@@ -208,19 +305,28 @@ impl EventHandler for DiscordEventHandler {
             }
         }
 
-        // Spawn permission request announcer (DM admin or post in configured channel)
+        // Spawn permission request announcer (DM admin(s) and/or post in configured channel(s))
         let http = ctx.http.clone();
+        let cfg = self.bot.config.clone();
         tokio::spawn(async move {
             use pattern_core::permission::broker;
             use serenity::all::{ChannelId, UserId};
             let mut rx = broker().subscribe();
-            // Resolve preferred recipient once (env var)
-            let dm_user: Option<u64> = std::env::var("DISCORD_DEFAULT_DM_USER")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok());
-            let channel_id: Option<u64> = std::env::var("DISCORD_CHANNEL_ID")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok());
+            // Resolve recipients from config
+            let admin_ids: Vec<u64> = cfg
+                .admin_users
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect();
+            let channel_ids: Vec<u64> = cfg
+                .allowed_channels
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect();
 
             while let Ok(req) = rx.recv().await {
                 let title = format!("🔐 Permission Needed: {}", req.tool_name);
@@ -245,16 +351,19 @@ impl EventHandler for DiscordEventHandler {
                     }
                 }
                 if !sent {
-                    if let Some(uid) = dm_user {
-                        if let Ok(channel) = UserId::new(uid).create_dm_channel(&http).await {
+                    // Try DM to each configured admin
+                    for uid in &admin_ids {
+                        if let Ok(channel) = UserId::new(*uid).create_dm_channel(&http).await {
                             let _ = channel.say(&http, content.clone()).await;
-                            sent = true;
+                            sent = true; // consider success if at least one DM succeeds
                         }
                     }
                 }
                 if !sent {
-                    if let Some(cid) = channel_id {
-                        let _ = ChannelId::new(cid).say(&http, content.clone()).await.ok();
+                    // Post to all configured channels
+                    for cid in &channel_ids {
+                        let _ = ChannelId::new(*cid).say(&http, content.clone()).await.ok();
+                        sent = true;
                     }
                 }
             }
@@ -297,20 +406,29 @@ impl EventHandler for DiscordEventHandler {
             let is_dm = msg.guild_id.is_none();
             let is_mention = msg.mentions_me(&ctx.http).await.unwrap_or(false);
 
+            // If allowed guilds are configured, restrict responses to those guilds (DMs unaffected)
+            let guild_ok = if let (Some(gid), Some(list)) =
+                (msg.guild_id, self.bot.config.allowed_guilds.as_ref())
+            {
+                list.contains(&gid.get().to_string()) || is_dm
+            } else {
+                true
+            };
+
             // In CLI mode with a configured channel, respond to all messages in that channel
             if self.bot.cli_mode {
                 if let Some(ref allowed) = self.bot.config.allowed_channels {
-                    if allowed.contains(&msg.channel_id.get().to_string()) {
+                    if allowed.contains(&msg.channel_id.get().to_string()) && guild_ok {
                         true
                     } else {
-                        is_dm || is_mention
+                        guild_ok && (is_dm || is_mention)
                     }
                 } else {
-                    is_dm || is_mention
+                    guild_ok && (is_dm || is_mention)
                 }
             } else {
                 // Otherwise respond to DMs and mentions
-                is_dm || is_mention
+                guild_ok && (is_dm || is_mention)
             }
         };
 
