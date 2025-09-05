@@ -43,6 +43,13 @@ memory_type = "working"
 description = "Current conversant context"
 shared = true
 
+[agent.memory.deep_background]
+content_path = "../deep-background.md"
+permission = "read_only"
+memory_type = "archival"
+description = "A framework for systemically researching a topic and or verifying claims"
+shared = true
+
 [agent.memory.partner]
 content_path = "lasa-familiar-block.md"
 permission = "append"
