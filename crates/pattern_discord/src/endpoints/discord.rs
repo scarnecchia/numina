@@ -35,6 +35,16 @@ impl DiscordEndpoint {
         }
     }
 
+    /// For DMs, prefix the content with an agent/facet tag when available
+    fn dm_tagged_content(content: &str, origin: Option<&MessageOrigin>) -> String {
+        if let Some(MessageOrigin::Agent { name, .. }) = origin {
+            // Subtle Markdown tag so recipients know which facet is speaking
+            format!("*[{}]* {}", name, content)
+        } else {
+            content.to_string()
+        }
+    }
+
     /// Create a new Discord endpoint with token and optional config
     pub fn with_config(token: String, config: Option<&DiscordAppConfig>) -> Self {
         let mut endpoint = Self::new(token);
@@ -793,7 +803,8 @@ impl MessageEndpoint for DiscordEndpoint {
 
                 // If channel resolution failed, try user resolution for DMs
                 if let Some(user_id) = self.resolve_user_id(target_id).await {
-                    self.send_dm(user_id, content).await?;
+                    let tagged = Self::dm_tagged_content(&content, origin);
+                    self.send_dm(user_id, tagged).await?;
                     return Ok(Some(format!("dm:{}", user_id)));
                 }
             }
@@ -826,7 +837,8 @@ impl MessageEndpoint for DiscordEndpoint {
 
             // Finally check for user_id to send DM (lowest priority)
             if let Some(user_id) = meta.get("discord_user_id").and_then(|v| v.as_u64()) {
-                self.send_dm(DiscordUserId::new(user_id), content).await?;
+                let tagged = Self::dm_tagged_content(&content, origin);
+                self.send_dm(DiscordUserId::new(user_id), tagged).await?;
                 return Ok(Some(format!("dm:{}", user_id)));
             }
 
@@ -852,14 +864,16 @@ impl MessageEndpoint for DiscordEndpoint {
                     .await?;
                 return Ok(Some(format!("channel:{}", chan_id)));
             } else if let Ok(usr_id) = user_id.parse::<u64>() {
-                self.send_dm(DiscordUserId::new(usr_id), content).await?;
+                let tagged = Self::dm_tagged_content(&content, origin);
+                self.send_dm(DiscordUserId::new(usr_id), tagged).await?;
                 return Ok(Some(format!("dm:{}", usr_id)));
             }
         }
 
         // Fall back to default DM user if configured
         if let Some(user) = self.default_dm_user {
-            self.send_dm(user, content).await?;
+            let tagged = Self::dm_tagged_content(&content, origin);
+            self.send_dm(user, tagged).await?;
             return Ok(Some(format!("default_dm:{}", user)));
         }
 
