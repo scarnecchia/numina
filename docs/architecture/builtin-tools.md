@@ -38,7 +38,7 @@ Manages core memory blocks following the Letta/MemGPT pattern. Each operation mo
 - `append` - Add content to existing memory (always uses \n separator)
 - `replace` - Replace specific content within memory
 - `archive` - Move a core memory block to archival storage
-- `load_from_archival` - Load an archival memory block into core
+- `load` - Load an archival memory block into working/core
 - `swap` - Atomic operation to archive one block and load another
 
 ```rust
@@ -219,6 +219,28 @@ Tool schemas are generated with `inline_subschemas = true` to ensure no `$ref` f
 5. **send_to_group**: Send message to agent group
 6. **schedule_reminder**: Set time-based reminders
 7. **track_task**: Create and track ADHD-friendly tasks
+
+## Memory Permissions and Enforcement
+
+Memory blocks carry a `permission` (enum `MemoryPermission`). New blocks default to `read_write` unless configured. Tools enforce an ACL as follows:
+
+- Read: always allowed.
+- Append: allowed for `append`/`read_write`/`admin`; `partner`/`human` require approval via PermissionBroker; `read_only` denied.
+- Overwrite/Replace: allowed for `read_write`/`admin`; `partner`/`human` require approval; `append`/`read_only` denied.
+- Delete: `admin` only.
+
+Tool-specific notes:
+
+- `context.append` and `context.replace` enforce ACL and request `MemoryEdit { key }` when needed.
+- `context.archive` checks Overwrite ACL if the archival label already exists; deleting the source context requires Admin.
+- `context.load` behavior:
+  - Same label: convert archival → working in-memory.
+  - Different label: create new working block and retain archival.
+  - Does not delete archival.
+- `context.swap` enforces Overwrite ACL on the destination (with possible approval) and deletes the source archival only with Admin.
+- `recall.append` enforces ACL; `recall.delete` requires Admin.
+
+Consent prompts are routed with origin metadata (e.g., Discord channel) for fast approval.
 
 ### MessageSender Integration
 

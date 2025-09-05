@@ -281,9 +281,12 @@ mod tests {
         // Test with timeout to prevent hanging
         let result = timeout(
             Duration::from_secs(5),
-            echo_tool.execute(json!({
-                "text": "Hello, MCP!"
-            })),
+            echo_tool.execute(
+                json!({
+                    "text": "Hello, MCP!"
+                }),
+                &pattern_core::tool::ExecutionMeta::default(),
+            ),
         )
         .await;
 

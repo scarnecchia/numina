@@ -53,6 +53,21 @@ pub struct PatternConfig {
     /// Bluesky configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky: Option<BlueskyConfig>,
+
+    /// Discord configuration (non-sensitive options)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordAppConfig>,
+}
+
+/// Discord options in pattern.toml (non-sensitive)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscordAppConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_channels: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_guilds: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_users: Option<Vec<String>>,
 }
 
 /// User configuration
@@ -184,6 +199,12 @@ pub enum ToolRuleTypeConfig {
 
     /// Call this tool periodically during long conversations (in seconds)
     Periodic(u64),
+
+    /// Require user consent before executing the tool
+    RequiresConsent {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
 }
 
 fn default_rule_priority() -> u8 {
@@ -245,6 +266,9 @@ impl ToolRuleTypeConfig {
             ToolRuleTypeConfig::Periodic(seconds) => {
                 ToolRuleType::Periodic(Duration::from_secs(*seconds))
             }
+            ToolRuleTypeConfig::RequiresConsent { scope } => ToolRuleType::RequiresConsent {
+                scope: scope.clone(),
+            },
         };
 
         Ok(runtime_type)
@@ -268,6 +292,9 @@ impl ToolRuleTypeConfig {
             ToolRuleType::MaxCalls(max) => ToolRuleTypeConfig::MaxCalls(*max),
             ToolRuleType::Cooldown(duration) => ToolRuleTypeConfig::Cooldown(duration.as_secs()),
             ToolRuleType::Periodic(duration) => ToolRuleTypeConfig::Periodic(duration.as_secs()),
+            ToolRuleType::RequiresConsent { scope } => ToolRuleTypeConfig::RequiresConsent {
+                scope: scope.clone(),
+            },
         }
     }
 }
@@ -631,6 +658,7 @@ impl Default for PatternConfig {
             database: DatabaseConfig::default(),
             groups: Vec::new(),
             bluesky: None,
+            discord: None,
         }
     }
 }
@@ -783,6 +811,7 @@ pub fn merge_configs(base: PatternConfig, overlay: PartialConfig) -> PatternConf
         database: overlay.database.unwrap_or(base.database),
         groups: overlay.groups.unwrap_or(base.groups),
         bluesky: overlay.bluesky.or(base.bluesky),
+        discord: base.discord,
     }
 }
 

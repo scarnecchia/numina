@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::search_utils::{extract_snippet, process_search_results};
-use crate::{Result, context::AgentHandle, message::ChatRole, tool::AiTool};
+use crate::{
+    Result,
+    context::AgentHandle,
+    message::ChatRole,
+    tool::{AiTool, ExecutionMeta},
+};
 
 /// Search domains available
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -52,10 +57,7 @@ pub struct SearchInput {
     /// This will enable typo-tolerant search once SurrealDB fuzzy functions are integrated
     #[serde(default)]
     pub fuzzy: bool,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Output from search operations
@@ -106,7 +108,11 @@ impl AiTool for SearchTool {
                 "
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         let limit = params
             .limit
             .map(|l| l.max(1).min(100) as usize)
@@ -203,7 +209,6 @@ impl AiTool for SearchTool {
                     start_time: None,
                     end_time: None,
                     fuzzy: false,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
                     success: true,
@@ -226,7 +231,6 @@ impl AiTool for SearchTool {
                     start_time: None,
                     end_time: None,
                     fuzzy: false,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
                     success: true,
@@ -569,16 +573,18 @@ mod tests {
 
         // Test searching
         let result = tool
-            .execute(SearchInput {
-                domain: SearchDomain::ArchivalMemory,
-                query: "color".to_string(),
-                limit: None,
-                role: None,
-                start_time: None,
-                end_time: None,
-                fuzzy: false,
-                request_heartbeat: false,
-            })
+            .execute(
+                SearchInput {
+                    domain: SearchDomain::ArchivalMemory,
+                    query: "color".to_string(),
+                    limit: None,
+                    role: None,
+                    start_time: None,
+                    end_time: None,
+                    fuzzy: false,
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 

@@ -8,6 +8,7 @@ mod endpoints;
 mod forwarding;
 mod message_display;
 mod output;
+mod permission_sink;
 mod slash_commands;
 mod tracing_writer;
 

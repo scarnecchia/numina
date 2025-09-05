@@ -4,7 +4,11 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, context::AgentHandle, tool::AiTool};
+use crate::{
+    Result,
+    context::AgentHandle,
+    tool::{AiTool, ExecutionMeta},
+};
 
 use super::{MessageTarget, TargetType};
 
@@ -21,10 +25,7 @@ pub struct SendMessageInput {
     #[schemars(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Output from send message operation
@@ -63,7 +64,11 @@ impl AiTool for SendMessageTool {
         "Send a message to the user, another agent, a group, or a specific channel, or as a post on bluesky. This is the primary way to communicate."
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         // Get the message router from the handle
         let router =
             self.handle
@@ -193,7 +198,6 @@ impl AiTool for SendMessageTool {
                     },
                     content: "Hello! How can I help you today?".to_string(),
                     metadata: None,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SendMessageOutput {
                     success: true,
@@ -213,7 +217,6 @@ impl AiTool for SendMessageTool {
                         "priority": "high",
                         "context": "task_breakdown"
                     })),
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SendMessageOutput {
                     success: true,
@@ -251,15 +254,17 @@ mod tests {
 
         // Test sending to user
         let result = tool
-            .execute(SendMessageInput {
-                target: MessageTarget {
-                    target_type: TargetType::User,
-                    target_id: None,
+            .execute(
+                SendMessageInput {
+                    target: MessageTarget {
+                        target_type: TargetType::User,
+                        target_id: None,
+                    },
+                    content: "Test message".to_string(),
+                    metadata: None,
                 },
-                content: "Test message".to_string(),
-                metadata: None,
-                request_heartbeat: false,
-            })
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 

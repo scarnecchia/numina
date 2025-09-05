@@ -84,6 +84,11 @@ impl GroupManager for SupervisorManager {
             };
 
             // Send start event
+            tracing::info!(
+                "Supervisor: sending GroupResponseEvent::Started (agents={}, group_id={})",
+                agents.len(),
+                group_id
+            );
             let _ = tx
                 .send(GroupResponseEvent::Started {
                     group_id: group_id.clone(),
@@ -91,6 +96,7 @@ impl GroupManager for SupervisorManager {
                     agent_count: agents.len(),
                 })
                 .await;
+            tracing::debug!("Supervisor: Started event queued");
 
             // Decide if leader should delegate
             let should_delegate = Self::should_delegate_static(

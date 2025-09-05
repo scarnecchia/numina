@@ -20,10 +20,12 @@ pub mod error;
 pub mod export;
 pub mod id;
 pub mod memory;
+pub mod memory_acl;
 pub mod message;
 pub mod message_queue;
 pub mod model;
 pub mod oauth;
+pub mod permission;
 pub mod prompt_template;
 pub mod realtime;
 pub mod tool;
@@ -60,14 +62,4 @@ pub mod prelude {
         CoreError, DynamicTool, IdType, Memory, MemoryBlock, MemoryContext, MessageCompressor,
         ModelCapability, ModelProvider, Result, ToolRegistry, ToolResult,
     };
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn it_works() {
-        // Basic smoke test
-        assert_eq!(2 + 2, 4);
-    }
 }

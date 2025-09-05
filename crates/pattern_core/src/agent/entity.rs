@@ -307,6 +307,7 @@ impl AgentRecord {
             tool_usage_rules: vec![],
             tool_workflow_rules: vec![],
             model_adjustments,
+            consent_required_tools: vec![],
         }
     }
 

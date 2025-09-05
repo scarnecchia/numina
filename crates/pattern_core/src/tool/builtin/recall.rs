@@ -10,7 +10,8 @@ use crate::{
     Result,
     context::AgentHandle,
     memory::{MemoryPermission, MemoryType},
-    tool::AiTool,
+    memory_acl::{MemoryGate, MemoryOp, check as acl_check, consent_reason},
+    tool::{AiTool, ExecutionMeta},
 };
 
 /// Operation types for recall storage management
@@ -39,10 +40,7 @@ pub struct RecallInput {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Output from recall storage operations
@@ -97,7 +95,11 @@ impl AiTool for RecallTool {
  - 'delete' removes the recall memory with the specified label"
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         match params.operation {
             ArchivalMemoryOperationType::Insert => {
                 let content = params.content.ok_or_else(|| {
@@ -124,7 +126,7 @@ impl AiTool for RecallTool {
                         "append operation requires 'content' field",
                     )
                 })?;
-                self.execute_append(label, content).await
+                self.execute_append(label, content, _meta).await
             }
             ArchivalMemoryOperationType::Read => {
                 let label = params.label.ok_or_else(|| {
@@ -144,7 +146,7 @@ impl AiTool for RecallTool {
                         "delete operation requires 'label' field",
                     )
                 })?;
-                self.execute_delete(label).await
+                self.execute_delete(label, _meta).await
             }
         }
     }
@@ -164,7 +166,6 @@ impl AiTool for RecallTool {
                             .to_string(),
                     ),
                     label: None,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(RecallOutput {
                     success: true,
@@ -178,7 +179,6 @@ impl AiTool for RecallTool {
                     operation: ArchivalMemoryOperationType::Append,
                     content: Some("Max is a golden retriever.".to_string()),
                     label: Some("archival_1234567890".to_string()),
-                    request_heartbeat: false,
                 },
                 expected_output: Some(RecallOutput {
                     success: true,
@@ -274,19 +274,39 @@ impl RecallTool {
         }
     }
 
-    async fn execute_delete(&self, label: String) -> Result<RecallOutput> {
+    async fn execute_delete(&self, label: String, meta: &ExecutionMeta) -> Result<RecallOutput> {
         // Check if block exists and get type
         let block_type = if let Some(block) = self.handle.memory.get_block(&label) {
             let memory_type = block.memory_type;
             if block.permission != MemoryPermission::Admin {
-                return Ok(RecallOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Insufficient permission to delete block '{}' (requires Admin, has {:?})",
-                        label, block.permission
-                    )),
-                    results: vec![],
-                });
+                // High-risk delete: request explicit consent
+                let grant = crate::permission::broker()
+                    .request(
+                        self.handle.agent_id.clone(),
+                        "recall".to_string(),
+                        crate::permission::PermissionScope::MemoryEdit { key: label.clone() },
+                        Some(format!(
+                            "{} — high-risk delete",
+                            crate::memory_acl::consent_reason(
+                                &label,
+                                crate::memory_acl::MemoryOp::Delete,
+                                block.permission
+                            )
+                        )),
+                        meta.route_metadata.clone(),
+                        std::time::Duration::from_secs(90),
+                    )
+                    .await;
+                if grant.is_none() {
+                    return Ok(RecallOutput {
+                        success: false,
+                        message: Some(format!(
+                            "Delete of '{}' requires approval; request timed out or was denied",
+                            label
+                        )),
+                        results: vec![],
+                    });
+                }
             }
             drop(block); // Release lock immediately
             Some(memory_type)
@@ -321,7 +341,12 @@ impl RecallTool {
         }
     }
 
-    async fn execute_append(&self, label: String, content: String) -> Result<RecallOutput> {
+    async fn execute_append(
+        &self,
+        label: String,
+        content: String,
+        meta: &ExecutionMeta,
+    ) -> Result<RecallOutput> {
         tracing::info!(
             "Recall append operation for label '{}' (content: {} chars)",
             label,
@@ -338,46 +363,59 @@ impl RecallTool {
             });
         }
 
-        // Use alter for atomic update with validation
-        let mut validation_result: Option<RecallOutput> = None;
+        // Inspect current block and gate
+        let current = self.handle.memory.get_block(&label).unwrap();
+        if current.memory_type != MemoryType::Archival {
+            return Ok(RecallOutput {
+                success: false,
+                message: Some(format!(
+                    "Block '{}' is not recall memory (type: {:?})",
+                    label, current.memory_type
+                )),
+                results: vec![],
+            });
+        }
 
+        match acl_check(MemoryOp::Append, current.permission) {
+            MemoryGate::Allow => {}
+            MemoryGate::Deny { reason } => {
+                return Ok(RecallOutput {
+                    success: false,
+                    message: Some(format!("{} — cannot append to '{}'", reason, label)),
+                    results: vec![],
+                });
+            }
+            MemoryGate::RequireConsent { .. } => {
+                let grant = crate::permission::broker()
+                    .request(
+                        self.handle.agent_id.clone(),
+                        "recall".to_string(),
+                        crate::permission::PermissionScope::MemoryEdit { key: label.clone() },
+                        Some(consent_reason(&label, MemoryOp::Append, current.permission)),
+                        meta.route_metadata.clone(),
+                        std::time::Duration::from_secs(90),
+                    )
+                    .await;
+                if grant.is_none() {
+                    return Ok(RecallOutput {
+                        success: false,
+                        message: Some(format!(
+                            "Append to '{}' requires approval; request timed out or was denied",
+                            label
+                        )),
+                        results: vec![],
+                    });
+                }
+            }
+        }
+
+        // Perform the append
         self.handle.memory.alter_block(&label, |_key, mut block| {
-            // Check if this is recall memory
-            if block.memory_type != MemoryType::Archival {
-                validation_result = Some(RecallOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Block '{}' is not recall memory (type: {:?})",
-                        label, block.memory_type
-                    )),
-                    results: vec![],
-                });
-                return block;
-            }
-
-            if block.permission < MemoryPermission::Append {
-                validation_result = Some(RecallOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Insufficient permission to append to block '{}' (requires Append or higher, has {:?})",
-                        label, block.permission
-                    )),
-                    results: vec![],
-                });
-                return block;
-            }
-
-            // All checks passed, update the block
             block.value.push_str("\n");
             block.value.push_str(&content);
             block.updated_at = chrono::Utc::now();
             block
         });
-
-        // If validation failed, return the error
-        if let Some(error_result) = validation_result {
-            return Ok(error_result);
-        }
 
         // Get the updated block to show a preview
         let preview_info = self
@@ -430,12 +468,14 @@ mod tests {
 
         // Test inserting
         let result = tool
-            .execute(RecallInput {
-                operation: ArchivalMemoryOperationType::Insert,
-                content: Some("The user's favorite color is blue.".to_string()),
-                label: Some("user_preferences".to_string()),
-                request_heartbeat: false,
-            })
+            .execute(
+                RecallInput {
+                    operation: ArchivalMemoryOperationType::Insert,
+                    content: Some("The user's favorite color is blue.".to_string()),
+                    label: Some("user_preferences".to_string()),
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 
@@ -454,12 +494,14 @@ mod tests {
 
         // Test appending
         let result = tool
-            .execute(RecallInput {
-                operation: ArchivalMemoryOperationType::Append,
-                content: Some(" They also like the color green.".to_string()),
-                label: Some("user_preferences".to_string()),
-                request_heartbeat: false,
-            })
+            .execute(
+                RecallInput {
+                    operation: ArchivalMemoryOperationType::Append,
+                    content: Some(" They also like the color green.".to_string()),
+                    label: Some("user_preferences".to_string()),
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 
@@ -509,12 +551,14 @@ mod tests {
 
         // Test deleting
         let result = tool
-            .execute(RecallInput {
-                operation: ArchivalMemoryOperationType::Delete,
-                content: None,
-                label: Some("to_delete".to_string()),
-                request_heartbeat: false,
-            })
+            .execute(
+                RecallInput {
+                    operation: ArchivalMemoryOperationType::Delete,
+                    content: None,
+                    label: Some("to_delete".to_string()),
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 
@@ -541,12 +585,14 @@ mod tests {
 
         // Try to delete a core memory block
         let result = tool
-            .execute(RecallInput {
-                operation: ArchivalMemoryOperationType::Delete,
-                content: None,
-                label: Some("core_block".to_string()),
-                request_heartbeat: false,
-            })
+            .execute(
+                RecallInput {
+                    operation: ArchivalMemoryOperationType::Delete,
+                    content: None,
+                    label: Some("core_block".to_string()),
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
             .await
             .unwrap();
 

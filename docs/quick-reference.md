@@ -79,7 +79,7 @@ let agent = DatabaseAgent::new(
   "value": "User prefers dark mode"
 }
 ```
-Operations: `append`, `replace`, `archive`, `load_from_archival`, `swap`
+Operations: `append`, `replace`, `archive`, `load`, `swap`
 
 ### recall (Archival Memory)
 ```json
@@ -141,6 +141,26 @@ agent.execute_tool("recall", json!({
     "label": "notes_2024",
     "value": "Important information"
 })).await?;
+```
+
+### Memory Permissions and ACL
+
+- Levels: `read_only`, `partner`, `human`, `append`, `read_write` (default for new blocks), `admin`.
+- ACL rules:
+  - Read: allowed for all.
+  - Append: allowed for `append`/`read_write`/`admin`; `partner`/`human` require approval; `read_only` denied.
+  - Overwrite/Replace: allowed for `read_write`/`admin`; `partner`/`human` require approval; `append`/`read_only` denied.
+  - Delete: `admin` only (no consent path by default).
+- Tool behavior:
+  - `context.append`/`context.replace`: enforce ACL; auto-request approval (MemoryEdit { key }) when needed.
+  - `context.archive`: if target archival label already exists, enforce Overwrite ACL (approval if needed); deleting original context requires Admin.
+- `context.load`: 
+  - If `name` equals the archival label, flips the block to working in-memory (no deletion).
+  - Otherwise, creates a new working block under `name` and retains the archival source.
+  - Never deletes archival by default.
+  - `context.swap`: overwrite of destination context enforces ACL (approval if needed); deleting source archival requires Admin.
+  - `recall.append`: enforce ACL (approval if needed); `recall.delete`: Admin only.
+  - Consent prompts route to the originating channel (Discord) when available.
 ```
 
 ## Data Sources

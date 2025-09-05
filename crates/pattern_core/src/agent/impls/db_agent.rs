@@ -811,6 +811,21 @@ where
             .collect()
     }
 
+    /// Compute tools that require consent from runtime rule engine
+    async fn get_consent_required_tools(&self) -> Vec<String> {
+        let engine = self.tool_rules.read().await;
+        engine
+            .get_rules()
+            .iter()
+            .filter_map(|r| match &r.rule_type {
+                crate::agent::tool_rules::ToolRuleType::RequiresConsent { .. } => {
+                    Some(r.tool_name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Set the constellation activity tracker for shared context
     pub fn set_constellation_tracker(
         &self,
@@ -2505,11 +2520,14 @@ where
             // Add tool rules from rule engine to context before building
             {
                 let tool_rules = self.get_context_tool_rules().await;
+                let consent_tools = self.get_consent_required_tools().await;
                 let mut ctx = context.write().await;
                 ctx.add_tool_rules(tool_rules);
+                ctx.context_config.consent_required_tools = consent_tools;
             }
 
             // Build memory context with the current batch ID
+            tracing::info!("Building memory context (batch {:?})", current_batch_id);
             let memory_context = match context.read().await.build_context(current_batch_id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -2541,8 +2559,14 @@ where
                     return;
                 }
             };
+            tracing::info!(
+                "Context built: messages={}, tools={}",
+                memory_context.messages().len(),
+                memory_context.tools.len()
+            );
 
             // Execute start constraint tools if any are required
+            tracing::info!("Checking and executing start-constraint tools (if any)");
             match self_clone.execute_start_constraint_tools().await {
                 Ok(start_responses) => {
                     if !start_responses.is_empty() {
@@ -2590,6 +2614,11 @@ where
             }
 
             // Create request
+            tracing::info!(
+                "Preparing model request (messages={}, tools={})",
+                memory_context.messages().len(),
+                memory_context.tools.len()
+            );
             let request = Request {
                 system: Some(vec![memory_context.system_prompt.clone()]),
                 messages: memory_context.messages(),
@@ -3275,8 +3304,10 @@ where
                     // Add tool rules from rule engine before rebuilding
                     {
                         let tool_rules = self.get_context_tool_rules().await;
+                        let consent_tools = self.get_consent_required_tools().await;
                         let mut ctx = context.write().await;
                         ctx.add_tool_rules(tool_rules);
+                        ctx.context_config.consent_required_tools = consent_tools;
 
                         // // Determine role based on vendor
                         // let role = match model_vendor {
@@ -4238,8 +4269,22 @@ where
         let start_time = std::time::Instant::now();
         let created_at = chrono::Utc::now();
 
-        // Execute the tool
-        let result = tool.execute(params.clone()).await;
+        // Execute the tool with minimal meta (no consent yet in this path)
+        let meta = crate::tool::ExecutionMeta {
+            permission_grant: None,
+            request_heartbeat: params
+                .get("request_heartbeat")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            caller_user: None,
+            call_id: None,
+            route_metadata: None,
+        };
+        let mut params_clean = params.clone();
+        if let serde_json::Value::Object(ref mut map) = params_clean {
+            map.remove("request_heartbeat");
+        }
+        let result = tool.execute(params_clean, &meta).await;
 
         // Calculate duration
         let duration_ms = start_time.elapsed().as_millis() as i64;
@@ -4473,8 +4518,10 @@ where
         // Add workflow rules from the rule engine before building context
         {
             let tool_rules = self.get_context_tool_rules().await;
+            let consent_tools = self.get_consent_required_tools().await;
             let mut ctx = self.context.write().await;
             ctx.add_tool_rules(tool_rules);
+            ctx.context_config.consent_required_tools = consent_tools;
         }
 
         let context = self.context.read().await;

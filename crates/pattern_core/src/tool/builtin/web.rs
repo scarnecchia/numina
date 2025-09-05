@@ -55,10 +55,7 @@ pub struct WebInput {
     #[schemars(default, with = "i64")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continue_from: Option<usize>,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Result from a web search
@@ -749,7 +746,11 @@ Important search operators:
 Use this whenever you need current information, facts, news, or anything beyond your training data."#
     }
 
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        params: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         match params.operation {
             WebOperation::Fetch => {
                 let format = params.format.unwrap_or_default();
@@ -784,7 +785,6 @@ mod tests {
             format: Some(WebFormat::Markdown),
             limit: None,
             continue_from: None,
-            request_heartbeat: false,
         };
         let json = serde_json::to_string(&fetch).unwrap();
         assert!(json.contains("\"operation\":\"fetch\""));
@@ -796,7 +796,6 @@ mod tests {
             format: None,
             limit: Some(5),
             continue_from: None,
-            request_heartbeat: false,
         };
         let json = serde_json::to_string(&search).unwrap();
         assert!(json.contains("\"operation\":\"search\""));

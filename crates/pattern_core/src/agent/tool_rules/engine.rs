@@ -62,6 +62,13 @@ pub enum ToolRuleType {
 
     /// Call this tool periodically during long conversations
     Periodic(Duration),
+
+    /// This tool requires explicit user consent before execution
+    RequiresConsent {
+        /// Optional scope hint (e.g., memory prefix or capability tag)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
 }
 
 impl ToolRuleType {
@@ -149,6 +156,16 @@ impl ToolRuleType {
                     tool_name,
                     interval.as_millis()
                 )
+            }
+            ToolRuleType::RequiresConsent { scope } => {
+                if let Some(s) = scope {
+                    format!(
+                        "User approval is required before calling `{}` (scope: {}).",
+                        tool_name, s
+                    )
+                } else {
+                    format!("User approval is required before calling `{}`.", tool_name)
+                }
             }
         }
     }

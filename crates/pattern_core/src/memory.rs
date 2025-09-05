@@ -82,10 +82,10 @@ pub enum MemoryPermission {
     Partner,
     /// Requires permission from any human
     Human,
-    /// Can append to existing content (default)
-    #[default]
+    /// Can append to existing content
     Append,
     /// Can modify content freely
+    #[default]
     ReadWrite,
     /// Total control, can delete
     Admin,
@@ -193,7 +193,7 @@ impl Default for MemoryBlock {
             description: None,
             memory_type: MemoryType::Core,
             pinned: false,
-            permission: MemoryPermission::Append,
+            permission: MemoryPermission::ReadWrite,
             metadata: json!({}),
             embedding_model: None,
             embedding: None,

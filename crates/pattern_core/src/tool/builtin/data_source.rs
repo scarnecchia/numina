@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::data_source::DataIngestionCoordinator;
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
-use crate::tool::{AiTool, ToolRegistry};
+use crate::tool::{AiTool, ExecutionMeta, ToolRegistry};
 
 fn default_limit() -> i64 {
     10
@@ -79,10 +79,6 @@ pub struct DataSourceOutput {
 
     /// The actual content returned (for read/search/list operations)
     pub content: serde_json::Value,
-
-    /// Whether another turn was requested
-    #[serde(default)]
-    pub request_heartbeat: bool,
 }
 
 #[async_trait]
@@ -114,7 +110,11 @@ Sources must be configured separately before they can be used."#,
         )
     }
 
-    async fn execute(&self, input: Self::Input) -> Result<Self::Output> {
+    async fn execute(
+        &self,
+        input: Self::Input,
+        _meta: &crate::tool::ExecutionMeta,
+    ) -> Result<Self::Output> {
         match input.operation {
             DataSourceOperation::Read => {
                 let source_id =
@@ -174,7 +174,6 @@ Sources must be configured separately before they can be used."#,
                         source_id
                     )),
                     content: json!(items),
-                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
@@ -215,7 +214,6 @@ Sources must be configured separately before they can be used."#,
                         source_id
                     )),
                     content: json!(results),
-                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
@@ -236,7 +234,6 @@ Sources must be configured separately before they can be used."#,
                     success: true,
                     message: Some(format!("Started monitoring source '{}'", source_id)),
                     content: json!(null),
-                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
@@ -259,7 +256,6 @@ Sources must be configured separately before they can be used."#,
                     success: true,
                     message: Some(format!("Paused notifications from source '{}'", source_id)),
                     content: json!(null),
-                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
@@ -279,7 +275,6 @@ Sources must be configured separately before they can be used."#,
                     success: true,
                     message: Some(format!("Resumed notifications from source '{}'", source_id)),
                     content: json!(null),
-                    request_heartbeat: input.request_heartbeat,
                 })
             }
 
@@ -299,7 +294,6 @@ Sources must be configured separately before they can be used."#,
                     success: true,
                     message: Some(format!("Found {} configured sources", source_list.len())),
                     content: json!(source_list),
-                    request_heartbeat: input.request_heartbeat,
                 })
             }
         }

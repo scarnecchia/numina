@@ -604,3 +604,8 @@ config_path = "agents/momentum.toml"
 agent_id = "b134d9f4219642be8190a6eb93e9339e"
 name = "Anchor"
 config_path = "agents/anchor.toml"
+
+[discord]
+allowed_channels = ["1390442382654181477"]
+allowed_guilds = ["1310716219527135363"]
+admin_users = ["549170854458687509"]

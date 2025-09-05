@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use pattern_core::Result;
+use pattern_core::config::DiscordAppConfig;
 use pattern_core::context::message_router::{MessageEndpoint, MessageOrigin};
 use pattern_core::message::{ContentPart, Message, MessageContent};
 
@@ -32,6 +33,34 @@ impl DiscordEndpoint {
             default_channel: None,
             default_dm_user: None,
         }
+    }
+
+    /// Create a new Discord endpoint with token and optional config
+    pub fn with_config(token: String, config: Option<&DiscordAppConfig>) -> Self {
+        let mut endpoint = Self::new(token);
+
+        // Apply config if provided
+        if let Some(cfg) = config {
+            // Set default channel from first allowed channel
+            if let Some(channels) = &cfg.allowed_channels {
+                if let Some(first) = channels.first() {
+                    if let Ok(channel_id) = first.parse::<u64>() {
+                        endpoint.default_channel = Some(ChannelId::new(channel_id));
+                    }
+                }
+            }
+
+            // Set default DM user from first admin user
+            if let Some(admins) = &cfg.admin_users {
+                if let Some(first) = admins.first() {
+                    if let Ok(user_id) = first.parse::<u64>() {
+                        endpoint.default_dm_user = Some(DiscordUserId::new(user_id));
+                    }
+                }
+            }
+        }
+
+        endpoint
     }
 
     /// Set the bot reference for context access
@@ -62,58 +91,74 @@ impl DiscordEndpoint {
         }
 
         // Try to resolve by channel name using Discord API
-        // We need a guild ID to search channels - try to get it from environment
-        if let Ok(guild_id_str) = std::env::var("DISCORD_GUILD_ID") {
-            if let Ok(guild_id_u64) = guild_id_str.parse::<u64>() {
-                let guild_id = serenity::model::id::GuildId::new(guild_id_u64);
-
-                info!(
-                    "Fetching channels for guild {} to resolve name '{}'",
-                    guild_id, channel_ref
-                );
-
-                // Try to get guild channels via HTTP API
-                match self.http.get_channels(guild_id).await {
-                    Ok(channels) => {
-                        info!(
-                            "Retrieved {} channels from guild {}",
-                            channels.len(),
-                            guild_id
-                        );
-
-                        // Search for exact channel name match
-                        for channel in &channels {
-                            if channel.name == channel_ref {
-                                info!(
-                                    "Found exact match channel '{}' with ID: {}",
-                                    channel_ref, channel.id
-                                );
-                                return Some(channel.id);
-                            }
-                        }
-
-                        // If no exact match, try partial matching
-                        for channel in &channels {
-                            if channel.name.contains(channel_ref) {
-                                info!(
-                                    "Found partial match channel '{}' -> '{}' with ID: {}",
-                                    channel_ref, channel.name, channel.id
-                                );
-                                return Some(channel.id);
-                            }
-                        }
-
-                        info!("No channel found matching name '{}'", channel_ref);
-                    }
-                    Err(e) => {
-                        info!("Failed to fetch guild channels: {}", e);
-                    }
-                }
-            } else {
-                info!("Invalid DISCORD_GUILD_ID format: {}", guild_id_str);
-            }
+        // Prefer guilds from bot config if available; else fall back to env
+        let guild_ids: Vec<u64> = if let Some(bot) = &self.bot {
+            bot.config()
+                .allowed_guilds
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect()
+        } else if let Ok(guilds) = std::env::var("DISCORD_GUILD_IDS") {
+            guilds
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect()
+        } else if let Ok(one) = std::env::var("DISCORD_GUILD_ID") {
+            one.parse::<u64>().ok().into_iter().collect()
         } else {
-            info!("DISCORD_GUILD_ID not set, cannot resolve channel names to IDs");
+            Vec::new()
+        };
+
+        for guild_id_u64 in guild_ids {
+            let guild_id = serenity::model::id::GuildId::new(guild_id_u64);
+
+            info!(
+                "Fetching channels for guild {} to resolve name '{}'",
+                guild_id, channel_ref
+            );
+
+            // Try to get guild channels via HTTP API
+            match self.http.get_channels(guild_id).await {
+                Ok(channels) => {
+                    info!(
+                        "Retrieved {} channels from guild {}",
+                        channels.len(),
+                        guild_id
+                    );
+
+                    // Search for exact channel name match
+                    for channel in &channels {
+                        if channel.name == channel_ref {
+                            info!(
+                                "Found exact match channel '{}' with ID: {}",
+                                channel_ref, channel.id
+                            );
+                            return Some(channel.id);
+                        }
+                    }
+
+                    // If no exact match, try partial matching
+                    for channel in &channels {
+                        if channel.name.contains(channel_ref) {
+                            info!(
+                                "Found partial match channel '{}' -> '{}' with ID: {}",
+                                channel_ref, channel.name, channel.id
+                            );
+                            return Some(channel.id);
+                        }
+                    }
+
+                    info!(
+                        "No channel found matching name '{}' in {}",
+                        channel_ref, guild_id
+                    );
+                }
+                Err(e) => {
+                    info!("Failed to fetch guild channels for {}: {}", guild_id, e);
+                }
+            }
         }
 
         info!("Could not resolve channel name '{}' to ID", channel_ref);
@@ -144,110 +189,123 @@ impl DiscordEndpoint {
         }
 
         // Try to resolve by username/display name using Discord API
-        // We need a guild ID to search members - try to get it from environment
-        if let Ok(guild_id_str) = std::env::var("DISCORD_GUILD_ID") {
-            if let Ok(guild_id_u64) = guild_id_str.parse::<u64>() {
-                let guild_id = serenity::model::id::GuildId::new(guild_id_u64);
+        // Prefer guilds from bot config if available; else fall back to env
+        let guild_ids: Vec<u64> = if let Some(bot) = &self.bot {
+            bot.config()
+                .allowed_guilds
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect()
+        } else if let Ok(guilds) = std::env::var("DISCORD_GUILD_IDS") {
+            guilds
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect()
+        } else if let Ok(one) = std::env::var("DISCORD_GUILD_ID") {
+            one.parse::<u64>().ok().into_iter().collect()
+        } else {
+            Vec::new()
+        };
 
-                info!(
-                    "Fetching guild members from guild {} to resolve user '{}'",
-                    guild_id, user_ref
-                );
+        for guild_id_u64 in guild_ids {
+            let guild_id = serenity::model::id::GuildId::new(guild_id_u64);
 
-                // Try to get guild members via HTTP API
-                // Note: This requires proper bot permissions (GUILD_MEMBERS intent)
-                match self
-                    .http
-                    .get_guild_members(guild_id, Some(1000), None)
-                    .await
-                {
-                    Ok(members) => {
-                        info!(
-                            "Retrieved {} members from guild {}",
-                            members.len(),
-                            guild_id
-                        );
+            info!(
+                "Fetching guild members from guild {} to resolve user '{}'",
+                guild_id, user_ref
+            );
 
-                        // Search for exact username match (case insensitive)
-                        for member in &members {
-                            if member.user.name.to_lowercase() == user_ref.to_lowercase() {
+            // Try to get guild members via HTTP API
+            // Note: This requires proper bot permissions (GUILD_MEMBERS intent)
+            match self
+                .http
+                .get_guild_members(guild_id, Some(1000), None)
+                .await
+            {
+                Ok(members) => {
+                    info!(
+                        "Retrieved {} members from guild {}",
+                        members.len(),
+                        guild_id
+                    );
+
+                    // Search for exact username match (case insensitive)
+                    for member in &members {
+                        if member.user.name.to_lowercase() == user_ref.to_lowercase() {
+                            info!(
+                                "Found exact username match '{}' -> {} (ID: {})",
+                                user_ref, member.user.name, member.user.id
+                            );
+                            return Some(member.user.id);
+                        }
+                    }
+
+                    // Search for exact display name match (case insensitive)
+                    for member in &members {
+                        if let Some(ref display_name) = member.user.global_name {
+                            if display_name.to_lowercase() == user_ref.to_lowercase() {
                                 info!(
-                                    "Found exact username match '{}' -> {} (ID: {})",
-                                    user_ref, member.user.name, member.user.id
+                                    "Found exact display name match '{}' -> {} (ID: {})",
+                                    user_ref, display_name, member.user.id
                                 );
                                 return Some(member.user.id);
                             }
                         }
+                    }
 
-                        // Search for exact display name match (case insensitive)
-                        for member in &members {
-                            if let Some(ref display_name) = member.user.global_name {
-                                if display_name.to_lowercase() == user_ref.to_lowercase() {
-                                    info!(
-                                        "Found exact display name match '{}' -> {} (ID: {})",
-                                        user_ref, display_name, member.user.id
-                                    );
-                                    return Some(member.user.id);
-                                }
+                    // Search for exact nickname match (case insensitive)
+                    for member in &members {
+                        if let Some(ref nick) = member.nick {
+                            if nick.to_lowercase() == user_ref.to_lowercase() {
+                                info!(
+                                    "Found exact nickname match '{}' -> {} (ID: {})",
+                                    user_ref, nick, member.user.id
+                                );
+                                return Some(member.user.id);
                             }
                         }
+                    }
 
-                        // Search for exact nickname match (case insensitive)
-                        for member in &members {
-                            if let Some(ref nick) = member.nick {
-                                if nick.to_lowercase() == user_ref.to_lowercase() {
-                                    info!(
-                                        "Found exact nickname match '{}' -> {} (ID: {})",
-                                        user_ref, nick, member.user.id
-                                    );
-                                    return Some(member.user.id);
-                                }
-                            }
+                    // If no exact match, try partial matching on username
+                    for member in &members {
+                        if member
+                            .user
+                            .name
+                            .to_lowercase()
+                            .contains(&user_ref.to_lowercase())
+                        {
+                            info!(
+                                "Found partial username match '{}' -> {} (ID: {})",
+                                user_ref, member.user.name, member.user.id
+                            );
+                            return Some(member.user.id);
                         }
+                    }
 
-                        // If no exact match, try partial matching on username
-                        for member in &members {
-                            if member
-                                .user
-                                .name
+                    // Try partial matching on display name
+                    for member in &members {
+                        if let Some(ref display_name) = member.user.global_name {
+                            if display_name
                                 .to_lowercase()
                                 .contains(&user_ref.to_lowercase())
                             {
                                 info!(
-                                    "Found partial username match '{}' -> {} (ID: {})",
-                                    user_ref, member.user.name, member.user.id
+                                    "Found partial display name match '{}' -> {} (ID: {})",
+                                    user_ref, display_name, member.user.id
                                 );
                                 return Some(member.user.id);
                             }
                         }
-
-                        // Try partial matching on display name
-                        for member in &members {
-                            if let Some(ref display_name) = member.user.global_name {
-                                if display_name
-                                    .to_lowercase()
-                                    .contains(&user_ref.to_lowercase())
-                                {
-                                    info!(
-                                        "Found partial display name match '{}' -> {} (ID: {})",
-                                        user_ref, display_name, member.user.id
-                                    );
-                                    return Some(member.user.id);
-                                }
-                            }
-                        }
-
-                        info!("No user found matching '{}'", user_ref);
                     }
-                    Err(e) => {
-                        info!("Failed to fetch guild members: {}", e);
-                    }
+
+                    info!("No user found matching '{}'", user_ref);
                 }
-            } else {
-                info!("Invalid DISCORD_GUILD_ID format: {}", guild_id_str);
+                Err(e) => {
+                    info!("Failed to fetch guild members for {}: {}", guild_id, e);
+                }
             }
-        } else {
-            info!("DISCORD_GUILD_ID not set, cannot resolve usernames to IDs");
         }
 
         info!("Could not resolve username '{}' to user ID", user_ref);
@@ -375,6 +433,77 @@ impl DiscordEndpoint {
         serenity::model::channel::ReactionType::Unicode(trimmed.to_string())
     }
 
+    /// Check if a channel is a DM and validate against admin_users if applicable
+    async fn validate_channel_access(&self, channel_id: ChannelId) -> Result<()> {
+        if let Some(ref bot) = self.bot {
+            // Try to get channel info to determine type
+            match self.http.get_channel(channel_id).await {
+                Ok(channel) => {
+                    use serenity::model::channel::Channel;
+                    match channel {
+                        Channel::Private(private_channel) => {
+                            // This is a DM channel - validate against admin_users
+                            if let Some(admin_users) = &bot.config().admin_users {
+                                // Get the recipient user ID
+                                let recipient_id = private_channel.recipient.id.to_string();
+
+                                // Check if recipient is in admin_users
+                                if !admin_users.contains(&recipient_id) {
+                                    return Err(pattern_core::CoreError::ToolExecutionFailed {
+                                        tool_name: "discord_endpoint".to_string(),
+                                        cause: format!(
+                                            "DM channel {} with recipient {} not in admin_users; delivery blocked",
+                                            channel_id, recipient_id
+                                        ),
+                                        parameters: serde_json::json!({
+                                            "channel_id": channel_id.get(),
+                                            "recipient_id": recipient_id,
+                                        }),
+                                    });
+                                }
+                            }
+                            // DM channel with no admin_users configured - allow
+                        }
+                        Channel::Guild(_) | _ => {
+                            // This is a guild channel or other non-DM channel type - validate against allowed_channels
+                            if let Some(allowed) = &bot.config().allowed_channels {
+                                let ok = allowed.iter().any(|s| s == &channel_id.to_string());
+                                if !ok {
+                                    return Err(pattern_core::CoreError::ToolExecutionFailed {
+                                        tool_name: "discord_endpoint".to_string(),
+                                        cause: format!(
+                                            "Channel {} not in allowed_channels; delivery blocked",
+                                            channel_id
+                                        ),
+                                        parameters: serde_json::json!({ "channel_id": channel_id.get() }),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // If we can't get channel info, be conservative and check allowed_channels
+                    warn!("Failed to get channel info for {}: {}", channel_id, e);
+                    if let Some(allowed) = &bot.config().allowed_channels {
+                        let ok = allowed.iter().any(|s| s == &channel_id.to_string());
+                        if !ok {
+                            return Err(pattern_core::CoreError::ToolExecutionFailed {
+                                tool_name: "discord_endpoint".to_string(),
+                                cause: format!(
+                                    "Channel {} not validated; couldn't get channel info: {}",
+                                    channel_id, e
+                                ),
+                                parameters: serde_json::json!({ "channel_id": channel_id.get() }),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Send a message to a specific Discord channel
     async fn send_to_channel(&self, channel_id: ChannelId, content: String) -> Result<()> {
         info!(
@@ -460,17 +589,47 @@ impl DiscordEndpoint {
             }
         }
 
-        // Fall back to sending as regular message
-        channel_id.say(&self.http, &content).await.map_err(|e| {
-            pattern_core::CoreError::ToolExecutionFailed {
-                tool_name: "discord_endpoint".to_string(),
-                cause: format!("Failed to send message to channel: {}", e),
-                parameters: serde_json::json!({
-                    "channel_id": channel_id.get(),
-                    "content_length": content.len()
-                }),
+        // Fall back to sending as regular message with timeout
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            channel_id.say(&self.http, &content),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                info!("Successfully sent message to channel {}", channel_id);
             }
-        })?;
+            Ok(Err(e)) => {
+                tracing::error!("Discord API error for channel {}: {}", channel_id, e);
+                return Err(pattern_core::CoreError::ToolExecutionFailed {
+                    tool_name: "discord_endpoint".to_string(),
+                    cause: format!("Failed to send message to channel: {}", e),
+                    parameters: serde_json::json!({
+                        "channel_id": channel_id.get(),
+                        "content_length": content.len(),
+                        "error": e.to_string()
+                    }),
+                });
+            }
+            Err(_) => {
+                tracing::error!(
+                    "Discord API TIMEOUT for channel {} after 10 seconds",
+                    channel_id
+                );
+                return Err(pattern_core::CoreError::ToolExecutionFailed {
+                    tool_name: "discord_endpoint".to_string(),
+                    cause: format!(
+                        "Discord API call timed out after 10 seconds for channel {}",
+                        channel_id
+                    ),
+                    parameters: serde_json::json!({
+                        "channel_id": channel_id.get(),
+                        "content_length": content.len(),
+                        "timeout": "10s"
+                    }),
+                });
+            }
+        }
 
         info!("Sent message to Discord channel {}", channel_id);
         Ok(())
@@ -550,6 +709,9 @@ impl MessageEndpoint for DiscordEndpoint {
             if let Some(channel_id) = meta.get("target_id").and_then(|v| v.as_u64()) {
                 let channel = ChannelId::new(channel_id);
 
+                // Validate channel access (handles both DM and guild channels)
+                self.validate_channel_access(channel).await?;
+
                 // If we have a message to reply to and response is delayed, use reply
                 if let Some(msg_id) = reply_to_id {
                     // Check if this is a delayed response
@@ -609,6 +771,22 @@ impl MessageEndpoint for DiscordEndpoint {
             // Check if target_id contains a channel name to resolve
             if let Some(target_id) = meta.get("target_id").and_then(|v| v.as_str()) {
                 if let Some(channel_id) = self.resolve_channel_id(target_id).await {
+                    // Enforce allowed_channels whitelist if configured on bot
+                    if let Some(ref bot) = self.bot {
+                        if let Some(allowed) = &bot.config().allowed_channels {
+                            let ok = allowed.iter().any(|s| s == &channel_id.to_string());
+                            if !ok {
+                                return Err(pattern_core::CoreError::ToolExecutionFailed {
+                                    tool_name: "discord_endpoint".to_string(),
+                                    cause: format!(
+                                        "Channel {} not in allowed_channels; delivery blocked",
+                                        channel_id
+                                    ),
+                                    parameters: serde_json::json!({ "channel_id": channel_id }),
+                                });
+                            }
+                        }
+                    }
                     self.send_to_channel(channel_id, content).await?;
                     return Ok(Some(format!("channel:{}", channel_id)));
                 }
@@ -624,6 +802,22 @@ impl MessageEndpoint for DiscordEndpoint {
             if let Some(custom) = meta.get("custom").and_then(|v| v.as_object()) {
                 if let Some(channel_id) = custom.get("discord_channel_id").and_then(|v| v.as_u64())
                 {
+                    // Enforce allowed_channels whitelist if configured on bot
+                    if let Some(ref bot) = self.bot {
+                        if let Some(allowed) = &bot.config().allowed_channels {
+                            let ok = allowed.iter().any(|s| s == &channel_id.to_string());
+                            if !ok {
+                                return Err(pattern_core::CoreError::ToolExecutionFailed {
+                                    tool_name: "discord_endpoint".to_string(),
+                                    cause: format!(
+                                        "Channel {} not in allowed_channels; delivery blocked",
+                                        channel_id
+                                    ),
+                                    parameters: serde_json::json!({ "channel_id": channel_id }),
+                                });
+                            }
+                        }
+                    }
                     self.send_to_channel(ChannelId::new(channel_id), content)
                         .await?;
                     return Ok(Some(format!("channel:{}", channel_id)));

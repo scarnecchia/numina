@@ -197,6 +197,10 @@ pub struct ContextConfig {
 
     /// Model-specific adjustments
     pub model_adjustments: ModelAdjustments,
+
+    /// Tools that require consent (populated from runtime rules)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consent_required_tools: Vec<String>,
 }
 
 impl Default for ContextConfig {
@@ -210,6 +214,7 @@ impl Default for ContextConfig {
             tool_usage_rules: Vec::new(),
             tool_workflow_rules: Vec::new(),
             model_adjustments: ModelAdjustments::default(),
+            consent_required_tools: Vec::new(),
         }
     }
 }
@@ -303,6 +308,12 @@ impl ContextBuilder {
         // Add usage rules from registry (these are basic tool behaviors)
         self.config.tool_usage_rules.extend(registry_rules);
 
+        self
+    }
+
+    /// Add tools that require consent (tool names)
+    pub fn with_consent_required_tools(mut self, tools: Vec<String>) -> Self {
+        self.config.consent_required_tools = tools;
         self
     }
 

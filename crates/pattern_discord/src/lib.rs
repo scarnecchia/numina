@@ -31,6 +31,7 @@ pub mod config {
         pub token: String,
         pub prefix: String,
         pub allowed_channels: Option<Vec<String>>,
+        pub allowed_guilds: Option<Vec<String>>,
         pub admin_users: Option<Vec<String>>,
     }
 
@@ -40,6 +41,7 @@ pub mod config {
                 token: String::new(),
                 prefix: "!".to_string(),
                 allowed_channels: None,
+                allowed_guilds: None,
                 admin_users: None,
             }
         }

@@ -171,6 +171,31 @@ pub async fn handle_slash_command(
             output.print("");
             Ok(false)
         }
+        "/permit" => {
+            if parts.len() < 2 {
+                output.error("Usage: /permit <request_id> [once|always|ttl=600]");
+                return Ok(false);
+            }
+            let id = parts[1];
+            let mode = parts.get(2).copied();
+            match crate::permission_sink::cli_permit(id, mode).await {
+                Ok(_) => output.success(&format!("Approved {}", id)),
+                Err(e) => output.error(&format!("Failed to approve: {}", e)),
+            }
+            Ok(false)
+        }
+        "/deny" => {
+            if parts.len() != 2 {
+                output.error("Usage: /deny <request_id>");
+                return Ok(false);
+            }
+            let id = parts[1];
+            match crate::permission_sink::cli_deny(id).await {
+                Ok(_) => output.success(&format!("Denied {}", id)),
+                Err(e) => output.error(&format!("Failed to deny: {}", e)),
+            }
+            Ok(false)
+        }
         "/memory" => {
             // Parse command format: /memory [agent_name] [block_name]
             let (agent_name, block_name) = if parts.len() == 1 {
