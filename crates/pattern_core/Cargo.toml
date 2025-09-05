@@ -1,6 +1,6 @@
 [package]
 name = "pattern-core"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -47,7 +47,6 @@ candle-transformers = { version = "0.9", optional = true }
 hf-hub = { version = "0.4", default-features = false, features = [
     "rustls-tls",
     "tokio",
-    "ureq",
 ], optional = true }
 tokenizers = { version = "0.21", optional = true }
 
@@ -76,7 +75,6 @@ multihash-codetable.workspace = true
 
 # Compression for archives
 zstd = { version = "0.13", optional = true }
-ureq.workspace = true
 
 atrium-api.workspace = true
 atrium-oauth.workspace = true
@@ -109,7 +107,7 @@ proc-macro2-diagnostics = "0.10"
 miette = { workspace = true, features = ["fancy"] }
 
 [features]
-default = ["surreal-embedded", "embed-candle", "embed-cloud", "file-watch"]
+default = ["surreal-embedded", "embed-cloud", "file-watch"]
 nd = []                                                                     # Enable neurodivergent features when pattern-nd is ready
 export = ["zstd"]                                                           # Agent export/import with compression
 oauth = ["reqwest-middleware", "http"]                                      # OAuth authentication support

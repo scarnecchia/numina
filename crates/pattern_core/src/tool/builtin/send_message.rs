@@ -64,11 +64,7 @@ impl AiTool for SendMessageTool {
         "Send a message to the user, another agent, a group, or a specific channel, or as a post on bluesky. This is the primary way to communicate."
     }
 
-    async fn execute(
-        &self,
-        params: Self::Input,
-        _meta: &crate::tool::ExecutionMeta,
-    ) -> Result<Self::Output> {
+    async fn execute(&self, params: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
         // Get the message router from the handle
         let router =
             self.handle

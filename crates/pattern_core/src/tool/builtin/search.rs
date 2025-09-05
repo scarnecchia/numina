@@ -108,11 +108,7 @@ impl AiTool for SearchTool {
                 "
     }
 
-    async fn execute(
-        &self,
-        params: Self::Input,
-        _meta: &crate::tool::ExecutionMeta,
-    ) -> Result<Self::Output> {
+    async fn execute(&self, params: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
         let limit = params
             .limit
             .map(|l| l.max(1).min(100) as usize)

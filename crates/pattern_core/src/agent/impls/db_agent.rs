@@ -2274,13 +2274,14 @@ where
             let (current_state, maybe_receiver) = self_clone.state().await;
             match current_state {
                 AgentState::Ready => {
+                    tracing::info!("pre-request: state=Ready; brief 10ms debounce");
                     // Ready to process, but maybe wait JUST a little
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 AgentState::Processing { active_batches: _ } => {
                     // Check if we're continuing an existing batch
                     if let Some(batch_id) = message.batch {
-                        // Try to find and wait on the batch's notifier
+                        // Try to find and optionally wait on the batch's notifier
                         let notifier = {
                             let ctx = context.read().await;
                             let history = ctx.history.read().await;
@@ -2292,31 +2293,48 @@ where
                         };
 
                         if let Some(notifier) = notifier {
-                            // Wait for tool responses, then wait for ready with a short timeout
-                            notifier.notified().await;
+                            tracing::info!(
+                                "pre-request: state=Processing; batch={:?}; found notifier; waiting ≤180s",
+                                batch_id
+                            );
+                            let t0 = std::time::Instant::now();
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(180), notifier.notified())
+                                    .await;
+                            tracing::info!(
+                                "pre-request: notifier wait finished after {}ms (timeout or fired)",
+                                t0.elapsed().as_millis()
+                            );
                             if let Some(mut receiver) = maybe_receiver {
+                                tracing::info!("pre-request: waiting for Ready state (≤5s)");
                                 let timeout = tokio::time::timeout(
                                     Duration::from_secs(5),
                                     receiver.wait_for(|s| matches!(s, AgentState::Ready)),
                                 );
                                 let _ = timeout.await;
                             }
+                        } else {
+                            tracing::info!(
+                                "pre-request: state=Processing; batch={:?}; no notifier found; proceeding",
+                                batch_id
+                            );
                         }
                     } else {
-                        // New batch, wait for Ready state with medium timeout
-                        if let Some(mut receiver) = maybe_receiver {
-                            let timeout = tokio::time::timeout(
-                                Duration::from_secs(20),
-                                receiver.wait_for(|s| matches!(s, AgentState::Ready)),
-                            );
-                            let _ = timeout.await;
-                        }
+                        // Allow concurrent processing for new incoming messages; tiny debounce only
+                        tracing::info!(
+                            "pre-request: state=Processing; no batch id; proceeding concurrently (10ms debounce)"
+                        );
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
                 AgentState::Error {
                     kind,
                     message: error_msg,
                 } => {
+                    tracing::info!(
+                        "pre-request: state=Error({:?}); sleeping 30s and attempting recovery",
+                        kind
+                    );
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     // Run error recovery based on kind
                     tracing::warn!("Agent in error state: {:?} - {}", kind, error_msg);
@@ -2332,6 +2350,10 @@ where
                 }
                 _ => {
                     // Cooldown or Suspended - wait for Ready
+                    tracing::info!(
+                        "pre-request: state={:?}; waiting for Ready (≤200s)",
+                        current_state
+                    );
                     if let Some(mut receiver) = maybe_receiver {
                         let timeout = tokio::time::timeout(
                             Duration::from_secs(200),

@@ -122,11 +122,7 @@ impl AiTool for ConstellationSearchTool {
                 "
     }
 
-    async fn execute(
-        &self,
-        params: Self::Input,
-        _meta: &crate::tool::ExecutionMeta,
-    ) -> Result<Self::Output> {
+    async fn execute(&self, params: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
         let limit = params.limit.max(1).min(100) as usize;
 
         match params.domain {
