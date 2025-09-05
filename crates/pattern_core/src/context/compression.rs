@@ -1350,28 +1350,43 @@ mod tests {
     fn test_compression_metadata() {
         let compressor = MessageCompressor::new(CompressionStrategy::Truncate { keep_recent: 1 });
 
-        let messages = vec![
-            Message::user("Message 1"),
-            Message::agent("Message 2"),
-            Message::user("Message 3"),
-        ];
-
-        // Create batches from messages
+        // Build three batches; ensure first two are complete so they can be archived
         let mut batches = Vec::new();
-        for msg in messages {
+        // Batch 1: user then assistant (complete)
+        {
             let batch_id = crate::agent::get_next_message_position_sync();
             batches.push(crate::message::MessageBatch::from_messages(
                 batch_id,
                 crate::message::BatchType::UserRequest,
-                vec![msg],
+                vec![Message::user("Message 1"), Message::agent("Ack 1")],
+            ));
+        }
+        // Batch 2: assistant only (complete)
+        {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                vec![Message::agent("Message 2")],
+            ));
+        }
+        // Batch 3: user then assistant (complete and most recent; should be kept)
+        {
+            let batch_id = crate::agent::get_next_message_position_sync();
+            batches.push(crate::message::MessageBatch::from_messages(
+                batch_id,
+                crate::message::BatchType::UserRequest,
+                vec![Message::user("Message 3"), Message::agent("Ack 3")],
             ));
         }
 
         let result = tokio_test::block_on(compressor.compress(batches, 1, None)).unwrap();
 
-        assert_eq!(result.metadata.original_count, 3);
-        assert_eq!(result.metadata.compressed_count, 2);
-        assert_eq!(result.metadata.archived_count, 2);
+        // With 3 batches constructed as [2,1,2] messages, keep_recent=1 keeps the last (2 msgs).
+        // Archived should contain the first two batches (2 + 1 = 3 messages).
+        assert_eq!(result.metadata.original_count, 5);
+        assert_eq!(result.metadata.compressed_count, 3);
+        assert_eq!(result.metadata.archived_count, 3);
         assert_eq!(result.metadata.strategy_used, "truncate");
     }
 

@@ -1857,7 +1857,12 @@ impl AgentContext {
                 tool: call.fn_name.clone(),
                 args_digest: None,
             };
-            crate::permission::broker()
+            tracing::info!(
+                "permission: requesting consent for tool '{}' (timeout=90s)",
+                call.fn_name
+            );
+            let t0 = std::time::Instant::now();
+            let grant = crate::permission::broker()
                 .request(
                     self.handle.agent_id.clone(),
                     call.fn_name.clone(),
@@ -1866,7 +1871,21 @@ impl AgentContext {
                     route_metadata.clone(),
                     std::time::Duration::from_secs(90),
                 )
-                .await
+                .await;
+            match &grant {
+                Some(g) => tracing::info!(
+                    "permission: granted for '{}' after {}ms (expires={:?})",
+                    call.fn_name,
+                    t0.elapsed().as_millis(),
+                    g.expires_at
+                ),
+                None => tracing::warn!(
+                    "permission: denied/timeout for '{}' after {}ms",
+                    call.fn_name,
+                    t0.elapsed().as_millis()
+                ),
+            }
+            grant
         } else {
             None
         };

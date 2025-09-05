@@ -105,9 +105,9 @@ impl GroupManager for SleeptimeManager {
 
             // Check if it's time to run checks
             let time_since_last_check = Utc::now() - last_check;
+            let safe_interval = check_interval.saturating_sub(Duration::from_secs(40));
             let should_check = time_since_last_check
-                >= ChronoDuration::from_std(*check_interval - Duration::from_secs(40))
-                    .unwrap_or(ChronoDuration::minutes(10));
+                >= ChronoDuration::from_std(safe_interval).unwrap_or(ChronoDuration::minutes(10));
 
             // Send start event
             let active_count = agents.iter().filter(|awm| awm.membership.is_active).count();

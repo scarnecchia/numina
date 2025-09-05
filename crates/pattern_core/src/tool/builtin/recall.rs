@@ -363,20 +363,23 @@ impl RecallTool {
             });
         }
 
-        // Inspect current block and gate
-        let current = self.handle.memory.get_block(&label).unwrap();
-        if current.memory_type != MemoryType::Archival {
+        // Inspect current block and gate (copy fields, drop guard)
+        let (current_type, current_perm) = {
+            let guard = self.handle.memory.get_block(&label).unwrap();
+            (guard.memory_type, guard.permission)
+        };
+        if current_type != MemoryType::Archival {
             return Ok(RecallOutput {
                 success: false,
                 message: Some(format!(
                     "Block '{}' is not recall memory (type: {:?})",
-                    label, current.memory_type
+                    label, current_type
                 )),
                 results: vec![],
             });
         }
 
-        match acl_check(MemoryOp::Append, current.permission) {
+        match acl_check(MemoryOp::Append, current_perm) {
             MemoryGate::Allow => {}
             MemoryGate::Deny { reason } => {
                 return Ok(RecallOutput {
@@ -391,7 +394,7 @@ impl RecallTool {
                         self.handle.agent_id.clone(),
                         "recall".to_string(),
                         crate::permission::PermissionScope::MemoryEdit { key: label.clone() },
-                        Some(consent_reason(&label, MemoryOp::Append, current.permission)),
+                        Some(consent_reason(&label, MemoryOp::Append, current_perm)),
                         meta.route_metadata.clone(),
                         std::time::Duration::from_secs(90),
                     )

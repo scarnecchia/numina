@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Orual <orual@nonbinary.computer>"]
 license = "AGPL-3.0"
@@ -76,7 +76,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "deflate",
 ] }
 #hyper-tls = { version = "0.6", features = ["vendored"] }
-ureq = { version = "*" } #features = ["vendored"] }
 
 # MCP client transport dependencies
 sse-stream = "0.2"

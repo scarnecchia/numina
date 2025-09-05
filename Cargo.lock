@@ -3143,7 +3143,6 @@ checksum = "629d8f3bbeda9d148036d6b0de0a3ab947abd08ce90626327fc3547a49d59d97"
 dependencies = [
  "dirs 6.0.0",
  "futures",
- "http 1.3.1",
  "indicatif",
  "libc",
  "log",
@@ -3154,7 +3153,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.16",
  "tokio",
- "ureq 2.12.1",
  "windows-sys 0.60.2",
 ]
 
@@ -5078,7 +5076,7 @@ checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
 
 [[package]]
 name = "pattern-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum 0.7.9",
  "chrono",
@@ -5094,7 +5092,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5159,7 +5157,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "trybuild",
- "ureq 3.1.0",
  "url",
  "urlencoding",
  "uuid",
@@ -5169,7 +5166,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-discord"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5184,6 +5181,7 @@ dependencies = [
  "pattern-nd",
  "pretty_assertions",
  "regex",
+ "reqwest 0.12.23",
  "serde",
  "serde_json",
  "serenity",
@@ -5191,7 +5189,6 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
- "ureq 3.1.0",
  "uuid",
 ]
 
@@ -5214,7 +5211,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5238,7 +5235,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "ureq 3.1.0",
  "uuid",
 ]
 
@@ -5265,7 +5261,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "axum 0.7.9",
@@ -5295,7 +5291,7 @@ dependencies = [
 
 [[package]]
 name = "pattern_cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "atrium-api",
@@ -6121,7 +6117,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustls 0.21.12",
- "rustls-pemfile 1.0.4",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -6613,7 +6609,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9aace74cb666635c918e9c12bc0d348266037aa8eb599b5cba565709a8dff00"
 dependencies = [
  "openssl-probe",
- "rustls-pemfile 1.0.4",
+ "rustls-pemfile",
  "schannel",
  "security-framework",
 ]
@@ -6625,15 +6621,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
 dependencies = [
  "base64 0.21.7",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -7355,17 +7342,6 @@ checksum = "233504af464074f9d066d7b5416c5f9b894a5862a6506e306f7b816cdd6f1807"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "socks"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0c3dbbd9ae980613c6dd8e28a9407b50509d3803b57624d5dfe8315218cd58b"
-dependencies = [
- "byteorder",
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -8825,55 +8801,6 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
-
-[[package]]
-name = "ureq"
-version = "2.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "log",
- "once_cell",
- "rustls 0.23.31",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "socks",
- "url",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "ureq"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00432f493971db5d8e47a65aeb3b02f8226b9b11f1450ff86bb772776ebadd70"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "log",
- "percent-encoding",
- "rustls 0.23.31",
- "rustls-pemfile 2.2.0",
- "rustls-pki-types",
- "ureq-proto",
- "utf-8",
- "webpki-roots 1.0.2",
-]
-
-[[package]]
-name = "ureq-proto"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbe120bb823a0061680e66e9075942fcdba06d46551548c2c259766b9558bc9a"
-dependencies = [
- "base64 0.22.1",
- "http 1.3.1",
- "httparse",
- "log",
-]
 
 [[package]]
 name = "url"

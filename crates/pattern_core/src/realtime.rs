@@ -50,7 +50,7 @@ pub fn tap_agent_stream(
     ctx: AgentEventContext,
 ) -> Box<dyn tokio_stream::Stream<Item = ResponseEvent> + Send + Unpin> {
     use tokio::sync::mpsc;
-    let (tx, rx) = mpsc::channel::<ResponseEvent>(64);
+    let (tx, rx) = mpsc::channel::<ResponseEvent>(100);
 
     let ctx_arc = Arc::new(ctx);
     tokio::spawn(async move {
@@ -84,7 +84,7 @@ pub fn tap_group_stream(
     ctx: GroupEventContext,
 ) -> Box<dyn tokio_stream::Stream<Item = GroupResponseEvent> + Send + Unpin> {
     use tokio::sync::mpsc;
-    let (tx, rx) = mpsc::channel::<GroupResponseEvent>(64);
+    let (tx, rx) = mpsc::channel::<GroupResponseEvent>(100);
 
     let ctx_arc = Arc::new(ctx);
     tokio::spawn(async move {
@@ -108,4 +108,18 @@ pub fn tap_group_stream(
     });
 
     Box::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
+#[async_trait::async_trait]
+impl GroupEventSink for Arc<dyn GroupEventSink> {
+    async fn on_event(&self, event: GroupResponseEvent, ctx: GroupEventContext) {
+        (**self).on_event(event, ctx).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentEventSink for Arc<dyn AgentEventSink> {
+    async fn on_event(&self, event: ResponseEvent, ctx: AgentEventContext) {
+        (**self).on_event(event, ctx).await;
+    }
 }
