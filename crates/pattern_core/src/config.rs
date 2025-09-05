@@ -184,6 +184,12 @@ pub enum ToolRuleTypeConfig {
 
     /// Call this tool periodically during long conversations (in seconds)
     Periodic(u64),
+
+    /// Require user consent before executing the tool
+    RequiresConsent {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
 }
 
 fn default_rule_priority() -> u8 {
@@ -245,6 +251,9 @@ impl ToolRuleTypeConfig {
             ToolRuleTypeConfig::Periodic(seconds) => {
                 ToolRuleType::Periodic(Duration::from_secs(*seconds))
             }
+            ToolRuleTypeConfig::RequiresConsent { scope } => ToolRuleType::RequiresConsent {
+                scope: scope.clone(),
+            },
         };
 
         Ok(runtime_type)
@@ -268,6 +277,9 @@ impl ToolRuleTypeConfig {
             ToolRuleType::MaxCalls(max) => ToolRuleTypeConfig::MaxCalls(*max),
             ToolRuleType::Cooldown(duration) => ToolRuleTypeConfig::Cooldown(duration.as_secs()),
             ToolRuleType::Periodic(duration) => ToolRuleTypeConfig::Periodic(duration.as_secs()),
+            ToolRuleType::RequiresConsent { scope } => ToolRuleTypeConfig::RequiresConsent {
+                scope: scope.clone(),
+            },
         }
     }
 }

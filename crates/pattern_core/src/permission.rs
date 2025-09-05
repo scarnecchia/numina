@@ -38,6 +38,8 @@ pub struct PermissionRequest {
     pub scope: PermissionScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +54,7 @@ pub enum PermissionDecisionKind {
 pub struct PermissionBroker {
     tx: broadcast::Sender<PermissionRequest>,
     pending: Arc<RwLock<HashMap<String, oneshot::Sender<PermissionDecisionKind>>>>,
+    pending_info: Arc<RwLock<HashMap<String, PermissionRequest>>>,
 }
 
 impl PermissionBroker {
@@ -60,6 +63,7 @@ impl PermissionBroker {
         Self {
             tx,
             pending: Arc::new(RwLock::new(HashMap::new())),
+            pending_info: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -73,6 +77,7 @@ impl PermissionBroker {
         tool_name: String,
         scope: PermissionScope,
         reason: Option<String>,
+        metadata: Option<serde_json::Value>,
         timeout: std::time::Duration,
     ) -> Option<PermissionGrant> {
         let id = Uuid::new_v4().to_string();
@@ -81,13 +86,19 @@ impl PermissionBroker {
             let mut p = self.pending.write().await;
             p.insert(id.clone(), tx_decision);
         }
-        let _ = self.tx.send(PermissionRequest {
+        let req = PermissionRequest {
             id: id.clone(),
             agent_id: agent_id.clone(),
             tool_name: tool_name.clone(),
             scope: scope.clone(),
             reason,
-        });
+            metadata,
+        };
+        {
+            let mut pi = self.pending_info.write().await;
+            pi.insert(id.clone(), req.clone());
+        }
+        let _ = self.tx.send(req);
 
         match tokio::time::timeout(timeout, rx_decision).await {
             Ok(Ok(decision)) => match decision {
@@ -116,12 +127,21 @@ impl PermissionBroker {
 
     pub async fn resolve(&self, request_id: &str, decision: PermissionDecisionKind) -> bool {
         let tx_opt = { self.pending.write().await.remove(request_id) };
+        {
+            let mut pi = self.pending_info.write().await;
+            pi.remove(request_id);
+        }
         if let Some(tx) = tx_opt {
             let _ = tx.send(decision);
             true
         } else {
             false
         }
+    }
+
+    pub async fn list_pending(&self) -> Vec<PermissionRequest> {
+        let pi = self.pending_info.read().await;
+        pi.values().cloned().collect()
     }
 }
 

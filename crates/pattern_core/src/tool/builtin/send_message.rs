@@ -25,10 +25,7 @@ pub struct SendMessageInput {
     #[schemars(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Output from send message operation
@@ -201,7 +198,6 @@ impl AiTool for SendMessageTool {
                     },
                     content: "Hello! How can I help you today?".to_string(),
                     metadata: None,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SendMessageOutput {
                     success: true,
@@ -221,7 +217,6 @@ impl AiTool for SendMessageTool {
                         "priority": "high",
                         "context": "task_breakdown"
                     })),
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SendMessageOutput {
                     success: true,

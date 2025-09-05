@@ -207,6 +207,58 @@ impl EventHandler for DiscordEventHandler {
                 }
             }
         }
+
+        // Spawn permission request announcer (DM admin or post in configured channel)
+        let http = ctx.http.clone();
+        tokio::spawn(async move {
+            use pattern_core::permission::broker;
+            use serenity::all::{ChannelId, UserId};
+            let mut rx = broker().subscribe();
+            // Resolve preferred recipient once (env var)
+            let dm_user: Option<u64> = std::env::var("DISCORD_DEFAULT_DM_USER")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok());
+            let channel_id: Option<u64> = std::env::var("DISCORD_CHANNEL_ID")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok());
+
+            while let Ok(req) = rx.recv().await {
+                let title = format!("🔐 Permission Needed: {}", req.tool_name);
+                let scope = format!("scope: {:?}", req.scope);
+                let tip = format!(
+                    "Use /permit {} [once|always|ttl=600] or /deny {}",
+                    req.id, req.id
+                );
+                let body = if let Some(reason) = req.reason.clone() {
+                    format!("{}\n{}\nreason: {}", title, scope, reason)
+                } else {
+                    format!("{}\n{}", title, scope)
+                };
+                let content = format!("{}\n{}", body, tip);
+
+                // Prefer request-scoped discord_channel_id if present
+                let mut sent = false;
+                if let Some(meta) = &req.metadata {
+                    if let Some(cid) = meta.get("discord_channel_id").and_then(|v| v.as_u64()) {
+                        let _ = ChannelId::new(cid).say(&http, content.clone()).await.ok();
+                        sent = true;
+                    }
+                }
+                if !sent {
+                    if let Some(uid) = dm_user {
+                        if let Ok(channel) = UserId::new(uid).create_dm_channel(&http).await {
+                            let _ = channel.say(&http, content.clone()).await;
+                            sent = true;
+                        }
+                    }
+                }
+                if !sent {
+                    if let Some(cid) = channel_id {
+                        let _ = ChannelId::new(cid).say(&http, content.clone()).await.ok();
+                    }
+                }
+            }
+        });
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
@@ -620,6 +672,24 @@ impl EventHandler for DiscordEventHandler {
                     }
                 }
                 "list" => crate::slash_commands::handle_list_command(&ctx, &command).await,
+                "permit" => {
+                    if let Err(e) = crate::slash_commands::handle_permit(&ctx, &command).await {
+                        warn!("Failed to handle permit: {}", e);
+                    }
+                    Ok(())
+                }
+                "deny" => {
+                    if let Err(e) = crate::slash_commands::handle_deny(&ctx, &command).await {
+                        warn!("Failed to handle deny: {}", e);
+                    }
+                    Ok(())
+                }
+                "permits" => {
+                    if let Err(e) = crate::slash_commands::handle_permits(&ctx, &command).await {
+                        warn!("Failed to handle permits: {}", e);
+                    }
+                    Ok(())
+                }
                 _ => {
                     warn!("Unknown command: {}", command.data.name);
                     Ok(())

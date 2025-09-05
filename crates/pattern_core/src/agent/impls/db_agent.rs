@@ -811,6 +811,21 @@ where
             .collect()
     }
 
+    /// Compute tools that require consent from runtime rule engine
+    async fn get_consent_required_tools(&self) -> Vec<String> {
+        let engine = self.tool_rules.read().await;
+        engine
+            .get_rules()
+            .iter()
+            .filter_map(|r| match &r.rule_type {
+                crate::agent::tool_rules::ToolRuleType::RequiresConsent { .. } => {
+                    Some(r.tool_name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Set the constellation activity tracker for shared context
     pub fn set_constellation_tracker(
         &self,
@@ -2505,8 +2520,10 @@ where
             // Add tool rules from rule engine to context before building
             {
                 let tool_rules = self.get_context_tool_rules().await;
+                let consent_tools = self.get_consent_required_tools().await;
                 let mut ctx = context.write().await;
                 ctx.add_tool_rules(tool_rules);
+                ctx.context_config.consent_required_tools = consent_tools;
             }
 
             // Build memory context with the current batch ID
@@ -3275,8 +3292,10 @@ where
                     // Add tool rules from rule engine before rebuilding
                     {
                         let tool_rules = self.get_context_tool_rules().await;
+                        let consent_tools = self.get_consent_required_tools().await;
                         let mut ctx = context.write().await;
                         ctx.add_tool_rules(tool_rules);
+                        ctx.context_config.consent_required_tools = consent_tools;
 
                         // // Determine role based on vendor
                         // let role = match model_vendor {
@@ -4486,8 +4505,10 @@ where
         // Add workflow rules from the rule engine before building context
         {
             let tool_rules = self.get_context_tool_rules().await;
+            let consent_tools = self.get_consent_required_tools().await;
             let mut ctx = self.context.write().await;
             ctx.add_tool_rules(tool_rules);
+            ctx.context_config.consent_required_tools = consent_tools;
         }
 
         let context = self.context.read().await;

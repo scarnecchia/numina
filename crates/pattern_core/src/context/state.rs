@@ -1821,9 +1821,9 @@ impl AgentContext {
         // Check for a simple consent rule in workflow rules: rule == "requires_consent"
         let requires_consent = self
             .context_config
-            .tool_workflow_rules
+            .consent_required_tools
             .iter()
-            .any(|r| r.tool_name == call.fn_name && r.rule == "requires_consent");
+            .any(|name| name == &call.fn_name);
         let request_heartbeat = params
             .get("request_heartbeat")
             .and_then(|v| v.as_bool())
@@ -1832,6 +1832,25 @@ impl AgentContext {
         if let serde_json::Value::Object(ref mut map) = params {
             map.remove("request_heartbeat");
         }
+        // Try to capture origin routing metadata (e.g., discord_channel_id) from the most recent message
+        let route_metadata = {
+            let history = self.history.read().await;
+            let mut meta: Option<serde_json::Value> = None;
+            if let Some(last_batch) = history.batches.last() {
+                if let Some(last_msg) = last_batch.messages.last() {
+                    if let Some(obj) = last_msg.metadata.custom.as_object() {
+                        if obj.contains_key("discord_channel_id") {
+                            meta = Some(serde_json::json!({
+                                "discord_channel_id": obj.get("discord_channel_id").cloned().unwrap_or(serde_json::Value::Null),
+                                "agent_name": self.handle.name.clone(),
+                            }));
+                        }
+                    }
+                }
+            }
+            meta
+        };
+
         // Obtain permission grant if required (simple ToolExecution scope)
         let permission_grant = if requires_consent {
             let scope = crate::permission::PermissionScope::ToolExecution {
@@ -1844,6 +1863,7 @@ impl AgentContext {
                     call.fn_name.clone(),
                     scope,
                     Some("Tool requires consent".to_string()),
+                    route_metadata,
                     std::time::Duration::from_secs(90),
                 )
                 .await

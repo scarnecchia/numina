@@ -88,6 +88,31 @@ pub fn create_commands() -> Vec<CreateCommand> {
         CreateCommand::new("list")
             .description("List all available agents")
             .dm_permission(true),
+        CreateCommand::new("permit")
+            .description("Approve a pending permission request")
+            .dm_permission(true)
+            .add_option(
+                CreateCommandOption::new(CommandOptionType::String, "id", "Request ID")
+                    .required(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "mode",
+                    "once | always | ttl=seconds (default: once)",
+                )
+                .required(false),
+            ),
+        CreateCommand::new("deny")
+            .description("Deny a pending permission request")
+            .dm_permission(true)
+            .add_option(
+                CreateCommandOption::new(CommandOptionType::String, "id", "Request ID")
+                    .required(true),
+            ),
+        CreateCommand::new("permits")
+            .description("List pending permission requests (admin only)")
+            .dm_permission(true),
     ]
 }
 
@@ -239,6 +264,189 @@ pub async fn handle_status_command(
 
     Ok(())
 }
+
+pub async fn handle_permit(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let user_id = command.user.id.get();
+    if !is_authorized_user(user_id) {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🚫 Not authorized to approve requests.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
+
+    let id = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "id")
+        .and_then(|o| o.value.as_str())
+        .unwrap_or("");
+    let mode = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "mode")
+        .and_then(|o| o.value.as_str());
+
+    let decision = match mode.unwrap_or("once").to_lowercase().as_str() {
+        "once" => pattern_core::permission::PermissionDecisionKind::ApproveOnce,
+        "always" | "scope" => pattern_core::permission::PermissionDecisionKind::ApproveForScope,
+        s if s.starts_with("ttl=") => {
+            let secs: u64 = s[4..].parse().unwrap_or(600);
+            pattern_core::permission::PermissionDecisionKind::ApproveForDuration(
+                std::time::Duration::from_secs(secs),
+            )
+        }
+        _ => pattern_core::permission::PermissionDecisionKind::ApproveOnce,
+    };
+
+    let ok = pattern_core::permission::broker()
+        .resolve(id, decision)
+        .await;
+    let content = if ok {
+        format!("✅ Approved request {}", id)
+    } else {
+        format!("⚠️ Unknown request id {}", id)
+    };
+
+    command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .ephemeral(true),
+            ),
+        )
+        .await
+        .ok();
+
+    Ok(())
+}
+
+pub async fn handle_deny(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let user_id = command.user.id.get();
+    if !is_authorized_user(user_id) {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🚫 Not authorized to deny requests.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
+
+    let id = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "id")
+        .and_then(|o| o.value.as_str())
+        .unwrap_or("");
+
+    let ok = pattern_core::permission::broker()
+        .resolve(id, pattern_core::permission::PermissionDecisionKind::Deny)
+        .await;
+    let content = if ok {
+        format!("🚫 Denied request {}", id)
+    } else {
+        format!("⚠️ Unknown request id {}", id)
+    };
+
+    command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .ephemeral(true),
+            ),
+        )
+        .await
+        .ok();
+
+    Ok(())
+}
+
+pub async fn handle_permits(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let user_id = command.user.id.get();
+    if !is_authorized_user(user_id) {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🚫 Not authorized to view permits.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
+
+    let pending = pattern_core::permission::broker().list_pending().await;
+    let mut lines = Vec::new();
+    for req in pending.iter().take(25) {
+        let agent_name = req
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("agent_name").and_then(|v| v.as_str()))
+            .unwrap_or("(unknown)");
+        lines.push(format!("• {} — {} — {}", req.id, agent_name, req.tool_name));
+    }
+    if lines.is_empty() {
+        lines.push("No pending permission requests.".to_string());
+    }
+
+    command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(lines.join("\n"))
+                    .ephemeral(true),
+            ),
+        )
+        .await
+        .ok();
+
+    Ok(())
+}
+// ===== Permission approvals =====
+
+fn is_authorized_user(user_id: u64) -> bool {
+    if let Ok(v) = std::env::var("DISCORD_DEFAULT_DM_USER") {
+        if v.trim() == user_id.to_string() {
+            return true;
+        }
+    }
+    if let Ok(v) = std::env::var("DISCORD_ADMIN_USERS") {
+        let ok = v
+            .split(',')
+            .map(|s| s.trim())
+            .any(|s| s == user_id.to_string());
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+// duplicate block removed
 
 /// Handle the /memory command
 pub async fn handle_memory_command(

@@ -39,10 +39,7 @@ pub struct RecallInput {
     #[schemars(default, with = "String")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Output from recall storage operations
@@ -168,7 +165,6 @@ impl AiTool for RecallTool {
                             .to_string(),
                     ),
                     label: None,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(RecallOutput {
                     success: true,
@@ -182,7 +178,6 @@ impl AiTool for RecallTool {
                     operation: ArchivalMemoryOperationType::Append,
                     content: Some("Max is a golden retriever.".to_string()),
                     label: Some("archival_1234567890".to_string()),
-                    request_heartbeat: false,
                 },
                 expected_output: Some(RecallOutput {
                     success: true,

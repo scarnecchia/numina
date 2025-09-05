@@ -55,10 +55,7 @@ pub struct WebInput {
     #[schemars(default, with = "i64")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continue_from: Option<usize>,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Result from a web search

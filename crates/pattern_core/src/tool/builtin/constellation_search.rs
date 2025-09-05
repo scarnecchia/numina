@@ -68,10 +68,7 @@ pub struct ConstellationSearchInput {
     /// This will enable typo-tolerant search once SurrealDB fuzzy functions are integrated
     #[serde(default)]
     pub fuzzy: bool,
-
-    /// Request another turn after this tool executes
-    #[serde(default)]
-    pub request_heartbeat: bool,
+    // request_heartbeat handled via ExecutionMeta injection; field removed
 }
 
 /// Output from search operations
@@ -199,7 +196,6 @@ impl AiTool for ConstellationSearchTool {
                     start_time: None,
                     end_time: None,
                     fuzzy: false,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
                     success: true,
@@ -222,7 +218,6 @@ impl AiTool for ConstellationSearchTool {
                     start_time: None,
                     end_time: None,
                     fuzzy: false,
-                    request_heartbeat: false,
                 },
                 expected_output: Some(SearchOutput {
                     success: true,
