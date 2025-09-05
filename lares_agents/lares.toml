@@ -201,6 +201,9 @@ capabilities = [
 
 # Discord configuration for the Lares
 [discord]
+allowed_channels = ["866137918505222144"]
+allowed_guilds = ["1411487970141147257"]
+admin_users = ["592429922052472840", "717697168030564422"]
 respond_to_dms = true
 respond_to_mentions = true
 
@@ -348,7 +351,7 @@ default_filter = { nsids = [
     "did:plc:uh6p7dyiuqbzqldwaqmx5gkc",
     "did:plc:ctgwn5nxrul4jo3agftvx5bg",
     "did:plc:w6ywzmp4mzarlefzs52qado6",
-    "did:plc:dzvxvsiy3maw4iarpvizsj67",
+    "did:plc:dzvxvsiy3maw4iarpvizsj67", #dollspace.gay
     "did:plc:yyxl5lkip3kugga76rdfmncz",
     "did:plc:r6g3tt67i4kf2oynime6npyc",
     "did:plc:lzfenu2ceo7j3pokzgfdzmjk",
