@@ -9,6 +9,7 @@ use serenity::{
     },
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -84,6 +85,9 @@ pub struct DiscordBot {
 
     /// Optional sinks to mirror group events (e.g., CLI printer, file)
     group_event_sinks: Option<Vec<Arc<dyn GroupEventSink>>>,
+
+    /// Cached bot user ID (set on Ready)
+    bot_user_id: Arc<Mutex<Option<u64>>>,
 }
 
 /// Configuration for the Discord bot
@@ -237,6 +241,7 @@ impl DiscordBot {
             queue_flush_task: Arc::new(Mutex::new(None)),
             recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
             group_event_sinks,
+            bot_user_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -259,6 +264,7 @@ impl DiscordBot {
             queue_flush_task: Arc::new(Mutex::new(None)),
             recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
             group_event_sinks: None,
+            bot_user_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -290,6 +296,13 @@ impl EventHandler for DiscordEventHandler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         debug!("{} is connected!", ready.user.name);
         debug!("Bot user ID: {}", ready.user.id);
+
+        // Cache our bot user ID for later mention resolution
+        self.bot
+            .bot_user_id
+            .lock()
+            .await
+            .replace(ready.user.id.get());
 
         // Register slash commands using the new comprehensive implementations
         let commands = crate::slash_commands::create_commands();
@@ -493,7 +506,7 @@ impl EventHandler for DiscordEventHandler {
         }
 
         // Show typing indicator
-        let _ = msg.channel_id.start_typing(&ctx.http);
+        let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
 
         // Process the message
         if let Err(e) = self.bot.process_message(&ctx, &msg).await {
@@ -511,7 +524,14 @@ impl EventHandler for DiscordEventHandler {
     async fn reaction_add(&self, ctx: Context, reaction: serenity::model::channel::Reaction) {
         // Skip bot's own reactions
         if let Some(user_id) = reaction.user_id {
-            if let Ok(current_user) = ctx.http.get_current_user().await {
+            let cached = { *self.bot.bot_user_id.lock().await };
+            if let Some(bot_id) = cached {
+                if user_id.get() == bot_id {
+                    return;
+                }
+            } else if let Ok(current_user) = ctx.http.get_current_user().await {
+                // Cache for future events
+                *self.bot.bot_user_id.lock().await = Some(current_user.id.get());
                 if user_id == current_user.id {
                     return;
                 }
@@ -881,7 +901,9 @@ impl DiscordBot {
 
         // Show typing in the channel
         if let Some(first_msg) = queued_messages.first() {
-            let _ = ChannelId::new(first_msg.channel_id).start_typing(&ctx.http);
+            let _ = ChannelId::new(first_msg.channel_id)
+                .broadcast_typing(&ctx.http)
+                .await;
         }
 
         // Get channel info for the messages
@@ -942,10 +964,9 @@ impl DiscordBot {
             let extra = queued_messages.len().min(12) as u8; // cap extra to prevent bloat
             let base_limit: u8 = 4;
             let fetch_limit = base_limit.saturating_add(extra);
-            if let Ok(mut msgs) = ChannelId::new(channel_id)
-                .messages(&ctx.http, GetMessages::new().limit(fetch_limit))
-                .await
-            {
+            let fut = ChannelId::new(channel_id)
+                .messages(&ctx.http, GetMessages::new().limit(fetch_limit));
+            if let Ok(Ok(mut msgs)) = tokio::time::timeout(Duration::from_secs(5), fut).await {
                 msgs.reverse();
                 let lines: Vec<String> = msgs
                     .into_iter()
@@ -1212,7 +1233,7 @@ impl DiscordBot {
             let handle = tokio::spawn(async move {
                 loop {
                     // Send typing indicator
-                    let _ = channel_id.start_typing(&http);
+                    let _ = channel_id.broadcast_typing(&http).await;
 
                     // Wait 8 seconds (typing lasts 10 seconds, so refresh at 8)
                     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
@@ -1272,9 +1293,16 @@ impl DiscordBot {
             }
 
             // Get current bot user for self-mentions, map to the supervisor agent name when available
-            if let Ok(current_user) = ctx.http.get_current_user().await {
-                let bot_mention = format!("<@{}>", current_user.id);
-                let bot_alt_mention = format!("<@!{}>", current_user.id);
+            let mut cached_bot_id = { *self.bot_user_id.lock().await };
+            if cached_bot_id.is_none() {
+                if let Ok(current_user) = ctx.http.get_current_user().await {
+                    cached_bot_id = Some(current_user.id.get());
+                    *self.bot_user_id.lock().await = cached_bot_id;
+                }
+            }
+            if let Some(bot_id) = cached_bot_id {
+                let bot_mention = format!("<@{}>", bot_id);
+                let bot_alt_mention = format!("<@!{}>", bot_id);
 
                 // Determine supervisor agent name if we have group context
                 let supervisor_name = self.agents_with_membership.as_ref().and_then(|agents| {
@@ -1420,6 +1448,11 @@ impl DiscordBot {
             // Process attachments if any
             let mut attachment_content = String::new();
             let mut unique_image_urls = std::collections::HashSet::new();
+            // Build a small-timeout HTTP client for fetching small text attachments
+            let http_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .ok();
             if !msg.attachments.is_empty() {
                 for attachment in &msg.attachments {
                     // Check if it's an image file
@@ -1454,27 +1487,34 @@ impl DiscordBot {
                                 .map_or(false, |ct| ct.starts_with("text/"));
 
                         if is_text {
-                            match ureq::get(&attachment.url).call() {
-                                Ok(mut response) => match response.body_mut().read_to_string() {
-                                    Ok(text) => {
-                                        attachment_content.push_str(&format!(
-                                            "\n\nAttachment '{}' ({} bytes): \n```\n{}\n```",
-                                            attachment.filename, attachment.size, text
-                                        ));
-                                    }
+                            if let Some(client) = &http_client {
+                                match client.get(&attachment.url).send().await {
+                                    Ok(resp) => match resp.text().await {
+                                        Ok(text) => {
+                                            attachment_content.push_str(&format!(
+                                                "\n\nAttachment '{}' ({} bytes): \n```\n{}\n```",
+                                                attachment.filename, attachment.size, text
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            debug!(
+                                                "Failed to read attachment text {}: {}",
+                                                attachment.filename, e
+                                            );
+                                        }
+                                    },
                                     Err(e) => {
                                         debug!(
-                                            "Failed to read attachment {}: {}",
+                                            "Failed to fetch attachment {}: {}",
                                             attachment.filename, e
                                         );
                                     }
-                                },
-                                Err(e) => {
-                                    debug!(
-                                        "Failed to fetch attachment {}: {}",
-                                        attachment.filename, e
-                                    );
                                 }
+                            } else {
+                                debug!(
+                                    "HTTP client unavailable; skipping fetch for attachment {}",
+                                    attachment.filename
+                                );
                             }
                         }
                     }
@@ -1557,6 +1597,18 @@ impl DiscordBot {
                 let mut active_agents: usize = 0;
                 let mut completed_agents = 0;
 
+                // First-event watchdog: post a small indicator after 20s if no events
+                let started_flag = Arc::new(AtomicBool::new(false));
+                let flag = started_flag.clone();
+                let http = ctx.http.clone();
+                let ch = msg.channel_id;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    if !flag.load(Ordering::SeqCst) {
+                        let _ = ch.say(&http, "💭 thinking…").await;
+                    }
+                });
+
                 // Process stream with idle timeout
                 loop {
                     match tokio::time::timeout_at(
@@ -1569,6 +1621,7 @@ impl DiscordBot {
                             // Reset idle timer on any event
                             last_activity = tokio::time::Instant::now();
                             has_sent_initial_response = true; // ANY activity counts as a response
+                            started_flag.store(true, Ordering::SeqCst);
 
                             match event {
                                 pattern_core::coordination::groups::GroupResponseEvent::TextChunk { ..} => {},
@@ -1590,6 +1643,7 @@ impl DiscordBot {
                                             debug!("Failed to send tool activity: {}", e);
                                         }
                                         has_sent_initial_response = true;
+                                        started_flag.store(true, Ordering::SeqCst);
                                     }
                                 },
                                 pattern_core::coordination::groups::GroupResponseEvent::ToolCallCompleted { agent_id: _, call_id:_, result } => {
@@ -1600,6 +1654,7 @@ impl DiscordBot {
                                         if result_str.contains("Message sent successfully") || result_str.contains("channel:") {
                                             info!("send_message tool completed successfully");
                                             has_sent_initial_response = true; // Mark as having responded
+                                            started_flag.store(true, Ordering::SeqCst);
                                         }
                                     }
                                 },
@@ -1618,7 +1673,8 @@ impl DiscordBot {
                                     active_agents += 1;
 
                                     // Start typing indicator when agent starts thinking
-                                    let _ = msg.channel_id.start_typing(&ctx.http);
+                                    let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+                                    started_flag.store(true, Ordering::SeqCst);
                                 },
                                 pattern_core::coordination::groups::GroupResponseEvent::AgentCompleted { agent_name, .. } => {
                                     debug!("Agent {} completed processing", agent_name);

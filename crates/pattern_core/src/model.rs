@@ -426,7 +426,7 @@ impl GenAiClient {
                         if let ImageSource::Url(url) = source {
                             // Quick HEAD request to check if URL is accessible
                             let client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(2))
+                                .timeout(std::time::Duration::from_secs(5))
                                 .build()
                                 .ok();
 

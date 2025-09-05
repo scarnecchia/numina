@@ -255,21 +255,24 @@ impl ContextTool {
         content: String,
         meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // Fetch and validate target block
-        let current = self.handle.memory.get_block(&name).ok_or_else(|| {
-            crate::CoreError::memory_not_found(
-                &self.handle.agent_id,
-                &name,
-                self.handle.memory.list_blocks(),
-            )
-        })?;
+        // Fetch and validate target block (copy needed fields, then drop guard)
+        let (current_type, current_perm) = {
+            let guard = self.handle.memory.get_block(&name).ok_or_else(|| {
+                crate::CoreError::memory_not_found(
+                    &self.handle.agent_id,
+                    &name,
+                    self.handle.memory.list_blocks(),
+                )
+            })?;
+            (guard.memory_type, guard.permission)
+        };
 
-        if current.memory_type == MemoryType::Archival {
+        if current_type == MemoryType::Archival {
             return Ok(ContextOutput {
                 success: false,
                 message: Some(format!(
                     "Block '{}' is not context (type: {:?}). Use `recall` for archival memories.",
-                    name, current.memory_type
+                    name, current_type
                 )),
                 content: json!({}),
             });
@@ -277,7 +280,7 @@ impl ContextTool {
 
         // Gate by permission, offering consent path when applicable
         if !self.can_bypass(meta, &name) {
-            match acl_check(MemoryOp::Append, current.permission) {
+            match acl_check(MemoryOp::Append, current_perm) {
                 MemoryGate::Allow => {}
                 MemoryGate::Deny { reason } => {
                     return Ok(ContextOutput {
@@ -292,7 +295,7 @@ impl ContextTool {
                             self.handle.agent_id.clone(),
                             "context".to_string(),
                             PermissionScope::MemoryEdit { key: name.clone() },
-                            Some(consent_reason(&name, MemoryOp::Append, current.permission)),
+                            Some(consent_reason(&name, MemoryOp::Append, current_perm)),
                             meta.route_metadata.clone(),
                             std::time::Duration::from_secs(90),
                         )
@@ -367,9 +370,9 @@ impl ContextTool {
         new_content: String,
         meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // Fetch and validate target block
-        let current = match self.handle.memory.get_block(&name) {
-            Some(b) => b,
+        // Fetch and validate target block (copy fields, drop guard)
+        let (current_type, current_perm) = match self.handle.memory.get_block(&name) {
+            Some(b) => (b.memory_type, b.permission),
             None => {
                 return Ok(ContextOutput {
                     success: false,
@@ -383,12 +386,12 @@ impl ContextTool {
             }
         };
 
-        if current.memory_type == MemoryType::Archival {
+        if current_type == MemoryType::Archival {
             return Ok(ContextOutput {
                 success: false,
                 message: Some(format!(
                     "Block '{}' is not context (type: {:?})",
-                    name, current.memory_type
+                    name, current_type
                 )),
                 content: json!({}),
             });
@@ -396,7 +399,7 @@ impl ContextTool {
 
         // Gate by permission, offering consent path when applicable
         if !self.can_bypass(meta, &name) {
-            match acl_check(MemoryOp::Overwrite, current.permission) {
+            match acl_check(MemoryOp::Overwrite, current_perm) {
                 MemoryGate::Allow => {}
                 MemoryGate::Deny { reason } => {
                     return Ok(ContextOutput {
@@ -411,11 +414,7 @@ impl ContextTool {
                             self.handle.agent_id.clone(),
                             "context".to_string(),
                             PermissionScope::MemoryEdit { key: name.clone() },
-                            Some(consent_reason(
-                                &name,
-                                MemoryOp::Overwrite,
-                                current.permission,
-                            )),
+                            Some(consent_reason(&name, MemoryOp::Overwrite, current_perm)),
                             meta.route_metadata.clone(),
                             std::time::Duration::from_secs(90),
                         )

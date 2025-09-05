@@ -535,8 +535,9 @@ mod tests {
         // Create messages within a batch so relations get batch/sequence
         let (msg1, mut msg2, _batch_id) =
             simple_user_assistant_batch("First message", "Agent response");
-        // Keep msg3 archived and separate
-        let msg3 = Message::user("Another message");
+        // Keep msg3 archived and separate (in its own batch)
+        let separate_batch = crate::agent::get_next_message_position_sync();
+        let msg3 = Message::user_in_batch(separate_batch, 0, "Another message");
 
         // Ensure batch_type is set for assistant if needed
         if msg2.batch_type.is_none() {

@@ -110,11 +110,7 @@ Sources must be configured separately before they can be used."#,
         )
     }
 
-    async fn execute(
-        &self,
-        input: Self::Input,
-        _meta: &crate::tool::ExecutionMeta,
-    ) -> Result<Self::Output> {
+    async fn execute(&self, input: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
         match input.operation {
             DataSourceOperation::Read => {
                 let source_id =

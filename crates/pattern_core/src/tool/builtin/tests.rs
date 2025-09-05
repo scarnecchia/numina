@@ -327,9 +327,9 @@ mod tests {
         let handle = AgentHandle::test_with_memory(memory.clone());
         let tool = ContextTool::new(handle);
 
-        // Auto-approve consent
+        // Auto-approve consent: subscribe before executing to avoid race
+        let mut rx = broker().subscribe();
         tokio::spawn(async move {
-            let mut rx = broker().subscribe();
             if let Ok(req) = rx.recv().await {
                 if matches!(req.scope, PermissionScope::MemoryEdit{ ref key } if key == "work_a") {
                     let _ = broker()
@@ -446,9 +446,9 @@ mod tests {
         let handle = AgentHandle::test_with_memory(memory.clone());
         let tool = ContextTool::new(handle);
 
-        // Spawn a permit responder
+        // Subscribe before executing to avoid race, then spawn resolver
+        let mut rx = broker().subscribe();
         tokio::spawn(async move {
-            let mut rx = broker().subscribe();
             if let Ok(req) = rx.recv().await {
                 if matches!(req.scope, PermissionScope::MemoryEdit{ ref key } if key == "human") {
                     let _ = broker()
