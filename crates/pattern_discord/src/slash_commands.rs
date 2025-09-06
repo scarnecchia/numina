@@ -1,5 +1,6 @@
 //! Discord slash command implementations
 
+use miette::IntoDiagnostic;
 use miette::Result;
 use pattern_core::{
     Agent,
@@ -113,7 +114,47 @@ pub fn create_commands() -> Vec<CreateCommand> {
         CreateCommand::new("permits")
             .description("List pending permission requests (admin only)")
             .dm_permission(true),
+        CreateCommand::new("restart")
+            .description("Restart the runtime")
+            .dm_permission(true),
     ]
+}
+
+pub async fn handle_restart_command(
+    ctx: &Context,
+    command: &CommandInteraction,
+    restart_ch: &tokio::sync::mpsc::Sender<()>,
+) -> Result<()> {
+    let user_id = command.user.id.get();
+    if !is_authorized_user(user_id) {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("🚫 Not authorized to restart the entity runtime.")
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
+    command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("Restarting...")
+                    .ephemeral(true),
+            ),
+        )
+        .await
+        .map_err(|e| miette::miette!("Failed to send restart response: {}", e))?;
+
+    restart_ch.send(()).await.into_diagnostic()?;
+
+    Ok(())
 }
 
 /// Handle the /help command

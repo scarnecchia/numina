@@ -7,6 +7,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     Result,
     agent::Agent,
+    context::NON_USER_MESSAGE_PREFIX,
     coordination::{
         groups::{
             AgentResponse, AgentWithMembership, GroupManager, GroupResponse, GroupResponseEvent,
@@ -168,7 +169,8 @@ impl GroupManager for SleeptimeManager {
                             let trigger_names: Vec<_> =
                                 fired_triggers.iter().map(|t| t.name.as_str()).collect();
                             let mut context = format!(
-                                "[Sleeptime Intervention] Triggers fired: {}. {}",
+                                "{}[Background Intervention] Triggers fired: {}. {}",
+                                NON_USER_MESSAGE_PREFIX,
                                 trigger_names.join(", "),
                                 Self::get_intervention_message_static(&fired_triggers)
                             );
@@ -453,7 +455,10 @@ impl SleeptimeManager {
             },
         };
 
-        format!("[Periodic Context Sync] {}{}", now, prompt)
+        format!(
+            "{}[Periodic Context Sync] {}{}",
+            NON_USER_MESSAGE_PREFIX, now, prompt
+        )
     }
 
     /// Find the agent that was least recently active

@@ -30,6 +30,8 @@ use pattern_discord::{
     endpoints::DiscordEndpoint,
 };
 #[cfg(feature = "discord")]
+use std::os::unix::process::CommandExt;
+#[cfg(feature = "discord")]
 use std::sync::Arc;
 
 /// Set up Discord endpoint for an agent if configured
@@ -283,12 +285,15 @@ pub async fn run_discord_bot_with_group(
         let sinks =
             crate::forwarding::build_discord_group_sinks(&output, &agents_with_membership).await;
 
+        let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(1);
+
         let bot = Arc::new(DiscordBot::new_cli_mode(
             bot_cfg,
             agents_with_membership.clone(),
             group.clone(),
             pattern_manager.clone(),
             Some(sinks),
+            restart_tx.clone(),
         ));
 
         // Connect the bot to the Discord endpoint for timing context
@@ -344,6 +349,19 @@ pub async fn run_discord_bot_with_group(
                 if let Err(why) = client.start().await {
                     tracing::error!("Discord bot error: {:?}", why);
                 }
+            });
+
+            tokio::spawn(async move {
+                restart_rx.recv().await;
+                tracing::info!("restart signal received");
+                let _ = crossterm::terminal::disable_raw_mode();
+
+                let exe = std::env::current_exe().unwrap();
+                let args: Vec<String> = std::env::args().collect();
+
+                let _ = std::process::Command::new(exe).args(&args[1..]).exec();
+
+                std::process::exit(0);
             });
 
             // Run CLI chat loop in foreground

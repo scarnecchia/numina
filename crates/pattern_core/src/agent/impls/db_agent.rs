@@ -14,8 +14,7 @@ use crate::db::DbEntity;
 use crate::id::RelationId;
 use crate::memory::MemoryType;
 use crate::message::{
-    BatchType, ChatRole, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall,
-    ToolResponse,
+    BatchType, ContentBlock, ContentPart, ImageSource, Request, Response, ToolCall, ToolResponse,
 };
 use crate::model::ResponseOptions;
 use crate::tool::builtin::BuiltinTools;
@@ -28,7 +27,7 @@ use crate::{
         tool_rules::{ToolRule, ToolRuleEngine},
     },
     context::{
-        AgentContext, CompressionStrategy, ContextConfig, NON_USER_MESSAGE_PREFIX,
+        AgentContext, CompressionStrategy, ContextConfig,
         heartbeat::{HeartbeatSender, check_heartbeat_request},
     },
     db::{DatabaseError, ops, schema},

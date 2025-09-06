@@ -626,7 +626,7 @@ pub struct BlueskyConfig {
 }
 
 fn default_jetstream_endpoint() -> String {
-    "wss://jetstream1.us-west.bsky.network/subscribe".to_string()
+    "wss://jetstream1.us-east.fire.hose.cam/subscribe".to_string()
 }
 
 /// Model provider configuration

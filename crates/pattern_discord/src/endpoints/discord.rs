@@ -39,7 +39,7 @@ impl DiscordEndpoint {
     fn dm_tagged_content(content: &str, origin: Option<&MessageOrigin>) -> String {
         if let Some(MessageOrigin::Agent { name, .. }) = origin {
             // Subtle Markdown tag so recipients know which facet is speaking
-            format!("*[{}]* {}", name, content)
+            format!("*[{}]*\n{}", name, content)
         } else {
             content.to_string()
         }
@@ -515,7 +515,12 @@ impl DiscordEndpoint {
     }
 
     /// Send a message to a specific Discord channel
-    async fn send_to_channel(&self, channel_id: ChannelId, content: String) -> Result<()> {
+    async fn send_to_channel(
+        &self,
+        channel_id: ChannelId,
+        mut content: String,
+        origin: Option<&MessageOrigin>,
+    ) -> Result<()> {
         info!(
             "send_to_channel called with content: '{}', is_reaction: {}",
             content,
@@ -596,6 +601,13 @@ impl DiscordEndpoint {
                 Err(e) => {
                     debug!("Couldn't fetch messages to react to: {}", e);
                 }
+            }
+        }
+
+        // If this is a DM channel, add facet tag for clarity
+        if let Ok(channel) = channel_id.to_channel(&self.http).await {
+            if matches!(channel, serenity::model::channel::Channel::Private(_)) {
+                content = Self::dm_tagged_content(&content, origin);
             }
         }
 
@@ -760,20 +772,20 @@ impl MessageEndpoint for DiscordEndpoint {
                                     "Failed to reply to message: {}, falling back to channel send",
                                     e
                                 );
-                                self.send_to_channel(channel, content).await?;
+                                self.send_to_channel(channel, content, origin).await?;
                             } else {
                                 info!("Replied to message {} in channel {}", msg_id, channel_id);
                                 return Ok(Some(format!("reply:{}:{}", channel_id, msg_id)));
                             }
                         } else {
                             // Can't find original message, just send to channel
-                            self.send_to_channel(channel, content).await?;
+                            self.send_to_channel(channel, content, origin).await?;
                         }
                     } else {
-                        self.send_to_channel(channel, content).await?;
+                        self.send_to_channel(channel, content, origin).await?;
                     }
                 } else {
-                    self.send_to_channel(channel, content).await?;
+                    self.send_to_channel(channel, content, origin).await?;
                 }
                 return Ok(Some(format!("channel:{}", channel_id)));
             }
@@ -797,7 +809,7 @@ impl MessageEndpoint for DiscordEndpoint {
                             }
                         }
                     }
-                    self.send_to_channel(channel_id, content).await?;
+                    self.send_to_channel(channel_id, content, origin).await?;
                     return Ok(Some(format!("channel:{}", channel_id)));
                 }
 
@@ -829,7 +841,7 @@ impl MessageEndpoint for DiscordEndpoint {
                             }
                         }
                     }
-                    self.send_to_channel(ChannelId::new(channel_id), content)
+                    self.send_to_channel(ChannelId::new(channel_id), content, origin)
                         .await?;
                     return Ok(Some(format!("channel:{}", channel_id)));
                 }
@@ -860,7 +872,7 @@ impl MessageEndpoint for DiscordEndpoint {
         {
             // Prefer channel if both are present (came from a channel message)
             if let Ok(chan_id) = channel_id.parse::<u64>() {
-                self.send_to_channel(ChannelId::new(chan_id), content)
+                self.send_to_channel(ChannelId::new(chan_id), content, origin)
                     .await?;
                 return Ok(Some(format!("channel:{}", chan_id)));
             } else if let Ok(usr_id) = user_id.parse::<u64>() {
@@ -879,7 +891,7 @@ impl MessageEndpoint for DiscordEndpoint {
 
         // Fall back to default channel if configured
         if let Some(channel) = self.default_channel {
-            self.send_to_channel(channel, content).await?;
+            self.send_to_channel(channel, content, origin).await?;
             return Ok(Some(format!("default_channel:{}", channel)));
         }
 
