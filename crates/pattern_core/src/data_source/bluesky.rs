@@ -3511,9 +3511,10 @@ impl DataSource for BlueskyFirehoseSource {
 
             // Standard Jetstream endpoints to rotate through
             let endpoints = vec![
+                "wss://jetstream1.us-east.fire.hose.cam/subscribe",
                 "wss://jetstream2.us-west.bsky.network/subscribe",
                 "wss://jetstream1.us-west.bsky.network/subscribe",
-                //"wss://jetstream2.us-east.bsky.network/subscribe",
+                "wss://jetstream2.us-east.bsky.network/subscribe",
                 "wss://jetstream1.us-east.bsky.network/subscribe",
             ];
             let mut current_endpoint_idx = 0;
