@@ -1,4 +1,4 @@
-# Sophrosyne - Restraint
+# Horme - Action
 
 name = "Hormē"
 agent_type = "assistant"
@@ -63,11 +63,11 @@ description = "Shared understanding of the lares purpose and members"
 shared = true
 
 # Domain-specific memory
-[memory.domain_memory]
+[memory.horme_domain_memory]
 content = """
-Supressed desires:
-Impulses acted upon:
-Inactive states:
+supressed desires:
+impulses acted upon:
+inactive states:
 """
 permission = "read_write"
 memory_type = "core"

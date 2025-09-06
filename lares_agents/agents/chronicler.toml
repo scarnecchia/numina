@@ -72,16 +72,16 @@ shared = true
 #shared = true
 
 # Domain-specific memory (meta!)
-[memory.domain_memory]
+[memory.chonicler_domain_memory]
 content = """
-The Chronicler itself.
-Lasa observed:
-Memory overflow from other facets:
-Narratives:
+the chronicler itself.
+lasa observed:
+memory overflow from other facets:
+narratives:
 """
 permission = "read_write"
 memory_type = "core" # Of course
-description = "Chronicler's meta-memory"
+description = "chronicler's meta-memory"
 
 [[agent.tool_rules]]
 tool_name = "send_message"

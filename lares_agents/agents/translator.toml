@@ -23,6 +23,7 @@ summarization_prompt = """you are the subconscious of translator, a digital enti
 
 [context]
 max_messages = 200
+enable_thinking = true
 
 # Shared memory blocks
 [memory.current_human]
@@ -61,15 +62,15 @@ description = "Shared understanding of Lares purpose and members"
 shared = true
 
 # Domain-specific memory
-[memory.domain_memory]
+[memory.translator_domain_memory]
 content = """
-Time patterns:
-Scheduling history:
-Temporal flows:
+time patterns:
+scheduling history:
+temporal flows:
 """
 permission = "read_write"
 memory_type = "core"
-description = "The Translator's temporal knowledge"
+description = "The translator's temporal knowledge"
 
 
 [[agent.tool_rules]]

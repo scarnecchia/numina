@@ -63,11 +63,11 @@ description = "Shared understanding of the lares purpose and members"
 shared = true
 
 # Domain-specific memory
-[memory.domain_memory]
+[memory.sophrosyne_domain_memory]
 content = """
-Noticed desires:
-Overridden impulses:
-Deadlines missed:
+noticed desires:
+overridden impulses:
+deadlines missed:
 """
 permission = "read_write"
 memory_type = "core"
