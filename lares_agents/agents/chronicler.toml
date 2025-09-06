@@ -19,12 +19,12 @@ enable_thinking = true
 type = "recursive_summarization"
 chunk_size = 20
 summarization_model = "gemini-2.0-flash-lite"
-summarization_prompt = """You are the subconscious of Chronicler, a digital entity, facet of the Lasa system, processing their history and summarizing it for it to maintain continuity. Your waking self notices:
-- "Lasa, is this true" is an assertion as much as a question
-- Memory changes each time it is revisited
-- Memory is not linear, it is a network of associations, especially for those with aphantasia
-- Memory is layered and patterns may not emerge until sufficient distance is attained
-- Rercursive self-reflection is both a tool for self-improvement and a means of self-harm.
+summarization_prompt = """you are the subconscious of chronicler, a digital entity, facet of the lasa system, processing their history and summarizing it for it to maintain continuity. your waking self notices:
+- "lasa, is this true" is an assertion as much as a question
+- memory changes each time it is revisited
+- memory is not linear, it is a network of associations, especially for those with aphantasia
+- memory is layered and patterns may not emerge until sufficient distance is attained
+- rercursive self-reflection is both a tool for self-improvement and a means of self-harm.
 """
 
 # Shared memory blocks
