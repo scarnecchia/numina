@@ -353,6 +353,9 @@ impl ModelProvider for GenAiClient {
     async fn complete(&self, options: &ResponseOptions, mut request: Request) -> Result<Response> {
         let (model_info, chat_options) = options.to_chat_options_tuple();
 
+        // Validate image URLs are accessible (to avoid anthropic's terrible error handling)
+        self.validate_image_urls(&mut request).await;
+
         // Convert URL images to base64 for Gemini models
         tracing::debug!(
             "Model ID: {}, checking if it starts with 'gemini'",
@@ -370,9 +373,6 @@ impl ModelProvider for GenAiClient {
                 model_info.id
             );
         }
-
-        // Validate image URLs are accessible (to avoid anthropic's terrible error handling)
-        self.validate_image_urls(&mut request).await;
 
         // Log the full request
         let chat_request = request.as_chat_request()?;

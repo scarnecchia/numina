@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use owo_colors::OwoColorize;
 use pattern_core::{
     Agent,
     agent::ResponseEvent,
@@ -167,19 +166,6 @@ pub async fn build_discord_group_sinks(
     build_group_sinks(output, agents, "Discord").await
 }
 
-/// Helper: build file-only sinks for CLI routes (avoid double printing)
-pub async fn build_cli_group_file_sinks() -> Vec<Arc<dyn GroupEventSink>> {
-    let mut sinks: Vec<Arc<dyn GroupEventSink>> = Vec::new();
-    if let Ok(path) = std::env::var("PATTERN_FORWARD_FILE") {
-        if !path.trim().is_empty() {
-            if let Ok(sink) = FileGroupSink::create(PathBuf::from(path)).await {
-                sinks.push(Arc::new(sink));
-            }
-        }
-    }
-    sinks
-}
-
 /// Build group sinks for CLI-initiated group chat (CLI printer + optional file)
 pub async fn build_cli_group_sinks(
     output: &Output,
@@ -194,19 +180,6 @@ pub async fn build_jetstream_group_sinks(
     agents: &Vec<AgentWithMembership<Arc<dyn Agent>>>,
 ) -> Vec<Arc<dyn GroupEventSink>> {
     build_group_sinks(output, agents, "Jetstream").await
-}
-
-/// Build agent sinks for CLI agent chat (file-only to avoid double printing)
-pub async fn build_cli_agent_file_sinks() -> Vec<Arc<dyn AgentEventSink>> {
-    let mut sinks: Vec<Arc<dyn AgentEventSink>> = Vec::new();
-    if let Ok(path) = std::env::var("PATTERN_FORWARD_FILE") {
-        if !path.trim().is_empty() {
-            if let Ok(sink) = FileAgentSink::create(PathBuf::from(path)).await {
-                sinks.push(Arc::new(sink));
-            }
-        }
-    }
-    sinks
 }
 
 /// Build agent sinks for single-agent CLI chat: CLI printer + optional file

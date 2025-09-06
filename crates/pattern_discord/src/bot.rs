@@ -88,6 +88,9 @@ pub struct DiscordBot {
 
     /// Cached bot user ID (set on Ready)
     bot_user_id: Arc<Mutex<Option<u64>>>,
+
+    /// restart channel sender
+    restart_ch: tokio::sync::mpsc::Sender<()>,
 }
 
 /// Configuration for the Discord bot
@@ -223,6 +226,7 @@ impl DiscordBot {
         group: AgentGroup,
         group_manager: Arc<dyn GroupManager>,
         group_event_sinks: Option<Vec<Arc<dyn GroupEventSink>>>,
+        restart_ch: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         Self {
             cli_mode: true,
@@ -242,11 +246,15 @@ impl DiscordBot {
             recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
             group_event_sinks,
             bot_user_id: Arc::new(Mutex::new(None)),
+            restart_ch,
         }
     }
 
     /// Create a new Discord bot for full mode (with database)
-    pub fn new_full_mode(config: DiscordBotConfig) -> Self {
+    pub fn new_full_mode(
+        config: DiscordBotConfig,
+        restart_ch: tokio::sync::mpsc::Sender<()>,
+    ) -> Self {
         Self {
             cli_mode: false,
             agents_with_membership: None,
@@ -265,6 +273,7 @@ impl DiscordBot {
             recent_activity_by_channel: Arc::new(Mutex::new(HashMap::new())),
             group_event_sinks: None,
             bot_user_id: Arc::new(Mutex::new(None)),
+            restart_ch,
         }
     }
 }
@@ -375,8 +384,10 @@ impl EventHandler for DiscordEventHandler {
                 if !sent {
                     // Post to all configured channels
                     for cid in &channel_ids {
-                        let _ = ChannelId::new(*cid).say(&http, content.clone()).await.ok();
-                        sent = true;
+                        if !sent {
+                            let _ = ChannelId::new(*cid).say(&http, content.clone()).await.ok();
+                            sent = true;
+                        }
                     }
                 }
             }
@@ -759,6 +770,7 @@ impl EventHandler for DiscordEventHandler {
             // Get agents and group for slash command handlers
             let agents = self.bot.agents_with_membership.as_deref();
             let group = self.bot.group.as_ref();
+            let restart_ch = &self.bot.restart_ch;
 
             let result = match command.data.name.as_str() {
                 "help" => crate::slash_commands::handle_help_command(&ctx, &command, agents).await,
@@ -766,7 +778,7 @@ impl EventHandler for DiscordEventHandler {
                     crate::slash_commands::handle_status_command(&ctx, &command, agents, group)
                         .await
                 }
-                "memory" | "archival" | "context" | "search" => {
+                "memory" | "archival" | "context" | "search" | "restart" => {
                     // Check user authorization for sensitive commands
                     if let Some(ref admin_users) = self.bot.config.admin_users {
                         let user_id_str = command.user.id.get().to_string();
@@ -805,6 +817,12 @@ impl EventHandler for DiscordEventHandler {
                         "search" => {
                             crate::slash_commands::handle_search_command(&ctx, &command, agents)
                                 .await
+                        }
+                        "restart" => {
+                            crate::slash_commands::handle_restart_command(
+                                &ctx, &command, restart_ch,
+                            )
+                            .await
                         }
                         _ => unreachable!(),
                     }
