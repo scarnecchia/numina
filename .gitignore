@@ -22,3 +22,7 @@ mcp-wrapper.sh
 **.json
 **.sql
 **.surql
+**/**.car
+**.bak
+**.tar.gz
+**/**.tar.gz
