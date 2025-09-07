@@ -3503,6 +3503,7 @@ impl DataSource for BlueskyFirehoseSource {
         let manager_last_cursor_save = self.last_cursor_save.clone();
         let manager_posts_per_second = self.posts_per_second;
 
+        let endpoint = self.endpoint.clone();
         tokio::spawn(async move {
             let mut connection_count = 0;
             let mut consecutive_failures: u32 = 0;
@@ -3511,18 +3512,19 @@ impl DataSource for BlueskyFirehoseSource {
 
             // Standard Jetstream endpoints to rotate through
             let endpoints = vec![
-                "wss://jetstream1.us-east.fire.hose.cam/subscribe",
-                "wss://jetstream2.us-west.bsky.network/subscribe",
-                "wss://jetstream1.us-west.bsky.network/subscribe",
-                "wss://jetstream2.us-east.bsky.network/subscribe",
-                "wss://jetstream1.us-east.bsky.network/subscribe",
+                endpoint,
+                "wss://jetstream1.us-east.fire.hose.cam/subscribe".to_string(),
+                "wss://jetstream2.us-west.bsky.network/subscribe".to_string(),
+                "wss://jetstream1.us-west.bsky.network/subscribe".to_string(),
+                "wss://jetstream2.us-east.bsky.network/subscribe".to_string(),
+                "wss://jetstream1.us-east.bsky.network/subscribe".to_string(),
             ];
             let mut current_endpoint_idx = 0;
 
             // Outer loop that recreates the connection when it dies
             loop {
                 connection_count += 1;
-                let current_endpoint = endpoints[current_endpoint_idx];
+                let current_endpoint = endpoints[current_endpoint_idx].clone();
                 tracing::debug!(
                     "Creating jetstream connection #{} using endpoint {}",
                     connection_count,
@@ -3542,12 +3544,12 @@ impl DataSource for BlueskyFirehoseSource {
                 let options = if let Some(cursor_us) = current_cursor {
                     JetstreamOptions::builder()
                         .cursor(cursor_us.to_string())
-                        .ws_url(JetstreamEndpoints::Custom(current_endpoint.to_string()))
+                        .ws_url(JetstreamEndpoints::Custom(current_endpoint))
                         .wanted_collections(manager_collections.clone())
                         .build()
                 } else {
                     JetstreamOptions::builder()
-                        .ws_url(JetstreamEndpoints::Custom(current_endpoint.to_string()))
+                        .ws_url(JetstreamEndpoints::Custom(current_endpoint))
                         .wanted_collections(manager_collections.clone())
                         .build()
                 };

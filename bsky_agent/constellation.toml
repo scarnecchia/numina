@@ -562,6 +562,7 @@ default_filter = { nsids = [
     "did:plc:vszw3ess46odfhnzdsy4huae", # se gyges got got one too many times
     "did:plc:lw7hallqsgrhwumgudkph44j",
 ] }
+jetstream_endpoint = "ws://jetstream.hose:6008/subscribe"
 auto_connect_firehose = true # Control when to connect
 
 # Context sync group - runs background synchronization

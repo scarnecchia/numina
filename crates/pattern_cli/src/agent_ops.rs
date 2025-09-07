@@ -753,7 +753,18 @@ pub async fn register_data_sources_with_target<M, E>(
             tracing::info!("filter: {:?}", filter);
             let data_sources = if let Some(target) = target {
                 DataSourceBuilder::new()
-                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .with_custom_bluesky_source(
+                        "bluesky_jetstream".to_string(),
+                        config
+                            .bluesky
+                            .as_ref()
+                            .map(|b| b.jetstream_endpoint.clone())
+                            .unwrap_or(
+                                "wss://jetstream1.us-east.fire.hose.cam/subscribe".to_string(),
+                            ),
+                        filter,
+                        true,
+                    )
                     .build_with_target(
                         agent.id(),
                         agent.name(),
@@ -767,7 +778,18 @@ pub async fn register_data_sources_with_target<M, E>(
                     .unwrap()
             } else {
                 DataSourceBuilder::new()
-                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                    .with_custom_bluesky_source(
+                        "bluesky_jetstream".to_string(),
+                        config
+                            .bluesky
+                            .as_ref()
+                            .map(|b| b.jetstream_endpoint.clone())
+                            .unwrap_or(
+                                "wss://jetstream1.us-east.fire.hose.cam/subscribe".to_string(),
+                            ),
+                        filter,
+                        true,
+                    )
                     .build(
                         agent.id(),
                         agent.name(),
