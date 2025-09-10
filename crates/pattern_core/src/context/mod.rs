@@ -242,7 +242,7 @@ impl Default for ModelAdjustments {
             native_thinking: false,
             use_xml_tags: true,
             max_context_tokens: None,
-            token_multiplier: 1.5, // Rough estimate: 1 token ≈ 0.75 words
+            token_multiplier: 1.0, // Rough estimate: 1 token ≈ 0.75 words
         }
     }
 }
@@ -505,10 +505,7 @@ impl ContextBuilder {
 </value>
 </{}>",
                     block.label,
-                    block
-                        .description
-                        .as_deref()
-                        .unwrap_or("No description provided"),
+                    block.description.as_deref().unwrap_or("No description"),
                     block.permission,
                     block.memory_type,
                     char_count,

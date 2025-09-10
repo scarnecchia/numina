@@ -2538,15 +2538,12 @@ impl BlueskyFirehoseSource {
         if let Some(cached) = self.thread_cache.get(thread_root) {
             let now = std::time::Instant::now();
             if now.duration_since(cached.cached_at) < self.thread_cache_ttl {
-                tracing::debug!("📁 Cache HIT for thread {}", thread_root);
                 return Some(cached.context.clone());
             } else {
-                tracing::debug!("🕐 Cache EXPIRED for thread {}", thread_root);
                 // Remove expired entry
                 self.thread_cache.remove(thread_root);
             }
         } else {
-            tracing::debug!("📁 Cache MISS for thread {}", thread_root);
         }
         None
     }
@@ -2559,7 +2556,6 @@ impl BlueskyFirehoseSource {
         };
 
         self.thread_cache.insert(thread_root.clone(), cached);
-        tracing::debug!("💾 Cached thread context for {}", thread_root);
     }
 
     /// Check if thread was recently shown to agent (within TTL window)
@@ -2588,19 +2584,7 @@ impl BlueskyFirehoseSource {
         if let Ok(pending_posts) = self.pending_batch.pending_posts.try_read() {
             if let Some(post) = pending_posts.iter().find(|p| p.uri == uri) {
                 if post.hydration >= required_hydration {
-                    tracing::debug!(
-                        "📁 Post cache HIT for {} (hydration: {:?})",
-                        uri,
-                        post.hydration
-                    );
                     return Some(post.clone());
-                } else {
-                    tracing::debug!(
-                        "🔄 Post cache PARTIAL for {} (has: {:?}, need: {:?})",
-                        uri,
-                        post.hydration,
-                        required_hydration
-                    );
                 }
             }
         }
@@ -2609,24 +2593,10 @@ impl BlueskyFirehoseSource {
         for entry in self.pending_batch.posts_by_thread.iter() {
             if let Some(post) = entry.value().iter().find(|p| p.uri == uri) {
                 if post.hydration >= required_hydration {
-                    tracing::debug!(
-                        "📁 Post cache HIT (batched) for {} (hydration: {:?})",
-                        uri,
-                        post.hydration
-                    );
                     return Some(post.clone());
-                } else {
-                    tracing::debug!(
-                        "🔄 Post cache PARTIAL (batched) for {} (has: {:?}, need: {:?})",
-                        uri,
-                        post.hydration,
-                        required_hydration
-                    );
                 }
             }
         }
-
-        tracing::debug!("📁 Post cache MISS for {}", uri);
         None
     }
 
@@ -2662,12 +2632,6 @@ impl BlueskyFirehoseSource {
                         {
                             pending_posts.push(post.clone());
                         }
-
-                        tracing::debug!(
-                            "🌐 Fetched and cached post {} (hydration: {:?})",
-                            uri,
-                            required_hydration
-                        );
                         return Ok(Some(post));
                     }
                 }
@@ -2725,11 +2689,6 @@ impl BlueskyFirehoseSource {
                             cached_posts.push(post);
                         }
                     }
-                    tracing::debug!(
-                        "🌐 Batch fetched {} posts (hydration: {:?})",
-                        need_fetch.len(),
-                        required_hydration
-                    );
                 }
                 Err(e) => {
                     tracing::warn!("Failed to batch fetch posts: {}", e);

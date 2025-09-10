@@ -34,19 +34,12 @@ pub fn create_oauth_auth_resolver<C: Connection + 'static>(
 
             // Only handle Anthropic OAuth for now
             if adapter_kind == AdapterKind::Anthropic {
-                tracing::debug!("Checking OAuth token for Anthropic, user: {}", user_id);
                 // Use OAuthModelProvider to handle token refresh automatically
                 let provider =
                     crate::oauth::integration::OAuthModelProvider::new(db.clone(), user_id.clone());
 
                 match provider.get_token("anthropic").await {
                     Ok(Some(token)) => {
-                        // Token is automatically refreshed if needed by get_token()
-                        tracing::debug!(
-                            "Using OAuth token for Anthropic (expires: {})",
-                            token.expires_at
-                        );
-
                         // Return bearer token with "Bearer " prefix so genai detects OAuth
                         return Ok(Some(AuthData::Key(format!(
                             "Bearer {}",
@@ -57,9 +50,6 @@ pub fn create_oauth_auth_resolver<C: Connection + 'static>(
                         // No OAuth token found
                         // Check if API key is available as fallback
                         if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                            tracing::debug!(
-                                "No OAuth token found for Anthropic, falling back to API key"
-                            );
                             // Return None to use default auth (API key)
                             return Ok(None);
                         } else {
@@ -100,67 +90,6 @@ pub fn create_service_target_resolver() -> ServiceTargetResolver {
     };
 
     ServiceTargetResolver::from_resolver_async_fn(resolver_fn)
-}
-
-/// Load OAuth token for a provider from the database
-#[allow(dead_code)]
-async fn get_oauth_token<C: Connection>(
-    db: &Surreal<C>,
-    user_id: &UserId,
-    provider: &str,
-) -> Result<Option<OAuthToken>, CoreError> {
-    // Query for OAuth token belonging to this user and provider
-    let query = r#"
-        SELECT * FROM oauth_token
-        WHERE owner_id = $user_id
-        AND provider = $provider
-        ORDER BY last_used_at DESC
-        LIMIT 1
-    "#;
-
-    // Clone to avoid borrow issues
-    let user_id = user_id.clone();
-    let provider = provider.to_string();
-
-    let mut result = db
-        .query(query)
-        .bind(("user_id", RecordId::from(user_id.clone())))
-        .bind(("provider", provider.clone()))
-        .await
-        .map_err(|e| CoreError::DatabaseQueryFailed {
-            query: query.to_string(),
-            table: "oauth_token".to_string(),
-            cause: e,
-        })?;
-
-    let tokens: Vec<<OAuthToken as DbEntity>::DbModel> =
-        result.take(0).map_err(|e| CoreError::DatabaseQueryFailed {
-            query: query.to_string(),
-            table: "oauth_token".to_string(),
-            cause: e,
-        })?;
-
-    let mut tokens = tokens
-        .into_iter()
-        .map(|tok| OAuthToken::from_db_model(tok).expect("should be the db model"));
-
-    let token = tokens.next();
-
-    if token.is_none() {
-        tracing::info!(
-            "No OAuth token found for user {} provider {}",
-            user_id,
-            provider
-        );
-    } else {
-        tracing::info!(
-            "Found OAuth token for user {} provider {}",
-            user_id,
-            provider
-        );
-    }
-
-    Ok(token)
 }
 
 /// Builder for creating a genai client with OAuth support
