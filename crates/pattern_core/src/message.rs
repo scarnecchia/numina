@@ -949,12 +949,12 @@ impl Message {
                 self.content.clone()
             }
             MessageContent::ToolResponses(_) => {
-                tracing::debug!("Converting ToolResponses message with role {:?}", role);
+                tracing::trace!("Converting ToolResponses message with role {:?}", role);
                 self.content.clone()
             }
             MessageContent::Parts(parts) => match role {
                 ChatRole::System | ChatRole::Assistant | ChatRole::Tool => {
-                    tracing::debug!("Combining Parts message with role {:?}", role);
+                    tracing::trace!("Combining Parts message with role {:?}", role);
                     let string = parts
                         .into_iter()
                         .map(|part| match part {

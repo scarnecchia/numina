@@ -1613,7 +1613,7 @@ impl AgentContext {
                     let total_tokens = system_tokens + message_tokens;
 
                     // Leave some buffer (use 80% of limit to trigger compression)
-                    total_tokens > (max_tokens * 2 / 3)
+                    total_tokens > (max_tokens * 5 / 6)
                 } else {
                     false
                 };
@@ -1675,10 +1675,6 @@ impl AgentContext {
             context.len(),
             context.system_prompt.len()
         );
-        for msg in &context.messages() {
-            tracing::debug!("{:?}", msg);
-        }
-
         Ok(context)
     }
 
