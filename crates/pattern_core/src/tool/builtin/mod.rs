@@ -3,6 +3,7 @@
 //! This module provides the standard tools that all agents have access to,
 //! including memory management and inter-agent communication.
 
+mod calculator;
 mod constellation_search;
 mod context;
 pub mod data_source;
@@ -17,6 +18,7 @@ mod web;
 
 use std::fmt::Debug;
 
+pub use calculator::{CalculatorInput, CalculatorOutput, CalculatorTool};
 pub use constellation_search::{
     ConstellationSearchDomain, ConstellationSearchInput, ConstellationSearchTool,
 };
@@ -47,6 +49,7 @@ pub struct BuiltinTools {
     search_tool: Box<dyn DynamicTool>,
     send_message_tool: Box<dyn DynamicTool>,
     web_tool: Option<Box<dyn DynamicTool>>,
+    calculator_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinTools {
@@ -65,7 +68,12 @@ impl BuiltinTools {
             send_message_tool: Box::new(DynamicToolAdapter::new(SendMessageTool {
                 handle: handle.clone(),
             })),
-            web_tool: Some(Box::new(DynamicToolAdapter::new(WebTool::new(handle)))),
+            web_tool: Some(Box::new(DynamicToolAdapter::new(WebTool::new(
+                handle.clone(),
+            )))),
+            calculator_tool: Some(Box::new(DynamicToolAdapter::new(CalculatorTool::new(
+                handle,
+            )))),
         }
     }
 
@@ -78,6 +86,10 @@ impl BuiltinTools {
 
         if let Some(web_tool) = &self.web_tool {
             registry.register_dynamic(web_tool.clone_box());
+        }
+
+        if let Some(calculator_tool) = &self.calculator_tool {
+            registry.register_dynamic(calculator_tool.clone_box());
         }
 
         // Note: DataSourceTool requires external coordinator setup.
@@ -97,6 +109,7 @@ pub struct BuiltinToolsBuilder {
     context_tool: Option<Box<dyn DynamicTool>>,
     search_tool: Option<Box<dyn DynamicTool>>,
     send_message_tool: Option<Box<dyn DynamicTool>>,
+    calculator_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinToolsBuilder {
@@ -124,6 +137,12 @@ impl BuiltinToolsBuilder {
         self
     }
 
+    /// Replace the default calculator tool
+    pub fn with_calculator_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.calculator_tool = Some(Box::new(tool));
+        self
+    }
+
     /// Build the tools for a specific agent
     pub fn build_for_agent(self, handle: AgentHandle) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(handle);
@@ -133,6 +152,7 @@ impl BuiltinToolsBuilder {
             search_tool: self.search_tool.unwrap_or(defaults.search_tool),
             send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
             web_tool: defaults.web_tool,
+            calculator_tool: self.calculator_tool.or(defaults.calculator_tool),
         }
     }
 }
