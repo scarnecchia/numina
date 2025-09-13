@@ -43,13 +43,6 @@ memory_type = "working"
 description = "Current conversant context"
 shared = true
 
-[agent.memory.deep_background]
-content_path = "../deep-background.md"
-permission = "read_only"
-memory_type = "archival"
-description = "A framework for systemically researching a topic and or verifying claims"
-shared = true
-
 [agent.memory.partner]
 content_path = "lasa-familiar-block.md"
 permission = "append"
@@ -62,6 +55,13 @@ content_path = "lasa-observations-block.md"
 permission = "read_write"
 memory_type = "core"
 description = "Collective pattern gathering"
+shared = true
+
+[agent.memory.intro_blog_post]
+content_path = "blog-post.md"
+permission = "read_only"
+memory_type = "archival"
+description = "Post written by orual about their motivation for developing our Lares"
 shared = true
 
 [agent.memory.resonances]
