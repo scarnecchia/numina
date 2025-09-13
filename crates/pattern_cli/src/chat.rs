@@ -515,7 +515,7 @@ pub async fn setup_group(
     let constellation_tracker = Arc::new(
         pattern_core::constellation_memory::ConstellationActivityTracker::with_memory_id(
             tracker_memory_id,
-            50,
+            25,
         ),
     );
 
@@ -1176,7 +1176,7 @@ pub async fn print_group_response_event(
                     .map(|a| a.agent.name())
                     .unwrap_or("Unknown Agent".to_string());
 
-                output.info(&format!("{} reasoning:", agent_name), &text);
+                output.agent_reasoning(&agent_name, &text);
             }
         }
         GroupResponseEvent::ToolCallStarted {
@@ -1228,17 +1228,26 @@ pub async fn print_group_response_event(
             output.tool_call(&fn_name, &args_display);
         }
         GroupResponseEvent::ToolCallCompleted {
-            agent_id: _,
+            agent_id,
             call_id,
             result,
-        } => match result {
-            Ok(result) => {
-                output.tool_result(&result);
+        } => {
+            // Find agent name
+            let agent_name = agents_with_membership
+                .iter()
+                .find(|a| a.agent.id() == agent_id)
+                .map(|a| a.agent.name())
+                .unwrap_or("Unknown Agent".to_string());
+            output.status(&format!("Tool result {} for {}", call_id, agent_name));
+            match result {
+                Ok(result) => {
+                    output.tool_result(&result);
+                }
+                Err(error) => {
+                    output.error(&format!("Tool error (call {}): {}", call_id, error));
+                }
             }
-            Err(error) => {
-                output.error(&format!("Tool error (call {}): {}", call_id, error));
-            }
-        },
+        }
         GroupResponseEvent::AgentCompleted { agent_name, .. } => {
             output.status(&format!("{} completed", agent_name));
         }

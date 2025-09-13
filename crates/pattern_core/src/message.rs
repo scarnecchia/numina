@@ -976,11 +976,7 @@ impl Message {
                 }
                 ChatRole::User => self.content.clone(),
             },
-            MessageContent::Blocks(_) => {
-                // Blocks are preserved as-is for providers that support them
-                tracing::trace!("Preserving Blocks message with role {:?}", role);
-                self.content.clone()
-            }
+            MessageContent::Blocks(_) => self.content.clone(),
         };
 
         genai::chat::ChatMessage {
@@ -1017,16 +1013,8 @@ pub struct Request {
 }
 
 impl Request {
-    /// Validate that the request has no orphaned tool calls and proper ordering
-    pub fn validate(&mut self) -> crate::Result<()> {
-        Ok(())
-    }
-
     /// Convert this request to a genai ChatRequest
     pub fn as_chat_request(&mut self) -> crate::Result<genai::chat::ChatRequest> {
-        // Validate before converting
-        self.validate()?;
-
         // Fix assistant messages that end with thinking blocks
         for msg in &mut self.messages {
             if msg.role == ChatRole::User || msg.role == ChatRole::System {
@@ -1864,30 +1852,6 @@ impl Message {
             });
         }
 
-        // // If response was empty but had reasoning, create a text message
-        // if messages.is_empty() && response.reasoning.is_some() {
-        //     messages.push(Self {
-        //         id: MessageId::generate(),
-        //         role: ChatRole::Assistant,
-        //         content: MessageContent::Text(response.reasoning.clone().unwrap_or_default()),
-        //         metadata: MessageMetadata {
-        //             user_id: Some(agent_id.to_string()),
-        //             ..Default::default()
-        //         },
-        //         options: MessageOptions::default(),
-        //         created_at: Utc::now(),
-        //         owner_id: None,
-        //         has_tool_calls: false,
-        //         word_count: response
-        //             .reasoning
-        //             .as_ref()
-        //             .map(|r| r.split_whitespace().count() as u32)
-        //             .unwrap_or(0),
-        //         embedding: None,
-        //         embedding_model: None,
-        //     });
-        // }
-
         messages
     }
 
@@ -1943,7 +1907,7 @@ impl Message {
                         }
                     })
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join("\n")
             }
             MessageContent::ToolCalls(calls) => {
                 // Just dump the JSON for tool calls
@@ -1958,7 +1922,7 @@ impl Message {
                         )
                     })
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join("\n")
             }
             MessageContent::ToolResponses(responses) => {
                 // Include tool response content
@@ -1966,7 +1930,7 @@ impl Message {
                     .iter()
                     .map(|resp| format!("[Tool Response] {}", resp.content))
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join("\n")
             }
             MessageContent::Blocks(blocks) => {
                 // Extract text from all block types including reasoning
@@ -1996,7 +1960,7 @@ impl Message {
                         }
                     })
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join("\n")
             }
         }
     }
@@ -2039,7 +2003,7 @@ impl Message {
     /// Rough estimation of token count for this message
     ///
     /// Uses the approximation of ~4 characters per token
-    /// Images are estimated at 1600 tokens each
+    /// Images are estimated at 1200 tokens each
     pub fn estimate_tokens(&self) -> usize {
         let text_tokens = self.display_content().len() / 4;
 
@@ -2052,7 +2016,7 @@ impl Message {
             _ => 0,
         };
 
-        text_tokens + (image_count * 1600)
+        text_tokens + (image_count * 1200)
     }
 }
 
