@@ -463,6 +463,7 @@ default_filter = { nsids = [
     "did:plc:vc7f4oafdgxsihk4cry2xpze", # Jerry Chen
     "did:plc:zifbq74pivhmode7fflzngye", # Eva
     "did:plc:nhvvwh2qglcmsbvba7durp7f", # ollie
+     "did:plc:gq2c76b4sxu76g3mv2a7zemt", # blu
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
