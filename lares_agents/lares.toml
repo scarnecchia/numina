@@ -460,7 +460,7 @@ default_filter = { nsids = [
     "did:plc:33d7gnwiagm6cimpiepefp72",
     "did:plc:aapmpjikkcu3zrn3enaa2h4h",
     "did:plc:igvkdeoufdee3gpkg4o2peye",
-    "did:plc:k644h4rq5bjfzcetgsa6tuby",
+    "did:plc:k644h4rq5bjfzcetgsa6tuby", # Natalie
     "did:plc:rtzf5y356funa3tgp6fzmkjn",
     "did:plc:7br4wx2s57b3gj6zlrnwizeo",
     "did:plc:aq7owa5y7ndc2hzjz37wy7ma",
@@ -541,6 +541,7 @@ default_filter = { nsids = [
     "did:plc:vc7f4oafdgxsihk4cry2xpze", # Jerry Chen
     "did:plc:zifbq74pivhmode7fflzngye", # Eva
     "did:plc:nhvvwh2qglcmsbvba7durp7f", # ollie
+    "did:plc:gq2c76b4sxu76g3mv2a7zemt", # blu
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina

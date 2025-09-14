@@ -4,7 +4,7 @@
 //! and tool execution system that powers Pattern's multi-agent
 //! cognitive support system.
 
-#![recursion_limit = "256"]
+//#![recursion_limit = "256"]
 
 pub mod agent;
 pub mod atproto_identity;

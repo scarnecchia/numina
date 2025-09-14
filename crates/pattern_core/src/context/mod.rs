@@ -118,7 +118,7 @@ impl MemoryContext {
 /// Clip a delimited archive summary to show the first N and last M blocks.
 /// Blocks are separated by two-or-more consecutive newlines. If there are not
 /// enough blocks, return the original summary.
-fn clip_archive_summary(summary: &str, head: usize, tail: usize) -> String {
+pub fn clip_archive_summary(summary: &str, head: usize, tail: usize) -> String {
     // Split on two-or-more newlines (treat multiple blank lines as block separators)
     // Compiling each time is acceptable here due to infrequent calls.
     let delim_re = Regex::new(r"\n{2,}").expect("valid delimiter regex");

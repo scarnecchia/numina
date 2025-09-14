@@ -1602,7 +1602,7 @@ impl AgentContext {
             let needs_token_compression =
                 if let Some(max_tokens) = self.context_config.max_context_tokens {
                     // Estimate current token usage
-                    let memory_blocks = self.handle.memory.get_all_blocks();
+                    let memory_blocks = self.handle.memory.get_all_non_recall();
                     let system_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
                     let message_tokens: usize = history
                         .batches
@@ -2019,7 +2019,7 @@ impl AgentContext {
         let mut history = self.history.write().await;
 
         // Calculate system prompt tokens (including memory blocks)
-        let memory_blocks = self.handle.memory.get_all_blocks();
+        let memory_blocks = self.handle.memory.get_all_non_recall();
         let system_prompt_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
 
         let mut compressor = MessageCompressor::new(history.compression_strategy.clone())

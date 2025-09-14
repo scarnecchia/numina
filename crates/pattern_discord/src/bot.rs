@@ -689,56 +689,30 @@ impl EventHandler for DiscordEventHandler {
                                             {
                                                 Ok(mut stream) => {
                                                     use futures::StreamExt;
-                                                    let mut response_text = String::new();
 
                                                     while let Some(event) = stream.next().await {
                                                         match event {
-                                                        pattern_core::coordination::groups::GroupResponseEvent::TextChunk { text, is_final, .. } => {
-                                                            if text.len() > 1 {
-                                                                response_text.push_str(&text);
+                                                            pattern_core::coordination::groups::GroupResponseEvent::TextChunk { .. } => {
 
-                                                                // Send complete chunks as they arrive
-                                                                if is_final || text.ends_with('\n') || response_text.len() > 1000 {
-                                                                    if !response_text.trim().is_empty() {
-                                                                        // Send the response to Discord
-                                                                        if let Err(e) = channel_id.say(&ctx_clone.http, &response_text).await {
-                                                                            warn!("Failed to send reaction response to Discord: {}", e);
-                                                                        }
-                                                                        response_text.clear();
-                                                                    }
+                                                            }
+                                                            pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
+                                                                // Show tool activity for reactions too
+                                                                let tool_msg = match fn_name.as_str() {
+                                                                    "context" => "💭 Processing reaction context...".to_string(),
+                                                                    "recall" => "🔍 Searching reaction history...".to_string(),
+                                                                    "send_message" => {continue;},
+                                                                    _ => format!("🔧 Processing with {}...", fn_name)
+                                                                };
+                                                                if let Err(e) = channel_id.say(&ctx_clone.http, tool_msg).await {
+                                                                    debug!("Failed to send tool activity: {}", e);
                                                                 }
                                                             }
-                                                        }
-                                                        pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
-                                                            // Show tool activity for reactions too
-                                                            let tool_msg = match fn_name.as_str() {
-                                                                "context" => "💭 Processing reaction context...".to_string(),
-                                                                "recall" => "🔍 Searching reaction history...".to_string(),
-                                                                _ => format!("🔧 Processing with {}...", fn_name)
-                                                            };
-                                                            if let Err(e) = channel_id.say(&ctx_clone.http, tool_msg).await {
-                                                                debug!("Failed to send tool activity: {}", e);
+                                                            pattern_core::coordination::groups::GroupResponseEvent::Error { message, .. } => {
+                                                                warn!("Error processing reaction: {}", message);
                                                             }
+                                                            _ => {}
                                                         }
-                                                        pattern_core::coordination::groups::GroupResponseEvent::Error { message, .. } => {
-                                                            warn!("Error processing reaction: {}", message);
-                                                        }
-                                                        _ => {}
                                                     }
-                                                    }
-
-                                                    // Send any remaining text
-                                                    // if !response_text.trim().is_empty() {
-                                                    //     if let Err(e) = channel_id
-                                                    //         .say(&ctx_clone.http, &response_text)
-                                                    //         .await
-                                                    //     {
-                                                    //         warn!(
-                                                    //             "Failed to send final reaction response: {}",
-                                                    //             e
-                                                    //         );
-                                                    //     }
-                                                    // }
                                                 }
                                                 Err(e) => {
                                                     warn!(
@@ -1059,41 +1033,25 @@ impl DiscordBot {
                         } else {
                             stream
                         };
-                        let mut response = String::new();
                         let mut has_response = false;
 
+                        let ctx_clone = ctx.clone();
                         while let Some(event) = stream.next().await {
+                            has_response = true;
                             match event {
-                                pattern_core::coordination::groups::GroupResponseEvent::TextChunk { text, is_final, .. } => {
-                                    if !text.is_empty() && text.trim() != "." {
-                                        response.push_str(&text);
-                                        has_response = true;
-
-                                        // Send complete chunks
-                                        if is_final || text.ends_with('\n') || response.len() > 1500 {
-                                            if !response.trim().is_empty() {
-                                                for chunk in split_message(&response, 2000) {
-                                                    if let Err(e) = ChannelId::new(channel_id).say(&ctx.http, chunk).await {
-                                                        warn!("Failed to send batch response: {}", e);
-                                                    }
-                                                }
-                                                response.clear();
-                                            }
-                                        }
-                                    }
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
+                                    // // Show tool activity for reactions too
+                                    // let tool_msg = match fn_name.as_str() {
+                                    //     "context" => "💭 Processing reaction context...".to_string(),
+                                    //     "recall" => "🔍 Searching reaction history...".to_string(),
+                                    //     "send_message" => {continue;},
+                                    //     _ => format!("🔧 Processing with {}...", fn_name)
+                                    // };
+                                    // if let Err(e) = channel_id.say(&ctx_clone.http, tool_msg).await {
+                                    //     debug!("Failed to send tool activity: {}", e);
+                                    // }
                                 }
                                 _ => {} // Ignore other events for batch processing
-                            }
-                        }
-
-                        // Send any remaining response
-                        if !response.trim().is_empty() {
-                            for chunk in split_message(&response, 2000) {
-                                if let Err(e) =
-                                    ChannelId::new(channel_id).say(&ctx.http, chunk).await
-                                {
-                                    warn!("Failed to send final batch response: {}", e);
-                                }
                             }
                         }
 
