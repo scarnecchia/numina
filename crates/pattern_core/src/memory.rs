@@ -328,6 +328,19 @@ impl Memory {
         self.blocks.iter().map(|e| e.value().clone()).collect()
     }
 
+    pub fn get_all_non_recall(&self) -> Vec<MemoryBlock> {
+        self.blocks
+            .iter()
+            .filter_map(|e| {
+                if e.value().memory_type != MemoryType::Archival {
+                    Some(e.value().clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// List all block labels
     pub fn list_blocks(&self) -> Vec<CompactString> {
         self.blocks.iter().map(|e| e.key().clone()).collect()
