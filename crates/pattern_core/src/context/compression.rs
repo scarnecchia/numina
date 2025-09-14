@@ -447,7 +447,7 @@ impl MessageCompressor {
             // No compression needed
             return Ok(CompressionResult {
                 active_batches: batches,
-                summary: None,
+                summary: self.existing_archive_summary.clone(),
                 archived_batches: Vec::new(),
                 metadata: CompressionMetadata {
                     strategy_used: "recursive_summarization_no_compression".to_string(),
@@ -520,7 +520,7 @@ impl MessageCompressor {
             // Nothing to summarize
             return Ok(CompressionResult {
                 active_batches,
-                summary: None,
+                summary: self.existing_archive_summary.clone(),
                 archived_batches: Vec::new(),
                 metadata: CompressionMetadata {
                     strategy_used: "recursive_summarization".to_string(),
@@ -537,6 +537,10 @@ impl MessageCompressor {
         const MAX_TOKENS_PER_REQUEST: usize = 128_000; // Conservative limit for safety
 
         let mut accumulated_summaries = Vec::new();
+        if let Some(ref summary) = self.existing_archive_summary {
+            accumulated_summaries.push(super::clip_archive_summary(&summary, 4, 8));
+        }
+
         let mut batch_index = 0;
 
         while batch_index < archived_batches.len() {
