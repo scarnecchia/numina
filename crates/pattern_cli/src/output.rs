@@ -7,6 +7,7 @@ use termimad::MadSkin;
 #[derive(Clone)]
 pub struct Output {
     skin: MadSkin,
+    reasoning_skin: MadSkin,
     writer: Option<SharedWriter>,
 }
 
@@ -28,19 +29,43 @@ impl Output {
         skin.code_block.set_fg(termimad::ansi(15)); // bright white text
         // If a global SharedWriter is available (when chat has initialized
         // the readline UI), use it to avoid cursor glitches
+        let mut reasoning_skin = MadSkin::default();
+        // Keep it simple for copy-paste friendliness
+        reasoning_skin.set_headers_fg(termimad::ansi(5)); // purple
+        reasoning_skin.bold.set_fg(termimad::ansi(7)); //  light grey
+
+        // Make inline code stand out with color but no background
+        reasoning_skin.inline_code.set_fg(termimad::ansi(11)); // bright yellow
+        reasoning_skin
+            .inline_code
+            .set_bg(termimad::crossterm::style::Color::Black);
+
+        // Fix code blocks to not have background
+        reasoning_skin
+            .code_block
+            .set_bg(termimad::crossterm::style::Color::Black);
+        reasoning_skin.code_block.set_fg(termimad::ansi(7)); // bright white
+        // If a global SharedWriter is available (when chat has initialized
+        // the readline UI), use it to avoid cursor glitches
         if let Some(shared) = crate::tracing_writer::get_shared_writer() {
             Self {
                 skin,
+                reasoning_skin,
                 writer: Some(shared),
             }
         } else {
-            Self { skin, writer: None }
+            Self {
+                skin,
+                reasoning_skin,
+                writer: None,
+            }
         }
     }
 
     pub fn with_writer(self, writer: SharedWriter) -> Self {
         Self {
             skin: self.skin,
+            reasoning_skin: self.reasoning_skin,
             writer: Some(writer),
         }
     }
@@ -63,16 +88,40 @@ impl Output {
         }
     }
 
+    /// flush the buffer
+    fn flush(&self) {
+        if let Some(ref writer) = self.writer {
+            // Clone the writer to get a mutable version
+            let mut writer = writer.clone();
+            let _ = writer.flush();
+        } else {
+            use std::io::{self, Write};
+            let _ = io::stdout().flush();
+        }
+    }
+
+    /// Helper method to write output either to SharedWriter or stdout
+    fn write_line_noclear(&self, content: &str) {
+        if let Some(ref writer) = self.writer {
+            // Clone the writer to get a mutable version
+            let mut writer = writer.clone();
+            // When using SharedWriter, it handles the synchronization
+            let _ = writeln!(writer, "{}", content);
+        } else {
+            // Fallback to regular println
+            println!("{}", content);
+        }
+    }
+
     /// Print an agent message with markdown formatting
     pub fn agent_message(&self, agent_name: &str, content: &str) {
         // Clear visual separation without box drawing chars
-        self.write_line("");
-        self.write_line(&format!(
+        self.write_line_noclear("");
+        self.write_line_noclear(&format!(
             "{} {}",
             agent_name.bright_cyan().bold(),
             "says:".dimmed()
         ));
-        self.write_line("");
 
         // Use termimad to format the markdown content
         use termimad::FmtText;
@@ -81,7 +130,27 @@ impl Output {
 
         // Write each line through our write_line method
         for line in formatted_string.lines() {
-            self.write_line(line);
+            self.write_line_noclear(line);
+        }
+
+        self.write_line("");
+    }
+
+    /// Print an agent message with markdown formatting
+    pub fn agent_reasoning(&self, agent_name: &str, content: &str) {
+        self.write_line_noclear(&format!(
+            "{} reasoning:",
+            agent_name.bright_magenta().bold()
+        ));
+
+        // Use termimad to format the markdown content
+        use termimad::FmtText;
+        let formatted = FmtText::from(&self.reasoning_skin, content, Some(80));
+        let formatted_string = formatted.to_string();
+
+        // Write each line through our write_line method
+        for line in formatted_string.lines() {
+            self.write_line_noclear(line);
         }
 
         self.write_line("");
@@ -126,7 +195,7 @@ impl Output {
 
     /// Print a tool call
     pub fn tool_call(&self, tool_name: &str, args: &str) {
-        self.write_line(&format!(
+        self.write_line_noclear(&format!(
             "  {} Using tool: {}",
             ">>".bright_blue(),
             tool_name.bright_yellow()
@@ -135,12 +204,13 @@ impl Output {
             // Indent each line of the args for proper alignment
             for (i, line) in args.lines().enumerate() {
                 if i == 0 {
-                    self.write_line(&format!("     Args: {}", line).dimmed().to_string());
+                    self.write_line_noclear(&format!("     Args: {}", line).dimmed().to_string());
                 } else {
-                    self.write_line(&format!("           {}", line).dimmed().to_string());
+                    self.write_line_noclear(&format!("           {}", line).dimmed().to_string());
                 }
             }
         }
+        self.flush();
     }
 
     /// Print a tool result
@@ -148,17 +218,18 @@ impl Output {
         // Handle multi-line results with proper indentation
         let lines: Vec<&str> = result.lines().collect();
         if lines.len() == 1 {
-            self.write_line(&format!(
+            self.write_line_noclear(&format!(
                 "  {} Tool result: {}",
                 "=>".bright_green(),
                 result.dimmed()
             ));
         } else {
-            self.write_line(&format!("  {} Tool result:", "=>".bright_green()));
+            self.write_line_noclear(&format!("  {} Tool result:", "=>".bright_green()));
             for line in lines {
-                self.write_line(&format!("     {}", line.dimmed()));
+                self.write_line_noclear(&format!("     {}", line.dimmed()));
             }
         }
+        self.flush();
     }
 
     /// Print a "working on it" status message
@@ -196,15 +267,16 @@ impl Output {
 
         // Write each line through our write_line method
         for line in formatted_string.lines() {
-            self.write_line(line);
+            self.write_line_noclear(line);
         }
+        self.flush();
     }
 
     /// Print a table-like header
     #[allow(dead_code)]
     pub fn table_header(&self, columns: &[&str]) {
         let header = columns.join(" | ");
-        self.write_line(&format!("  {}", header.bright_white().bold()));
+        self.write_line_noclear(&format!("  {}", header.bright_white().bold()));
         self.write_line(&format!("  {}", "─".repeat(header.len()).dimmed()));
     }
 

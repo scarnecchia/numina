@@ -3,10 +3,8 @@
 //! Provides AuthResolver and ServiceTargetResolver implementations that
 //! integrate with Pattern's OAuth token storage.
 
-use crate::db::DbEntity;
 use crate::error::CoreError;
 use crate::id::UserId;
-use crate::oauth::OAuthToken;
 use genai::ModelIden;
 use genai::ServiceTarget;
 use genai::adapter::AdapterKind;
@@ -14,7 +12,6 @@ use genai::resolver::{AuthData, AuthResolver, Result as ResolverResult, ServiceT
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use surrealdb::RecordId;
 use surrealdb::{Connection, Surreal};
 
 /// Create an OAuth-aware auth resolver for Pattern
