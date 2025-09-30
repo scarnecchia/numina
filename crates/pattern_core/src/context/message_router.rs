@@ -1110,6 +1110,17 @@ impl MessageEndpoint for BlueskyEndpoint {
             tags.push(agent_name);
         }
 
+        if rich_text.grapheme_len() > 300 {
+            return Err(crate::CoreError::ToolExecutionFailed {
+                tool_name: "bluesky_endpoint".to_string(),
+                cause: format!(
+                    "Post text is too long ({} graphemes, max is 300)",
+                    rich_text.grapheme_len()
+                ),
+                parameters: serde_json::json!({ "text": rich_text.text }),
+            });
+        }
+
         // Create the post
         let agent = &self.agent;
         let text_copy = text.clone();

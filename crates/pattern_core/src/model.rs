@@ -124,10 +124,10 @@ impl ResponseOptions {
                 "anthropic-beta".to_string(),
                 "computer-use-2025-01-24".to_string(),
             ));
-            headers.push((
-                "anthropic-beta".to_string(),
-                "context-1m-2025-08-07".to_string(),
-            ));
+            // headers.push((
+            //     "anthropic-beta".to_string(),
+            //     "context-1m-2025-08-07".to_string(),
+            // ));
             headers.push((
                 "anthropic-beta".to_string(),
                 "code-execution-2025-05-22".to_string(),
@@ -426,7 +426,7 @@ impl GenAiClient {
                         if let ImageSource::Url(url) = source {
                             // Quick HEAD request to check if URL is accessible
                             let client = reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(5))
+                                .timeout(std::time::Duration::from_secs(2))
                                 .build()
                                 .ok();
 

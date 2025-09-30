@@ -542,7 +542,7 @@ pub fn strip_dt(s: &str) -> &str {
 
 /// Convert SurrealDB's Datetime type to a chrono DateTime
 pub fn from_surreal_datetime(dt: surrealdb::Datetime) -> chrono::DateTime<chrono::Utc> {
-    let datetime = chrono::NaiveDateTime::parse_from_str(&dt.to_string(), "d'%FT%T%.6fZ'")
+    let datetime = chrono::NaiveDateTime::parse_from_str(&dt.to_string(), "d'%FT%T%.fZ'")
         .expect("should be valid ISO-8601");
 
     datetime.and_utc()

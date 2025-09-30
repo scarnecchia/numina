@@ -1019,7 +1019,9 @@ impl Request {
         for msg in &mut self.messages {
             if msg.role == ChatRole::User || msg.role == ChatRole::System {
                 if let MessageContent::Text(text) = &msg.content {
-                    let timestamp = msg.created_at.naive_local();
+                    use chrono::TimeZone;
+                    let time_zone = chrono::Local::now().timezone();
+                    let timestamp = time_zone.from_utc_datetime(&msg.created_at.naive_utc());
                     // injecting created time in to make agents less likely to be confused by artifacts and more temporally aware.
                     msg.content = MessageContent::Text(format!(
                         "<time_sync>created: {}</time_sync>\n{}",
