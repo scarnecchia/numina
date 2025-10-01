@@ -1604,6 +1604,7 @@ impl AgentContext {
                     // Estimate current token usage
                     let memory_blocks = self.handle.memory.get_all_non_recall();
                     let system_tokens = self.estimate_system_prompt_tokens(&memory_blocks);
+                    // TODO: need to not count prev turn thinking tokens in this value i think.
                     let message_tokens: usize = history
                         .batches
                         .iter()

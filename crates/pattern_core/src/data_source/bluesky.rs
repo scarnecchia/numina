@@ -905,23 +905,24 @@ impl BlueskyPost {
                         .images
                         .iter()
                         .map(|img| {
-                            // Try fullsize first, fallback to thumb with appropriate CDN format
-                            if img.fullsize.is_empty() {
-                                // Fallback to thumbnail - extract CID from blob JSON and use thumbnail CDN format
-                                if img.thumb.starts_with("http") {
-                                    img.thumb.clone()
-                                } else if let Some(cid) = extract_cid_from_blob(&img.thumb) {
-                                    if cid.starts_with("http") {
-                                        cid
-                                    } else {
-                                        format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, cid)
-                                    }
+                            // Use thumbnail - extract CID from blob JSON and use thumbnail CDN format
+                            if img.thumb.starts_with("http") {
+                                img.thumb.clone()
+                            } else if let Some(cid) = extract_cid_from_blob(&img.thumb) {
+                                if cid.starts_with("http") {
+                                    cid
                                 } else {
-                                    // Final fallback: treat as plain CID
-                                    format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, img.thumb)
+                                    format!(
+                                        "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+                                        did, cid
+                                    )
                                 }
                             } else {
-                                convert_blob_to_url(&img.fullsize, did)
+                                // Final fallback: treat as plain CID
+                                format!(
+                                    "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+                                    did, img.thumb
+                                )
                             }
                         })
                         .collect(),
@@ -1012,18 +1013,24 @@ impl BlueskyPost {
                             count: images.images.len(),
                             alt_texts: images.images.iter().map(|img| img.alt.clone()).collect(),
                             urls: images.images.iter().map(|img| {
-                                if img.fullsize.starts_with("http") {
-                                    img.fullsize.clone()
-                                } else if let Some(cid) = extract_cid_from_blob(&img.fullsize) {
+                                // Use thumbnail - extract CID from blob JSON and use thumbnail CDN format
+                                if img.thumb.starts_with("http") {
+                                    img.thumb.clone()
+                                } else if let Some(cid) = extract_cid_from_blob(&img.thumb) {
                                     if cid.starts_with("http") {
                                         cid
                                     } else {
-                                        // Use the parent post's DID (not the quoted post's DID) - thumbnail for LLM
-                                        format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, cid)
+                                        format!(
+                                            "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+                                            did, cid
+                                        )
                                     }
                                 } else {
-                                    // Use the parent post's DID for the fallback case too
-                                    format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg", did, img.thumb)
+                                    // Final fallback: treat as plain CID
+                                    format!(
+                                        "https://cdn.bsky.app/img/feed_thumbnail/plain/{}/{}@jpeg",
+                                        did, img.thumb
+                                    )
                                 }
                             }).collect(),
                         })
@@ -3240,7 +3247,7 @@ impl BlueskyFirehoseSource {
                 "\n💭 Reply option: @{} ({})\n",
                 post.handle, post.uri
             ));
-            message.push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri), your response must contain under 300 characters or it will be truncated.\n");
+            message.push_str("If you choose to reply (by using send_message with target_type bluesky and the target_id set to the uri), your response must contain under 300 graphemes or it won't go through. You can thread a longer reply by requesting a heartbeat when making a reply, posting the first part of the the reply, and then replying to the uri you get back from the first successful reply with the second part\n");
         }
 
         // Collect memory blocks
@@ -4169,8 +4176,6 @@ impl LexiconIngestor for PostIngestor {
                     if let Some(buffer) = &self.buffer {
                         let mut buffer_guard = buffer.lock();
                         if buffer_guard.queue_for_processing(event.clone()) {
-                            // Successfully queued for later processing
-                            tracing::debug!("Queued post for rate-limited processing");
                         } else {
                             // Queue full, drop the event
                             tracing::warn!(
@@ -4182,9 +4187,6 @@ impl LexiconIngestor for PostIngestor {
                         buffer_guard.push(event);
                     }
                 } else {
-                    // Can send immediately
-                    tracing::debug!("📤 Sending post to channel: @{}", post_to_filter.handle);
-
                     // Always mark activity for watchdog regardless of send success - we're processing messages
                     let mut act = self.last_activity_time.lock().await;
                     *act = std::time::Instant::now();
@@ -4206,9 +4208,6 @@ impl LexiconIngestor for PostIngestor {
                             if let Some(buffer) = &self.buffer {
                                 let mut buffer_guard = buffer.lock();
                                 if buffer_guard.queue_for_processing(event.clone()) {
-                                    tracing::debug!(
-                                        "Successfully queued post for rate-limited processing"
-                                    );
                                 } else {
                                     tracing::warn!(
                                         "Backpressure: processing queue full; dropping post from {}",

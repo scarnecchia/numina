@@ -23,3 +23,9 @@ group-create name description="Default group" pattern="round_robin":
 
 group-add group agent role="regular":
     cargo run --bin pattern-cli -- group add-member "{{group}}" "{{agent}}" --role {{role}}
+
+pattern:
+    cargo run --bin pattern-cli -- -c bsky_agent/constellation.toml chat --discord --group "Pattern Cluster"
+
+pattern-db:
+    surreal start rocksdb://./pattern_external.db

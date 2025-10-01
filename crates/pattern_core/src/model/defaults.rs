@@ -31,6 +31,51 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
     let mut defaults = HashMap::new();
 
     // Anthropic Claude models
+
+    defaults.insert(
+        "claude-sonnet-4-5-20250929",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(64_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::CodeExecution,
+                ModelCapability::SystemPrompt,
+                ModelCapability::VisionInput,
+                ModelCapability::ComputerUse,
+                ModelCapability::TextEdit,
+                ModelCapability::WebSearch,
+                ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.03),
+            cost_per_1k_completion: Some(0.015),
+        },
+    );
+
+    defaults.insert(
+        "claude-opus-4-1-20250805",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(32_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::SystemPrompt,
+                ModelCapability::CodeExecution,
+                ModelCapability::ComputerUse,
+                ModelCapability::VisionInput,
+                ModelCapability::TextEdit,
+                ModelCapability::LongContext,
+                ModelCapability::WebSearch,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.015),
+            cost_per_1k_completion: Some(0.075),
+        },
+    );
+
     defaults.insert(
         "claude-opus-4-20250514",
         ModelDefaults {

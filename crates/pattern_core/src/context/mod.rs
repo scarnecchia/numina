@@ -10,7 +10,7 @@ use crate::{
     Result,
     id::AgentId,
     memory::MemoryBlock,
-    message::{CacheControl, Message, MessageBatch},
+    message::{CacheControl, Message, MessageBatch, MessageOptions},
     tool::{DynamicTool, ToolRegistry},
 };
 use regex::Regex;
@@ -98,10 +98,11 @@ impl MemoryContext {
             // TODO: Make head/tail counts configurable via ContextConfig
             // For now, show first 1 and last 2 summary blocks.
             let clipped = clip_archive_summary(summary, 2, 4);
-            messages.push(crate::message::Message::system(format!(
+            let mut message = crate::message::Message::system(format!(
                 "Previous conversation summary:\n{}",
                 clipped
-            )));
+            ));
+            messages.push(message);
         }
 
         // Then add all the regular messages from batches
@@ -740,20 +741,18 @@ You MUST follow these workflow rules exactly (they will be enforced by the syste
         let mut result_batches = Vec::new();
         let total_batches = final_batches.len();
         let mut cache_points_used = 0;
-        const MAX_CACHE_POINTS: usize = 4;
+        const MAX_CACHE_POINTS: usize = 2; // one in system, one in tools, two left
 
         // Calculate which batches should get cache points
         // Strategy: cache early context and recent context
         let cache_positions: Vec<usize> = if total_batches <= MAX_CACHE_POINTS {
             // If we have 4 or fewer batches, cache the first message of each
-            (0..total_batches).collect()
+            vec![0, total_batches - 1]
         } else {
             // Otherwise, distribute cache points strategically:
-            // 1. First batch (early context)
-            // 2. 25% through
-            // 3. 50% through
-            // 4. Most recent batch
-            vec![0, total_batches / 4, total_batches / 2, total_batches - 1]
+            // 1. 50% through
+            // 2. Most recent batch
+            vec![total_batches / 2, total_batches - 1]
         };
 
         for (batch_idx, mut batch) in final_batches.into_iter().enumerate() {
