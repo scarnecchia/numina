@@ -468,6 +468,7 @@ default_filter = { nsids = [
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
+    "did:plc:owlyxc3oe7rsjpysdsx5cguw", # Giulia
 ], allow_any_mentions = true, keywords = [ # Keywords to include
 ], languages = [ # Languages to include
 ], require_agent_participation = true, exclude_keywords = [
