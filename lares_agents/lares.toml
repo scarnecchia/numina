@@ -15,7 +15,7 @@ persona_path = "lasa-persona-block.md"
 
 [model]
 provider = "anthropic"
-model = "claude-sonnet-4"
+model = "claude-sonnet-4-5"
 temperature = 0.8         # Higher for creative public interactions
 
 [context]
