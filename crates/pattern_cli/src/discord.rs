@@ -173,69 +173,63 @@ pub async fn run_discord_bot_with_group(
                 None
             };
 
-            // Register data sources NOW (not in a spawn) since group endpoint is ready
-            if let Some(embedding_provider) = embedding_provider {
-                // Set up data sources synchronously (not in a spawn)
-                let filter = config
-                    .bluesky
-                    .as_ref()
-                    .and_then(|b| b.default_filter.as_ref())
-                    .unwrap_or(&BlueskyFilter {
-                        exclude_keywords: vec!["patternstop".to_string()],
-                        ..Default::default()
-                    })
-                    .clone();
+            // Set up data sources synchronously (not in a spawn)
+            let filter = config
+                .bluesky
+                .as_ref()
+                .and_then(|b| b.default_filter.as_ref())
+                .unwrap_or(&BlueskyFilter {
+                    exclude_keywords: vec!["patternstop".to_string()],
+                    ..Default::default()
+                })
+                .clone();
 
-                tracing::info!("Discord: Building data sources with DataSourceBuilder");
-                let data_sources = DataSourceBuilder::new()
-                    .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
-                    .build_with_target(
-                        pattern_agent.id(),
-                        pattern_agent.name(),
-                        DB.clone(),
-                        Some(embedding_provider),
-                        Some(pattern_agent.handle().await),
-                        get_bluesky_credentials(&config).await,
-                        group_target,
-                    )
-                    .await
-                    .map_err(|e| miette::miette!("Failed to build data sources: {:?}", e))?;
+            tracing::info!("Discord: Building data sources with DataSourceBuilder");
+            let data_sources = DataSourceBuilder::new()
+                .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
+                .build_with_target(
+                    pattern_agent.id(),
+                    pattern_agent.name(),
+                    DB.clone(),
+                    embedding_provider,
+                    Some(pattern_agent.handle().await),
+                    get_bluesky_credentials(&config).await,
+                    group_target,
+                )
+                .await
+                .map_err(|e| miette::miette!("Failed to build data sources: {:?}", e))?;
 
-                // NOTE: Monitoring is already started during agent loading via register_data_sources
-                // Calling start_monitoring again here can cause write lock contention and deadlocks
-                // Just verify it's running instead
-                tracing::info!(
-                    "Discord: Data sources built, monitoring should already be active from agent loading"
-                );
-                output.success("Data sources configured for group");
+            tracing::info!(
+                "Discord: Data sources built, monitoring should already be active from agent loading"
+            );
+            output.success("Data sources configured for group");
 
-                // Register endpoints on the data source's router
-                let data_sources_router = data_sources.router();
+            // Register endpoints on the data source's router
+            let data_sources_router = data_sources.router();
 
-                // Register the CLI endpoint as default user endpoint
-                data_sources_router
-                    .register_endpoint(
-                        "user".to_string(),
-                        Arc::new(CliEndpoint::new(output.clone())),
-                    )
-                    .await;
+            // Register the CLI endpoint as default user endpoint
+            data_sources_router
+                .register_endpoint(
+                    "user".to_string(),
+                    Arc::new(CliEndpoint::new(output.clone())),
+                )
+                .await;
 
-                // Register the group endpoint so it can route to the group
-                let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
-                    group: group.clone(),
-                    agents: agents_with_membership.clone(),
-                    manager: pattern_manager.clone(),
-                    output: output.clone(),
-                });
-                data_sources_router
-                    .register_endpoint("group".to_string(), group_endpoint)
-                    .await;
+            // Register the group endpoint so it can route to the group
+            let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
+                group: group.clone(),
+                agents: agents_with_membership.clone(),
+                manager: pattern_manager.clone(),
+                output: output.clone(),
+            });
+            data_sources_router
+                .register_endpoint("group".to_string(), group_endpoint)
+                .await;
 
-                // Register DataSourceTool on all agent tool registries
-                let data_source_tool = DataSourceTool::new(Arc::new(data_sources));
-                for tools in &agent_tools {
-                    tools.register(data_source_tool.clone());
-                }
+            // Register DataSourceTool on all agent tool registries
+            let data_source_tool = DataSourceTool::new(Arc::new(data_sources));
+            for tools in &agent_tools {
+                tools.register(data_source_tool.clone());
             }
         }
     }

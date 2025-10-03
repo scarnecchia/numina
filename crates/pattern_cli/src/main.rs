@@ -529,11 +529,11 @@ async fn main() -> Result<()> {
     // Create the base subscriber with environment filter
     let env_filter = if cli.debug {
         EnvFilter::new(
-            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug",
+            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug,info",
         )
     } else {
         EnvFilter::new(
-            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,info",
+            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,warning",
         )
     };
 

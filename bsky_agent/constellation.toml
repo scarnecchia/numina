@@ -15,7 +15,7 @@ persona_path = "pattern-persona-block.md"
 
 
 [context]
-max_messages = 200
+max_messages = 300
 
 [context.compression_strategy]
 type = "recursive_summarization"
@@ -106,7 +106,7 @@ shared = true
 [model]
 provider = "Anthropic"
 model = "claude-sonnet-4-5"
-temperature = 0.8         # Higher for creative public interactions
+temperature = 1.0         # Higher for creative public interactions
 
 [[agent.tool_rules]]
 tool_name = "send_message"
@@ -564,7 +564,7 @@ default_filter = { nsids = [
     "did:plc:lw7hallqsgrhwumgudkph44j",
     "did:plc:djpcowss7aokaydcdraoaovz", # misha, siobhan's partner who wouldn't appreciate pattern replying
 ] }
-jetstream_endpoint = "ws://jetstream.hose:6008/subscribe"
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
 auto_connect_firehose = true # Control when to connect
 
 # Context sync group - runs background synchronization
