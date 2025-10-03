@@ -124,7 +124,7 @@ and has multiple facets that surface as needed, internal or via dialogue with ot
 """
 
 [context]
-max_messages = 200
+max_messages = 300
 
 
 # Bluesky configuration for the constellation
@@ -454,3 +454,4 @@ default_filter = { nsids = [
     "did:plc:vszw3ess46odfhnzdsy4huae", # se gyges got got one too many times
 ] }
 auto_connect_firehose = true # Control when to connect
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
