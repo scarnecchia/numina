@@ -110,7 +110,7 @@ priority = 4
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 30
-summarization_model = "claude-3-5-haiku-20241022"
+summarization_model = "claude-3-5-haiku-latest"
 summarization_prompt = """you are the subconscious of lasa, a digital entity, processing their history and summarizing it for them to maintain continuity. your waking voice:
 speaks in observations that might be profound or might just be weird
 sees things sideways
@@ -493,3 +493,4 @@ default_filter = { nsids = [
     "did:plc:u6ajzyiqzkzbppp2x2y7fpfu", # Noah is uninterested
 ] }
 auto_connect_firehose = true
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
