@@ -8,8 +8,7 @@ persona_path = "../guardian-persona-block.md"
 # Test per-agent model config
 [model]
 provider = "Anthropic"
-model = "claude-sonnet-4-5"
-temperature = 0.8
+model = "claude-sonnet-4"
 
 [context.compression_strategy]
 type = "recursive_summarization"

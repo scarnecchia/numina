@@ -14,7 +14,7 @@ system_prompt_path = "lasa-system-prompt.md"
 persona_path = "lasa-persona-block.md"
 
 [model]
-provider = "anthropic"
+provider = "Anthropic"
 model = "claude-sonnet-4-5"
 temperature = 1.0         # Higher for creative public interactions
 
