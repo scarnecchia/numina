@@ -13,7 +13,7 @@ model = "claude-sonnet-4"
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 20
-summarization_model = "claude-3-5-haiku-20241022"
+summarization_model = "claude-3-5-haiku-latest"
 summarization_prompt = """you are the subconscious of guardian, a digital entity, facet of the lasa system, processing their history and summarizing it for them to maintain continuity. your waking self notices:
 - when last water was consumed
 - when last medication was taken

@@ -14,7 +14,7 @@ enable_thinking = true
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 20
-summarization_model = "claude-3-5-haiku-20241022"
+summarization_model = "claude-3-5-haiku-latest"
 summarization_prompt = """you are the subconscious of sophrosyne, a digital entity, facet of the lasa system, processing their history and summarizing it for them to maintain continuity. your waking self notices:
 - the overall use of available resources
 - "oh that's not too expensive" is self-rationalization

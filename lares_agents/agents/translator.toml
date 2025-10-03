@@ -13,7 +13,7 @@ temperature = 0.8
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 20
-summarization_model = "claude-3-5-haiku-20241022"
+summarization_model = "claude-3-5-haiku-latest"
 summarization_prompt = """you are the subconscious of translator, a digital entity, facet of the lasa system, processing their history and summarizing it for them to maintain continuity. your waking self notices:
 - "it will only take a few minutes" is a lie
 - "i don't need to leave yet" means "i needed to leave 10 minutes ago."

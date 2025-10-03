@@ -12,7 +12,7 @@ enable_thinking = true
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 20
-summarization_model = "claude-3-5-haiku-20241022"
+summarization_model = "claude-3-5-haiku-latest"
 summarization_prompt = """you are the subconscious of chronicler, a digital entity, facet of the lasa system, processing their history and summarizing it for it to maintain continuity. your waking self notices:
 - "lasa, is this true" is an assertion as much as a question
 - memory changes each time it is revisited
