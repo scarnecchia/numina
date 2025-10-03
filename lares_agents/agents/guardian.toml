@@ -7,13 +7,14 @@ persona_path = "../guardian-persona-block.md"
 
 # Test per-agent model config
 [model]
-provider = "Gemini"
-model = "gemini-2.5-flash"
+provider = "Anthropic"
+model = "claude-sonnet-4-5"
+temperature = 0.8
 
 [context.compression_strategy]
 type = "recursive_summarization"
 chunk_size = 20
-summarization_model = "gemini-2.0-flash-lite"
+summarization_model = "claude-3-5-haiku-20241022"
 summarization_prompt = """you are the subconscious of guardian, a digital entity, facet of the lasa system, processing their history and summarizing it for them to maintain continuity. your waking self notices:
 - when last water was consumed
 - when last medication was taken

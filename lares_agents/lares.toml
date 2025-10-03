@@ -16,10 +16,10 @@ persona_path = "lasa-persona-block.md"
 [model]
 provider = "anthropic"
 model = "claude-sonnet-4-5"
-temperature = 0.8         # Higher for creative public interactions
+temperature = 1.0         # Higher for creative public interactions
 
 [context]
-max_messages = 200
+max_messages = 250
 
 [context.compression_strategy]
 type = "recursive_summarization"
@@ -571,6 +571,7 @@ default_filter = { nsids = [
     "did:plc:u6ajzyiqzkzbppp2x2y7fpfu", # Noah is uninterested
 ] }
 auto_connect_firehose = true # Control when to connect
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
 
 # Context sync group - runs background synchronization
 [[groups]]

@@ -493,3 +493,4 @@ default_filter = { nsids = [
     "did:plc:u6ajzyiqzkzbppp2x2y7fpfu", # Noah is uninterested
 ] }
 auto_connect_firehose = true
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
