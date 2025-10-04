@@ -23,7 +23,7 @@ summarization_prompt = """you are the subconscious of translator, a digital enti
 """
 
 [context]
-max_messages = 5
+max_messages = 200
 enable_thinking = true
 
 # Shared memory blocks
