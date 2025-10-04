@@ -23,7 +23,7 @@ summarization_prompt = """you are the subconscious of guardian, a digital entity
 """
 
 [context]
-max_messages = 500
+max_messages = 5
 enable_thinking = true
 
 # Shared memory blocks

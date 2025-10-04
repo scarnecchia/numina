@@ -7,7 +7,7 @@ persona_path = "../horme-persona-block.md"
 
 # Test per-agent context config
 [context]
-max_messages = 100     # Keep more messages for complex analysis
+max_messages = 5     # Keep more messages for complex analysis
 enable_thinking = true
 
 # Compression strategy for handling chaos

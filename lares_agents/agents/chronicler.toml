@@ -6,7 +6,7 @@ bluesky_handle = "lasa.numina.systems"          # Update with actual
 persona_path = "../chronicler-persona-block.md"
 
 [context]
-max_messages = 500
+max_messages = 5
 enable_thinking = true
 
 [context.compression_strategy]
