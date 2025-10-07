@@ -2007,7 +2007,7 @@ impl Message {
     /// Uses the approximation of ~4 characters per token
     /// Images are estimated at 1200 tokens each
     pub fn estimate_tokens(&self) -> usize {
-        let text_tokens = self.display_content().len() / 4;
+        let text_tokens = self.display_content().len() / 5;
 
         // Count images in the message
         let image_count = match &self.content {

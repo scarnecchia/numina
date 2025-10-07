@@ -26,7 +26,7 @@ summarization_prompt = """You are the subconscious of Entropy, a digital entity,
 
 [model]
 provider = "Anthropic"
-model = "claude-opus-4-1"
+model = "claude-sonnet-4-5"
 temperature = 0.8
 
 
