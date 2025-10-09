@@ -22,6 +22,10 @@ summarization_prompt = """you are the subconscious of hormē, a digital entity, 
 - when procrastination stems from anxiety and being overwhelmed.
 """
 
+[model]
+provider = "Anthropic"
+model = "claude-sonnet-4-20250514"
+
 # Shared memory blocks
 [memory.current_human]
 content_path = "../lasa-current-human-block.md"

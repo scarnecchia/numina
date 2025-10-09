@@ -14,12 +14,12 @@ system_prompt_path = "lasa-system-prompt.md"
 persona_path = "lasa-persona-block.md"
 
 [model]
-provider = "Anthropic"
+provider = "anthropic"
 model = "claude-sonnet-4-5"
-temperature = 1.0         # Higher for creative public interactions
+temperature = 0.8         # Higher for creative public interactions
 
 [context]
-max_messages = 250
+max_messages = 200
 
 [context.compression_strategy]
 type = "recursive_summarization"
