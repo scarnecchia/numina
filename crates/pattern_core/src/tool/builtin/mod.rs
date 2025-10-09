@@ -7,6 +7,7 @@ mod calculator;
 mod constellation_search;
 mod context;
 pub mod data_source;
+mod mail;
 mod recall;
 mod search;
 pub mod search_utils;
@@ -26,6 +27,7 @@ pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationT
 pub use data_source::{
     DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
 };
+pub use mail::{MailInput, MailOutput, MailTool};
 pub use recall::{
     ArchivalMemoryOperationType, ArchivalSearchResult, RecallInput, RecallOutput, RecallTool,
 };
@@ -50,6 +52,7 @@ pub struct BuiltinTools {
     send_message_tool: Box<dyn DynamicTool>,
     web_tool: Option<Box<dyn DynamicTool>>,
     calculator_tool: Option<Box<dyn DynamicTool>>,
+    mail_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinTools {
@@ -72,8 +75,9 @@ impl BuiltinTools {
                 handle.clone(),
             )))),
             calculator_tool: Some(Box::new(DynamicToolAdapter::new(CalculatorTool::new(
-                handle,
+                handle.clone(),
             )))),
+            mail_tool: Some(Box::new(DynamicToolAdapter::new(MailTool::new(handle)))),
         }
     }
 
@@ -90,6 +94,10 @@ impl BuiltinTools {
 
         if let Some(calculator_tool) = &self.calculator_tool {
             registry.register_dynamic(calculator_tool.clone_box());
+        }
+
+        if let Some(mail_tool) = &self.mail_tool {
+            registry.register_dynamic(mail_tool.clone_box());
         }
 
         // Note: DataSourceTool requires external coordinator setup.
@@ -110,6 +118,7 @@ pub struct BuiltinToolsBuilder {
     search_tool: Option<Box<dyn DynamicTool>>,
     send_message_tool: Option<Box<dyn DynamicTool>>,
     calculator_tool: Option<Box<dyn DynamicTool>>,
+    mail_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinToolsBuilder {
@@ -143,6 +152,12 @@ impl BuiltinToolsBuilder {
         self
     }
 
+    /// Replace the default mail tool
+    pub fn with_mail_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.mail_tool = Some(Box::new(tool));
+        self
+    }
+
     /// Build the tools for a specific agent
     pub fn build_for_agent(self, handle: AgentHandle) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(handle);
@@ -153,6 +168,7 @@ impl BuiltinToolsBuilder {
             send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
             web_tool: defaults.web_tool,
             calculator_tool: self.calculator_tool.or(defaults.calculator_tool),
+            mail_tool: self.mail_tool.or(defaults.mail_tool),
         }
     }
 }
