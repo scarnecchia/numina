@@ -95,6 +95,9 @@ regex = "1.11.1"
 # Calculator tool dependencies
 fend-core = "1.5.7"
 
+# Mail tool dependencies
+lettre = "0.11"
+
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
 
