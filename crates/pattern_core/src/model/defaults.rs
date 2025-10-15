@@ -212,6 +212,28 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
     );
 
     defaults.insert(
+        "claude-haiku-4-5-20251001",
+        ModelDefaults {
+            context_window: 200_000,
+            max_output_tokens: Some(64_000),
+            capabilities: vec![
+                ModelCapability::TextGeneration,
+                ModelCapability::FunctionCalling,
+                ModelCapability::CodeExecution,
+                ModelCapability::SystemPrompt,
+                ModelCapability::VisionInput,
+                ModelCapability::ComputerUse,
+                ModelCapability::TextEdit,
+                ModelCapability::WebSearch,
+                ModelCapability::LongContext,
+                ModelCapability::ExtendedThinking,
+            ],
+            cost_per_1k_prompt: Some(0.001),
+            cost_per_1k_completion: Some(0.005),
+        },
+    );
+
+    defaults.insert(
         "claude-3-5-haiku-20241022",
         ModelDefaults {
             context_window: 200_000,
