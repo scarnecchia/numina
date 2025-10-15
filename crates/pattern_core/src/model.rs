@@ -130,7 +130,7 @@ impl ResponseOptions {
             // ));
             headers.push((
                 "anthropic-beta".to_string(),
-                "code-execution-2025-05-22".to_string(),
+                "code-execution-2025-08-25".to_string(),
             ));
         }
 
