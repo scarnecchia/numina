@@ -103,120 +103,137 @@ impl VotingManager {
             }
         };
 
-        // Check if we have an active voting session
-        let active_session = match &group.state {
-            GroupState::Voting { active_session } => active_session.clone(),
-            _ => None,
+        // Get active agents
+        let active_agents: Vec<_> = agents
+            .iter()
+            .filter(|awm| awm.membership.is_active)
+            .collect();
+
+        if active_agents.is_empty() {
+            return Err(CoreError::AgentGroupError {
+                group_name: group.name.clone(),
+                operation: "voting".to_string(),
+                cause: "No active agents in voting group".to_string(),
+            });
+        }
+
+        // Call all agents to vote
+        let mut responses = Vec::new();
+        let mut session = VotingSession {
+            id: Uuid::new_v4(),
+            proposal: self.create_proposal_from_message(&message),
+            votes: HashMap::new(),
+            started_at: Utc::now(),
+            deadline: Utc::now()
+                + Duration::from_std(voting_rules.voting_timeout)
+                    .unwrap_or(Duration::seconds(30)),
         };
 
-        let mut responses = Vec::new();
-        let new_state;
+        // Call each agent to get their response/vote
+        for awm in &active_agents {
+            let agent_id = awm.agent.as_ref().id();
 
-        match active_session {
-            None => {
-                // Create a new voting session
-                let proposal = self.create_proposal_from_message(&message);
-                let session = VotingSession {
-                    id: Uuid::new_v4(),
-                    proposal,
-                    votes: HashMap::new(),
-                    started_at: Utc::now(),
-                    deadline: Utc::now()
-                        + Duration::from_std(voting_rules.voting_timeout)
-                            .unwrap_or(Duration::seconds(30)),
-                };
+            // Process the voting message with the agent
+            match awm
+                .agent
+                .clone()
+                .process_message(message.clone())
+                .await
+            {
+                Ok(response) => {
+                    // Record agent response
+                    responses.push(AgentResponse {
+                        agent_id: agent_id.clone(),
+                        response: response.clone(),
+                        responded_at: Utc::now(),
+                    });
 
-                // Notify all agents about the new vote
-                for awm in agents {
-                    if awm.membership.is_active {
-                        responses.push(AgentResponse {
-                            agent_id: awm.agent.as_ref().id(),
-                            response: text_response(format!(
-                                "[Voting] New proposal: {}. Options: {:?}",
-                                session.proposal.content,
-                                session
-                                    .proposal
-                                    .options
-                                    .iter()
-                                    .map(|o| &o.description)
-                                    .collect::<Vec<_>>()
-                            )),
-                            responded_at: Utc::now(),
+                    // Extract text from response content
+                    let response_text = response.content
+                        .iter()
+                        .filter_map(|c| c.text())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    // Parse response to determine vote
+                    // Default: first option if no clear vote indicated
+                    let vote_option = self.extract_vote_from_response(&response_text, &session.proposal)
+                        .unwrap_or_else(|| {
+                            session.proposal.options.first()
+                                .map(|opt| opt.id.clone())
+                                .unwrap_or_else(|| "option1".to_string())
                         });
-                    }
+
+                    // Record the vote
+                    let vote = Vote {
+                        option_id: vote_option,
+                        weight: 1.0,
+                        reasoning: Some(response_text.clone()),
+                        timestamp: Utc::now(),
+                    };
+                    session.votes.insert(agent_id.clone(), vote);
                 }
-
-                new_state = Some(GroupState::Voting {
-                    active_session: Some(session),
-                });
-            }
-            Some(mut session) => {
-                // Collect votes (in a real implementation, this would parse agent responses)
-                let active_agents: Vec<_> = agents
-                    .iter()
-                    .filter(|awm| awm.membership.is_active)
-                    .collect();
-
-                // Simulate vote collection (in reality, parse from message responses)
-                for awm in &active_agents {
-                    let agent_id = awm.agent.as_ref().id();
-                    if !session.votes.contains_key(&agent_id) {
-                        // Simulate a vote
-                        if let Some(option) = session.proposal.options.first() {
-                            let vote = Vote {
-                                option_id: option.id.clone(),
-                                weight: 1.0, // Would calculate based on expertise if enabled
-                                reasoning: Some("Simulated vote".to_string()),
-                                timestamp: Utc::now(),
-                            };
-                            session.votes.insert(agent_id.clone(), vote);
-                        }
-                    }
-                }
-
-                // Check if we have quorum or timeout
-                let has_quorum = session.votes.len() >= quorum;
-                let is_timeout = Utc::now() > session.deadline;
-
-                if has_quorum || is_timeout {
-                    // Tally votes and determine winner
-                    let result = self.tally_votes(&session, voting_rules)?;
-
-                    responses.push(AgentResponse {
-                        agent_id: agents[0].agent.as_ref().id(), // Group response
-                        response: text_response(format!(
-                            "[Voting Complete] Winner: {}. Votes: {}/{}",
-                            result,
-                            session.votes.len(),
-                            active_agents.len()
-                        )),
-                        responded_at: Utc::now(),
-                    });
-
-                    // Clear the voting session
-                    new_state = Some(GroupState::Voting {
-                        active_session: None,
-                    });
-                } else {
-                    // Still collecting votes
-                    responses.push(AgentResponse {
-                        agent_id: agents[0].agent.as_ref().id(),
-                        response: text_response(format!(
-                            "[Voting in Progress] {}/{} votes collected",
-                            session.votes.len(),
-                            quorum
-                        )),
-                        responded_at: Utc::now(),
-                    });
-
-                    new_state = Some(GroupState::Voting {
-                        active_session: Some(session),
-                    });
+                Err(e) => {
+                    tracing::warn!("Agent {} failed to process voting message: {}", agent_id, e);
+                    // Continue with other agents on failure
                 }
             }
         }
 
+        // Check if we have quorum
+        let has_quorum = session.votes.len() >= quorum;
+
+        let new_state = if has_quorum || session.votes.len() == active_agents.len() {
+            // Tally votes and determine winner
+            let result = self.tally_votes(&session, voting_rules)?;
+
+            // Add voting result summary
+            responses.push(AgentResponse {
+                agent_id: active_agents[0].agent.as_ref().id(), // Group response
+                response: text_response(format!(
+                    "[Voting Complete] Winner: {}. Votes: {}/{}",
+                    result,
+                    session.votes.len(),
+                    active_agents.len()
+                )),
+                responded_at: Utc::now(),
+            });
+
+            Some(GroupState::Voting {
+                active_session: None,
+            })
+        } else {
+            // Not enough votes - keep session active
+            responses.push(AgentResponse {
+                agent_id: active_agents[0].agent.as_ref().id(),
+                response: text_response(format!(
+                    "[Voting] {}/{} agents have voted (quorum: {})",
+                    session.votes.len(),
+                    active_agents.len(),
+                    quorum
+                )),
+                responded_at: Utc::now(),
+            });
+
+            Some(GroupState::Voting {
+                active_session: Some(session),
+            })
+        };
+
         Ok((responses, new_state))
+    }
+
+    fn extract_vote_from_response(&self, response: &str, proposal: &VotingProposal) -> Option<String> {
+        let lower = response.to_lowercase();
+
+        // Try to match option descriptions in the response
+        for option in &proposal.options {
+            if lower.contains(&option.description.to_lowercase()) {
+                return Some(option.id.clone());
+            }
+        }
+
+        None
     }
 
     fn create_proposal_from_message(&self, message: &Message) -> VotingProposal {
