@@ -603,10 +603,36 @@ pub enum GroupPatternConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         intervention_agent: Option<String>,
     },
+    /// Agents vote on decisions
+    Voting {
+        /// Minimum number of votes needed for a decision
+        quorum: usize,
+        /// Voting timeout in seconds
+        #[serde(default = "default_voting_timeout")]
+        voting_timeout: u64,
+        /// Strategy for breaking ties
+        #[serde(default = "default_tie_breaker")]
+        tie_breaker: String,
+        /// Whether to weight votes based on agent expertise
+        #[serde(default = "default_weight_by_expertise")]
+        weight_by_expertise: bool,
+    },
 }
 
 fn default_skip_unavailable() -> bool {
     true
+}
+
+fn default_voting_timeout() -> u64 {
+    30 // 30 seconds
+}
+
+fn default_tie_breaker() -> String {
+    "no_decision".to_string()
+}
+
+fn default_weight_by_expertise() -> bool {
+    false
 }
 
 /// Bluesky/ATProto configuration

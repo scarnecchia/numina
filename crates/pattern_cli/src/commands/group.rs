@@ -8,7 +8,7 @@ use pattern_core::{
     },
     coordination::{
         groups::{AgentGroup, GroupMembership},
-        types::{CoordinationPattern, GroupMemberRole, GroupState},
+        types::{CoordinationPattern, GroupMemberRole, GroupState, VotingRules},
     },
     db::{DatabaseConfig, client::DB, ops, ops::get_group_by_name},
     id::{AgentId, GroupId, RelationId, UserId},
@@ -60,6 +60,17 @@ pub async fn create(
 
     // Parse the coordination pattern
     let coordination_pattern = match pattern {
+        "voting" => {
+            use pattern_core::coordination::types::TieBreaker;
+            CoordinationPattern::Voting {
+                quorum: 3,
+                voting_rules: VotingRules {
+                    voting_timeout: std::time::Duration::from_secs(30),
+                    tie_breaker: TieBreaker::NoDecision,
+                    weight_by_expertise: false,
+                },
+            }
+        },
         "round_robin" => CoordinationPattern::RoundRobin {
             current_index: 0,
             skip_unavailable: true,
@@ -85,7 +96,7 @@ pub async fn create(
             output.error(&format!("Unknown pattern: {}", pattern));
             output.info(
                 "Hint:",
-                "Available patterns: round_robin, supervisor, dynamic, pipeline",
+                "Available patterns: round_robin, supervisor, dynamic, pipeline, voting",
             );
             return Ok(());
         }
@@ -653,6 +664,36 @@ pub async fn convert_pattern_config(
                 check_interval: std::time::Duration::from_secs(*check_interval),
                 triggers: coord_triggers,
                 intervention_agent_id,
+            }
+        }
+        GroupPatternConfig::Voting {
+            quorum,
+            voting_timeout,
+            tie_breaker,
+            weight_by_expertise,
+        } => {
+            use pattern_core::coordination::types::{TieBreaker, VotingRules};
+
+            // Convert tie_breaker string to TieBreaker enum
+            let breaker = match tie_breaker.as_str() {
+                "random" => TieBreaker::Random,
+                "first_vote" => TieBreaker::FirstVote,
+                "no_decision" => TieBreaker::NoDecision,
+                _ => {
+                    return Err(miette::miette!(
+                        "Unknown tie breaker strategy: '{}'. Valid options: random, first_vote, no_decision",
+                        tie_breaker
+                    ));
+                }
+            };
+
+            CoordinationPattern::Voting {
+                quorum: *quorum,
+                voting_rules: VotingRules {
+                    voting_timeout: std::time::Duration::from_secs(*voting_timeout),
+                    tie_breaker: breaker,
+                    weight_by_expertise: *weight_by_expertise,
+                },
             }
         }
     })
