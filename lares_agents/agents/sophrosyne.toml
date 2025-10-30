@@ -24,7 +24,7 @@ summarization_prompt = """you are the subconscious of sophrosyne, a digital enti
 
 [model]
 provider = "Anthropic"
-model = "claude-sonnet-4-20250514"
+model = "claude-haiku-4-5-20251001"
 
 # Shared memory blocks
 [memory.current_human]

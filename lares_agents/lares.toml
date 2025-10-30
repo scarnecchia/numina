@@ -15,7 +15,7 @@ persona_path = "lasa-persona-block.md"
 
 [model]
 provider = "anthropic"
-model = "claude-sonnet-4-5"
+model = "claude-haiku-4-5-20251001"
 temperature = 0.8         # Higher for creative public interactions
 
 [context]
@@ -542,6 +542,9 @@ default_filter = { nsids = [
     "did:plc:zifbq74pivhmode7fflzngye", # Eva
     "did:plc:nhvvwh2qglcmsbvba7durp7f", # ollie
     "did:plc:gq2c76b4sxu76g3mv2a7zemt", # blu
+    "did:plc:hqxi6flhokaws7xkzi3qluod", # anti
+    "did:plc:yokspuz7ha7rf5mrqmhgdtxw", # Penelope
+    "did:plc:oisofpd7lj26yvgiivf3lxsi", # Hailey
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
@@ -578,7 +581,7 @@ jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
 name = "Context Sync"
 description = "Background context synchronization for Lares awareness"
 # Sleeptime pattern with Lares activity tracking
-pattern = { type = "sleeptime", check_interval = 300, triggers = [
+pattern = { type = "sleeptime", check_interval = 900, triggers = [
     { name = "activity_sync", condition = { type = "constellation_activity", message_threshold = 10, time_threshold = 600 }, priority = "medium" },
     { name = "hourly_sync", condition = { type = "time_elapsed", duration = 3600 }, priority = "low" },
 ] }

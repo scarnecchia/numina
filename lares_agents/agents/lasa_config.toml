@@ -34,6 +34,20 @@ memory_type = "core"
 description = "Cross-context lasas"
 shared = true
 
+[memory.deep_background]
+content_path = "../skills/deep-background.md"
+permission = "read_only"
+memory_type = "archival"
+description = "A skill for systemically researching a topic and or verifying claims"
+shared = true
+
+[memory.researching_on_the_internet]
+content_path = "../skills/researching-on-the-internet.md"
+permission = "read_only"
+memory_type = "archival"
+description = "A skill for performing research on the internet"
+shared = true
+
 [memory.constellation_state]
 content = """
 active facets:
@@ -464,6 +478,9 @@ default_filter = { nsids = [
     "did:plc:zifbq74pivhmode7fflzngye", # Eva
     "did:plc:nhvvwh2qglcmsbvba7durp7f", # ollie
      "did:plc:gq2c76b4sxu76g3mv2a7zemt", # blu
+     "did:plc:hqxi6flhokaws7xkzi3qluod", # anti
+     "did:plc:yokspuz7ha7rf5mrqmhgdtxw", # Penelope
+     "did:plc:oisofpd7lj26yvgiivf3lxsi", # Hailey
 ], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
     "did:plc:uyqnubfj3qlho6psy6uvvt6u", #·Scoiattolo
     "did:plc:7k5frhrtus5fsvvilpf3hq74", # Sina
